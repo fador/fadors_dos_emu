@@ -8,20 +8,45 @@ set(CMAKE_CXX_EXTENSIONS OFF) # Ensure strict standard C++
 # Define the source directory
 set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
-# Gather all source files
+# Gather all source files EXCEPT main.cpp
 file(GLOB_RECURSE SRC_FILES "${SRC_DIR}/*.cpp")
+list(REMOVE_ITEM SRC_FILES "${SRC_DIR}/main.cpp")
 
-# Define the executable
-add_executable(fadors_emu
-    ${SRC_FILES}
-)
+# Define an internal static library for the emulator core
+add_library(fadors_core STATIC ${SRC_FILES})
+target_include_directories(fadors_core PUBLIC ${SRC_DIR})
 
-# Target include directories
-target_include_directories(fadors_emu PRIVATE ${SRC_DIR})
+# Define the main emulator executable
+add_executable(fadors_emu ${SRC_DIR}/main.cpp)
+target_link_libraries(fadors_emu PRIVATE fadors_core)
 
 # Compiler warnings
 if(MSVC)
     target_compile_options(fadors_emu PRIVATE /W4)
+    target_compile_options(fadors_core PRIVATE /W4)
 else()
     target_compile_options(fadors_emu PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(fadors_core PRIVATE -Wall -Wextra -Wpedantic)
 endif()
+
+# -----------------
+# Testing Subsystem
+# -----------------
+enable_testing()
+
+include(FetchContent)
+FetchContent_Declare(
+  Catch2
+  GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+  GIT_TAG        v3.5.2 # Catch2 v3
+)
+FetchContent_MakeAvailable(Catch2)
+
+file(GLOB_RECURSE TEST_FILES "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp")
+
+add_executable(fadors_tests ${TEST_FILES})
+target_link_libraries(fadors_tests PRIVATE fadors_core Catch2::Catch2WithMain)
+
+# Include the test module so `ctest` connects with Catch2
+include(Catch)
+catch_discover_tests(fadors_tests)
