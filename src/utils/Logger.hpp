@@ -6,6 +6,7 @@
 namespace fador::utils {
 
 enum class LogLevel {
+    Trace,
     Debug,
     Info,
     Warn,
@@ -20,6 +21,7 @@ void log(LogLevel level, const std::source_location& loc, Args&&... args) {
 
     const char* levelStr = "INFO";
     switch (level) {
+        case LogLevel::Trace: levelStr = "TRACE"; break;
         case LogLevel::Debug: levelStr = "DEBUG"; break;
         case LogLevel::Info:  levelStr = "INFO"; break;
         case LogLevel::Warn:  levelStr = "WARN"; break;
@@ -32,6 +34,7 @@ void log(LogLevel level, const std::source_location& loc, Args&&... args) {
 
 } // namespace fador::utils
 
+#define LOG_TRACE(...) fador::utils::log(fador::utils::LogLevel::Trace, std::source_location::current(), __VA_ARGS__)
 #define LOG_DEBUG(...) fador::utils::log(fador::utils::LogLevel::Debug, std::source_location::current(), __VA_ARGS__)
 #define LOG_INFO(...)  fador::utils::log(fador::utils::LogLevel::Info, std::source_location::current(), __VA_ARGS__)
 #define LOG_WARN(...)  fador::utils::log(fador::utils::LogLevel::Warn, std::source_location::current(), __VA_ARGS__)

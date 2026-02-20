@@ -1,11 +1,13 @@
 #include "InstructionDecoder.hpp"
+#include "../hw/IOBus.hpp"
 #include "../utils/Logger.hpp"
 
 namespace fador::cpu {
 
-InstructionDecoder::InstructionDecoder(CPU& cpu, memory::MemoryBus& memory)
+InstructionDecoder::InstructionDecoder(CPU& cpu, memory::MemoryBus& memory, hw::IOBus& iobus)
     : m_cpu(cpu)
     , m_memory(memory)
+    , m_iobus(iobus)
     , m_hasPrefix66(false)
     , m_hasPrefix67(false)
     , m_hasRepnz(false)
@@ -620,6 +622,66 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                 else m_cpu.setReg16(CX, 0);
             } else {
                 do_lods();
+            }
+            break;
+        }
+
+        // IN
+        case 0xE4: { // IN AL, imm8
+            uint8_t port = fetch8();
+            m_cpu.setReg8(AL, m_iobus.read8(port));
+            break;
+        }
+        case 0xE5: { // IN AX/EAX, imm8
+            uint8_t port = fetch8();
+            if (m_hasPrefix66) {
+                m_cpu.setReg32(EAX, m_iobus.read32(port));
+            } else {
+                m_cpu.setReg16(AX, m_iobus.read16(port));
+            }
+            break;
+        }
+        case 0xEC: { // IN AL, DX
+            uint16_t port = m_cpu.getReg16(DX);
+            m_cpu.setReg8(AL, m_iobus.read8(port));
+            break;
+        }
+        case 0xED: { // IN AX/EAX, DX
+            uint16_t port = m_cpu.getReg16(DX);
+            if (m_hasPrefix66) {
+                m_cpu.setReg32(EAX, m_iobus.read32(port));
+            } else {
+                m_cpu.setReg16(AX, m_iobus.read16(port));
+            }
+            break;
+        }
+
+        // OUT
+        case 0xE6: { // OUT imm8, AL
+            uint8_t port = fetch8();
+            m_iobus.write8(port, m_cpu.getReg8(AL));
+            break;
+        }
+        case 0xE7: { // OUT imm8, AX/EAX
+            uint8_t port = fetch8();
+            if (m_hasPrefix66) {
+                m_iobus.write32(port, m_cpu.getReg32(EAX));
+            } else {
+                m_iobus.write16(port, m_cpu.getReg16(AX));
+            }
+            break;
+        }
+        case 0xEE: { // OUT DX, AL
+            uint16_t port = m_cpu.getReg16(DX);
+            m_iobus.write8(port, m_cpu.getReg8(AL));
+            break;
+        }
+        case 0xEF: { // OUT DX, AX/EAX
+            uint16_t port = m_cpu.getReg16(DX);
+            if (m_hasPrefix66) {
+                m_iobus.write32(port, m_cpu.getReg32(EAX));
+            } else {
+                m_iobus.write16(port, m_cpu.getReg16(AX));
             }
             break;
         }

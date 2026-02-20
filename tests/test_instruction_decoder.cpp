@@ -2,13 +2,15 @@
 #include "cpu/CPU.hpp"
 #include "cpu/InstructionDecoder.hpp"
 #include "memory/MemoryBus.hpp"
+#include "hw/IOBus.hpp"
 
 using namespace fador;
 
 TEST_CASE("CPU Instruction Execution", "[Decoder]") {
     cpu::CPU cpu;
     memory::MemoryBus mem;
-    cpu::InstructionDecoder decoder(cpu, mem);
+    hw::IOBus iobus;
+    cpu::InstructionDecoder decoder(cpu, mem, iobus);
 
     // Setup base execution environment
     cpu.setSegReg(cpu::SegRegIndex::CS, 0x0000);

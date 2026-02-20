@@ -28,11 +28,11 @@
   - [x] Hardware interrupt pin routing
 
 ## Phase 3: Hardware Devices
-- [ ] Programmable Interval Timer (PIT 8253/8254)
-- [ ] Programmable Interrupt Controller (PIC 8259A)
-- [ ] Keyboard Controller (8042)
-- [ ] CMOS / RTC
-- [ ] Basic Port I/O dispatching
+- [x] Port I/O dispatching (IOBus)
+- [x] PIC (8259)
+- [x] PIT (8254)
+- [x] Keyboard Controller (8042)
+- [ ] CMOS/RTC (Optional)
 
 ## Phase 4: BIOS Emulation
 - [ ] System initialization (IVT setup)
