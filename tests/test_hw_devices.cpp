@@ -43,6 +43,12 @@ TEST_CASE("Hardware: PIC8259A", "[HW]") {
     }
 
     SECTION("IRQ Masking") {
+        // Must initialize first to set vector base to 0x20
+        pic.write8(0x20, 0x11); // ICW1
+        pic.write8(0x21, 0x20); // ICW2: Vector 0x20
+        pic.write8(0x21, 0x04); // ICW3
+        pic.write8(0x21, 0x01); // ICW4
+
         pic.write8(0x21, 0xFE); // Mask all but IRQ 0
         pic.raiseIRQ(0);
         REQUIRE(pic.getPendingInterrupt() == 0x20);
