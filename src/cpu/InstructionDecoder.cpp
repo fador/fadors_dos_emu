@@ -178,6 +178,56 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             break;
         }
 
+        case 0xC3: { // RET (Near)
+            if (m_hasPrefix66) {
+                uint32_t esp = m_cpu.getReg32(ESP);
+                uint32_t eip = m_memory.read32((m_cpu.getSegReg(SS) << 4) + esp);
+                m_cpu.setReg32(ESP, esp + 4);
+                m_cpu.setEIP(eip);
+            } else {
+                uint16_t sp = m_cpu.getReg16(SP);
+                uint16_t ip = m_memory.read16((m_cpu.getSegReg(SS) << 4) + sp);
+                m_cpu.setReg16(SP, sp + 2);
+                m_cpu.setEIP(ip);
+            }
+            break;
+        }
+        case 0xE8: { // CALL rel16/32
+            if (m_hasPrefix66) {
+                int32_t rel32 = static_cast<int32_t>(fetch32());
+                uint32_t esp = m_cpu.getReg32(ESP) - 4;
+                m_cpu.setReg32(ESP, esp);
+                m_memory.write32((m_cpu.getSegReg(SS) << 4) + esp, m_cpu.getEIP());
+                m_cpu.setEIP(m_cpu.getEIP() + rel32);
+            } else {
+                int16_t rel16 = static_cast<int16_t>(fetch16());
+                uint16_t sp = m_cpu.getReg16(SP) - 2;
+                m_cpu.setReg16(SP, sp);
+                m_memory.write16((m_cpu.getSegReg(SS) << 4) + sp, static_cast<uint16_t>(m_cpu.getEIP()));
+                m_cpu.setEIP(static_cast<uint16_t>(m_cpu.getEIP() + rel16));
+            }
+            break;
+        }
+        case 0xE9: { // JMP rel16/32
+            if (m_hasPrefix66) {
+                int32_t rel32 = static_cast<int32_t>(fetch32());
+                m_cpu.setEIP(m_cpu.getEIP() + rel32);
+            } else {
+                int16_t rel16 = static_cast<int16_t>(fetch16());
+                m_cpu.setEIP(static_cast<uint16_t>(m_cpu.getEIP() + rel16));
+            }
+            break;
+        }
+        case 0xEB: { // JMP rel8
+            int8_t rel8 = static_cast<int8_t>(fetch8());
+            if (m_hasPrefix66) {
+                m_cpu.setEIP(m_cpu.getEIP() + rel8);
+            } else {
+                m_cpu.setEIP(static_cast<uint16_t>(m_cpu.getEIP() + rel8));
+            }
+            break;
+        }
+
         default:
             LOG_WARN("Unknown opcode 0x", std::hex, static_cast<int>(opcode), " at CS:EIP ", 
                      m_cpu.getSegReg(CS), ":", m_cpu.getEIP() - 1);

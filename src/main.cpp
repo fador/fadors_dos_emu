@@ -17,15 +17,27 @@ int main(int argc, char** argv) {
 
         // Setup environment to jump into address 0x100 (Common for COM files)
         cpu.setSegReg(fador::cpu::CS, 0);
+        cpu.setSegReg(fador::cpu::SS, 0);
+        cpu.setReg16(fador::cpu::SP, 0xFFF0); // Setup a basic 16-bit stack
         cpu.setEIP(0x100);
 
-        // Write a sequence of basic instructions: 0x90 (NOP), 0x90 (NOP), 0xCC (INT3)
-        memory.write8(0x100, 0x90);
-        memory.write8(0x101, 0x90);
-        memory.write8(0x102, 0xCC);
+        // Write a sequence of instructions (16-bit code):
+        // 0x100: E8 03 00 (CALL 0x106, rel16 = +3)
+        // 0x103: EB 03    (JMP 0x108, rel8 = +3)
+        // 0x105: 90       (NOP - padding)
+        // 0x106: C3       (RET)
+        // 0x107: 90       (NOP - padding)
+        // 0x108: CC       (INT3 - Halt)
+        
+        memory.write8(0x100, 0xE8); memory.write16(0x101, 0x0003); // CALL +3
+        memory.write8(0x103, 0xEB); memory.write8(0x104, 0x03);    // JMP +3
+        memory.write8(0x105, 0x90);
+        memory.write8(0x106, 0xC3);                                // RET
+        memory.write8(0x107, 0x90);
+        memory.write8(0x108, 0xCC);                                // INT3
 
-        LOG_INFO("Executing 3 instructions...");
-        for (int i=0; i<3; i++) {
+        LOG_INFO("Executing 4 instructions...");
+        for (int i=0; i<4; i++) {
             decoder.step();
             LOG_DEBUG("EIP after step: 0x", std::hex, cpu.getEIP());
         }
