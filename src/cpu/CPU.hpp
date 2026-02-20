@@ -9,6 +9,17 @@ enum Reg16Index { AX = 0, CX = 1, DX = 2, BX = 3, SP = 4, BP = 5, SI = 6, DI = 7
 enum Reg8Index  { AL = 0, CL = 1, DL = 2, BL = 3, AH = 4, CH = 5, DH = 6, BH = 7 };
 enum SegRegIndex { ES = 0, CS = 1, SS = 2, DS = 3, FS = 4, GS = 5 };
 
+// EFLAGS bit masks
+constexpr uint32_t FLAG_CARRY     = 1 << 0;
+constexpr uint32_t FLAG_PARITY    = 1 << 2;
+constexpr uint32_t FLAG_AUX       = 1 << 4;
+constexpr uint32_t FLAG_ZERO      = 1 << 6;
+constexpr uint32_t FLAG_SIGN      = 1 << 7;
+constexpr uint32_t FLAG_TRAP      = 1 << 8;
+constexpr uint32_t FLAG_INTERRUPT = 1 << 9;
+constexpr uint32_t FLAG_DIRECTION = 1 << 10;
+constexpr uint32_t FLAG_OVERFLOW  = 1 << 11;
+
 class CPU {
 public:
     CPU();

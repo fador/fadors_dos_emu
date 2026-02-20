@@ -188,7 +188,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             break;
         }
 
-        // Basic ADD
+        // ADD
         case 0x00: { // ADD r/m8, r8
             ModRM modrm = decodeModRM(fetch8());
             uint8_t rmVal = readModRM8(modrm);
@@ -200,14 +200,426 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
         }
         case 0x01: { // ADD r/m16/32, r16/32
             ModRM modrm = decodeModRM(fetch8());
-            if (m_hasPrefix66) { // 32-bit
+            if (m_hasPrefix66) {
                 uint32_t rmVal = readModRM32(modrm);
                 uint32_t regVal = m_cpu.getReg32(modrm.reg);
-                writeModRM32(modrm, rmVal + regVal);
-            } else { // 16-bit default in real mode
+                uint32_t res = rmVal + regVal;
+                writeModRM32(modrm, res);
+            } else {
                 uint16_t rmVal = readModRM16(modrm);
                 uint16_t regVal = m_cpu.getReg16(modrm.reg);
-                writeModRM16(modrm, rmVal + regVal);
+                uint16_t res = rmVal + regVal;
+                writeModRM16(modrm, res);
+            }
+            break;
+        }
+        case 0x02: { // ADD r8, r/m8
+            ModRM modrm = decodeModRM(fetch8());
+            uint8_t rmVal = readModRM8(modrm);
+            uint8_t regVal = m_cpu.getReg8(modrm.reg);
+            uint8_t res = regVal + rmVal;
+            m_cpu.setReg8(modrm.reg, res);
+            break;
+        }
+        case 0x03: { // ADD r16/32, r/m16/32
+            ModRM modrm = decodeModRM(fetch8());
+            if (m_hasPrefix66) {
+                uint32_t rmVal = readModRM32(modrm);
+                uint32_t regVal = m_cpu.getReg32(modrm.reg);
+                uint32_t res = regVal + rmVal;
+                m_cpu.setReg32(modrm.reg, res);
+            } else {
+                uint16_t rmVal = readModRM16(modrm);
+                uint16_t regVal = m_cpu.getReg16(modrm.reg);
+                uint16_t res = regVal + rmVal;
+                m_cpu.setReg16(modrm.reg, res);
+            }
+            break;
+        }
+
+        // OR
+        case 0x08: { // OR r/m8, r8
+            ModRM modrm = decodeModRM(fetch8());
+            uint8_t rmVal = readModRM8(modrm);
+            uint8_t regVal = m_cpu.getReg8(modrm.reg);
+            uint8_t res = rmVal | regVal;
+            // TODO: EFLAGS
+            writeModRM8(modrm, res);
+            break;
+        }
+        case 0x09: { // OR r/m16/32, r16/32
+            ModRM modrm = decodeModRM(fetch8());
+            if (m_hasPrefix66) {
+                uint32_t rmVal = readModRM32(modrm);
+                uint32_t regVal = m_cpu.getReg32(modrm.reg);
+                uint32_t res = rmVal | regVal;
+                writeModRM32(modrm, res);
+            } else {
+                uint16_t rmVal = readModRM16(modrm);
+                uint16_t regVal = m_cpu.getReg16(modrm.reg);
+                uint16_t res = rmVal | regVal;
+                writeModRM16(modrm, res);
+            }
+            break;
+        }
+        case 0x0A: { // OR r8, r/m8
+            ModRM modrm = decodeModRM(fetch8());
+            uint8_t rmVal = readModRM8(modrm);
+            uint8_t regVal = m_cpu.getReg8(modrm.reg);
+            uint8_t res = regVal | rmVal;
+            m_cpu.setReg8(modrm.reg, res);
+            break;
+        }
+        case 0x0B: { // OR r16/32, r/m16/32
+            ModRM modrm = decodeModRM(fetch8());
+            if (m_hasPrefix66) {
+                uint32_t rmVal = readModRM32(modrm);
+                uint32_t regVal = m_cpu.getReg32(modrm.reg);
+                uint32_t res = regVal | rmVal;
+                m_cpu.setReg32(modrm.reg, res);
+            } else {
+                uint16_t rmVal = readModRM16(modrm);
+                uint16_t regVal = m_cpu.getReg16(modrm.reg);
+                uint16_t res = regVal | rmVal;
+                m_cpu.setReg16(modrm.reg, res);
+            }
+            break;
+        }
+
+        // AND
+        case 0x20: { // AND r/m8, r8
+            ModRM modrm = decodeModRM(fetch8());
+            uint8_t rmVal = readModRM8(modrm);
+            uint8_t regVal = m_cpu.getReg8(modrm.reg);
+            uint8_t res = rmVal & regVal;
+            // TODO: EFLAGS
+            writeModRM8(modrm, res);
+            break;
+        }
+        case 0x21: { // AND r/m16/32, r16/32
+            ModRM modrm = decodeModRM(fetch8());
+            if (m_hasPrefix66) {
+                uint32_t rmVal = readModRM32(modrm);
+                uint32_t regVal = m_cpu.getReg32(modrm.reg);
+                uint32_t res = rmVal & regVal;
+                writeModRM32(modrm, res);
+            } else {
+                uint16_t rmVal = readModRM16(modrm);
+                uint16_t regVal = m_cpu.getReg16(modrm.reg);
+                uint16_t res = rmVal & regVal;
+                writeModRM16(modrm, res);
+            }
+            break;
+        }
+        case 0x22: { // AND r8, r/m8
+            ModRM modrm = decodeModRM(fetch8());
+            uint8_t rmVal = readModRM8(modrm);
+            uint8_t regVal = m_cpu.getReg8(modrm.reg);
+            uint8_t res = regVal & rmVal;
+            m_cpu.setReg8(modrm.reg, res);
+            break;
+        }
+        case 0x23: { // AND r16/32, r/m16/32
+            ModRM modrm = decodeModRM(fetch8());
+            if (m_hasPrefix66) {
+                uint32_t rmVal = readModRM32(modrm);
+                uint32_t regVal = m_cpu.getReg32(modrm.reg);
+                uint32_t res = regVal & rmVal;
+                m_cpu.setReg32(modrm.reg, res);
+            } else {
+                uint16_t rmVal = readModRM16(modrm);
+                uint16_t regVal = m_cpu.getReg16(modrm.reg);
+                uint16_t res = regVal & rmVal;
+                m_cpu.setReg16(modrm.reg, res);
+            }
+            break;
+        }
+
+        // SUB
+        case 0x28: { // SUB r/m8, r8
+            ModRM modrm = decodeModRM(fetch8());
+            uint8_t rmVal = readModRM8(modrm);
+            uint8_t regVal = m_cpu.getReg8(modrm.reg);
+            uint8_t res = rmVal - regVal;
+            // TODO: EFLAGS
+            writeModRM8(modrm, res);
+            break;
+        }
+        case 0x29: { // SUB r/m16/32, r16/32
+            ModRM modrm = decodeModRM(fetch8());
+            if (m_hasPrefix66) {
+                uint32_t rmVal = readModRM32(modrm);
+                uint32_t regVal = m_cpu.getReg32(modrm.reg);
+                uint32_t res = rmVal - regVal;
+                writeModRM32(modrm, res);
+            } else {
+                uint16_t rmVal = readModRM16(modrm);
+                uint16_t regVal = m_cpu.getReg16(modrm.reg);
+                uint16_t res = rmVal - regVal;
+                writeModRM16(modrm, res);
+            }
+            break;
+        }
+        case 0x2A: { // SUB r8, r/m8
+            ModRM modrm = decodeModRM(fetch8());
+            uint8_t rmVal = readModRM8(modrm);
+            uint8_t regVal = m_cpu.getReg8(modrm.reg);
+            uint8_t res = regVal - rmVal;
+            m_cpu.setReg8(modrm.reg, res);
+            break;
+        }
+        case 0x2B: { // SUB r16/32, r/m16/32
+            ModRM modrm = decodeModRM(fetch8());
+            if (m_hasPrefix66) {
+                uint32_t rmVal = readModRM32(modrm);
+                uint32_t regVal = m_cpu.getReg32(modrm.reg);
+                uint32_t res = regVal - rmVal;
+                m_cpu.setReg32(modrm.reg, res);
+            } else {
+                uint16_t rmVal = readModRM16(modrm);
+                uint16_t regVal = m_cpu.getReg16(modrm.reg);
+                uint16_t res = regVal - rmVal;
+                m_cpu.setReg16(modrm.reg, res);
+            }
+            break;
+        }
+
+        // XOR
+        case 0x30: { // XOR r/m8, r8
+            ModRM modrm = decodeModRM(fetch8());
+            uint8_t rmVal = readModRM8(modrm);
+            uint8_t regVal = m_cpu.getReg8(modrm.reg);
+            uint8_t res = rmVal ^ regVal;
+            // TODO: EFLAGS
+            writeModRM8(modrm, res);
+            break;
+        }
+        case 0x31: { // XOR r/m16/32, r16/32
+            ModRM modrm = decodeModRM(fetch8());
+            if (m_hasPrefix66) {
+                uint32_t rmVal = readModRM32(modrm);
+                uint32_t regVal = m_cpu.getReg32(modrm.reg);
+                uint32_t res = rmVal ^ regVal;
+                writeModRM32(modrm, res);
+            } else {
+                uint16_t rmVal = readModRM16(modrm);
+                uint16_t regVal = m_cpu.getReg16(modrm.reg);
+                uint16_t res = rmVal ^ regVal;
+                writeModRM16(modrm, res);
+            }
+            break;
+        }
+        case 0x32: { // XOR r8, r/m8
+            ModRM modrm = decodeModRM(fetch8());
+            uint8_t rmVal = readModRM8(modrm);
+            uint8_t regVal = m_cpu.getReg8(modrm.reg);
+            uint8_t res = regVal ^ rmVal;
+            m_cpu.setReg8(modrm.reg, res);
+            break;
+        }
+        case 0x33: { // XOR r16/32, r/m16/32
+            ModRM modrm = decodeModRM(fetch8());
+            if (m_hasPrefix66) {
+                uint32_t rmVal = readModRM32(modrm);
+                uint32_t regVal = m_cpu.getReg32(modrm.reg);
+                uint32_t res = regVal ^ rmVal;
+                m_cpu.setReg32(modrm.reg, res);
+            } else {
+                uint16_t rmVal = readModRM16(modrm);
+                uint16_t regVal = m_cpu.getReg16(modrm.reg);
+                uint16_t res = regVal ^ rmVal;
+                m_cpu.setReg16(modrm.reg, res);
+            }
+            break;
+        }
+
+        // CMP
+        case 0x38: { // CMP r/m8, r8
+            ModRM modrm = decodeModRM(fetch8());
+            uint8_t rmVal = readModRM8(modrm);
+            uint8_t regVal = m_cpu.getReg8(modrm.reg);
+            uint8_t res = rmVal - regVal;
+            // TODO: EFLAGS
+            (void)res;
+            break;
+        }
+        case 0x39: { // CMP r/m16/32, r16/32
+            ModRM modrm = decodeModRM(fetch8());
+            if (m_hasPrefix66) {
+                uint32_t rmVal = readModRM32(modrm);
+                uint32_t regVal = m_cpu.getReg32(modrm.reg);
+                uint32_t res = rmVal - regVal;
+                (void)res;
+            } else {
+                uint16_t rmVal = readModRM16(modrm);
+                uint16_t regVal = m_cpu.getReg16(modrm.reg);
+                uint16_t res = rmVal - regVal;
+                (void)res;
+            }
+            break;
+        }
+        case 0x3A: { // CMP r8, r/m8
+            ModRM modrm = decodeModRM(fetch8());
+            uint8_t rmVal = readModRM8(modrm);
+            uint8_t regVal = m_cpu.getReg8(modrm.reg);
+            uint8_t res = regVal - rmVal;
+            (void)res;
+            break;
+        }
+        case 0x3B: { // CMP r16/32, r/m16/32
+            ModRM modrm = decodeModRM(fetch8());
+            if (m_hasPrefix66) {
+                uint32_t rmVal = readModRM32(modrm);
+                uint32_t regVal = m_cpu.getReg32(modrm.reg);
+                uint32_t res = regVal - rmVal;
+                (void)res;
+            } else {
+                uint16_t rmVal = readModRM16(modrm);
+                uint16_t regVal = m_cpu.getReg16(modrm.reg);
+                uint16_t res = regVal - rmVal;
+                (void)res;
+            }
+            break;
+        }
+
+        // MOVSB / MOVSW / MOVSD
+        case 0xA4:
+        case 0xA5: {
+            uint32_t count = m_hasPrefix67 ? m_cpu.getReg32(ECX) : m_cpu.getReg16(CX);
+            bool rep = m_hasRepz || m_hasRepnz;
+            
+            auto do_movs = [&]() {
+                uint32_t si = m_hasPrefix67 ? m_cpu.getReg32(ESI) : m_cpu.getReg16(SI);
+                uint32_t di = m_hasPrefix67 ? m_cpu.getReg32(EDI) : m_cpu.getReg16(DI);
+                
+                uint16_t dsSeg = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
+                uint32_t srcAddr = (m_cpu.getSegReg(dsSeg) << 4) + si;
+                uint32_t dstAddr = (m_cpu.getSegReg(ES) << 4) + di;
+                
+                int df = (m_cpu.getEFLAGS() & FLAG_DIRECTION) ? -1 : 1;
+                uint32_t step = 0;
+
+                if (opcode == 0xA4) { // MOVSB
+                    m_memory.write8(dstAddr, m_memory.read8(srcAddr));
+                    step = 1;
+                } else if (m_hasPrefix66) { // MOVSD (32-bit)
+                    m_memory.write32(dstAddr, m_memory.read32(srcAddr));
+                    step = 4;
+                } else { // MOVSW (16-bit)
+                    m_memory.write16(dstAddr, m_memory.read16(srcAddr));
+                    step = 2;
+                }
+                
+                uint32_t delta = step * df;
+                if (m_hasPrefix67) {
+                    m_cpu.setReg32(ESI, si + delta);
+                    m_cpu.setReg32(EDI, di + delta);
+                } else {
+                    m_cpu.setReg16(SI, (si + delta) & 0xFFFF);
+                    m_cpu.setReg16(DI, (di + delta) & 0xFFFF);
+                }
+            };
+
+            if (rep) {
+                while (count > 0) {
+                    do_movs();
+                    count--;
+                }
+                if (m_hasPrefix67) m_cpu.setReg32(ECX, 0);
+                else m_cpu.setReg16(CX, 0);
+            } else {
+                do_movs();
+            }
+            break;
+        }
+
+        // STOSB / STOSW / STOSD
+        case 0xAA:
+        case 0xAB: {
+            uint32_t count = m_hasPrefix67 ? m_cpu.getReg32(ECX) : m_cpu.getReg16(CX);
+            bool rep = m_hasRepz || m_hasRepnz;
+            
+            auto do_stos = [&]() {
+                uint32_t di = m_hasPrefix67 ? m_cpu.getReg32(EDI) : m_cpu.getReg16(DI);
+                uint32_t dstAddr = (m_cpu.getSegReg(ES) << 4) + di;
+                
+                int df = (m_cpu.getEFLAGS() & FLAG_DIRECTION) ? -1 : 1;
+                uint32_t step = 0;
+
+                if (opcode == 0xAA) { // STOSB
+                    m_memory.write8(dstAddr, m_cpu.getReg8(AL));
+                    step = 1;
+                } else if (m_hasPrefix66) { // STOSD (32-bit)
+                    m_memory.write32(dstAddr, m_cpu.getReg32(EAX));
+                    step = 4;
+                } else { // STOSW (16-bit)
+                    m_memory.write16(dstAddr, m_cpu.getReg16(AX));
+                    step = 2;
+                }
+                
+                uint32_t delta = step * df;
+                if (m_hasPrefix67) {
+                    m_cpu.setReg32(EDI, di + delta);
+                } else {
+                    m_cpu.setReg16(DI, (di + delta) & 0xFFFF);
+                }
+            };
+
+            if (rep) {
+                while (count > 0) {
+                    do_stos();
+                    count--;
+                }
+                if (m_hasPrefix67) m_cpu.setReg32(ECX, 0);
+                else m_cpu.setReg16(CX, 0);
+            } else {
+                do_stos();
+            }
+            break;
+        }
+
+        // LODSB / LODSW / LODSD
+        case 0xAC:
+        case 0xAD: {
+            uint32_t count = m_hasPrefix67 ? m_cpu.getReg32(ECX) : m_cpu.getReg16(CX);
+            bool rep = m_hasRepz || m_hasRepnz;
+            
+            auto do_lods = [&]() {
+                uint32_t si = m_hasPrefix67 ? m_cpu.getReg32(ESI) : m_cpu.getReg16(SI);
+                uint16_t dsSeg = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
+                uint32_t srcAddr = (m_cpu.getSegReg(dsSeg) << 4) + si;
+                
+                int df = (m_cpu.getEFLAGS() & FLAG_DIRECTION) ? -1 : 1;
+                uint32_t step = 0;
+
+                if (opcode == 0xAC) { // LODSB
+                    m_cpu.setReg8(AL, m_memory.read8(srcAddr));
+                    step = 1;
+                } else if (m_hasPrefix66) { // LODSD (32-bit)
+                    m_cpu.setReg32(EAX, m_memory.read32(srcAddr));
+                    step = 4;
+                } else { // LODSW (16-bit)
+                    m_cpu.setReg16(AX, m_memory.read16(srcAddr));
+                    step = 2;
+                }
+                
+                uint32_t delta = step * df;
+                if (m_hasPrefix67) {
+                    m_cpu.setReg32(ESI, si + delta);
+                } else {
+                    m_cpu.setReg16(SI, (si + delta) & 0xFFFF);
+                }
+            };
+
+            if (rep) {
+                while (count > 0) {
+                    do_lods();
+                    count--;
+                }
+                if (m_hasPrefix67) m_cpu.setReg32(ECX, 0);
+                else m_cpu.setReg16(CX, 0);
+            } else {
+                do_lods();
             }
             break;
         }

@@ -98,4 +98,94 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
         REQUIRE(cpu.getEIP() == 0x103); // Retro to after CALL
         REQUIRE(cpu.getReg16(cpu::Reg16Index::SP) == 0x200); // SP restored
     }
+    SECTION("ALU: SUB r8, r/m8") {
+        cpu.setReg8(cpu::Reg8Index::AL, 0x50);
+        cpu.setReg8(cpu::Reg8Index::BL, 0x20);
+        // SUB AL, BL (0x2A)
+        // ModRM: mod=11 (3), reg=000(AL), rm=011(BL) -> 11000011 = 0xC3
+        mem.write8(0x100, 0x2A);
+        mem.write8(0x101, 0xC3);
+        decoder.step();
+        REQUIRE(cpu.getReg8(cpu::Reg8Index::AL) == 0x30);
+    }
+
+    SECTION("ALU: AND r8, r/m8") {
+        cpu.setReg8(cpu::Reg8Index::AL, 0xF0);
+        cpu.setReg8(cpu::Reg8Index::BL, 0x88);
+        // AND AL, BL (0x22)
+        // ModRM: mod=11(3), reg=000(AL), rm=011(BL) -> 0xC3
+        mem.write8(0x100, 0x22);
+        mem.write8(0x101, 0xC3);
+        decoder.step();
+        REQUIRE(cpu.getReg8(cpu::Reg8Index::AL) == 0x80);
+    }
+
+    SECTION("ALU: OR r8, r/m8") {
+        cpu.setReg8(cpu::Reg8Index::AL, 0x04);
+        cpu.setReg8(cpu::Reg8Index::BL, 0x02);
+        // OR AL, BL (0x0A)
+        mem.write8(0x100, 0x0A);
+        mem.write8(0x101, 0xC3);
+        decoder.step();
+        REQUIRE(cpu.getReg8(cpu::Reg8Index::AL) == 0x06);
+    }
+
+    SECTION("ALU: XOR r8, r/m8") {
+        cpu.setReg8(cpu::Reg8Index::AL, 0xFF);
+        cpu.setReg8(cpu::Reg8Index::BL, 0x0F);
+        // XOR AL, BL (0x32)
+        mem.write8(0x100, 0x32);
+        mem.write8(0x101, 0xC3);
+        decoder.step();
+        REQUIRE(cpu.getReg8(cpu::Reg8Index::AL) == 0xF0);
+    }
+    
+    SECTION("String Operations: MOVSB") {
+        cpu.setReg16(cpu::Reg16Index::SI, 0x1000);
+        cpu.setReg16(cpu::Reg16Index::DI, 0x2000);
+        cpu.setSegReg(cpu::SegRegIndex::DS, 0x0000);
+        cpu.setSegReg(cpu::SegRegIndex::ES, 0x0000);
+        mem.write8(0x1000, 0x55);
+        
+        // MOVSB (0xA4)
+        mem.write8(0x100, 0xA4);
+        decoder.step();
+        
+        REQUIRE(mem.read8(0x2000) == 0x55);
+        REQUIRE(cpu.getReg16(cpu::Reg16Index::SI) == 0x1001);
+        REQUIRE(cpu.getReg16(cpu::Reg16Index::DI) == 0x2001);
+    }
+
+    SECTION("String Operations: REP STOSW") {
+        cpu.setReg16(cpu::Reg16Index::DI, 0x3000);
+        cpu.setReg16(cpu::Reg16Index::CX, 3);
+        cpu.setReg16(cpu::Reg16Index::AX, 0x1234);
+        cpu.setSegReg(cpu::SegRegIndex::ES, 0x0000);
+        
+        // REP (0xF3) STOSW (0xAB)
+        mem.write8(0x100, 0xF3);
+        mem.write8(0x101, 0xAB);
+        decoder.step();
+        
+        REQUIRE(mem.read16(0x3000) == 0x1234);
+        REQUIRE(mem.read16(0x3002) == 0x1234);
+        REQUIRE(mem.read16(0x3004) == 0x1234);
+        REQUIRE(cpu.getReg16(cpu::Reg16Index::CX) == 0);
+        REQUIRE(cpu.getReg16(cpu::Reg16Index::DI) == 0x3006);
+    }
+
+    SECTION("String Operations: MOVSB with Direction Flag") {
+        cpu.setReg16(cpu::Reg16Index::SI, 0x1000);
+        cpu.setReg16(cpu::Reg16Index::DI, 0x2000);
+        cpu.setEFLAGS(cpu.getEFLAGS() | cpu::FLAG_DIRECTION);
+        mem.write8(0x1000, 0xAA);
+        
+        // MOVSB (0xA4)
+        mem.write8(0x100, 0xA4);
+        decoder.step();
+        
+        REQUIRE(mem.read8(0x2000) == 0xAA);
+        REQUIRE(cpu.getReg16(cpu::Reg16Index::SI) == 0x0FFF);
+        REQUIRE(cpu.getReg16(cpu::Reg16Index::DI) == 0x1FFF);
+    }
 }
