@@ -42,7 +42,11 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(Catch2)
 
-file(GLOB_RECURSE TEST_FILES "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp")
+set(TEST_FILES 
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cpu_behavior.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_instruction_decoder.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_interrupts.cpp"
+)
 
 add_executable(fadors_tests ${TEST_FILES})
 target_link_libraries(fadors_tests PRIVATE fadors_core Catch2::Catch2WithMain)

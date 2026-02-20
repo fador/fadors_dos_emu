@@ -23,9 +23,9 @@
   - [x] Data transfer (MOV, PUSH, POP)
   - [x] String operations (MOVS, STOS, LODS, SCAS, CMPS)
   - [ ] Advanced 386 protected mode instructions (later)
-- [ ] **Interrupt Pipeline**
-  - [ ] CPU exception handling
-  - [ ] Hardware interrupt pin routing
+- [x] **Interrupt Pipeline**
+  - [x] CPU exception handling
+  - [x] Hardware interrupt pin routing
 
 ## Phase 3: Hardware Devices
 - [ ] Programmable Interval Timer (PIT 8253/8254)

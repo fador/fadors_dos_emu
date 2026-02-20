@@ -62,6 +62,9 @@ private:
     // Instruction Handlers
     void executeOpcode(uint8_t opcode);
     void executeOpcode0F(uint8_t opcode); // Two-byte opcodes
+    
+    // Interrupt and Exception handling
+    void triggerInterrupt(uint8_t vector);
 };
 
 } // namespace fador::cpu

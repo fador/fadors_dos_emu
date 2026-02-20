@@ -151,8 +151,42 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             break;
             
         case 0xCC: // INT3
-            LOG_DEBUG("INT3 Exception triggered.");
+            triggerInterrupt(3);
             break;
+            
+        case 0xCD: { // INT imm8
+            uint8_t vector = fetch8();
+            triggerInterrupt(vector);
+            break;
+        }
+
+        case 0xCE: { // INTO
+            if (m_cpu.getEFLAGS() & 0x0800) { // Overflow flag (OF) is bit 11
+                triggerInterrupt(4);
+            }
+            break;
+        }
+
+        case 0xCF: { // IRET (Real mode for now)
+            if (m_hasPrefix66) { // 32-bit IRET
+                uint32_t esp = m_cpu.getReg32(ESP);
+                m_cpu.setEIP(m_memory.read32((m_cpu.getSegReg(SS) << 4) + esp));
+                m_cpu.setSegReg(CS, m_memory.read32((m_cpu.getSegReg(SS) << 4) + esp + 4) & 0xFFFF);
+                m_cpu.setEFLAGS(m_memory.read32((m_cpu.getSegReg(SS) << 4) + esp + 8));
+                m_cpu.setReg32(ESP, esp + 12);
+            } else { // 16-bit IRET
+                uint16_t sp = m_cpu.getReg16(SP);
+                m_cpu.setEIP(m_memory.read16((m_cpu.getSegReg(SS) << 4) + sp));
+                m_cpu.setSegReg(CS, m_memory.read16((m_cpu.getSegReg(SS) << 4) + sp + 2));
+                
+                uint32_t currentFlags = m_cpu.getEFLAGS();
+                uint16_t poppedFlags = m_memory.read16((m_cpu.getSegReg(SS) << 4) + sp + 4);
+                m_cpu.setEFLAGS((currentFlags & 0xFFFF0000) | poppedFlags);
+                
+                m_cpu.setReg16(SP, sp + 6);
+            }
+            break;
+        }
 
         // Basic ADD
         case 0x00: { // ADD r/m8, r8
@@ -228,7 +262,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             break;
         }
 
-        case 0x50 ... 0x57: { // PUSH r16/r32
+        case 0x50: case 0x51: case 0x52: case 0x53: case 0x54: case 0x55: case 0x56: case 0x57: { // PUSH r16/r32
             uint8_t opReg = opcode - 0x50;
             if (m_hasPrefix66) {
                 uint32_t val = m_cpu.getReg32(opReg);
@@ -243,7 +277,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             }
             break;
         }
-        case 0x58 ... 0x5F: { // POP r16/r32
+        case 0x58: case 0x59: case 0x5A: case 0x5B: case 0x5C: case 0x5D: case 0x5E: case 0x5F: { // POP r16/r32
             uint8_t opReg = opcode - 0x58;
             if (m_hasPrefix66) {
                 uint32_t esp = m_cpu.getReg32(ESP);
@@ -259,13 +293,13 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             break;
         }
         // MOV r8, imm8
-        case 0xB0 ... 0xB7: {
+        case 0xB0: case 0xB1: case 0xB2: case 0xB3: case 0xB4: case 0xB5: case 0xB6: case 0xB7: {
             uint8_t opReg = opcode - 0xB0;
             m_cpu.setReg8(opReg, fetch8());
             break;
         }
         // MOV r16/32, imm16/32
-        case 0xB8 ... 0xBF: {
+        case 0xB8: case 0xB9: case 0xBA: case 0xBB: case 0xBC: case 0xBD: case 0xBE: case 0xBF: {
             uint8_t opReg = opcode - 0xB8;
             if (m_hasPrefix66) {
                 m_cpu.setReg32(opReg, fetch32());
@@ -312,6 +346,41 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
 
 void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
     LOG_WARN("0x0F 0x", std::hex, static_cast<int>(opcode), " not implemented.");
+}
+
+void InstructionDecoder::triggerInterrupt(uint8_t vector) {
+    // 16-bit Real Mode Interrupt handling
+    // 1. Push FLAGS, CS, IP
+    // 2. Clear IF and TF flags (not fully implemented flag handling yet)
+    // 3. Jump to IVT[vector]
+
+    if (m_hasPrefix66) {
+        LOG_WARN("32-bit protected mode interrupts not strictly implemented yet");
+    }
+
+    uint16_t sp = m_cpu.getReg16(SP);
+    
+    // Push FLAGS
+    sp -= 2;
+    m_memory.write16((m_cpu.getSegReg(SS) << 4) + sp, static_cast<uint16_t>(m_cpu.getEFLAGS() & 0xFFFF));
+    // Push CS
+    sp -= 2;
+    m_memory.write16((m_cpu.getSegReg(SS) << 4) + sp, m_cpu.getSegReg(CS));
+    // Push IP
+    sp -= 2;
+    m_memory.write16((m_cpu.getSegReg(SS) << 4) + sp, static_cast<uint16_t>(m_cpu.getEIP() & 0xFFFF));
+
+    m_cpu.setReg16(SP, sp);
+
+    // Read new CS:IP from IVT
+    uint16_t newIP = m_memory.read16(vector * 4);
+    uint16_t newCS = m_memory.read16((vector * 4) + 2);
+    
+    m_cpu.setSegReg(CS, newCS);
+    m_cpu.setEIP(newIP);
+
+    LOG_DEBUG("Triggered Interrupt 0x", std::hex, static_cast<int>(vector), 
+              " Vector -> CS:EIP = 0x", newCS, ":0x", newIP);
 }
 
 } // namespace fador::cpu
