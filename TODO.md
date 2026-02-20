@@ -19,7 +19,9 @@
 - [x] **Instruction Decoding & Execution**
   - [x] Instruction Fetcher (Prefixes, ModR/M, SIB, Displacement, Immediate)
   - [x] Arithmetic and Logic Unit (ALU) instructions
-  - [ ] String operations (MOVS, STOS, LODS, SCAS, CMPS)
+  - [x] Control flow (JMP, CALL, RET, INT, IRET)
+  - [x] Data transfer (MOV, PUSH, POP)
+  - [x] String operations (MOVS, STOS, LODS, SCAS, CMPS)
   - [ ] Advanced 386 protected mode instructions (later)
 - [ ] **Interrupt Pipeline**
   - [ ] CPU exception handling

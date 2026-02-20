@@ -228,6 +228,81 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             break;
         }
 
+        case 0x50 ... 0x57: { // PUSH r16/r32
+            uint8_t opReg = opcode - 0x50;
+            if (m_hasPrefix66) {
+                uint32_t val = m_cpu.getReg32(opReg);
+                uint32_t esp = m_cpu.getReg32(ESP) - 4;
+                m_cpu.setReg32(ESP, esp);
+                m_memory.write32((m_cpu.getSegReg(SS) << 4) + esp, val);
+            } else {
+                uint16_t val = m_cpu.getReg16(opReg);
+                uint16_t sp = m_cpu.getReg16(SP) - 2;
+                m_cpu.setReg16(SP, sp);
+                m_memory.write16((m_cpu.getSegReg(SS) << 4) + sp, val);
+            }
+            break;
+        }
+        case 0x58 ... 0x5F: { // POP r16/r32
+            uint8_t opReg = opcode - 0x58;
+            if (m_hasPrefix66) {
+                uint32_t esp = m_cpu.getReg32(ESP);
+                uint32_t val = m_memory.read32((m_cpu.getSegReg(SS) << 4) + esp);
+                m_cpu.setReg32(ESP, esp + 4);
+                m_cpu.setReg32(opReg, val);
+            } else {
+                uint16_t sp = m_cpu.getReg16(SP);
+                uint16_t val = m_memory.read16((m_cpu.getSegReg(SS) << 4) + sp);
+                m_cpu.setReg16(SP, sp + 2);
+                m_cpu.setReg16(opReg, val);
+            }
+            break;
+        }
+        // MOV r8, imm8
+        case 0xB0 ... 0xB7: {
+            uint8_t opReg = opcode - 0xB0;
+            m_cpu.setReg8(opReg, fetch8());
+            break;
+        }
+        // MOV r16/32, imm16/32
+        case 0xB8 ... 0xBF: {
+            uint8_t opReg = opcode - 0xB8;
+            if (m_hasPrefix66) {
+                m_cpu.setReg32(opReg, fetch32());
+            } else {
+                m_cpu.setReg16(opReg, fetch16());
+            }
+            break;
+        }
+        case 0x88: { // MOV r/m8, r8
+            ModRM modrm = decodeModRM(fetch8());
+            writeModRM8(modrm, m_cpu.getReg8(modrm.reg));
+            break;
+        }
+        case 0x89: { // MOV r/m16/32, r16/32
+            ModRM modrm = decodeModRM(fetch8());
+            if (m_hasPrefix66) {
+                writeModRM32(modrm, m_cpu.getReg32(modrm.reg));
+            } else {
+                writeModRM16(modrm, m_cpu.getReg16(modrm.reg));
+            }
+            break;
+        }
+        case 0x8A: { // MOV r8, r/m8
+            ModRM modrm = decodeModRM(fetch8());
+            m_cpu.setReg8(modrm.reg, readModRM8(modrm));
+            break;
+        }
+        case 0x8B: { // MOV r16/32, r/m16/32
+            ModRM modrm = decodeModRM(fetch8());
+            if (m_hasPrefix66) {
+                m_cpu.setReg32(modrm.reg, readModRM32(modrm));
+            } else {
+                m_cpu.setReg16(modrm.reg, readModRM16(modrm));
+            }
+            break;
+        }
+
         default:
             LOG_WARN("Unknown opcode 0x", std::hex, static_cast<int>(opcode), " at CS:EIP ", 
                      m_cpu.getSegReg(CS), ":", m_cpu.getEIP() - 1);
