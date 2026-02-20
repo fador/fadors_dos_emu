@@ -35,11 +35,11 @@
 - [ ] CMOS/RTC (Optional)
 
 ## Phase 4: BIOS Emulation
-- [ ] System initialization (IVT setup)
-- [ ] INT 10h (Video Services) - Emulated text-mode logic
+- [x] System initialization (IVT setup)
+- [x] INT 10h (Video Services) - Emulated text-mode logic
 - [ ] INT 13h (Disk Services) - Basic floppy/hard drive image support
-- [ ] INT 16h (Keyboard Services)
-- [ ] INT 1Ah (Time of Day / RTC Services)
+- [x] INT 16h (Keyboard Services)
+- [x] INT 1Ah (Time of Day / RTC Services)
 
 ## Phase 5: DOS Emulation (MS-DOS functionality)
 - [ ] COM File Loader

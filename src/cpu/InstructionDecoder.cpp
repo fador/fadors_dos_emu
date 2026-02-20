@@ -1,13 +1,15 @@
 #include "InstructionDecoder.hpp"
 #include "../hw/IOBus.hpp"
+#include "../hw/BIOS.hpp"
 #include "../utils/Logger.hpp"
 
 namespace fador::cpu {
 
-InstructionDecoder::InstructionDecoder(CPU& cpu, memory::MemoryBus& memory, hw::IOBus& iobus)
+InstructionDecoder::InstructionDecoder(CPU& cpu, memory::MemoryBus& memory, hw::IOBus& iobus, hw::BIOS& bios)
     : m_cpu(cpu)
     , m_memory(memory)
     , m_iobus(iobus)
+    , m_bios(bios)
     , m_hasPrefix66(false)
     , m_hasPrefix67(false)
     , m_hasRepnz(false)
@@ -823,6 +825,11 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
 }
 
 void InstructionDecoder::triggerInterrupt(uint8_t vector) {
+    if (m_bios.handleInterrupt(vector)) {
+        LOG_DEBUG("BIOS: Handled Interrupt 0x", std::hex, static_cast<int>(vector), " via HLE");
+        return;
+    }
+
     // 16-bit Real Mode Interrupt handling
     // 1. Push FLAGS, CS, IP
     // 2. Clear IF and TF flags (not fully implemented flag handling yet)

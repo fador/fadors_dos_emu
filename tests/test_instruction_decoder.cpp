@@ -3,6 +3,9 @@
 #include "cpu/InstructionDecoder.hpp"
 #include "memory/MemoryBus.hpp"
 #include "hw/IOBus.hpp"
+#include "hw/BIOS.hpp"
+#include "hw/KeyboardController.hpp"
+#include "hw/PIT8254.hpp"
 
 using namespace fador;
 
@@ -10,7 +13,10 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
     cpu::CPU cpu;
     memory::MemoryBus mem;
     hw::IOBus iobus;
-    cpu::InstructionDecoder decoder(cpu, mem, iobus);
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::BIOS bios(cpu, mem, kbd, pit);
+    cpu::InstructionDecoder decoder(cpu, mem, iobus, bios);
 
     // Setup base execution environment
     cpu.setSegReg(cpu::SegRegIndex::CS, 0x0000);
