@@ -11,11 +11,11 @@
   - [x] VGA Text Mode VRAM (0xB8000) mapping
 
 ## Phase 2: CPU Emulation (Intel 80386)
-- [ ] **CPU State & Registers**
-  - [ ] General Purpose Registers (EAX, EBX, ECX, EDX, ESI, EDI, EBP, ESP)
-  - [ ] Segment Registers (CS, DS, ES, FS, GS, SS) and Descriptor Caches
-  - [ ] EFLAGS register
-  - [ ] Control/Debug Registers (CR0-CR4, DR0-DR7)
+- [x] **CPU State & Registers**
+  - [x] General Purpose Registers (EAX, EBX, ECX, EDX, ESI, EDI, EBP, ESP)
+  - [x] Segment Registers (CS, DS, ES, FS, GS, SS) and Descriptor Caches
+  - [x] EFLAGS register
+  - [x] Control/Debug Registers (CR0-CR4, DR0-DR7)
 - [ ] **Instruction Decoding & Execution**
   - [ ] Instruction Fetcher (Prefixes, ModR/M, SIB, Displacement, Immediate)
   - [ ] Arithmetic and Logic Unit (ALU) instructions
