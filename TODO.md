@@ -1,14 +1,14 @@
 # Emulator Development Plan
 
 ## Phase 1: Core Foundation
-- [ ] **Project Setup**
+- [x] **Project Setup**
   - [x] Initial CMake C++20 configuration
   - [x] Documentation and agent guidelines
-  - [ ] Logging macros and debugging utilities
-- [ ] **Memory Subsystem**
-  - [ ] 1MB Conventional memory bus mapping
-  - [ ] Read/Write interface handling (8-bit, 16-bit, 32-bit)
-  - [ ] VGA Text Mode VRAM (0xB8000) mapping
+  - [x] Logging macros and debugging utilities
+- [x] **Memory Subsystem**
+  - [x] 1MB Conventional memory bus mapping
+  - [x] Read/Write interface handling (8-bit, 16-bit, 32-bit)
+  - [x] VGA Text Mode VRAM (0xB8000) mapping
 
 ## Phase 2: CPU Emulation (Intel 80386)
 - [ ] **CPU State & Registers**

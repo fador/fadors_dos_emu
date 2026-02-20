@@ -8,9 +8,12 @@ set(CMAKE_CXX_EXTENSIONS OFF) # Ensure strict standard C++
 # Define the source directory
 set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
+# Gather all source files
+file(GLOB_RECURSE SRC_FILES "${SRC_DIR}/*.cpp")
+
 # Define the executable
 add_executable(fadors_emu
-    ${SRC_DIR}/main.cpp
+    ${SRC_FILES}
 )
 
 # Target include directories
