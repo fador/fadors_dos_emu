@@ -37,7 +37,7 @@
 ## Phase 4: BIOS Emulation
 - [x] System initialization (IVT setup)
 - [x] INT 10h (Video Services) - Emulated text-mode logic
-- [ ] INT 13h (Disk Services) - Basic floppy/hard drive image support
+- [x] INT 13h (Disk Services) - Basic floppy/hard drive image support
 - [x] INT 16h (Keyboard Services)
 - [x] INT 1Ah (Time of Day / RTC Services)
 

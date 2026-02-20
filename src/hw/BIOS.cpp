@@ -2,6 +2,8 @@
 #include "KeyboardController.hpp"
 #include "PIT8254.hpp"
 #include "../utils/Logger.hpp"
+#include <fstream>
+#include <algorithm>
 
 namespace fador::hw {
 
@@ -10,6 +12,25 @@ BIOS::BIOS(cpu::CPU& cpu, memory::MemoryBus& memory, KeyboardController& kbd, PI
     , m_memory(memory)
     , m_kbd(kbd)
     , m_pit(pit) {
+}
+
+bool BIOS::loadDiskImage(const std::string& path) {
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) {
+        LOG_ERROR("BIOS: Failed to open disk image: ", path);
+        return false;
+    }
+    
+    std::streamsize size = file.tellg();
+    file.seekg(0, std::ios::beg);
+    
+    m_floppyData.resize(static_cast<size_t>(size));
+    if (file.read(reinterpret_cast<char*>(m_floppyData.data()), size)) {
+        m_floppyLoaded = true;
+        LOG_INFO("BIOS: Loaded floppy image ", path, " (", size, " bytes)");
+        return true;
+    }
+    return false;
 }
 
 bool BIOS::handleInterrupt(uint8_t vector) {
@@ -156,10 +177,87 @@ void BIOS::handleTimeService() {
 
 void BIOS::handleDiskService() {
     uint8_t ah = m_cpu.getReg8(cpu::AH);
-    if (ah == 0x00) {
-        LOG_DEBUG("BIOS INT 13h: Reset Disk System");
-        m_cpu.setReg8(cpu::AH, 0); // Success
-        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    uint8_t dl = m_cpu.getReg8(cpu::DL); // Drive
+
+    switch (ah) {
+        case 0x00: { // Reset Disk System
+            LOG_DEBUG("BIOS INT 13h: Reset Disk System");
+            m_cpu.setReg8(cpu::AH, 0); // Success
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+            break;
+        }
+        case 0x02: { // Read Sectors
+            uint8_t al = m_cpu.getReg8(cpu::AL); // Num sectors
+            uint8_t ch = m_cpu.getReg8(cpu::CH); // Cylinder (low 8)
+            uint8_t cl = m_cpu.getReg8(cpu::CL); // Sector (1-63) + Cy (high 2)
+            uint8_t dh = m_cpu.getReg8(cpu::DH); // Head
+            uint16_t es = m_cpu.getSegReg(cpu::ES);
+            uint16_t bx = m_cpu.getReg16(cpu::BX);
+
+            uint16_t cylinder = ch | ((cl & 0xC0) << 2);
+            uint8_t sector = cl & 0x3F;
+
+            LOG_DEBUG("BIOS INT 13h: Read ", (int)al, " sectors from Drive ", (int)dl, 
+                      " (C:", cylinder, " H:", (int)dh, " S:", (int)sector, ") to ", 
+                      std::hex, es, ":", bx);
+
+            if (dl == 0x00 && m_floppyLoaded) {
+                // CHS Mapping for 1.44MB floppy: 80/2/18
+                uint32_t lba = ((cylinder * 2 + dh) * 18) + (sector - 1);
+                uint32_t dest = (es << 4) + bx;
+                
+                for (int i = 0; i < al; ++i) {
+                    uint32_t srcStart = (lba + i) * 512;
+                    if (srcStart + 512 > m_floppyData.size()) {
+                        m_cpu.setReg8(cpu::AH, 0x01); // Invalid parameter
+                        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+                        return;
+                    }
+                    for (int j = 0; j < 512; ++j) {
+                        m_memory.write8(dest + i * 512 + j, m_floppyData[srcStart + j]);
+                    }
+                }
+                m_cpu.setReg8(cpu::AH, 0); // Success
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+                m_cpu.setReg8(cpu::AL, al); // AL = sectors read
+            } else {
+                LOG_WARN("BIOS INT 13h: Drive not found or not loaded: ", (int)dl);
+                m_cpu.setReg8(cpu::AH, 0x01); // Invalid function/parameter
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+            }
+            break;
+        }
+        case 0x08: { // Get Drive Parameters
+            if (dl == 0x00) { // Floppy 0
+                m_cpu.setReg8(cpu::AH, 0);
+                m_cpu.setReg8(cpu::BL, 0x04); // 1.44MB
+                m_cpu.setReg8(cpu::CH, 79);   // Max cylinder index (low 8 bits)
+                // CL: bits 6-7 = high 2 bits of cyl, bits 0-5 = max sector number
+                m_cpu.setReg8(cpu::CL, 18);   // 18 sectors/track
+                m_cpu.setReg8(cpu::DH, 1);    // Max head index (0-based, so 1 means 2 heads)
+                m_cpu.setReg8(cpu::DL, 1);    // Num floppy drives
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+            } else {
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+                m_cpu.setReg8(cpu::AH, 0x07); // Drive parameter activity failed
+            }
+            break;
+        }
+        case 0x15: { // Get Disk Type
+            if (dl == 0x00) { // Floppy
+                m_cpu.setReg8(cpu::AH, 0x01); // Floppy, no change line
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+            } else {
+                m_cpu.setReg8(cpu::AH, 0x00); // Drive not present
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+            }
+            break;
+        }
+        default:
+            LOG_WARN("BIOS INT 13h: Unknown function AH=0x", std::hex, (int)ah);
+            m_cpu.setReg8(cpu::AH, 0x01);
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+            break;
     }
 }
 

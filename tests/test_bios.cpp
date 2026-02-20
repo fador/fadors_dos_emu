@@ -1,4 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
+#include <fstream>
+#include <cstdio>
+#include <vector>
 #include "cpu/CPU.hpp"
 #include "cpu/InstructionDecoder.hpp"
 #include "memory/MemoryBus.hpp"
@@ -62,5 +65,54 @@ TEST_CASE("BIOS Emulation Services", "[BIOS]") {
         cpu.setEIP(0x100);
         decoder.step();
         REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_ZERO)); // ZF=0 means key present
+    }
+
+    SECTION("INT 13h: AH=08h (Drive Parameters)") {
+        cpu.setSegReg(cpu::SegRegIndex::CS, 0x1000); // Testing different CS
+        cpu.setReg8(cpu::AH, 0x08);
+        cpu.setReg8(cpu::DL, 0x00); // Floppy 0
+        
+        mem.write8(0x10100, 0xCD);
+        mem.write8(0x10101, 0x13);
+        cpu.setEIP(0x100);
+        
+        decoder.step();
+        
+        REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+        REQUIRE(cpu.getReg8(cpu::BL) == 0x04); // 1.44MB
+        REQUIRE(cpu.getReg8(cpu::CL) == 18);   // 18 sectors
+    }
+
+    SECTION("INT 13h: AH=02h (Read Sectors)") {
+        // Create a dummy 512 byte file
+        {
+            std::ofstream ofs("test_floppy.img", std::ios::binary);
+            std::vector<uint8_t> dummy(512, 0xAA);
+            ofs.write(reinterpret_cast<const char*>(dummy.data()), 512);
+        }
+
+        REQUIRE(bios.loadDiskImage("test_floppy.img"));
+
+        cpu.setSegReg(cpu::SegRegIndex::CS, 0x0000);
+        cpu.setSegReg(cpu::SegRegIndex::ES, 0x2000);
+        cpu.setReg16(cpu::BX, 0x0000);
+        cpu.setReg8(cpu::AH, 0x02); // Read
+        cpu.setReg8(cpu::AL, 1);    // 1 sector
+        cpu.setReg8(cpu::CH, 0);    // Cyl 0
+        cpu.setReg8(cpu::CL, 1);    // Sector 1
+        cpu.setReg8(cpu::DH, 0);    // Head 0
+        cpu.setReg8(cpu::DL, 0);    // Drive 0
+
+        mem.write8(0x100, 0xCD);
+        mem.write8(0x101, 0x13);
+        cpu.setEIP(0x100);
+
+        decoder.step();
+
+        REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+        REQUIRE(cpu.getReg8(cpu::AH) == 0);
+        REQUIRE(mem.read8(0x20000) == 0xAA);
+        
+        std::remove("test_floppy.img");
     }
 }

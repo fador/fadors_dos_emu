@@ -1,5 +1,7 @@
 #pragma once
 #include <cstdint>
+#include <vector>
+#include <string>
 #include "../cpu/CPU.hpp"
 #include "../memory/MemoryBus.hpp"
 
@@ -19,11 +21,18 @@ public:
     // Set up IVT vectors and BDA defaults
     void initialize();
 
+    // Load a raw disk image for floppy 0 (0x00)
+    bool loadDiskImage(const std::string& path);
+
 private:
     cpu::CPU& m_cpu;
     memory::MemoryBus& m_memory;
     KeyboardController& m_kbd;
     PIT8254& m_pit;
+
+    // Simple Floppy emulation (1.44MB)
+    std::vector<uint8_t> m_floppyData;
+    bool m_floppyLoaded = false;
 
     void handleVideoService();      // INT 10h
     void handleKeyboardService();   // INT 16h
