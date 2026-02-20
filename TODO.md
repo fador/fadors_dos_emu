@@ -16,11 +16,9 @@
   - [x] Segment Registers (CS, DS, ES, FS, GS, SS) and Descriptor Caches
   - [x] EFLAGS register
   - [x] Control/Debug Registers (CR0-CR4, DR0-DR7)
-- [ ] **Instruction Decoding & Execution**
-  - [ ] Instruction Fetcher (Prefixes, ModR/M, SIB, Displacement, Immediate)
-  - [ ] Arithmetic and Logic Unit (ALU) instructions
-  - [ ] Control flow (JMP, CALL, RET, INT, IRET)
-  - [ ] Data transfer (MOV, PUSH, POP)
+- [x] **Instruction Decoding & Execution**
+  - [x] Instruction Fetcher (Prefixes, ModR/M, SIB, Displacement, Immediate)
+  - [x] Arithmetic and Logic Unit (ALU) instructions
   - [ ] String operations (MOVS, STOS, LODS, SCAS, CMPS)
   - [ ] Advanced 386 protected mode instructions (later)
 - [ ] **Interrupt Pipeline**
