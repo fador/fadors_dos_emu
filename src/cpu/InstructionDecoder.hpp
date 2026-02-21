@@ -49,6 +49,7 @@ private:
 
     // Caching for EA to avoid double-fetching displacement in RMW instructions
     uint32_t m_currentEA;
+    uint32_t m_currentOffset;  // Holds isolated offset (critical for 0x8D LEA)
     bool m_eaResolved;
 
     // Fetches next byte from memory through CS:EIP
@@ -67,6 +68,12 @@ private:
     void writeModRM32(const ModRM& modrm, uint32_t value);
     void writeModRM16(const ModRM& modrm, uint16_t value);
     void writeModRM8(const ModRM& modrm, uint8_t value);
+
+    // General ALU operation evaluator covering Math and Logic EFLAGS 
+    uint32_t aluOp(uint8_t op, uint32_t dest, uint32_t src, int size);
+    
+    // Checks branch/set conditions
+    bool checkCondition(uint8_t cond);
 
     // Instruction Handlers
     void executeOpcode(uint8_t opcode);
