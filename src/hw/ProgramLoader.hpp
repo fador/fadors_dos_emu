@@ -15,7 +15,7 @@ public:
     bool loadCOM(const std::string& path, uint16_t segment, const std::string& args = "");
 
     // Loads an .EXE file, parses MZ header, relocates, and sets initial CS:IP / SS:SP
-    bool loadEXE(const std::string& path, uint16_t segment, const std::string& args = "");
+    bool loadEXE(const std::string& path, uint16_t segment, const std::string& args = "", bool useHimem = false);
 
 private:
     cpu::CPU& m_cpu;

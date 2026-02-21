@@ -91,7 +91,7 @@ uint32_t InstructionDecoder::getEffectiveAddress16(const ModRM& modrm) {
         }
     }
 
-    uint8_t seg = (m_segmentOverride != 0xFF) ? m_segmentOverride : defaultSeg;
+    uint8_t seg = (m_segmentOverride != 0xFF) ? m_segmentOverride : static_cast<uint8_t>(defaultSeg);
     m_currentEA = (m_cpu.getSegReg(static_cast<SegRegIndex>(seg)) << 4) + addr;
     m_eaResolved = true;
     return m_currentEA;
@@ -773,13 +773,13 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
 
         case 0xA0: { // MOV AL, [moffs8]
             uint32_t addr = (m_hasPrefix67) ? fetch32() : fetch16();
-            uint8_t seg = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
+            uint8_t seg = (m_segmentOverride != 0xFF) ? m_segmentOverride : static_cast<uint8_t>(DS);
             m_cpu.setReg8(AL, m_memory.read8((m_cpu.getSegReg(static_cast<SegRegIndex>(seg)) << 4) + addr));
             break;
         }
         case 0xA1: { // MOV AX/EAX, [moffs16/32]
             uint32_t addr = (m_hasPrefix67) ? fetch32() : fetch16();
-            uint8_t seg = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
+            uint8_t seg = (m_segmentOverride != 0xFF) ? m_segmentOverride : static_cast<uint8_t>(DS);
             uint32_t finalAddr = (m_cpu.getSegReg(static_cast<SegRegIndex>(seg)) << 4) + addr;
             if (m_hasPrefix66) m_cpu.setReg32(EAX, m_memory.read32(finalAddr));
             else m_cpu.setReg16(AX, m_memory.read16(finalAddr));
@@ -787,13 +787,13 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
         }
         case 0xA2: { // MOV [moffs8], AL
             uint32_t addr = (m_hasPrefix67) ? fetch32() : fetch16();
-            uint8_t seg = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
+            uint8_t seg = (m_segmentOverride != 0xFF) ? m_segmentOverride : static_cast<uint8_t>(DS);
             m_memory.write8((m_cpu.getSegReg(static_cast<SegRegIndex>(seg)) << 4) + addr, m_cpu.getReg8(AL));
             break;
         }
         case 0xA3: { // MOV [moffs16/32], AX/EAX
             uint32_t addr = (m_hasPrefix67) ? fetch32() : fetch16();
-            uint8_t seg = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
+            uint8_t seg = (m_segmentOverride != 0xFF) ? m_segmentOverride : static_cast<uint8_t>(DS);
             uint32_t finalAddr = (m_cpu.getSegReg(static_cast<SegRegIndex>(seg)) << 4) + addr;
             if (m_hasPrefix66) m_memory.write32(finalAddr, m_cpu.getReg32(EAX));
             else m_memory.write16(finalAddr, m_cpu.getReg16(AX));
@@ -1061,7 +1061,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                 uint32_t si = m_hasPrefix67 ? m_cpu.getReg32(ESI) : m_cpu.getReg16(SI);
                 uint32_t di = m_hasPrefix67 ? m_cpu.getReg32(EDI) : m_cpu.getReg16(DI);
                 
-                uint8_t dsSeg = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
+                uint8_t dsSeg = (m_segmentOverride != 0xFF) ? m_segmentOverride : static_cast<uint8_t>(DS);
                 uint32_t srcAddr = (m_cpu.getSegReg(dsSeg) << 4) + si;
                 uint32_t dstAddr = (m_cpu.getSegReg(ES) << 4) + di;
                 
@@ -1155,7 +1155,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             
             auto do_lods = [&]() {
                 uint32_t si = m_hasPrefix67 ? m_cpu.getReg32(ESI) : m_cpu.getReg16(SI);
-                uint8_t dsSeg = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
+                uint8_t dsSeg = (m_segmentOverride != 0xFF) ? m_segmentOverride : static_cast<uint8_t>(DS);
                 uint32_t srcAddr = (m_cpu.getSegReg(dsSeg) << 4) + si;
                 
                 int df = (m_cpu.getEFLAGS() & FLAG_DIRECTION) ? -1 : 1;

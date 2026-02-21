@@ -56,7 +56,6 @@ void TerminalRenderer::render(bool force) {
 }
 
 const char* TerminalRenderer::getAnsiColor(uint8_t color, bool background) {
-    int base = background ? 40 : 30;
     switch (color & 0x07) {
         case 0: return background ? "40" : "30"; // Black
         case 1: return background ? "44" : "34"; // Blue

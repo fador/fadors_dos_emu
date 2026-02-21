@@ -46,27 +46,35 @@ int main(int argc, char* argv[]) {
 
         LOG_INFO("System initialized successfully.");
 
-        // Load program if provided
-        if (argc > 1) {
-            std::string path = argv[1];
-            std::string args;
-            for (int i = 2; i < argc; ++i) {
-                if (i > 2) args += " ";
-                args += argv[i];
+        // Parse command line for --himem
+        bool useHimem = false;
+        std::string path;
+        std::string args;
+        for (int i = 1; i < argc; ++i) {
+            std::string arg = argv[i];
+            if (arg == "--himem") {
+                useHimem = true;
+            } else if (path.empty() && (arg.find(".com") != std::string::npos || arg.find(".exe") != std::string::npos || arg.find(".COM") != std::string::npos || arg.find(".EXE") != std::string::npos)) {
+                path = arg;
+            } else {
+                if (!args.empty()) args += " ";
+                args += arg;
             }
+        }
 
+        if (!path.empty()) {
             bool loaded = false;
             if (path.find(".com") != std::string::npos || path.find(".COM") != std::string::npos) {
                 loaded = loader.loadCOM(path, 0x1000, args);
             } else {
-                loaded = loader.loadEXE(path, 0x1000, args);
+                loaded = loader.loadEXE(path, 0x1000, args, useHimem);
             }
             if (!loaded) {
                 LOG_ERROR("Failed to load program: ", path);
                 return 1;
             }
         } else {
-            LOG_WARN("No program specified. Use: fadors_emu <program.com|exe>");
+            LOG_WARN("No program specified. Use: fadors_emu <program.com|exe> [--himem]");
             // Start debugger by default if no program
             debugger.run();
             return 0;
@@ -75,7 +83,6 @@ int main(int argc, char* argv[]) {
         // renderer.clearScreen();
 
         bool running = true;
-        auto lastRender = std::chrono::steady_clock::now();
 
         while (running) {
             // Check for input
@@ -94,11 +101,7 @@ int main(int argc, char* argv[]) {
             pit.update(); 
 
             // Render at ~30 FPS
-            auto now = std::chrono::steady_clock::now();
-            /*if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastRender).count() > 33) {
-                renderer.render();
-                lastRender = now;
-            }*/
+            // (Rendering logic commented out)
 
             // In a real implementation we'd check for termination signals
             // For now, let's keep running or check for specific HALT if implemented

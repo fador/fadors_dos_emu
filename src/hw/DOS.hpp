@@ -6,6 +6,7 @@
 #include <fstream>
 #include "../cpu/CPU.hpp"
 #include "../memory/MemoryBus.hpp"
+#include "../memory/himem/HIMEM.hpp"
 
 namespace fador::hw {
 
@@ -24,6 +25,8 @@ public:
     uint8_t getExitCode() const { return m_exitCode; }
 
 private:
+    // HIMEM (XMS) support
+    std::unique_ptr<memory::HIMEM> m_himem;
     cpu::CPU& m_cpu;
     memory::MemoryBus& m_memory;
     std::string m_currentDir = "."; // Emulated C:\ starting at current host dir

@@ -8,9 +8,12 @@ set(CMAKE_CXX_EXTENSIONS OFF) # Ensure strict standard C++
 # Define the source directory
 set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
-# Gather all source files EXCEPT main.cpp
+
+# Gather all source files EXCEPT main.cpp, and ensure HIMEM.cpp is included
 file(GLOB_RECURSE SRC_FILES "${SRC_DIR}/*.cpp")
 list(REMOVE_ITEM SRC_FILES "${SRC_DIR}/main.cpp")
+# Ensure HIMEM.cpp is included (in case GLOB_RECURSE misses nested folders or symlinks)
+list(APPEND SRC_FILES "${SRC_DIR}/memory/himem/HIMEM.cpp")
 
 # Define an internal static library for the emulator core
 add_library(fadors_core STATIC ${SRC_FILES})

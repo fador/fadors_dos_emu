@@ -1,3 +1,6 @@
+#include "../memory/himem/HIMEM.hpp"
+
+namespace fador { namespace hw { memory::HIMEM* g_himem = nullptr; } }
 #include "DOS.hpp"
 #include "../utils/Logger.hpp"
 #include <iostream>
@@ -13,6 +16,8 @@ namespace fador::hw {
 DOS::DOS(cpu::CPU& cpu, memory::MemoryBus& memory)
     : m_cpu(cpu)
     , m_memory(memory) {
+    m_himem = std::make_unique<memory::HIMEM>();
+    fador::hw::g_himem = m_himem.get();
 }
 
 void DOS::initialize() {
@@ -124,7 +129,7 @@ void DOS::handleDOSService() {
         case 0x3E: { // Close File
             uint16_t h = m_cpu.getReg16(cpu::BX);
             LOG_DEBUG("DOS: Close handle ", h);
-            if (h >= 5 && (h - 5) < m_fileHandles.size()) {
+            if (h >= 5 && (h - 5) < static_cast<int>(m_fileHandles.size())) {
                 m_fileHandles[h - 5]->stream.close();
                 m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
             } else {
@@ -139,7 +144,7 @@ void DOS::handleDOSService() {
             uint16_t dx = m_cpu.getReg16(cpu::DX);
             uint32_t addr = (ds << 4) + dx;
 
-            if (h >= 5 && (h - 5) < m_fileHandles.size()) {
+            if (h >= 5 && (h - 5) < static_cast<int>(m_fileHandles.size())) {
                 std::vector<char> buffer(cx);
                 m_fileHandles[h - 5]->stream.read(buffer.data(), cx);
                 std::streamsize read = m_fileHandles[h - 5]->stream.gcount();
@@ -166,7 +171,7 @@ void DOS::handleDOSService() {
                 std::cerr << s << std::flush;
                 m_cpu.setReg16(cpu::AX, cx);
                 m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-            } else if (h >= 5 && (h - 5) < m_fileHandles.size()) {
+            } else if (h >= 5 && (h - 5) < static_cast<int>(m_fileHandles.size())) {
                 std::vector<char> buffer(cx);
                 for (int i = 0; i < cx; ++i) buffer[i] = m_memory.read8(addr + i);
                 m_fileHandles[h - 5]->stream.write(buffer.data(), cx);
@@ -182,7 +187,7 @@ void DOS::handleDOSService() {
             uint8_t origin = m_cpu.getReg8(cpu::AL);
             int32_t offset = (static_cast<int32_t>(m_cpu.getReg16(cpu::CX)) << 16) | m_cpu.getReg16(cpu::DX);
 
-            if (h >= 5 && (h - 5) < m_fileHandles.size()) {
+            if (h >= 5 && (h - 5) < static_cast<int>(m_fileHandles.size())) {
                 std::ios_base::seekdir dir;
                 if (origin == 0) dir = std::ios::beg;
                 else if (origin == 1) dir = std::ios::cur;
@@ -574,7 +579,7 @@ void DOS::handleDirectorySearch() {
         // Fill DTA
         auto next = matches[index].string();
         for (int i = 0; i < 13; ++i) {
-            uint8_t c = (i < next.length()) ? static_cast<uint8_t>(next[i]) : 0;
+            uint8_t c = (static_cast<size_t>(i) < next.length()) ? static_cast<uint8_t>(next[i]) : 0;
             m_memory.write8(dtaAddr + 0x1E + i, c);
         }
         

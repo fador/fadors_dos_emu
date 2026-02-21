@@ -2,6 +2,7 @@
 #include "../utils/Logger.hpp"
 #include <fstream>
 #include <vector>
+#include "../memory/himem/HIMEM.hpp"
 
 namespace fador::hw {
 
@@ -51,7 +52,7 @@ bool ProgramLoader::loadCOM(const std::string& path, uint16_t segment, const std
     return true;
 }
 
-bool ProgramLoader::loadEXE(const std::string& path, uint16_t segment, const std::string& args) {
+bool ProgramLoader::loadEXE(const std::string& path, uint16_t segment, const std::string& args, bool useHimem) {
     // Basic MZ Parsing
     std::ifstream file(path, std::ios::binary);
     if (!file.is_open()) {
@@ -95,17 +96,54 @@ bool ProgramLoader::loadEXE(const std::string& path, uint16_t segment, const std
     // For now, let's just use a simple load to segment:0000 (after PSP)
     // Actually, EXE load usually puts PSP at segment, and image at segment + 10h (256 bytes)
     createPSP(segment, args);
+
     uint16_t loadSegment = segment + 0x10; // Image starts after 256-byte PSP
     uint32_t loadAddr = (loadSegment << 4);
 
+
+    bool loadedToXMS = false;
     std::vector<uint8_t> buffer(imageSize);
     if (!file.read(reinterpret_cast<char*>(buffer.data()), imageSize)) {
         LOG_ERROR("ProgramLoader: Failed to read EXE image");
         return false;
     }
 
-    for (uint32_t i = 0; i < imageSize; ++i) {
-        m_memory.write8(loadAddr + i, buffer[i]);
+    if (loadAddr + imageSize > memory::MemoryBus::MEMORY_SIZE) {
+        if (useHimem) {
+            // Try to use XMS (HIMEM)
+            // Find global HIMEM instance (hack: static pointer, or pass in constructor in future)
+            extern fador::memory::HIMEM* g_himem;
+            if (g_himem && g_himem->available() >= imageSize) {
+                uint16_t handle = g_himem->allocate(imageSize);
+                uint8_t* xmsPtr = g_himem->getBlock(handle);
+                if (xmsPtr) {
+                    std::copy(buffer.begin(), buffer.end(), xmsPtr);
+                    loadedToXMS = true;
+                    LOG_WARN("ProgramLoader: Loaded EXE into XMS (HIMEM) at handle ", handle, ". This is not true DOS behavior.");
+                    // Set CPU state to a fake segment (e.g., 0xF000) for test/demo only
+                    m_cpu.setSegReg(cpu::CS, 0xF000);
+                    m_cpu.setEIP(0);
+                    m_cpu.setSegReg(cpu::SS, 0xF000);
+                    m_cpu.setReg16(cpu::SP, 0xFFFE);
+                    m_cpu.setSegReg(cpu::DS, 0xF000);
+                    m_cpu.setSegReg(cpu::ES, 0xF000);
+                    return true;
+                } else {
+                    LOG_ERROR("ProgramLoader: Failed to get XMS block for EXE");
+                    return false;
+                }
+            } else {
+                LOG_ERROR("ProgramLoader: Not enough XMS (HIMEM) for EXE image");
+                return false;
+            }
+        } else {
+            LOG_ERROR("ProgramLoader: EXE image too large for DOS memory: loadAddr=0x", std::hex, loadAddr, " size=0x", imageSize);
+            return false;
+        }
+    } else {
+        for (uint32_t i = 0; i < imageSize; ++i) {
+            m_memory.write8(loadAddr + i, buffer[i]);
+        }
     }
 
     // Relocations
@@ -115,8 +153,11 @@ bool ProgramLoader::loadEXE(const std::string& path, uint16_t segment, const std
             uint16_t offset, relSegment;
             file.read(reinterpret_cast<char*>(&offset), 2);
             file.read(reinterpret_cast<char*>(&relSegment), 2);
-            
             uint32_t relocAddr = ((loadSegment + relSegment) << 4) + offset;
+            if (relocAddr + 1 >= memory::MemoryBus::MEMORY_SIZE) {
+                LOG_ERROR("ProgramLoader: Relocation address out of DOS memory: 0x", std::hex, relocAddr);
+                return false;
+            }
             uint16_t val = m_memory.read16(relocAddr);
             m_memory.write16(relocAddr, val + loadSegment);
         }

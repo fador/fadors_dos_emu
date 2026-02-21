@@ -1,5 +1,7 @@
 #include "InputManager.hpp"
+#ifdef _WIN32
 #include <conio.h>
+#endif
 #include <iostream>
 
 namespace fador::ui {
@@ -9,6 +11,7 @@ InputManager::InputManager(hw::KeyboardController& kbd)
 }
 
 bool InputManager::pollInput() {
+#ifdef _WIN32
     if (_kbhit()) {
         int ch = _getch();
         if (ch == 0 || ch == 0xE0) {
@@ -21,6 +24,10 @@ bool InputManager::pollInput() {
         return true;
     }
     return false;
+#else
+    // TODO: Implement non-blocking input for Linux using termios or ncurses
+    return false;
+#endif
 }
 
 void InputManager::handleKey(int key, bool pressed) {
