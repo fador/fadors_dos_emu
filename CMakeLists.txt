@@ -37,15 +37,9 @@ endif()
 # -----------------
 enable_testing()
 
-include(FetchContent)
-FetchContent_Declare(
-  Catch2
-  GIT_REPOSITORY https://github.com/catchorg/Catch2.git
-  GIT_TAG        v3.5.2 # Catch2 v3
-)
-FetchContent_MakeAvailable(Catch2)
 
 set(TEST_FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_main.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cpu_behavior.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_instruction_decoder.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_interrupts.cpp"
@@ -60,8 +54,7 @@ set(TEST_FILES
 )
 
 add_executable(fadors_tests ${TEST_FILES})
-target_link_libraries(fadors_tests PRIVATE fadors_core Catch2::Catch2WithMain)
+target_link_libraries(fadors_tests PRIVATE fadors_core)
+target_include_directories(fadors_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests")
 
-# Include the test module so `ctest` connects with Catch2
-include(Catch)
-catch_discover_tests(fadors_tests)
+add_test(NAME fadors_tests COMMAND fadors_tests)

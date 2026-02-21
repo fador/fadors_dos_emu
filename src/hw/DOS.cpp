@@ -122,8 +122,8 @@ void DOS::handleDOSService() {
             break;
         case 0x30: { // Get DOS Version
             LOG_DEBUG("DOS: Get DOS Version");
-            m_cpu.setReg8(cpu::AL, 5); // Major 5
-            m_cpu.setReg8(cpu::AH, 0); // Minor 0
+            m_cpu.setReg8(cpu::AL, 3); // Major 3
+            m_cpu.setReg8(cpu::AH, 30); // Minor 30 (3.30)
             break;
         }
         case 0x3D: { // Open File

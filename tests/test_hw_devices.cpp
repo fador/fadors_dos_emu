@@ -1,4 +1,4 @@
-#include <catch2/catch_test_macros.hpp>
+#include "test_framework.hpp"
 #include "hw/IOBus.hpp"
 #include "hw/PIC8259.hpp"
 #include "hw/PIT8254.hpp"

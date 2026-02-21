@@ -1,4 +1,4 @@
-#include <catch2/catch_test_macros.hpp>
+#include "test_framework.hpp"
 #include "../src/cpu/CPU.hpp"
 #include "../src/memory/MemoryBus.hpp"
 #include "../src/hw/KeyboardController.hpp"

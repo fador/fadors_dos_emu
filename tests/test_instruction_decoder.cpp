@@ -1,4 +1,4 @@
-#include <catch2/catch_test_macros.hpp>
+#include "test_framework.hpp"
 #include "cpu/CPU.hpp"
 #include "cpu/InstructionDecoder.hpp"
 #include "memory/MemoryBus.hpp"

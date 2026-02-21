@@ -1,4 +1,4 @@
-#include <catch2/catch_test_macros.hpp>
+#include "test_framework.hpp"
 #include <fstream>
 #include <cstdio>
 #include <vector>
@@ -66,11 +66,11 @@ TEST_CASE("DOS Emulation and Program Loading", "[DOS]") {
         std::remove("test.com");
     }
 
-    SECTION("DOS Version Selection") {
+    SECTION("Get DOS Version") {
         cpu.setReg8(cpu::AH, 0x30);
-        dos.handleInterrupt(0x21);
-        REQUIRE(cpu.getReg8(cpu::AL) == 5); // Major
-        REQUIRE(cpu.getReg8(cpu::AH) == 0); // Minor
+        dos.handleDOSService();
+        REQUIRE(cpu.getReg8(cpu::AL) == 3);
+        REQUIRE(cpu.getReg8(cpu::AH) == 30);
     }
 
     SECTION("DOS File I/O: Open, Read, Close") {

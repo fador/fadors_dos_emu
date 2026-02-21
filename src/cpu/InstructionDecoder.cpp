@@ -825,13 +825,59 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
 
         // Return / Branch
         case 0xC3: { // RET Near
+            uint16_t ip;
             if (m_hasPrefix66) {
-                m_cpu.setEIP(m_memory.read32((m_cpu.getSegReg(SS) << 4) + m_cpu.getReg32(ESP)));
+                ip = m_memory.read16((m_cpu.getSegReg(SS) << 4) + m_cpu.getReg32(ESP));
                 m_cpu.setReg32(ESP, m_cpu.getReg32(ESP) + 4);
             } else {
-                m_cpu.setEIP(m_memory.read16((m_cpu.getSegReg(SS) << 4) + m_cpu.getReg16(SP)));
+                ip = m_memory.read16((m_cpu.getSegReg(SS) << 4) + m_cpu.getReg16(SP));
                 m_cpu.setReg16(SP, m_cpu.getReg16(SP) + 2);
             }
+            m_cpu.setEIP(ip);
+            break;
+        }
+        case 0xC2: { // RET imm16 Near
+            uint16_t imm = fetch16();
+            uint16_t ip;
+            if (m_hasPrefix66) {
+                ip = m_memory.read16((m_cpu.getSegReg(SS) << 4) + m_cpu.getReg32(ESP));
+                m_cpu.setReg32(ESP, m_cpu.getReg32(ESP) + 4 + imm);
+            } else {
+                ip = m_memory.read16((m_cpu.getSegReg(SS) << 4) + m_cpu.getReg16(SP));
+                m_cpu.setReg16(SP, m_cpu.getReg16(SP) + 2 + imm);
+            }
+            m_cpu.setEIP(ip);
+            break;
+        }
+        case 0xCB: { // RETF Far
+            uint16_t ip, cs;
+            if (m_hasPrefix66) {
+                ip = m_memory.read16((m_cpu.getSegReg(SS) << 4) + m_cpu.getReg32(ESP));
+                cs = m_memory.read16((m_cpu.getSegReg(SS) << 4) + m_cpu.getReg32(ESP) + 4);
+                m_cpu.setReg32(ESP, m_cpu.getReg32(ESP) + 8);
+            } else {
+                ip = m_memory.read16((m_cpu.getSegReg(SS) << 4) + m_cpu.getReg16(SP));
+                cs = m_memory.read16((m_cpu.getSegReg(SS) << 4) + m_cpu.getReg16(SP) + 2);
+                m_cpu.setReg16(SP, m_cpu.getReg16(SP) + 4);
+            }
+            m_cpu.setSegReg(CS, cs);
+            m_cpu.setEIP(ip);
+            break;
+        }
+        case 0xCA: { // RETF imm16 Far
+            uint16_t imm = fetch16();
+            uint16_t ip, cs;
+            if (m_hasPrefix66) {
+                ip = m_memory.read16((m_cpu.getSegReg(SS) << 4) + m_cpu.getReg32(ESP));
+                cs = m_memory.read16((m_cpu.getSegReg(SS) << 4) + m_cpu.getReg32(ESP) + 4);
+                m_cpu.setReg32(ESP, m_cpu.getReg32(ESP) + 8 + imm);
+            } else {
+                ip = m_memory.read16((m_cpu.getSegReg(SS) << 4) + m_cpu.getReg16(SP));
+                cs = m_memory.read16((m_cpu.getSegReg(SS) << 4) + m_cpu.getReg16(SP) + 2);
+                m_cpu.setReg16(SP, m_cpu.getReg16(SP) + 4 + imm);
+            }
+            m_cpu.setSegReg(CS, cs);
+            m_cpu.setEIP(ip);
             break;
         }
         case 0xE8: { // CALL rel
@@ -846,10 +892,26 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             }
             break;
         }
+        case 0x9A: { // CALL far imm16:imm16
+            uint16_t ip = fetch16();
+            uint16_t cs = fetch16();
+            m_cpu.push16(m_cpu.getSegReg(CS));
+            m_cpu.push16(static_cast<uint16_t>(m_cpu.getEIP()));
+            m_cpu.setSegReg(CS, cs);
+            m_cpu.setEIP(ip);
+            break;
+        }
         case 0xE9: // JMP rel16/32
             if (m_hasPrefix66) m_cpu.setEIP(m_cpu.getEIP() + fetch32());
             else m_cpu.setEIP(static_cast<uint16_t>(m_cpu.getEIP() + fetch16()));
             break;
+        case 0xEA: { // JMP far imm16:imm16
+            uint16_t ip = fetch16();
+            uint16_t cs = fetch16();
+            m_cpu.setSegReg(CS, cs);
+            m_cpu.setEIP(ip);
+            break;
+        }
         case 0xEB: m_cpu.setEIP(m_cpu.getEIP() + static_cast<int8_t>(fetch8())); break; // JMP rel8
 
         // Immediate to Reg Moves
@@ -860,6 +922,28 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
         case 0xBC: case 0xBD: case 0xBE: case 0xBF:
             if (m_hasPrefix66) m_cpu.setReg32(opcode & 0x07, fetch32());
             else m_cpu.setReg16(opcode & 0x07, fetch16());
+            break;
+
+        // I/O
+        case 0xE4: m_cpu.setReg8(AL, m_iobus.read8(fetch8())); break; // IN AL, imm8
+        case 0xE5: // IN AX/EAX, imm8
+            if (m_hasPrefix66) m_cpu.setReg32(EAX, m_iobus.read32(fetch8()));
+            else m_cpu.setReg16(AX, m_iobus.read16(fetch8()));
+            break;
+        case 0xE6: m_iobus.write8(fetch8(), m_cpu.getReg8(AL)); break; // OUT imm8, AL
+        case 0xE7: // OUT imm8, AX/EAX
+            if (m_hasPrefix66) m_iobus.write32(fetch8(), m_cpu.getReg32(EAX));
+            else m_iobus.write16(fetch8(), m_cpu.getReg16(AX));
+            break;
+        case 0xEC: m_cpu.setReg8(AL, m_iobus.read8(m_cpu.getReg16(DX))); break; // IN AL, DX
+        case 0xED: // IN AX/EAX, DX
+            if (m_hasPrefix66) m_cpu.setReg32(EAX, m_iobus.read32(m_cpu.getReg16(DX)));
+            else m_cpu.setReg16(AX, m_iobus.read16(m_cpu.getReg16(DX)));
+            break;
+        case 0xEE: m_iobus.write8(m_cpu.getReg16(DX), m_cpu.getReg8(AL)); break; // OUT DX, AL
+        case 0xEF: // OUT DX, AX/EAX
+            if (m_hasPrefix66) m_iobus.write32(m_cpu.getReg16(DX), m_cpu.getReg32(EAX));
+            else m_iobus.write16(m_cpu.getReg16(DX), m_cpu.getReg16(AX));
             break;
 
         default:
