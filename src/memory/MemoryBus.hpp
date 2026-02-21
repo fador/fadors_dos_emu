@@ -25,10 +25,14 @@ public:
     // Direct access to a memory chunk, e.g., for loading ROM/RAM to a specific address or video
     uint8_t* directAccess(uint32_t address);
 
-    static constexpr uint32_t MEMORY_SIZE = 1024 * 1024; // 1MB for basic real mode DOS
+    void setA20(bool enabled) { m_a20Enabled = enabled; }
+    bool isA20Enabled() const { return m_a20Enabled; }
+
+    static constexpr uint32_t MEMORY_SIZE = 1024 * 1024 + 65536; // 1MB + 64KB HMA
 
 private:
     std::vector<uint8_t> m_ram;
+    bool m_a20Enabled{false};
 };
 
 } // namespace fador::memory

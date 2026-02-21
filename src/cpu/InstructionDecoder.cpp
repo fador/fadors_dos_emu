@@ -408,10 +408,77 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             else aluOp(7, m_cpu.getReg16(AX), fetch16(), 16); 
             break;
 
-        // BCD / ASCII stubs
-        case 0x3F: LOG_DEBUG("AAS (0x3F) - stubbed"); break;
-        case 0xD4: fetch8(); LOG_DEBUG("AAM (0xD4) - stubbed"); break;
-        case 0xD5: fetch8(); LOG_DEBUG("AAD (0xD5) - stubbed"); break;
+        // BCD / ASCII adjust
+        case 0x27: { // DAA
+            uint8_t oldAL = m_cpu.getReg8(AL);
+            uint8_t oldCF = (m_cpu.getEFLAGS() & FLAG_CARRY) ? 1 : 0;
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~FLAG_CARRY);
+            if ((oldAL & 0x0F) > 9 || (m_cpu.getEFLAGS() & FLAG_AUX)) {
+                m_cpu.setReg8(AL, oldAL + 6);
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() | FLAG_CARRY | (oldCF ? FLAG_CARRY : 0));
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() | FLAG_AUX);
+            } else {
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~FLAG_AUX);
+            }
+            if (oldAL > 0x99 || oldCF) {
+                m_cpu.setReg8(AL, m_cpu.getReg8(AL) + 0x60);
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() | FLAG_CARRY);
+            }
+            break;
+        }
+        case 0x2F: { // DAS
+            uint8_t oldAL = m_cpu.getReg8(AL);
+            uint8_t oldCF = (m_cpu.getEFLAGS() & FLAG_CARRY) ? 1 : 0;
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~FLAG_CARRY);
+            if ((oldAL & 0x0F) > 9 || (m_cpu.getEFLAGS() & FLAG_AUX)) {
+                m_cpu.setReg8(AL, oldAL - 6);
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() | FLAG_CARRY | (oldCF ? FLAG_CARRY : 0));
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() | FLAG_AUX);
+            } else {
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~FLAG_AUX);
+            }
+            if (oldAL > 0x99 || oldCF) {
+                m_cpu.setReg8(AL, m_cpu.getReg8(AL) - 0x60);
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() | FLAG_CARRY);
+            }
+            break;
+        }
+        case 0x37: { // AAA
+            if ((m_cpu.getReg8(AL) & 0x0F) > 9 || (m_cpu.getEFLAGS() & FLAG_AUX)) {
+                m_cpu.setReg16(AX, m_cpu.getReg16(AX) + 0x106);
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() | FLAG_AUX | FLAG_CARRY);
+            } else {
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~(FLAG_AUX | FLAG_CARRY));
+            }
+            m_cpu.setReg8(AL, m_cpu.getReg8(AL) & 0x0F);
+            break;
+        }
+        case 0x3F: { // AAS
+            if ((m_cpu.getReg8(AL) & 0x0F) > 9 || (m_cpu.getEFLAGS() & FLAG_AUX)) {
+                m_cpu.setReg16(AX, m_cpu.getReg16(AX) - 6);
+                m_cpu.setReg8(AH, m_cpu.getReg8(AH) - 1);
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() | FLAG_AUX | FLAG_CARRY);
+            } else {
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~(FLAG_AUX | FLAG_CARRY));
+            }
+            m_cpu.setReg8(AL, m_cpu.getReg8(AL) & 0x0F);
+            break;
+        }
+        case 0xD4: { // AAM
+            uint8_t base = fetch8();
+            if (base == 0) triggerInterrupt(0); // Divide by zero
+            else {
+                m_cpu.setReg8(AH, m_cpu.getReg8(AL) / base);
+                m_cpu.setReg8(AL, m_cpu.getReg8(AL) % base);
+            }
+            break;
+        }
+        case 0xD5: { // AAD
+            uint8_t base = fetch8();
+            m_cpu.setReg8(AL, m_cpu.getReg8(AH) * base + m_cpu.getReg8(AL));
+            m_cpu.setReg8(AH, 0);
+            break;
+        }
 
         // Segment Push/Pop
         case 0x06: m_cpu.push16(m_cpu.getSegReg(ES)); break;
@@ -498,6 +565,56 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             break;
         }
 
+        case 0x60: { // PUSHA / PUSHAD
+            if (m_hasPrefix66) {
+                uint32_t valESP = m_cpu.getReg32(ESP);
+                m_cpu.push32(m_cpu.getReg32(EAX)); m_cpu.push32(m_cpu.getReg32(ECX));
+                m_cpu.push32(m_cpu.getReg32(EDX)); m_cpu.push32(m_cpu.getReg32(EBX));
+                m_cpu.push32(valESP); m_cpu.push32(m_cpu.getReg32(EBP));
+                m_cpu.push32(m_cpu.getReg32(ESI)); m_cpu.push32(m_cpu.getReg32(EDI));
+            } else {
+                uint16_t valSP = m_cpu.getReg16(SP);
+                m_cpu.push16(m_cpu.getReg16(AX)); m_cpu.push16(m_cpu.getReg16(CX));
+                m_cpu.push16(m_cpu.getReg16(DX)); m_cpu.push16(m_cpu.getReg16(BX));
+                m_cpu.push16(valSP); m_cpu.push16(m_cpu.getReg16(BP));
+                m_cpu.push16(m_cpu.getReg16(SI)); m_cpu.push16(m_cpu.getReg16(DI));
+            }
+            break;
+        }
+        case 0x61: { // POPA / POPAD
+            if (m_hasPrefix66) {
+                m_cpu.setReg32(EDI, m_cpu.pop32()); m_cpu.setReg32(ESI, m_cpu.pop32());
+                m_cpu.setReg32(EBP, m_cpu.pop32()); m_cpu.pop32(); // Skip ESP
+                m_cpu.setReg32(EBX, m_cpu.pop32()); m_cpu.setReg32(EDX, m_cpu.pop32());
+                m_cpu.setReg32(ECX, m_cpu.pop32()); m_cpu.setReg32(EAX, m_cpu.pop32());
+            } else {
+                m_cpu.setReg16(DI, m_cpu.pop16()); m_cpu.setReg16(SI, m_cpu.pop16());
+                m_cpu.setReg16(BP, m_cpu.pop16()); m_cpu.pop16(); // Skip SP
+                m_cpu.setReg16(BX, m_cpu.pop16()); m_cpu.setReg16(DX, m_cpu.pop16());
+                m_cpu.setReg16(CX, m_cpu.pop16()); m_cpu.setReg16(AX, m_cpu.pop16());
+            }
+            break;
+        }
+        case 0x63: decodeModRM(fetch8()); LOG_DEBUG("ARPL - stubbed"); break;
+
+        case 0x62: decodeModRM(fetch8()); LOG_DEBUG("BOUND - stubbed"); break;
+
+        case 0x6B: { // IMUL r16/32, rm, imm8
+            ModRM modrm = decodeModRM(fetch8());
+            int32_t val1 = m_hasPrefix66 ? static_cast<int32_t>(readModRM32(modrm)) : static_cast<int16_t>(readModRM16(modrm));
+            int32_t val2 = static_cast<int8_t>(fetch8());
+            if (m_hasPrefix66) m_cpu.setReg32(modrm.reg, static_cast<uint32_t>(val1 * val2));
+            else m_cpu.setReg16(modrm.reg, static_cast<uint16_t>(val1 * val2));
+            break;
+        }
+        case 0x68: { // PUSH imm16/32
+            if (m_hasPrefix66) m_cpu.push32(fetch32());
+            else m_cpu.push16(fetch16());
+            break;
+        }
+        case 0x6A: m_cpu.push16(static_cast<int16_t>(static_cast<int8_t>(fetch8()))); break; // PUSH imm8
+        case 0x6C: case 0x6D: case 0x6E: case 0x6F: LOG_DEBUG("INS/OUTS - stubbed"); break;
+
         // Short Jumps
         case 0x70: case 0x71: case 0x72: case 0x73:
         case 0x74: case 0x75: case 0x76: case 0x77:
@@ -551,6 +668,56 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             break;
         }
         case 0x8E: { ModRM m = decodeModRM(fetch8()); m_cpu.setSegReg(static_cast<SegRegIndex>(m.reg), readModRM16(m)); break; }
+        case 0xC8: { // ENTER
+            uint16_t size = fetch16();
+            uint8_t level = fetch8();
+            m_cpu.push16(m_cpu.getReg16(BP));
+            m_cpu.setReg16(BP, m_cpu.getReg16(SP));
+            // simplified, doesn't handle nested levels correctly yet
+            m_cpu.setReg16(SP, m_cpu.getReg16(SP) - size);
+            break;
+        }
+        case 0xc9: { // LEAVE
+            if (m_hasPrefix66) {
+                m_cpu.setReg32(ESP, m_cpu.getReg32(EBP));
+                m_cpu.setReg32(EBP, m_cpu.pop32());
+            } else {
+                m_cpu.setReg16(SP, m_cpu.getReg16(BP));
+                m_cpu.setReg16(BP, m_cpu.pop16());
+            }
+            break;
+        }
+
+        case 0xC4: { // LES
+            ModRM modrm = decodeModRM(fetch8());
+            uint32_t ea = m_hasPrefix67 ? getEffectiveAddress32(modrm) : getEffectiveAddress16(modrm);
+            if (m_hasPrefix66) {
+                m_cpu.setReg32(modrm.reg, m_memory.read32(ea));
+                m_cpu.setSegReg(ES, m_memory.read16(ea + 4));
+            } else {
+                m_cpu.setReg16(modrm.reg, m_memory.read16(ea));
+                m_cpu.setSegReg(ES, m_memory.read16(ea + 2));
+            }
+            break;
+        }
+        case 0xC5: { // LDS
+            ModRM modrm = decodeModRM(fetch8());
+            uint32_t ea = m_hasPrefix67 ? getEffectiveAddress32(modrm) : getEffectiveAddress16(modrm);
+            if (m_hasPrefix66) {
+                m_cpu.setReg32(modrm.reg, m_memory.read32(ea));
+                m_cpu.setSegReg(DS, m_memory.read16(ea + 4));
+            } else {
+                m_cpu.setReg16(modrm.reg, m_memory.read16(ea));
+                m_cpu.setSegReg(DS, m_memory.read16(ea + 2));
+            }
+            break;
+        }
+        case 0x8F: { // POP r/m
+            ModRM modrm = decodeModRM(fetch8());
+            if (m_hasPrefix66) writeModRM32(modrm, m_cpu.pop32());
+            else writeModRM16(modrm, m_cpu.pop16());
+            break;
+        }
 
         case 0xC7: { // MOV r/m, imm
             ModRM modrm = decodeModRM(fetch8());
@@ -698,16 +865,18 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             break;
         }
 
-        // MOV AX,[imm] and MOV [imm],AX
         case 0xA1: // MOV AX/EAX, [imm16/32]
-            if (m_hasPrefix66) m_cpu.setReg32(EAX, m_memory.read32((m_cpu.getSegReg(DS) << 4) + fetch32()));
+            if (m_hasPrefix66) m_cpu.setReg32(EAX, m_memory.read32((m_cpu.getSegReg(DS) << 4) + (m_hasPrefix67 ? fetch32() : fetch16())));
             else m_cpu.setReg16(AX, m_memory.read16((m_cpu.getSegReg(DS) << 4) + fetch16()));
             break;
-            case 0xA0: // MOV AL, [imm16]
-                m_cpu.setReg8(AL, m_memory.read8((m_cpu.getSegReg(DS) << 4) + fetch16()));
-                break;
-        case 0xA3: // MOV [imm16/32], AX/EAX
-            if (m_hasPrefix66) m_memory.write32((m_cpu.getSegReg(DS) << 4) + fetch32(), m_cpu.getReg32(EAX));
+        case 0xA0: // MOV AL, [imm]
+            m_cpu.setReg8(AL, m_memory.read8((m_cpu.getSegReg(DS) << 4) + (m_hasPrefix67 ? fetch32() : fetch16())));
+            break;
+        case 0xA2: // MOV [imm], AL
+            m_memory.write8((m_cpu.getSegReg(DS) << 4) + (m_hasPrefix67 ? fetch32() : fetch16()), m_cpu.getReg8(AL));
+            break;
+        case 0xA3: // MOV [imm], AX/EAX
+            if (m_hasPrefix66) m_memory.write32((m_cpu.getSegReg(DS) << 4) + (m_hasPrefix67 ? fetch32() : fetch16()), m_cpu.getReg32(EAX));
             else m_memory.write16((m_cpu.getSegReg(DS) << 4) + fetch16(), m_cpu.getReg16(AX));
             break;
 
@@ -717,9 +886,17 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             m_cpu.setReg16(DI, m_cpu.getReg16(DI) + ((m_cpu.getEFLAGS() & 0x0400) ? -1 : 1));
             m_cpu.setReg16(SI, m_cpu.getReg16(SI) + ((m_cpu.getEFLAGS() & 0x0400) ? -1 : 1));
             break;
-            case 0xDE: // FPU op stub
-                LOG_DEBUG("FPU opcode 0xDE encountered - stubbed");
-                break;
+        case 0xD7: { // XLAT
+            uint32_t addr = (m_cpu.getSegReg(DS) << 4) + m_cpu.getReg16(BX) + m_cpu.getReg8(AL);
+            m_cpu.setReg8(AL, m_memory.read8(addr));
+            break;
+        }
+        case 0xD8: case 0xD9: case 0xDA: case 0xDB:
+        case 0xDC: case 0xDD: case 0xDE: case 0xDF: { // FPU op stubs
+            ModRM m = decodeModRM(fetch8());
+            LOG_DEBUG("FPU opcode 0x", std::hex, static_cast<int>(opcode), " encountered - stubbed");
+            break;
+        }
         case 0xA5: // MOVSW/MOVSD
             if (m_hasPrefix66) {
                 m_memory.write32((m_cpu.getSegReg(ES) << 4) + m_cpu.getReg32(EDI), m_memory.read32((m_cpu.getSegReg(DS) << 4) + m_cpu.getReg32(ESI)));
@@ -731,6 +908,33 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                 m_cpu.setReg16(SI, m_cpu.getReg16(SI) + ((m_cpu.getEFLAGS() & 0x0400) ? -2 : 2));
             }
             break;
+        case 0xA6: { // CMPSB
+            uint8_t val1 = m_memory.read8((m_cpu.getSegReg(DS) << 4) + (m_hasPrefix67 ? m_cpu.getReg32(ESI) : m_cpu.getReg16(SI)));
+            uint8_t val2 = m_memory.read8((m_cpu.getSegReg(ES) << 4) + (m_hasPrefix67 ? m_cpu.getReg32(EDI) : m_cpu.getReg16(DI)));
+            aluOp(7, val1, val2, 8); // CMP
+            int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -1 : 1;
+            if (m_hasPrefix67) { m_cpu.setReg32(ESI, m_cpu.getReg32(ESI) + diff); m_cpu.setReg32(EDI, m_cpu.getReg32(EDI) + diff); }
+            else { m_cpu.setReg16(SI, static_cast<uint16_t>(m_cpu.getReg16(SI) + diff)); m_cpu.setReg16(DI, static_cast<uint16_t>(m_cpu.getReg16(DI) + diff)); }
+            break;
+        }
+        case 0xA7: { // CMPSW/CMPSD
+            if (m_hasPrefix66) {
+                uint32_t val1 = m_memory.read32((m_cpu.getSegReg(DS) << 4) + (m_hasPrefix67 ? m_cpu.getReg32(ESI) : m_cpu.getReg16(SI)));
+                uint32_t val2 = m_memory.read32((m_cpu.getSegReg(ES) << 4) + (m_hasPrefix67 ? m_cpu.getReg32(EDI) : m_cpu.getReg16(DI)));
+                aluOp(7, val1, val2, 32);
+                int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -4 : 4;
+                if (m_hasPrefix67) { m_cpu.setReg32(ESI, m_cpu.getReg32(ESI) + diff); m_cpu.setReg32(EDI, m_cpu.getReg32(EDI) + diff); }
+                else { m_cpu.setReg16(SI, static_cast<uint16_t>(m_cpu.getReg16(SI) + diff)); m_cpu.setReg16(DI, static_cast<uint16_t>(m_cpu.getReg16(DI) + diff)); }
+            } else {
+                uint16_t val1 = m_memory.read16((m_cpu.getSegReg(DS) << 4) + (m_hasPrefix67 ? m_cpu.getReg32(ESI) : m_cpu.getReg16(SI)));
+                uint16_t val2 = m_memory.read16((m_cpu.getSegReg(ES) << 4) + (m_hasPrefix67 ? m_cpu.getReg32(EDI) : m_cpu.getReg16(DI)));
+                aluOp(7, val1, val2, 16);
+                int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -2 : 2;
+                if (m_hasPrefix67) { m_cpu.setReg32(ESI, m_cpu.getReg32(ESI) + diff); m_cpu.setReg32(EDI, m_cpu.getReg32(EDI) + diff); }
+                else { m_cpu.setReg16(SI, static_cast<uint16_t>(m_cpu.getReg16(SI) + diff)); m_cpu.setReg16(DI, static_cast<uint16_t>(m_cpu.getReg16(DI) + diff)); }
+            }
+            break;
+        }
         case 0xAA: // STOSB
             m_memory.write8((m_cpu.getSegReg(ES) << 4) + m_cpu.getReg16(DI), m_cpu.getReg8(AL));
             m_cpu.setReg16(DI, m_cpu.getReg16(DI) + ((m_cpu.getEFLAGS() & 0x0400) ? -1 : 1));
@@ -757,6 +961,33 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                 m_cpu.setReg16(SI, m_cpu.getReg16(SI) + ((m_cpu.getEFLAGS() & 0x0400) ? -2 : 2));
             }
             break;
+        case 0xAE: { // SCASB
+            uint8_t val1 = m_cpu.getReg8(AL);
+            uint8_t val2 = m_memory.read8((m_cpu.getSegReg(ES) << 4) + (m_hasPrefix67 ? m_cpu.getReg32(EDI) : m_cpu.getReg16(DI)));
+            aluOp(7, val1, val2, 8); // CMP
+            int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -1 : 1;
+            if (m_hasPrefix67) m_cpu.setReg32(EDI, m_cpu.getReg32(EDI) + diff);
+            else m_cpu.setReg16(DI, static_cast<uint16_t>(m_cpu.getReg16(DI) + diff));
+            break;
+        }
+        case 0xAF: { // SCASW/SCASD
+            if (m_hasPrefix66) {
+                uint32_t val1 = m_cpu.getReg32(EAX);
+                uint32_t val2 = m_memory.read32((m_cpu.getSegReg(ES) << 4) + (m_hasPrefix67 ? m_cpu.getReg32(EDI) : m_cpu.getReg16(DI)));
+                aluOp(7, val1, val2, 32);
+                int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -4 : 4;
+                if (m_hasPrefix67) m_cpu.setReg32(EDI, m_cpu.getReg32(EDI) + diff);
+                else m_cpu.setReg16(DI, static_cast<uint16_t>(m_cpu.getReg16(DI) + diff));
+            } else {
+                uint16_t val1 = m_cpu.getReg16(AX);
+                uint16_t val2 = m_memory.read16((m_cpu.getSegReg(ES) << 4) + (m_hasPrefix67 ? m_cpu.getReg32(EDI) : m_cpu.getReg16(DI)));
+                aluOp(7, val1, val2, 16);
+                int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -2 : 2;
+                if (m_hasPrefix67) m_cpu.setReg32(EDI, m_cpu.getReg32(EDI) + diff);
+                else m_cpu.setReg16(DI, static_cast<uint16_t>(m_cpu.getReg16(DI) + diff));
+            }
+            break;
+        }
 
         // Group 2 (Rotates/Shifts)
         case 0xC0: case 0xC1: case 0xD0: case 0xD1: case 0xD2: case 0xD3: {
@@ -801,6 +1032,19 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                 uint16_t rmVal = readModRM16(modrm);
                 writeModRM16(modrm, m_cpu.getReg16(modrm.reg));
                 m_cpu.setReg16(modrm.reg, rmVal);
+            }
+            break;
+        }
+        case 0x91: case 0x92: case 0x93: case 0x94: case 0x95: case 0x96: case 0x97: {
+            uint8_t reg = opcode & 0x07;
+            if (m_hasPrefix66) {
+                uint32_t val = m_cpu.getReg32(EAX);
+                m_cpu.setReg32(EAX, m_cpu.getReg32(reg));
+                m_cpu.setReg32(reg, val);
+            } else {
+                uint16_t val = m_cpu.getReg16(AX);
+                m_cpu.setReg16(AX, m_cpu.getReg16(reg));
+                m_cpu.setReg16(reg, val);
             }
             break;
         }
@@ -976,6 +1220,8 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             if (m_hasPrefix66) m_iobus.write32(m_cpu.getReg16(DX), m_cpu.getReg32(EAX));
             else m_iobus.write16(m_cpu.getReg16(DX), m_cpu.getReg16(AX));
             break;
+
+        case 0xF4: LOG_INFO("HLT encountered at ", std::hex, m_cpu.getSegReg(CS), ":", m_cpu.getEIP() - 1); break;
 
         default:
             LOG_WARN("Unknown opcode 0x", std::hex, static_cast<int>(opcode), " at CS:EIP ", 

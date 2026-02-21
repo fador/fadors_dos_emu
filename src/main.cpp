@@ -31,6 +31,7 @@ int main(int argc, char* argv[]) {
         iobus.registerDevice(0x40, 0x43, &pit);
         iobus.registerDevice(0x60, 0x60, &kbd);
         iobus.registerDevice(0x64, 0x64, &kbd);
+        kbd.setMemoryBus(&memory);
         fador::cpu::CPU cpu;
         fador::hw::DOS dos(cpu, memory);
         fador::hw::BIOS bios(cpu, memory, kbd, pit);
@@ -80,7 +81,7 @@ int main(int argc, char* argv[]) {
             return 0;
         }
 
-        // renderer.clearScreen();
+        renderer.clearScreen();
 
         bool running = true;
 
@@ -100,15 +101,20 @@ int main(int argc, char* argv[]) {
             // Handle PIT ticks (approximate performance)
             pit.update(); 
 
-            // Render at ~30 FPS
-            // (Rendering logic commented out)
+            // Render at ~30 FPS (simplified throttle)
+            static auto lastRender = std::chrono::steady_clock::now();
+            auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastRender).count() > 33) {
+                renderer.render();
+                lastRender = now;
+            }
 
             // In a real implementation we'd check for termination signals
             // For now, let's keep running or check for specific HALT if implemented
         }
 
         // Final render to show any output before exit
-        // renderer.render(true);
+        renderer.render(true);
 
     } catch (const std::exception& e) {
         LOG_ERROR("Fatal system error: ", e.what());

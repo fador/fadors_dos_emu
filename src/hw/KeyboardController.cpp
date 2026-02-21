@@ -1,5 +1,6 @@
 #include "KeyboardController.hpp"
 #include "../utils/Logger.hpp"
+#include "../memory/MemoryBus.hpp"
 
 namespace fador::hw {
 
@@ -24,6 +25,14 @@ uint8_t KeyboardController::read8(uint16_t port) {
 void KeyboardController::write8(uint16_t port, uint8_t value) {
     if (port == 0x60) { // Data Port
         LOG_DEBUG("KBD: Data write 0x", std::hex, (int)value);
+        if (m_lastCommand == 0xD1) {
+            bool a20 = (value & 0x02) != 0;
+            if (m_memory) {
+                m_memory->setA20(a20);
+                LOG_INFO("KBD: A20 Gate ", a20 ? "Enabled" : "Disabled", " via Output Port write");
+            }
+            m_lastCommand = 0;
+        }
     } else if (port == 0x64) { // Command Port
         LOG_DEBUG("KBD: Command write 0x", std::hex, (int)value);
         if (value == 0xAA) { // Self-test
@@ -32,6 +41,8 @@ void KeyboardController::write8(uint16_t port, uint8_t value) {
             m_status |= 0x10;
         } else if (value == 0xAE) { // Enable keyboard
             m_status &= ~0x10;
+        } else if (value == 0xD1) { // Write Output Port
+            m_lastCommand = 0xD1;
         }
     }
 }
