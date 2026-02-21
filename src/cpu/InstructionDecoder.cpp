@@ -295,6 +295,37 @@ void InstructionDecoder::step() {
     if (opcode == 0x0F) {
         executeOpcode0F(fetch8());
     } else {
+        // String operations repeat handling
+        if (m_hasRepz || m_hasRepnz) {
+            uint8_t stringOps[] = {0xA4, 0xA5, 0xA6, 0xA7, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF, 0x6C, 0x6D, 0x6E, 0x6F};
+            bool isStringOp = false;
+            for (uint8_t op : stringOps) if (op == opcode) { isStringOp = true; break; }
+            
+            if (isStringOp) {
+                while (true) {
+                    uint32_t cx = m_hasPrefix67 ? m_cpu.getReg32(ECX) : m_cpu.getReg16(CX);
+                    if (cx == 0) break;
+                    
+                    uint32_t eipBefore = m_cpu.getEIP();
+                    executeOpcode(opcode);
+                    
+                    cx--;
+                    if (m_hasPrefix67) m_cpu.setReg32(ECX, cx);
+                    else m_cpu.setReg16(CX, static_cast<uint16_t>(cx));
+                    
+                    bool isCompare = (opcode == 0xA6 || opcode == 0xA7 || opcode == 0xAE || opcode == 0xAF);
+                    if (isCompare) {
+                        bool zf = (m_cpu.getEFLAGS() & 0x0040);
+                        if (m_hasRepz && !zf) break;
+                        if (m_hasRepnz && zf) break;
+                    }
+                    
+                    if (cx > 0) m_cpu.setEIP(eipBefore);
+                    else break;
+                }
+                return;
+            }
+        }
         executeOpcode(opcode);
     }
 }

@@ -66,12 +66,12 @@ TEST_CASE("DOS Emulation and Program Loading", "[DOS]") {
         std::remove("test.com");
     }
 
-    SECTION("Get DOS Version") {
-        cpu.setReg8(cpu::AH, 0x30);
-        dos.handleDOSService();
-        REQUIRE(cpu.getReg8(cpu::AL) == 3);
-        REQUIRE(cpu.getReg8(cpu::AH) == 30);
-    }
+        SECTION("Get DOS Version") {
+            cpu.setReg8(cpu::AH, 0x30);
+            dos.handleInterrupt(0x21);
+            REQUIRE(cpu.getReg8(cpu::AL) == 3);
+            REQUIRE(cpu.getReg8(cpu::AH) == 30);
+        }
 
     SECTION("DOS File I/O: Open, Read, Close") {
         // Create a test file

@@ -104,10 +104,13 @@ inline int run_all_tests() {
 
 } // namespace fador::test
 
+#define TEST_FRAMEWORK_CONCAT(a, b) a ## b
+#define TEST_FRAMEWORK_CONCAT_EXPANDED(a, b) TEST_FRAMEWORK_CONCAT(a, b)
+
 #define TEST_CASE(name, tags) \
-    static void test_func_##__LINE__(); \
-    static fador::test::RegisterTest reg_##__LINE__(name, test_func_##__LINE__); \
-    static void test_func_##__LINE__()
+    static void TEST_FRAMEWORK_CONCAT_EXPANDED(test_func_, __LINE__)(); \
+    static fador::test::RegisterTest TEST_FRAMEWORK_CONCAT_EXPANDED(reg_, __LINE__)(name, TEST_FRAMEWORK_CONCAT_EXPANDED(test_func_, __LINE__)); \
+    static void TEST_FRAMEWORK_CONCAT_EXPANDED(test_func_, __LINE__)()
 
 #define SECTION(name) \
     if (fador::test::SectionScope _scope{name})
