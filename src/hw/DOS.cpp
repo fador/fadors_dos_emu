@@ -24,17 +24,26 @@ void DOS::initialize() {
     LOG_INFO("DOS: Kernel initialized.");
 
     // Setup initial MCB chain
-    // First MCB at 0x0700: 'Z' type (last), owned by 0x0000 (free), 
-    // size = TOTAL - 0x0700 - 1 (for MCB itself)
-    MCB initial;
-    initial.type = 'Z';
-    initial.owner = 0x0000;
-    initial.size = LAST_PARA - FIRST_MCB_SEGMENT - 1;
-    for (int i = 0; i < 8; ++i) initial.name[i] = 0;
-    
-    writeMCB(FIRST_MCB_SEGMENT, initial);
-    LOG_INFO("DOS: Initial MCB chain setup at segment 0x", std::hex, FIRST_MCB_SEGMENT, 
-             " size 0x", initial.size, " paras");
+    // Block 1: 0x0700 to 0x0FFF (reserved/free)
+    MCB first;
+    first.type = 'M';
+    first.owner = 0x0000;
+    first.size = (0x0FFF - 0x0700);
+    for (int i = 0; i < 8; ++i) first.name[i] = 0;
+    writeMCB(FIRST_MCB_SEGMENT, first);
+
+    // Block 2: 0x0FFF (for block at 0x1000)
+    MCB psp;
+    psp.type = 'Z';
+    psp.owner = 0x1000; // Owned by the program
+    psp.size = static_cast<uint16_t>(LAST_PARA - 0x1000 - 1);
+    for (int i = 0; i < 8; ++i) psp.name[i] = 0;
+    writeMCB(0x1000 - 1, psp);
+
+    LOG_INFO("DOS: Initial MCB chain setup. PSP block at 0x1000, size 0x", std::hex, psp.size, " paras");
+
+    // Default DTA is at offset 0x80 of the initial PSP
+    m_dtaPtr = (0x1000 << 16) | 0x0080;
 }
 
 bool DOS::handleInterrupt(uint8_t vector) {
@@ -45,6 +54,28 @@ bool DOS::handleInterrupt(uint8_t vector) {
         case 0x21: // DOS API
             handleDOSService();
             return true;
+        case 0x3F: { // Overlay Manager / Generic Proxy
+             uint16_t ax = m_cpu.getReg16(cpu::AX);
+             uint16_t dx = m_cpu.getReg16(cpu::DX);
+             uint32_t eip = m_cpu.getEIP();
+             uint16_t cs = m_cpu.getSegReg(cpu::CS);
+             uint32_t addr = (cs << 4) + eip;
+             
+             uint32_t metadata = m_memory.read32(addr);
+             LOG_DOS("DOS: INT 3Fh called. AX=0x", std::hex, ax, " DX=0x", dx, 
+                     " DS=0x", m_cpu.getSegReg(cpu::DS), " ES=0x", m_cpu.getSegReg(cpu::ES),
+                     " at ", cs, ":", eip, " metadata: 0x", metadata);
+             
+             // Advance EIP to skip metadata (assume 4 bytes for thunk table)
+             m_cpu.setEIP(eip + 4);
+             return true;
+        }
+        case 0x2F: { // Multiplex
+            uint16_t ax = m_cpu.getReg16(cpu::AX);
+            LOG_DOS("DOS: INT 2Fh Multiplex (stubbed), AX=0x", std::hex, ax);
+            m_cpu.setReg8(cpu::AL, 0x00); // Not supported
+            return true;
+        }
     }
     return false;
 }
@@ -81,38 +112,43 @@ void DOS::handleDOSService() {
             uint16_t ds = m_cpu.getSegReg(cpu::DS);
             uint16_t dx = m_cpu.getReg16(cpu::DX);
             m_dtaPtr = (static_cast<uint32_t>(ds) << 16) | dx;
-            LOG_DEBUG("DOS: Set DTA to ", std::hex, ds, ":", dx);
+            LOG_DOS("DOS: Set DTA to ", std::hex, ds, ":", dx);
+            break;
+        }
+        case 0x2F: { // Get DTA Address
+            uint16_t ds = static_cast<uint16_t>(m_dtaPtr >> 16);
+            uint16_t bx = static_cast<uint16_t>(m_dtaPtr & 0xFFFF);
+            m_cpu.setSegReg(cpu::ES, ds);
+            m_cpu.setReg16(cpu::BX, bx);
+            LOG_DOS("DOS: Get DTA -> ", std::hex, ds, ":", bx);
             break;
         }
         case 0x25: { // Set Interrupt Vector
             uint8_t intNum = m_cpu.getReg8(cpu::AL);
             uint16_t ds = m_cpu.getSegReg(cpu::DS);
             uint16_t dx = m_cpu.getReg16(cpu::DX);
-            uint32_t addr = (ds << 4) + dx;
             // Write vector
             m_memory.write16(intNum * 4, dx);
             m_memory.write16(intNum * 4 + 2, ds);
             m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-            LOG_DEBUG("DOS: Set INT vector ", intNum, " to ", std::hex, ds, ":", dx);
+            LOG_DOS("DOS: Set INT vector 0x", std::hex, (int)intNum, " to ", ds, ":", dx);
             break;
         }
         case 0x35: { // Get Interrupt Vector
             uint8_t intNum = m_cpu.getReg8(cpu::AL);
             uint16_t seg = m_memory.read16(intNum * 4 + 2);
             uint16_t off = m_memory.read16(intNum * 4);
-            uint16_t es = m_cpu.getSegReg(cpu::ES);
-            uint16_t bx = m_cpu.getReg16(cpu::BX);
-            uint32_t addr = (es << 4) + bx;
-            m_memory.write16(addr, off);
-            m_memory.write16(addr + 2, seg);
+            
+            m_cpu.setSegReg(cpu::ES, seg);
+            m_cpu.setReg16(cpu::BX, off);
             m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-            LOG_DEBUG("DOS: Get INT vector ", intNum, " -> ", std::hex, seg, ":", off);
+            LOG_DOS("DOS: Get INT vector 0x", std::hex, (int)intNum, " -> ", seg, ":", off);
             break;
         }
         
-
+ 
         case 0x2E: { // Set/Reset Verify Flag (Not implemented)
-            LOG_DEBUG("DOS: Set/Reset Verify Flag (AH=2Eh) - Not implemented");
+            LOG_DOS("DOS: Set/Reset Verify Flag (AH=2Eh) - Not implemented");
             break;
         }
         case 0x0E: // Select Default Drive
@@ -121,9 +157,11 @@ void DOS::handleDOSService() {
             handleDriveService();
             break;
         case 0x30: { // Get DOS Version
-            LOG_DEBUG("DOS: Get DOS Version");
-            m_cpu.setReg8(cpu::AL, 3); // Major 3
-            m_cpu.setReg8(cpu::AH, 30); // Minor 30 (3.30)
+            LOG_DOS("DOS: Get DOS Version (Reported: 5.0)");
+            m_cpu.setReg8(cpu::AL, 5); // Major 5
+            m_cpu.setReg8(cpu::AH, 0); // Minor 0
+            m_cpu.setReg16(cpu::BX, 0xFF00); // OEM
+            m_cpu.setReg16(cpu::CX, 0x0000);
             break;
         }
         case 0x3D: { // Open File
@@ -132,7 +170,7 @@ void DOS::handleDOSService() {
             std::string filename = readFilename((ds << 4) + dx);
             uint8_t mode = m_cpu.getReg8(cpu::AL);
 
-            LOG_DEBUG("DOS: Open file '", filename, "' mode ", (int)mode);
+            LOG_DOS("DOS: Open file '", filename, "' mode ", (int)mode);
 
             std::ios_base::openmode openmode = std::ios::binary | std::ios::in;
             if ((mode & 0x03) == 1) openmode = std::ios::binary | std::ios::out;
@@ -144,18 +182,22 @@ void DOS::handleDOSService() {
 
             if (handle->stream.is_open()) {
                 m_fileHandles.push_back(std::move(handle));
-                m_cpu.setReg16(cpu::AX, static_cast<uint16_t>(m_fileHandles.size() + 4)); // Start handles at 5
+                uint16_t h = static_cast<uint16_t>(m_fileHandles.size() + 4);
+                m_cpu.setReg16(cpu::AX, h); // Start handles at 5
                 m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+                LOG_DOS("DOS: Opened '", filename, "' as handle ", h);
             } else {
                 m_cpu.setReg16(cpu::AX, 0x02); // File not found
                 m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+                LOG_WARN("DOS: Failed to open '", filename, "'");
             }
             break;
         }
         case 0x3E: { // Close File
             uint16_t h = m_cpu.getReg16(cpu::BX);
-            LOG_DEBUG("DOS: Close handle ", h);
+            LOG_DOS("DOS: Close handle ", h);
             if (h >= 5 && (h - 5) < static_cast<int>(m_fileHandles.size())) {
+                LOG_DOS("DOS: Closing file '", m_fileHandles[h-5]->path, "'");
                 m_fileHandles[h - 5]->stream.close();
                 m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
             } else {
@@ -194,6 +236,7 @@ void DOS::handleDOSService() {
             if (h == 1 || h == 2) { // Stdout/Stderr
                 std::string s;
                 for (int i = 0; i < cx; ++i) s += (char)m_memory.read8(addr + i);
+                LOG_DOS("DOS: Write to ", (h==1?"stdout":"stderr"), ": '", s, "'");
                 std::cerr << s << std::flush;
                 m_cpu.setReg16(cpu::AX, cx);
                 m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
@@ -250,9 +293,32 @@ void DOS::handleDOSService() {
             handleDirectorySearch();
             break;
 
+        case 0x4B: { // Exec
+            uint8_t mode = m_cpu.getReg8(cpu::AL);
+            uint16_t ds = m_cpu.getSegReg(cpu::DS);
+            uint16_t dx = m_cpu.getReg16(cpu::DX);
+            std::string filename = readFilename((ds << 4) + dx);
+            LOG_DOS("DOS: Exec '", filename, "' mode ", (int)mode);
+            m_cpu.setReg16(cpu::AX, 0x02); // File not found (simplified stub)
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+            break;
+        }
+        case 0x2C: { // Get System Time
+            LOG_DOS("DOS: Get System Time (stub)");
+            m_cpu.setReg8(cpu::CH, 12); // Hour
+            m_cpu.setReg8(cpu::CL, 0);  // Minute
+            m_cpu.setReg8(cpu::DH, 0);  // Second
+            m_cpu.setReg8(cpu::DL, 0);  // 1/100 second
+            break;
+        }
+
         case 0x4C: { // Terminate with return code
             uint8_t al = m_cpu.getReg8(cpu::AL);
             terminateProcess(al);
+            break;
+        }
+        case 0x57: {
+            LOG_DOS("DOS: Set/Reset Verify Flag (AH=0x57) - Not implemented");
             break;
         }
         default:
@@ -260,9 +326,8 @@ void DOS::handleDOSService() {
             break;
     }
 }
-
 void DOS::terminateProcess(uint8_t exitCode) {
-    LOG_INFO("DOS: Process terminated with exit code ", (int)exitCode);
+    LOG_DOS("DOS: Process terminated with exit code ", (int)exitCode);
     m_terminated = true;
     m_exitCode = exitCode;
 }

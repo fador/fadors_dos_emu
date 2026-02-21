@@ -71,10 +71,12 @@ bool BIOS::handleInterrupt(uint8_t vector) {
             m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
             LOG_DEBUG("BIOS INT 17h: Printer (stubbed)");
             return true;
-        case 0x2F: // Multiplex/TSR/Network
-            m_cpu.setReg8(cpu::AL, 0); // Not present
-            LOG_DEBUG("BIOS INT 2Fh: Multiplex (stubbed)");
+        case 0x2F: { // Multiplex
+            uint16_t ax = m_cpu.getReg16(cpu::AX);
+            LOG_DEBUG("BIOS: INT 2Fh Multiplex (stubbed), AX=0x", std::hex, ax);
+            m_cpu.setReg8(cpu::AL, 0x00); // Not supported
             return true;
+        }
         case 0x1B: // Ctrl-Break
         case 0x1C: // Timer Tick
         case 0x1D: // Video Parameters
@@ -95,7 +97,7 @@ void BIOS::handleVideoService() {
             m_memory.write8(0x449, al); // BIOS Data Area: current mode
             // Clear VRAM
             for (uint32_t i = 0; i < 80 * 25 * 2; ++i) m_memory.write8(0xB8000 + i, 0);
-            LOG_DEBUG("BIOS INT 10h: Set Video Mode ", (int)al);
+            LOG_VIDEO("BIOS INT 10h: Set Video Mode ", (int)al);
             break;
         }
         case 0x0F: { // Get Video Mode
@@ -143,11 +145,19 @@ void BIOS::handleVideoService() {
                     m_memory.write8(0xB8000 + i + 1, attr);
                 }
             }
-            LOG_DEBUG("BIOS INT 10h: Scroll ", (ah == 0x06 ? "Up" : "Down"), " AL=", (int)al, " Window=", (int)row1, ",", (int)col1, "-", (int)row2, ",", (int)col2);
+            LOG_VIDEO("BIOS INT 10h: Scroll ", (ah == 0x06 ? "Up" : "Down"), " AL=", (int)al, " Window=", (int)row1, ",", (int)col1, "-", (int)row2, ",", (int)col2);
+            break;
+        }
+        case 0x09: { // Write Character and Attribute
+            uint8_t c = m_cpu.getReg8(cpu::AL);
+            uint8_t attr = m_cpu.getReg8(cpu::BL);
+            uint16_t count = m_cpu.getReg16(cpu::CX);
+            LOG_VIDEO("BIOS INT 10h AH=09h: Write Char '", (char)c, "' attr=", std::hex, (int)attr, " count=", count);
             break;
         }
         case 0x0E: { // Teletype Output
             uint8_t al = m_cpu.getReg8(cpu::AL);
+            LOG_VIDEO("BIOS INT 10h AH=0Eh: Teletype Output '", (char)al, "' (0x", std::hex, (int)al, ")");
             uint16_t cursorCol = m_memory.read8(0x450);
             uint16_t cursorRow = m_memory.read8(0x451);
             uint32_t offset = (cursorRow * 80 + cursorCol) * 2;
@@ -159,7 +169,7 @@ void BIOS::handleVideoService() {
             m_memory.write8(0x450, static_cast<uint8_t>(cursorCol));
             m_memory.write8(0x451, static_cast<uint8_t>(cursorRow));
             std::cerr << (char)al << std::flush;
-            LOG_TRACE("BIOS INT 10h: Teletype Output '", (char)al, "' at ", (int)cursorRow, ":", (int)cursorCol);
+            LOG_VIDEO("BIOS INT 10h: Teletype Output '", (char)al, "' at ", (int)cursorRow, ":", (int)cursorCol);
             break;
         }
         default:

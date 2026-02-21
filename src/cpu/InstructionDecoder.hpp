@@ -39,6 +39,7 @@ private:
     hw::IOBus& m_iobus;
     hw::BIOS& m_bios;
     hw::DOS& m_dos;
+    uint64_t m_stepCount;
 
     // Prefixes state for current instruction
     bool m_hasPrefix66; // Operand size override

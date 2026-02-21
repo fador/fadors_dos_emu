@@ -55,6 +55,12 @@ int main(int argc, char* argv[]) {
             std::string arg = argv[i];
             if (arg == "--himem") {
                 useHimem = true;
+            } else if (arg.find("--debug=") == 0) {
+                fador::utils::currentLevel = fador::utils::LogLevel::Debug;
+                std::string cats = arg.substr(8);
+                if (cats.find("cpu") != std::string::npos) fador::utils::enabledCategories |= fador::utils::CAT_CPU;
+                if (cats.find("video") != std::string::npos) fador::utils::enabledCategories |= fador::utils::CAT_VIDEO;
+                if (cats.find("dos") != std::string::npos) fador::utils::enabledCategories |= fador::utils::CAT_DOS;
             } else if (path.empty() && (arg.find(".com") != std::string::npos || arg.find(".exe") != std::string::npos || arg.find(".COM") != std::string::npos || arg.find(".EXE") != std::string::npos)) {
                 path = arg;
             } else {

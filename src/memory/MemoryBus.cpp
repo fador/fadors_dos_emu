@@ -42,10 +42,13 @@ uint32_t MemoryBus::read32(uint32_t address) const {
 void MemoryBus::write8(uint32_t address, uint8_t value) {
     uint32_t effectiveAddress = m_a20Enabled ? address : (address & 0xFFFFF);
     if (effectiveAddress < MEMORY_SIZE) {
+        if (effectiveAddress < 0x400) {
+            LOG_DEBUG("IVT WRITE8 at 0x", std::hex, effectiveAddress, " val: 0x", static_cast<int>(value));
+        }
         m_ram[effectiveAddress] = value;
         // Simple hook for CGA/VGA text mode (0xB8000 - 0xBFFFF)
-        if (effectiveAddress >= 0xB8000 && effectiveAddress < 0xC0000) {
-            // Emulation graphical backend will pick this up
+        if (effectiveAddress >= 0xB8000 && effectiveAddress < 0xBFFFF) {
+            LOG_VIDEO("VRAM WRITE at 0x", std::hex, effectiveAddress, " val: 0x", static_cast<int>(value), " ('", (char)(value >= 32 ? value : ' '), "')");
         }
     } else {
         LOG_WARN("Memory out of bounds WRITE 8-bit at: 0x", std::hex, address, " (Effective: 0x", effectiveAddress, ") val: 0x", static_cast<int>(value));
@@ -55,6 +58,9 @@ void MemoryBus::write8(uint32_t address, uint8_t value) {
 void MemoryBus::write16(uint32_t address, uint16_t value) {
     uint32_t effectiveAddress = m_a20Enabled ? address : (address & 0xFFFFF);
     if (effectiveAddress + 1 < MEMORY_SIZE) {
+        if (effectiveAddress < 0x400) {
+            LOG_DEBUG("IVT WRITE16 at 0x", std::hex, effectiveAddress, " val: 0x", static_cast<int>(value));
+        }
         m_ram[effectiveAddress] = value & 0xFF;
         m_ram[effectiveAddress + 1] = (value >> 8) & 0xFF;
     } else {

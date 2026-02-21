@@ -89,9 +89,10 @@ bool ProgramLoader::loadEXE(const std::string& path, uint16_t segment, const std
 
     // Load actual program image
     uint32_t imageOffset = header.headerSize * 16;
+    file.seekg(0, std::ios::end);
+    uint32_t fileSize = file.tellg();
     file.seekg(imageOffset, std::ios::beg);
-
-    uint32_t imageSize = (header.numPages * 512) - (header.lastPageSize ? (512 - header.lastPageSize) : 0) - imageOffset;
+    uint32_t imageSize = fileSize - imageOffset;
     
     // For now, let's just use a simple load to segment:0000 (after PSP)
     // Actually, EXE load usually puts PSP at segment, and image at segment + 10h (256 bytes)
@@ -184,16 +185,33 @@ void ProgramLoader::createPSP(uint16_t segment, const std::string& args) {
     // Segment of top of memory at offset 2 (stubbed to 640KB)
     m_memory.write16(pspAddr + 0x02, 0xA000); 
 
-    // Environment block segment at offset 0x2C (0 means same as parent, but for boot we can use 0 or a dummy)
-    m_memory.write16(pspAddr + 0x2C, 0); 
+    // Environment block segment at offset 0x2C
+    // Let's place it at segment + 0x08 (dummy small block before code)
+    uint16_t envSegment = segment + 0x08;
+    uint32_t envAddr = (envSegment << 4);
+    // Format: VAR=VAL\0\0\0\x01\x00PROGRAM_PATH\0
+    std::string envStr = "PATH=C:\\TCC\0";
+    envStr += "LIB=C:\\TCC\\LIB\0";
+    envStr += "INCLUDE=C:\\TCC\\INCLUDE\0";
+    envStr += "\0"; // End of variables
+    envStr += "\x01\x00"; // Signature for program name follows
+    envStr += "C:\\TCC\\TCC.EXE\0";
+    
+    for (size_t i = 0; i < envStr.length(); ++i) {
+        m_memory.write8(envAddr + i, static_cast<uint8_t>(envStr[i]));
+    }
+    m_memory.write16(pspAddr + 0x2C, envSegment);
+    LOG_INFO("ProgramLoader: Environment block created at segment 0x", std::hex, envSegment);
 
     // Command tail size at offset 0x80
-    uint8_t len = static_cast<uint8_t>(std::min<size_t>(args.length(), 126));
+    std::string tail = " " + args; // Leading space is required
+    uint8_t len = static_cast<uint8_t>(std::min<size_t>(tail.length(), 126));
     m_memory.write8(pspAddr + 0x80, len);
+    LOG_INFO("ProgramLoader: PSP Command Tail: '", tail, "' (len=", (int)len, ")");
     
     // Command tail at offset 0x81
     for (uint8_t i = 0; i < len; ++i) {
-        m_memory.write8(pspAddr + 0x81 + i, static_cast<uint8_t>(args[i]));
+        m_memory.write8(pspAddr + 0x81 + i, static_cast<uint8_t>(tail[i]));
     }
     m_memory.write8(pspAddr + 0x81 + len, 0x0D); // CR terminator
 }
