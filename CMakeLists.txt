@@ -48,6 +48,7 @@ set(TEST_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_interrupts.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_hw_devices.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_bios.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_dos.cpp"
 )
 
 add_executable(fadors_tests ${TEST_FILES})

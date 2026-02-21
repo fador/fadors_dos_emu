@@ -7,6 +7,7 @@
 #include "memory/MemoryBus.hpp"
 #include "hw/IOBus.hpp"
 #include "hw/BIOS.hpp"
+#include "hw/DOS.hpp"
 #include "hw/KeyboardController.hpp"
 #include "hw/PIT8254.hpp"
 
@@ -19,9 +20,11 @@ TEST_CASE("BIOS Emulation Services", "[BIOS]") {
     hw::IOBus iobus;
     hw::KeyboardController kbd;
     hw::PIT8254 pit;
+    hw::DOS dos(cpu, mem);
     hw::BIOS bios(cpu, mem, kbd, pit);
     bios.initialize();
-    cpu::InstructionDecoder decoder(cpu, mem, iobus, bios);
+    dos.initialize();
+    cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
 
     SECTION("INT 10h: AH=0Eh (Teletype)") {
         cpu.setSegReg(cpu::SegRegIndex::CS, 0x0000);

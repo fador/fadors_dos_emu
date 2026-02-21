@@ -4,6 +4,7 @@
 #include "memory/MemoryBus.hpp"
 #include "hw/IOBus.hpp"
 #include "hw/BIOS.hpp"
+#include "hw/DOS.hpp"
 #include "hw/KeyboardController.hpp"
 #include "hw/PIT8254.hpp"
 
@@ -15,8 +16,11 @@ TEST_CASE("CPU Interrupt Pipeline", "[Interrupts]") {
     hw::IOBus iobus;
     hw::KeyboardController kbd;
     hw::PIT8254 pit;
+    hw::DOS dos(cpu, mem);
     hw::BIOS bios(cpu, mem, kbd, pit);
-    cpu::InstructionDecoder decoder(cpu, mem, iobus, bios);
+    bios.initialize();
+    dos.initialize();
+    cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
 
     // Setup base execution environment
     cpu.setSegReg(cpu::SegRegIndex::CS, 0x1000);

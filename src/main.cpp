@@ -3,6 +3,7 @@
 #include "cpu/InstructionDecoder.hpp"
 #include "hw/IOBus.hpp"
 #include "hw/BIOS.hpp"
+#include "hw/DOS.hpp"
 #include "hw/KeyboardController.hpp"
 #include "hw/PIT8254.hpp"
 
@@ -19,9 +20,11 @@ int main(int argc, char** argv) {
         fador::hw::KeyboardController kbd;
         fador::hw::PIT8254 pit;
         fador::cpu::CPU cpu;
+        fador::hw::DOS dos(cpu, memory);
         fador::hw::BIOS bios(cpu, memory, kbd, pit);
         bios.initialize();
-        fador::cpu::InstructionDecoder decoder(cpu, memory, iobus, bios);
+        dos.initialize();
+        fador::cpu::InstructionDecoder decoder(cpu, memory, iobus, bios, dos);
         LOG_INFO("System initialized successfully.");
 
         // Setup environment to jump into address 0x100 (Common for COM files)

@@ -5,7 +5,7 @@
 #include "../memory/MemoryBus.hpp"
 #include "CPU.hpp"
 
-namespace fador::hw { class IOBus; class BIOS; }
+namespace fador::hw { class IOBus; class BIOS; class DOS; }
 
 namespace fador::cpu {
 
@@ -24,7 +24,7 @@ struct SIB {
 // Provides helper functions for fetching CPU instructions and processing prefixes
 class InstructionDecoder {
 public:
-    InstructionDecoder(CPU& cpu, memory::MemoryBus& memory, hw::IOBus& iobus, hw::BIOS& bios);
+    InstructionDecoder(CPU& cpu, memory::MemoryBus& memory, hw::IOBus& iobus, hw::BIOS& bios, hw::DOS& dos);
 
     // Main execution loop single step
     void step();
@@ -34,6 +34,7 @@ private:
     memory::MemoryBus& m_memory;
     hw::IOBus& m_iobus;
     hw::BIOS& m_bios;
+    hw::DOS& m_dos;
 
     // Prefixes state for current instruction
     bool m_hasPrefix66; // Operand size override

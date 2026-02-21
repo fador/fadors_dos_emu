@@ -42,15 +42,15 @@
 - [x] INT 1Ah (Time of Day / RTC Services)
 
 ## Phase 5: DOS Emulation (MS-DOS functionality)
-- [ ] COM File Loader
-- [ ] EXE File Loader (MZ header parsing, relocation calculation)
-- [ ] Program Segment Prefix (PSP) construction
-- [ ] INT 20h (Terminate Program)
-- [ ] INT 21h (DOS Services)
-  - [ ] Console I/O (Ah=01h, 02h, 09h, 0Ah, etc.)
-  - [ ] File I/O (Open, Close, Read, Write, Lseek) using handles
+- [x] COM File Loader
+- [x] EXE File Loader (MZ header parsing, relocation calculation)
+- [x] Program Segment Prefix (PSP) construction
+- [x] INT 20h (Terminate Program)
+- [x] INT 21h (DOS Services)
+  - [x] Console I/O (Ah=01h, 02h, 09h, 0Ah, etc.)
+  - [x] File I/O (Open, Close, Read, Write, Lseek) using handles
+  - [x] Process Control (Ah=4Ch)
   - [ ] Directory Operations
-  - [ ] Process Control (Ah=4Ch)
   - [ ] Memory Management (Ah=48h, 49h, 4Ah)
 
 ## Phase 6: Front-End UI
