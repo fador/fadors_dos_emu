@@ -205,24 +205,54 @@ void DOS::handleDOSService() {
             }
             break;
         }
-        case 0x3F: { // Read from File
+        case 0x3F: { // Read from File or Device
             uint16_t h = m_cpu.getReg16(cpu::BX);
             uint16_t cx = m_cpu.getReg16(cpu::CX); // Count
             uint16_t ds = m_cpu.getSegReg(cpu::DS);
             uint16_t dx = m_cpu.getReg16(cpu::DX);
-            uint32_t addr = (ds << 4) + dx;
 
-            if (h >= 5 && (h - 5) < static_cast<int>(m_fileHandles.size())) {
-                std::vector<char> buffer(cx);
-                m_fileHandles[h - 5]->stream.read(buffer.data(), cx);
-                std::streamsize read = m_fileHandles[h - 5]->stream.gcount();
-                for (int i = 0; i < read; ++i) {
-                    m_memory.write8(addr + i, static_cast<uint8_t>(buffer[i]));
-                }
-                m_cpu.setReg16(cpu::AX, static_cast<uint16_t>(read));
+            // 1. Handle STDIN (Handle 0)
+            if (h == 0) {
+                // TODO: Wire this to your emulator's keyboard/input buffer.
+                // For now, returning 0 bytes read (EOF) or blocking.
+                m_cpu.setReg16(cpu::AX, 0);
                 m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-            } else {
+                break;
+            }
+            
+            // Fail on other reserved handles (STDOUT, STDERR) since they are write-only, 
+            // or unhandled ones.
+            if (h > 0 && h < 5) {
                 m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+                m_cpu.setReg16(cpu::AX, 0x05); // Error 5: Access Denied
+                break;
+            }
+
+            // 2. Handle User Files (>= 5)
+            int fd_index = h - 5;
+            if (fd_index >= 0 && fd_index < static_cast<int>(m_fileHandles.size()) && m_fileHandles[fd_index]) {
+                if (cx > 0) {
+                    std::vector<char> buffer(cx); // Consider a chunked read to avoid large allocs
+                    m_fileHandles[fd_index]->stream.read(buffer.data(), cx);
+                    std::streamsize read = m_fileHandles[fd_index]->stream.gcount();
+
+                    // 3. Emulate proper 16-bit segment offset wrap-around
+                    for (int i = 0; i < read; ++i) {
+                        uint16_t offset = dx + i; 
+                        uint32_t addr = (ds << 4) + offset;
+                        m_memory.write8(addr, static_cast<uint8_t>(buffer[i]));
+                    }
+
+                    m_cpu.setReg16(cpu::AX, static_cast<uint16_t>(read));
+                } else {
+                    m_cpu.setReg16(cpu::AX, 0); // Requested 0 bytes
+                }
+                
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY); // Success
+            } else {
+                // 4. Proper error reporting for invalid handles
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+                m_cpu.setReg16(cpu::AX, 0x06); // Error 6: Invalid Handle
             }
             break;
         }
