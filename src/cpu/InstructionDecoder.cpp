@@ -667,11 +667,58 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             break;
         }
 
-        // MOVS, STOS, LODS implementations...
-        // [MOVSB/STOSB/LODSB left exactly as provided by OP for space as they were already functionally OK, just needed EFLAGS which they don't modify]
-        case 0xA4: case 0xA5: case 0xAA: case 0xAB: case 0xAC: case 0xAD:
-            LOG_WARN("String ops 0x", std::hex, (int)opcode, " triggered - using original behavior");
-            // NOTE: Add original MOVS/STOS/LODS blocks here if retaining the entire switch natively. 
+        // MOV AX,[imm] and MOV [imm],AX
+        case 0xA1: // MOV AX/EAX, [imm16/32]
+            if (m_hasPrefix66) m_cpu.setReg32(EAX, m_memory.read32((m_cpu.getSegReg(DS) << 4) + fetch32()));
+            else m_cpu.setReg16(AX, m_memory.read16((m_cpu.getSegReg(DS) << 4) + fetch16()));
+            break;
+        case 0xA3: // MOV [imm16/32], AX/EAX
+            if (m_hasPrefix66) m_memory.write32((m_cpu.getSegReg(DS) << 4) + fetch32(), m_cpu.getReg32(EAX));
+            else m_memory.write16((m_cpu.getSegReg(DS) << 4) + fetch16(), m_cpu.getReg16(AX));
+            break;
+
+        // String ops: MOVSB, MOVSW, STOSB, STOSW, LODSB, LODSW
+        case 0xA4: // MOVSB
+            m_memory.write8((m_cpu.getSegReg(ES) << 4) + m_cpu.getReg16(DI), m_memory.read8((m_cpu.getSegReg(DS) << 4) + m_cpu.getReg16(SI)));
+            m_cpu.setReg16(DI, m_cpu.getReg16(DI) + ((m_cpu.getEFLAGS() & 0x0400) ? -1 : 1));
+            m_cpu.setReg16(SI, m_cpu.getReg16(SI) + ((m_cpu.getEFLAGS() & 0x0400) ? -1 : 1));
+            break;
+        case 0xA5: // MOVSW/MOVSD
+            if (m_hasPrefix66) {
+                m_memory.write32((m_cpu.getSegReg(ES) << 4) + m_cpu.getReg32(EDI), m_memory.read32((m_cpu.getSegReg(DS) << 4) + m_cpu.getReg32(ESI)));
+                m_cpu.setReg32(EDI, m_cpu.getReg32(EDI) + ((m_cpu.getEFLAGS() & 0x0400) ? -4 : 4));
+                m_cpu.setReg32(ESI, m_cpu.getReg32(ESI) + ((m_cpu.getEFLAGS() & 0x0400) ? -4 : 4));
+            } else {
+                m_memory.write16((m_cpu.getSegReg(ES) << 4) + m_cpu.getReg16(DI), m_memory.read16((m_cpu.getSegReg(DS) << 4) + m_cpu.getReg16(SI)));
+                m_cpu.setReg16(DI, m_cpu.getReg16(DI) + ((m_cpu.getEFLAGS() & 0x0400) ? -2 : 2));
+                m_cpu.setReg16(SI, m_cpu.getReg16(SI) + ((m_cpu.getEFLAGS() & 0x0400) ? -2 : 2));
+            }
+            break;
+        case 0xAA: // STOSB
+            m_memory.write8((m_cpu.getSegReg(ES) << 4) + m_cpu.getReg16(DI), m_cpu.getReg8(AL));
+            m_cpu.setReg16(DI, m_cpu.getReg16(DI) + ((m_cpu.getEFLAGS() & 0x0400) ? -1 : 1));
+            break;
+        case 0xAB: // STOSW/STOSD
+            if (m_hasPrefix66) {
+                m_memory.write32((m_cpu.getSegReg(ES) << 4) + m_cpu.getReg32(EDI), m_cpu.getReg32(EAX));
+                m_cpu.setReg32(EDI, m_cpu.getReg32(EDI) + ((m_cpu.getEFLAGS() & 0x0400) ? -4 : 4));
+            } else {
+                m_memory.write16((m_cpu.getSegReg(ES) << 4) + m_cpu.getReg16(DI), m_cpu.getReg16(AX));
+                m_cpu.setReg16(DI, m_cpu.getReg16(DI) + ((m_cpu.getEFLAGS() & 0x0400) ? -2 : 2));
+            }
+            break;
+        case 0xAC: // LODSB
+            m_cpu.setReg8(AL, m_memory.read8((m_cpu.getSegReg(DS) << 4) + m_cpu.getReg16(SI)));
+            m_cpu.setReg16(SI, m_cpu.getReg16(SI) + ((m_cpu.getEFLAGS() & 0x0400) ? -1 : 1));
+            break;
+        case 0xAD: // LODSW/LODSD
+            if (m_hasPrefix66) {
+                m_cpu.setReg32(EAX, m_memory.read32((m_cpu.getSegReg(DS) << 4) + m_cpu.getReg32(ESI)));
+                m_cpu.setReg32(ESI, m_cpu.getReg32(ESI) + ((m_cpu.getEFLAGS() & 0x0400) ? -4 : 4));
+            } else {
+                m_cpu.setReg16(AX, m_memory.read16((m_cpu.getSegReg(DS) << 4) + m_cpu.getReg16(SI)));
+                m_cpu.setReg16(SI, m_cpu.getReg16(SI) + ((m_cpu.getEFLAGS() & 0x0400) ? -2 : 2));
+            }
             break;
 
         // Group 2 (Rotates/Shifts)
