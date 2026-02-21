@@ -2,6 +2,11 @@
 #include "../utils/Logger.hpp"
 #include <iostream>
 #include <iomanip>
+#include <fstream>
+#include <algorithm>
+#include <filesystem>
+
+namespace fs = std::filesystem;
 
 namespace fador::hw {
 
@@ -12,6 +17,19 @@ DOS::DOS(cpu::CPU& cpu, memory::MemoryBus& memory)
 
 void DOS::initialize() {
     LOG_INFO("DOS: Kernel initialized.");
+
+    // Setup initial MCB chain
+    // First MCB at 0x0700: 'Z' type (last), owned by 0x0000 (free), 
+    // size = TOTAL - 0x0700 - 1 (for MCB itself)
+    MCB initial;
+    initial.type = 'Z';
+    initial.owner = 0x0000;
+    initial.size = LAST_PARA - FIRST_MCB_SEGMENT - 1;
+    for (int i = 0; i < 8; ++i) initial.name[i] = 0;
+    
+    writeMCB(FIRST_MCB_SEGMENT, initial);
+    LOG_INFO("DOS: Initial MCB chain setup at segment 0x", std::hex, FIRST_MCB_SEGMENT, 
+             " size 0x", initial.size, " paras");
 }
 
 bool DOS::handleInterrupt(uint8_t vector) {
@@ -152,6 +170,19 @@ void DOS::handleDOSService() {
             }
             break;
         }
+        case 0x39: // MKDIR
+        case 0x3A: // RMDIR
+        case 0x3B: // CHDIR
+        case 0x47: // GETCWD
+            handleDirectoryService();
+            break;
+
+        case 0x48: // Allocate Memory
+        case 0x49: // Free Memory
+        case 0x4A: // Resize Block
+            handleMemoryManagement();
+            break;
+
         case 0x4C: { // Terminate with return code
             uint8_t al = m_cpu.getReg8(cpu::AL);
             terminateProcess(al);
@@ -188,5 +219,229 @@ std::string DOS::readFilename(uint32_t address) {
     }
     return result;
 }
+
+
+DOS::MCB DOS::readMCB(uint16_t segment) {
+    uint32_t addr = (segment << 4);
+    MCB mcb;
+    mcb.type = m_memory.read8(addr + 0);
+    mcb.owner = m_memory.read16(addr + 1);
+    mcb.size = m_memory.read16(addr + 3);
+    for (int i = 0; i < 8; ++i) mcb.name[i] = (char)m_memory.read8(addr + 8 + i);
+    return mcb;
+}
+
+void DOS::writeMCB(uint16_t segment, const MCB& mcb) {
+    uint32_t addr = (segment << 4);
+    m_memory.write8(addr + 0, mcb.type);
+    m_memory.write16(addr + 1, mcb.owner);
+    m_memory.write16(addr + 3, mcb.size);
+    for (int i = 0; i < 8; ++i) m_memory.write8(addr + 8 + i, (uint8_t)mcb.name[i]);
+}
+
+void DOS::handleMemoryManagement() {
+    uint8_t ah = m_cpu.getReg8(cpu::AH);
+    if (ah == 0x48) { // Allocate
+        uint16_t requested = m_cpu.getReg16(cpu::BX);
+        uint16_t current = FIRST_MCB_SEGMENT;
+        uint16_t bestFit = 0;
+        uint16_t bestFitSize = 0xFFFF;
+
+        while (true) {
+            MCB mcb = readMCB(current);
+            if (mcb.owner == 0 && mcb.size >= requested) {
+                if (mcb.size < bestFitSize) {
+                    bestFit = current;
+                    bestFitSize = mcb.size;
+                }
+            }
+            if (mcb.type == 'Z') break;
+            current = static_cast<uint16_t>(current + mcb.size + 1);
+        }
+
+        if (bestFit != 0) {
+            MCB mcb = readMCB(bestFit);
+            if (mcb.size > requested + 1) { // Split
+                MCB next;
+                next.type = mcb.type;
+                next.owner = 0;
+                next.size = mcb.size - requested - 1;
+                
+                mcb.type = 'M';
+                mcb.size = requested;
+                mcb.owner = 0xFFFF; // Temporary owner (will be fixed by whoever calls this if they set ES)
+                
+                writeMCB(bestFit, mcb);
+                writeMCB(static_cast<uint16_t>(bestFit + requested + 1), next);
+            } else {
+                mcb.owner = 0xFFFF;
+                writeMCB(bestFit, mcb);
+            }
+            m_cpu.setReg16(cpu::AX, bestFit + 1);
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+            LOG_DEBUG("DOS: Allocated ", requested, " paras at segment ", std::hex, bestFit + 1);
+        } else {
+            m_cpu.setReg16(cpu::AX, 0x08); // Insufficient memory
+            m_cpu.setReg16(cpu::BX, bestFitSize == 0xFFFF ? 0 : bestFitSize); // Max available
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+            LOG_WARN("DOS: Failed to allocate ", requested, " paras");
+        }
+    } else if (ah == 0x49) { // Free
+        uint16_t segment = m_cpu.getSegReg(cpu::ES);
+        uint16_t mcbSeg = segment - 1;
+        MCB mcb = readMCB(mcbSeg);
+        if (mcb.type == 'M' || mcb.type == 'Z') {
+            mcb.owner = 0;
+            writeMCB(mcbSeg, mcb);
+            
+            // Simplified merge: only merge with next if free
+            if (mcb.type == 'M') {
+                uint16_t nextSeg = mcbSeg + mcb.size + 1;
+                MCB next = readMCB(nextSeg);
+                if (next.owner == 0) {
+                    mcb.type = next.type;
+                    mcb.size = static_cast<uint16_t>(mcb.size + next.size + 1);
+                    writeMCB(mcbSeg, mcb);
+                }
+            }
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+            LOG_DEBUG("DOS: Freed segment ", std::hex, segment);
+        } else {
+            m_cpu.setReg16(cpu::AX, 0x09); // Memory block address invalid
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+            LOG_ERROR("DOS: Failed to free invalid segment ", std::hex, segment);
+        }
+    } else if (ah == 0x4A) { // Resize
+        uint16_t segment = m_cpu.getSegReg(cpu::ES);
+        uint16_t requested = m_cpu.getReg16(cpu::BX);
+        uint16_t mcbSeg = segment - 1;
+        MCB mcb = readMCB(mcbSeg);
+
+        if (mcb.size >= requested) { // Shrink
+            if (mcb.size > requested + 1) {
+                MCB next;
+                next.type = mcb.type;
+                next.owner = 0;
+                next.size = mcb.size - requested - 1;
+
+                mcb.type = 'M';
+                mcb.size = requested;
+                
+                writeMCB(mcbSeg, mcb);
+                writeMCB(static_cast<uint16_t>(mcbSeg + requested + 1), next);
+            }
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+            LOG_DEBUG("DOS: Shrunk segment ", std::hex, segment, " to ", requested, " paras");
+        } else {
+            // Expand (only if next is free)
+            if (mcb.type == 'M') {
+                uint16_t nextSeg = mcbSeg + mcb.size + 1;
+                MCB next = readMCB(nextSeg);
+                if (next.owner == 0 && (mcb.size + 1 + next.size) >= requested) {
+                    uint16_t combinedSize = mcb.size + 1 + next.size;
+                    if (combinedSize > requested + 1) {
+                        MCB newNext;
+                        newNext.type = next.type;
+                        newNext.owner = 0;
+                        newNext.size = combinedSize - requested - 1;
+                        
+                        mcb.type = 'M';
+                        mcb.size = requested;
+                        writeMCB(mcbSeg, mcb);
+                        writeMCB(static_cast<uint16_t>(mcbSeg + requested + 1), newNext);
+                    } else {
+                        mcb.type = next.type;
+                        mcb.size = static_cast<uint16_t>(combinedSize);
+                        writeMCB(mcbSeg, mcb);
+                    }
+                    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+                    LOG_DEBUG("DOS: Expanded segment ", std::hex, segment, " to ", requested, " paras");
+                    return;
+                }
+            }
+            m_cpu.setReg16(cpu::AX, 0x08); // Insufficient memory
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+            LOG_WARN("DOS: Failed to expand segment ", std::hex, segment, " to ", requested, " paras");
+        }
+    }
+}
+
+void DOS::handleDirectoryService() {
+    uint8_t ah = m_cpu.getReg8(cpu::AH);
+    uint16_t ds = m_cpu.getSegReg(cpu::DS);
+    uint16_t dx = m_cpu.getReg16(cpu::DX);
+    uint32_t addr = (ds << 4) + dx;
+
+    try {
+        if (ah == 0x39) { // MKDIR
+            std::string path = readFilename(addr);
+            LOG_DEBUG("DOS: MKDIR '", path, "'");
+            if (fs::create_directory(path)) {
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+                m_cpu.setReg16(cpu::AX, 0);
+            } else {
+                m_cpu.setReg16(cpu::AX, 0x03); // Path not found or already exists
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+            }
+        } else if (ah == 0x3A) { // RMDIR
+            std::string path = readFilename(addr);
+            LOG_DEBUG("DOS: RMDIR '", path, "'");
+            if (fs::remove(path)) {
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+                m_cpu.setReg16(cpu::AX, 0);
+            } else {
+                m_cpu.setReg16(cpu::AX, 0x05); // Access denied (or not empty/doesn't exist)
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+            }
+        } else if (ah == 0x3B) { // CHDIR
+            std::string path = readFilename(addr);
+            LOG_DEBUG("DOS: CHDIR '", path, "'");
+            if (fs::exists(path) && fs::is_directory(path)) {
+                m_currentDir = path;
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+                m_cpu.setReg16(cpu::AX, 0);
+            } else {
+                m_cpu.setReg16(cpu::AX, 0x03); // Path not found
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+            }
+        } else if (ah == 0x47) { // GETCWD
+            uint16_t ds_si = m_cpu.getSegReg(cpu::DS);
+            uint16_t si = m_cpu.getReg16(cpu::SI);
+            uint32_t outAddr = (ds_si << 4) + si;
+            
+            // DOS returns path relative to drive (no leading slash, no drive letter)
+            // For now we just return our tracked currentDir
+            std::string path = m_currentDir;
+            if (path == ".") path = "";
+            
+            LOG_DEBUG("DOS: GETCWD returning '", path, "'");
+            for (size_t i = 0; i < path.length(); ++i) {
+                m_memory.write8(outAddr + i, static_cast<uint8_t>(path[i]));
+            }
+            m_memory.write8(outAddr + path.length(), 0); // Null terminator
+            
+            m_cpu.setReg16(cpu::AX, 0x0100); // Success (AX=0 is also common but AH=0 is enough)
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+        }
+    } catch (const std::exception& e) {
+        LOG_ERROR("DOS Directory Error: ", e.what());
+        m_cpu.setReg16(cpu::AX, 0x05); // General failure
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+    }
+}
+
+void DOS::dumpMCBChain() {
+    uint16_t current = FIRST_MCB_SEGMENT;
+    LOG_INFO("--- DOS MCB Chain Dump ---");
+    while (true) {
+        MCB mcb = readMCB(current);
+        LOG_INFO("MCB [", (char)mcb.type, "] Seg: 0x", std::hex, current, 
+                 " Owner: 0x", mcb.owner, " Size: ", std::dec, mcb.size, " paras");
+        if (mcb.type == 'Z') break;
+        current = static_cast<uint16_t>(current + mcb.size + 1);
+        if (current >= LAST_PARA) break;
+    }
+}
+
 
 } // namespace fador::hw

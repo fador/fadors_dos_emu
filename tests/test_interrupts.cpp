@@ -29,13 +29,13 @@ TEST_CASE("CPU Interrupt Pipeline", "[Interrupts]") {
     cpu.setReg16(cpu::Reg16Index::SP, 0x0100);
     cpu.setEIP(0x100);
 
-    // Setup IVT vector 0x21 (DOS Services)
-    mem.write16(0x21 * 4, 0x1234);     // IP = 0x1234
-    mem.write16((0x21 * 4) + 2, 0xF000); // CS = 0xF000
+    // Setup IVT vector 0x77
+    mem.write16(0x77 * 4, 0x1234);     // IP = 0x1234
+    mem.write16((0x77 * 4) + 2, 0xF000); // CS = 0xF000
 
-    SECTION("Software Interrupt INT imm8 (0xCD 0x21)") {
+    SECTION("Software Interrupt INT imm8 (0xCD 0x77)") {
         mem.write8((0x1000 << 4) + 0x100, 0xCD); // INT
-        mem.write8((0x1000 << 4) + 0x101, 0x21); // 0x21
+        mem.write8((0x1000 << 4) + 0x101, 0x77); // 0x77
 
         uint32_t prevEflags = cpu.getEFLAGS();
 
