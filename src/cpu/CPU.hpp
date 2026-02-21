@@ -2,6 +2,8 @@
 #include <cstdint>
 #include <array>
 
+namespace fador::memory { class MemoryBus; }
+
 namespace fador::cpu {
 
 enum Reg32Index { EAX = 0, ECX = 1, EDX = 2, EBX = 3, ESP = 4, EBP = 5, ESI = 6, EDI = 7 };
@@ -46,7 +48,17 @@ public:
     uint32_t getEFLAGS() const { return m_eflags; }
     void setEFLAGS(uint32_t value) { m_eflags = value; }
 
+    // MemoryBus reference for stack ops
+    void setMemoryBus(memory::MemoryBus* memory) { m_memory = memory; }
+
+    // Stack operations
+    void push16(uint16_t value);
+    void push32(uint32_t value);
+    uint16_t pop16();
+    uint32_t pop32();
+
 private:
+    memory::MemoryBus* m_memory{nullptr};
     std::array<uint32_t, 8> m_regs{}; // EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI
     std::array<uint16_t, 6> m_segRegs{}; // ES, CS, SS, DS, FS, GS
     uint32_t m_eip{0};

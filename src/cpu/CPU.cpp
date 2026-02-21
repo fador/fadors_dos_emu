@@ -1,5 +1,6 @@
 #include "CPU.hpp"
 #include "../utils/Logger.hpp"
+#include "../memory/MemoryBus.hpp"
 
 namespace fador::cpu {
 
@@ -60,6 +61,42 @@ void CPU::setReg8(uint8_t index, uint8_t value) {
     } else {
         reg = (reg & 0xFFFFFF00) | value;
     }
+}
+
+void CPU::push16(uint16_t value) {
+    uint16_t sp = getReg16(SP) - 2;
+    setReg16(SP, sp);
+    if (m_memory) {
+        m_memory->write16((static_cast<uint32_t>(m_segRegs[SS]) << 4) + sp, value);
+    }
+}
+
+void CPU::push32(uint32_t value) {
+    uint32_t esp = getReg32(ESP) - 4;
+    setReg32(ESP, esp);
+    if (m_memory) {
+        m_memory->write32((static_cast<uint32_t>(m_segRegs[SS]) << 4) + esp, value);
+    }
+}
+
+uint16_t CPU::pop16() {
+    uint16_t sp = getReg16(SP);
+    uint16_t value = 0;
+    if (m_memory) {
+        value = m_memory->read16((static_cast<uint32_t>(m_segRegs[SS]) << 4) + sp);
+    }
+    setReg16(SP, sp + 2);
+    return value;
+}
+
+uint32_t CPU::pop32() {
+    uint32_t esp = getReg32(ESP);
+    uint32_t value = 0;
+    if (m_memory) {
+        value = m_memory->read32((static_cast<uint32_t>(m_segRegs[SS]) << 4) + esp);
+    }
+    setReg32(ESP, esp + 4);
+    return value;
 }
 
 } // namespace fador::cpu
