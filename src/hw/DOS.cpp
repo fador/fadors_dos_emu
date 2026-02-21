@@ -115,6 +115,22 @@ void DOS::handleDOSService() {
             LOG_DOS("DOS: Set DTA to ", std::hex, ds, ":", dx);
             break;
         }
+        case 0x2A: { // Get System Date
+            // Return current date
+            std::time_t t = std::time(nullptr);
+            std::tm* now = std::localtime(&t);
+            m_cpu.setReg16(cpu::CX, now->tm_year + 1900); // Year
+            m_cpu.setReg8(cpu::DH, now->tm_mon + 1);     // Month
+            m_cpu.setReg8(cpu::DL, now->tm_mday);        // Day
+            m_cpu.setReg8(cpu::AL, now->tm_wday);        // Day of week (0=Sun, 1=Mon, ..., 6=Sat)
+            break;
+        }
+        case 0x2B: { // Get Current PSP
+            uint16_t pspSegment = m_cpu.getSegReg(cpu::DS);
+            m_cpu.setReg16(cpu::BX, pspSegment);
+            LOG_DOS("DOS: Get Current PSP -> ", std::hex, pspSegment);
+            break;
+        }
         case 0x2F: { // Get DTA Address
             uint16_t ds = static_cast<uint16_t>(m_dtaPtr >> 16);
             uint16_t bx = static_cast<uint16_t>(m_dtaPtr & 0xFFFF);

@@ -267,7 +267,7 @@ bool InstructionDecoder::checkCondition(uint8_t cond) {
 
 void InstructionDecoder::step() {
     m_stepCount++;
-    if (m_stepCount <= 500000) {
+    /*if (m_stepCount <= 500000) {
         uint16_t cs = m_cpu.getSegReg(CS);
         uint32_t eip = m_cpu.getEIP();
         uint16_t ss = m_cpu.getSegReg(SS);
@@ -276,7 +276,7 @@ void InstructionDecoder::step() {
         uint16_t stackTop = m_memory.read16((ss << 4) + sp);
         LOG_INFO("TRACE: step=", std::dec, m_stepCount, " CS:EIP=", std::hex, cs, ":", eip, 
                  " Opcode=0x", (int)opcode, " SS:SP=", ss, ":", sp, " [SP]=0x", stackTop);
-    }
+    }*/
 
     m_hasPrefix66 = false;
     m_hasPrefix67 = false;
@@ -794,6 +794,12 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             break;
         }
 
+        case 0xC6: { // MOV r/m8, imm8
+            ModRM modrm = decodeModRM(fetch8());
+            writeModRM8(modrm, fetch8());
+            break;
+        }
+
         case 0xC7: { // MOV r/m, imm
             ModRM modrm = decodeModRM(fetch8());
             if (m_hasPrefix66) writeModRM32(modrm, fetch32());
@@ -1105,6 +1111,14 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             break;
         }
 
+        case 0x86: { // XCHG r/m8, r8
+            ModRM modrm = decodeModRM(fetch8());
+            uint8_t rmVal = readModRM8(modrm);
+            writeModRM8(modrm, m_cpu.getReg8(modrm.reg));
+            m_cpu.setReg8(modrm.reg, rmVal);
+            break;
+        }
+
         // XCHG
         case 0x87: { 
             ModRM modrm = decodeModRM(fetch8());
@@ -1378,6 +1392,10 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
                     triggerInterrupt(6);
                     break;
             }
+            break;
+        }
+        case 0x06: { // CLTS
+            LOG_CPU("CLTS - stubbed (no task switching)");
             break;
         }
         case 0x80: case 0x81: case 0x82: case 0x83:

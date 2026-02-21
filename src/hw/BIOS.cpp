@@ -148,6 +148,13 @@ void BIOS::handleVideoService() {
             LOG_VIDEO("BIOS INT 10h: Scroll ", (ah == 0x06 ? "Up" : "Down"), " AL=", (int)al, " Window=", (int)row1, ",", (int)col1, "-", (int)row2, ",", (int)col2);
             break;
         }
+        case 0x08: { // Read Character and Attribute
+            uint8_t al = m_memory.read8(0xB8000 + ((m_memory.read8(0x451) * 80 + m_memory.read8(0x450)) * 2));
+            uint8_t attr = m_memory.read8(0xB8000 + ((m_memory.read8(0x451) * 80 + m_memory.read8(0x450)) * 2) + 1);
+            m_cpu.setReg8(cpu::AL, al);
+            m_cpu.setReg8(cpu::AH, attr);
+            break;
+        }
         case 0x09: { // Write Character and Attribute
             uint8_t c = m_cpu.getReg8(cpu::AL);
             uint8_t attr = m_cpu.getReg8(cpu::BL);
@@ -170,6 +177,16 @@ void BIOS::handleVideoService() {
             m_memory.write8(0x451, static_cast<uint8_t>(cursorRow));
             std::cerr << (char)al << std::flush;
             LOG_VIDEO("BIOS INT 10h: Teletype Output '", (char)al, "' at ", (int)cursorRow, ":", (int)cursorCol);
+            break;
+        }
+        case 0x11: { // Read Light Pen Position - Not implemented
+            m_cpu.setReg8(cpu::AL, 0); // No light pen
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_ZERO);
+            LOG_DEBUG("BIOS INT 10h: Read Light Pen Position (stubbed)");
+            break;
+        }
+        case 0xFE: { // Write VBE Protected Mode Info - Not implemented
+            LOG_DEBUG("BIOS INT 10h: Write VBE Protected Mode Info (stubbed)");
             break;
         }
         default:
