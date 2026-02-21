@@ -29,6 +29,10 @@ public:
     // Main execution loop single step
     void step();
 
+    // Calculates effective address based on ModRM and SIB (public for testing)
+    uint32_t getEffectiveAddress16(const ModRM& modrm);
+    uint32_t getEffectiveAddress32(const ModRM& modrm);
+
 private:
     CPU& m_cpu;
     memory::MemoryBus& m_memory;
@@ -43,6 +47,10 @@ private:
     bool m_hasRepz;
     uint8_t m_segmentOverride; // SegRegIndex or 0xFF for none
 
+    // Caching for EA to avoid double-fetching displacement in RMW instructions
+    uint32_t m_currentEA;
+    bool m_eaResolved;
+
     // Fetches next byte from memory through CS:EIP
     uint8_t fetch8();
     uint16_t fetch16();
@@ -50,10 +58,6 @@ private:
 
     ModRM decodeModRM(uint8_t byte);
     SIB decodeSIB(uint8_t byte);
-
-    // Calculates effective address based on ModRM and SIB
-    uint32_t getEffectiveAddress16(const ModRM& modrm);
-    uint32_t getEffectiveAddress32(const ModRM& modrm);
 
     // Helpers to resolve operand values
     uint32_t readModRM32(const ModRM& modrm);

@@ -16,7 +16,9 @@ InstructionDecoder::InstructionDecoder(CPU& cpu, memory::MemoryBus& memory, hw::
     , m_hasPrefix67(false)
     , m_hasRepnz(false)
     , m_hasRepz(false)
-    , m_segmentOverride(0xFF) {
+    , m_segmentOverride(0xFF)
+    , m_currentEA(0)
+    , m_eaResolved(false) {
 }
 
 uint8_t InstructionDecoder::fetch8() {
@@ -59,17 +61,81 @@ SIB InstructionDecoder::decodeSIB(uint8_t byte) {
     };
 }
 
-// NOTE: Placeholder simplified implementations for now
+// Calculates effective address based on ModRM and SIB
 uint32_t InstructionDecoder::getEffectiveAddress16(const ModRM& modrm) {
-    // 16-bit addressing mode
-    LOG_WARN("getEffectiveAddress16 not fully implemented");
-    return 0;
+    if (m_eaResolved) return m_currentEA;
+
+    uint16_t addr = 0;
+    uint8_t defaultSeg = DS;
+
+    if (modrm.mod == 0 && modrm.rm == 6) {
+        addr = fetch16();
+    } else {
+        switch (modrm.rm) {
+            case 0: addr = m_cpu.getReg16(BX) + m_cpu.getReg16(SI); break;
+            case 1: addr = m_cpu.getReg16(BX) + m_cpu.getReg16(DI); break;
+            case 2: addr = m_cpu.getReg16(BP) + m_cpu.getReg16(SI); defaultSeg = SS; break;
+            case 3: addr = m_cpu.getReg16(BP) + m_cpu.getReg16(DI); defaultSeg = SS; break;
+            case 4: addr = m_cpu.getReg16(SI); break;
+            case 5: addr = m_cpu.getReg16(DI); break;
+            case 6: addr = m_cpu.getReg16(BP); defaultSeg = SS; break;
+            case 7: addr = m_cpu.getReg16(BX); break;
+        }
+
+        if (modrm.mod == 1) {
+            addr += static_cast<int8_t>(fetch8());
+        } else if (modrm.mod == 2) {
+            addr += static_cast<int16_t>(fetch16());
+        }
+    }
+
+    uint8_t seg = (m_segmentOverride != 0xFF) ? m_segmentOverride : defaultSeg;
+    m_currentEA = (m_cpu.getSegReg(static_cast<SegRegIndex>(seg)) << 4) + addr;
+    m_eaResolved = true;
+    return m_currentEA;
 }
 
 uint32_t InstructionDecoder::getEffectiveAddress32(const ModRM& modrm) {
-    // 32-bit addressing mode
-    LOG_WARN("getEffectiveAddress32 not fully implemented");
-    return 0;
+    if (m_eaResolved) return m_currentEA;
+
+    uint32_t addr = 0;
+    uint8_t defaultSeg = DS;
+
+    if (modrm.rm == 4) { // SIB byte follows
+        SIB sib = decodeSIB(fetch8());
+        uint32_t base = 0;
+        if (sib.base == 5) {
+            if (modrm.mod == 0) base = fetch32();
+            else {
+                base = m_cpu.getReg32(EBP);
+                defaultSeg = SS;
+            }
+        } else {
+            base = m_cpu.getReg32(sib.base);
+            if (sib.base == ESP || sib.base == EBP) defaultSeg = SS;
+        }
+
+        uint32_t index = (sib.index == 4) ? 0 : m_cpu.getReg32(sib.index);
+        addr = base + (index << sib.scale);
+    } else {
+        if (modrm.mod == 0 && modrm.rm == 5) {
+            addr = fetch32();
+        } else {
+            addr = m_cpu.getReg32(modrm.rm);
+            if (modrm.rm == ESP || modrm.rm == EBP) defaultSeg = SS;
+        }
+    }
+
+    if (modrm.mod == 1) {
+        addr += static_cast<int8_t>(fetch8());
+    } else if (modrm.mod == 2) {
+        addr += fetch32();
+    }
+
+    uint8_t seg = (m_segmentOverride != 0xFF) ? m_segmentOverride : defaultSeg;
+    m_currentEA = (m_cpu.getSegReg(static_cast<SegRegIndex>(seg)) << 4) + addr;
+    m_eaResolved = true;
+    return m_currentEA;
 }
 
 uint32_t InstructionDecoder::readModRM32(const ModRM& modrm) {
@@ -123,6 +189,7 @@ void InstructionDecoder::step() {
     m_hasRepnz = false;
     m_hasRepz = false;
     m_segmentOverride = 0xFF;
+    m_eaResolved = false;
 
     uint8_t opcode = fetch8();
     
