@@ -50,8 +50,9 @@
   - [x] Console I/O (Ah=01h, 02h, 09h, 0Ah, etc.)
   - [x] File I/O (Open, Close, Read, Write, Lseek) using handles
   - [x] Process Control (Ah=4Ch)
-  - [ ] Directory Operations
-  - [ ] Memory Management (Ah=48h, 49h, 4Ah)
+  - [x] Directory Operations (Ah=39h, 3Ah, 3Bh, 47h)
+  - [x] Memory Management (Ah=48h, 49h, 4Ah)
+  - [x] Drive Information (Ah=0Eh, 19h, 36h)
 
 ## Phase 6: Front-End UI
 - [x] VRAM-to-Terminal Rendering (Text mode 80x25)

@@ -24,6 +24,8 @@ private:
     cpu::CPU& m_cpu;
     memory::MemoryBus& m_memory;
     std::string m_currentDir = "."; // Emulated C:\ starting at current host dir
+    uint8_t m_currentDrive = 2;     // 0=A, 1=B, 2=C... default to C:
+    uint32_t m_dtaPtr = 0x00000000; // Pointer to DTA (segmented)
 
     // File handle emulation
     struct FileHandle {
@@ -46,6 +48,8 @@ private:
     void handleDOSService(); // INT 21h
     void handleMemoryManagement(); // AH=48h, 49h, 4Ah
     void handleDirectoryService(); // AH=39h, 3Ah, 3Bh, 47h
+    void handleDriveService();     // AH=0Eh, 19h, 36h
+    void handleDirectorySearch();  // AH=4Eh, 4Fh
     void terminateProcess(uint8_t exitCode); // AH=4Ch or INT 20h
 
     // Helpers

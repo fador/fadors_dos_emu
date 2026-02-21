@@ -58,6 +58,23 @@ void DOS::handleDOSService() {
             std::cout << str;
             break;
         }
+        case 0x1A: { // Set DTA
+            uint16_t ds = m_cpu.getSegReg(cpu::DS);
+            uint16_t dx = m_cpu.getReg16(cpu::DX);
+            m_dtaPtr = (static_cast<uint32_t>(ds) << 16) | dx;
+            LOG_DEBUG("DOS: Set DTA to ", std::hex, ds, ":", dx);
+            break;
+        }
+
+        case 0x2E: { // Set/Reset Verify Flag (Not implemented)
+            LOG_DEBUG("DOS: Set/Reset Verify Flag (AH=2Eh) - Not implemented");
+            break;
+        }
+        case 0x0E: // Select Default Drive
+        case 0x19: // Get Current Default Drive
+        case 0x36: // Get Free Disk Space
+            handleDriveService();
+            break;
         case 0x30: { // Get DOS Version
             LOG_DEBUG("DOS: Get DOS Version");
             m_cpu.setReg8(cpu::AL, 5); // Major 5
@@ -181,6 +198,11 @@ void DOS::handleDOSService() {
         case 0x49: // Free Memory
         case 0x4A: // Resize Block
             handleMemoryManagement();
+            break;
+
+        case 0x4E: // Find First
+        case 0x4F: // Find Next
+            handleDirectorySearch();
             break;
 
         case 0x4C: { // Terminate with return code
@@ -427,6 +449,123 @@ void DOS::handleDirectoryService() {
         LOG_ERROR("DOS Directory Error: ", e.what());
         m_cpu.setReg16(cpu::AX, 0x05); // General failure
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+    }
+}
+
+void DOS::handleDriveService() {
+    uint8_t ah = m_cpu.getReg8(cpu::AH);
+    if (ah == 0x0E) { // Select Default Drive
+        uint8_t drive = m_cpu.getReg8(cpu::DL);
+        m_currentDrive = drive;
+        LOG_DEBUG("DOS: Selected drive ", (int)m_currentDrive);
+        m_cpu.setReg8(cpu::AL, 5); // DOS often returns total logical drives (e.g., 5: A-E)
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    } else if (ah == 0x19) { // Get Current Default Drive
+        m_cpu.setReg8(cpu::AL, m_currentDrive);
+        LOG_DEBUG("DOS: Current drive is ", (int)m_currentDrive);
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    } else if (ah == 0x36) { // Get Free Disk Space
+        uint8_t drive = m_cpu.getReg8(cpu::DL);
+        if (drive == 0) drive = m_currentDrive + 1;
+        
+        LOG_DEBUG("DOS: Get Free Disk Space for drive ", (int)drive);
+        
+        // Mock 1GB total, 500MB free
+        // AX = Sectors per cluster
+        // BX = Number of free clusters
+        // CX = Bytes per sector
+        // DX = Total clusters
+        m_cpu.setReg16(cpu::AX, 32);     // 32 sectors/cluster (16KB clusters)
+        m_cpu.setReg16(cpu::BX, 32768);  // 32768 free clusters (512MB)
+        m_cpu.setReg16(cpu::CX, 512);    // 512 bytes/sector
+        m_cpu.setReg16(cpu::DX, 65535);  // 65535 total clusters (~1GB)
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    }
+}
+
+void DOS::handleDirectorySearch() {
+    uint8_t ah = m_cpu.getReg8(cpu::AH);
+    uint32_t dtaAddr = ((m_dtaPtr >> 16) << 4) + (m_dtaPtr & 0xFFFF);
+
+    if (ah == 0x4E) { // Find First
+        uint16_t ds = m_cpu.getSegReg(cpu::DS);
+        uint16_t dx = m_cpu.getReg16(cpu::DX);
+        std::string pattern = readFilename((ds << 4) + dx);
+        uint8_t attr = m_cpu.getReg8(cpu::CL);
+
+        LOG_DEBUG("DOS: FindFirst '", pattern, "' attr 0x", std::hex, (int)attr);
+
+        // Store pattern in DTA (first 13 bytes)
+        for (int i = 0; i < 13; ++i) {
+            uint8_t c = (i < static_cast<int>(pattern.length())) ? static_cast<uint8_t>(pattern[i]) : 0;
+            m_memory.write8(dtaAddr + i, c);
+        }
+        // Store index 0 in DTA (bytes 14-15)
+        m_memory.write16(dtaAddr + 14, 0);
+
+        // Perform search
+        // For now, very simplified: just list the current directory
+        std::vector<fs::path> matches;
+        try {
+            for (const auto& entry : fs::directory_iterator(m_currentDir)) {
+                // TODO: Actual glob matching. For now, just match anything or fixed names.
+                matches.push_back(entry.path().filename());
+            }
+        } catch (...) {
+            m_cpu.setReg16(cpu::AX, 0x02); // File not found
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+            return;
+        }
+
+        if (matches.empty()) {
+            m_cpu.setReg16(cpu::AX, 0x12); // No more files
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+            return;
+        }
+
+        // Fill DTA with first match
+        auto first = matches[0].string();
+        for (int i = 0; i < 13; ++i) {
+            uint8_t c = (i < static_cast<int>(first.length())) ? static_cast<uint8_t>(first[i]) : 0;
+            m_memory.write8(dtaAddr + 0x1E + i, c);
+        }
+        m_memory.write32(dtaAddr + 0x1A, 0); // Size (mock)
+        
+        m_cpu.setReg16(cpu::AX, 0);
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+
+    } else if (ah == 0x4F) { // Find Next
+        LOG_DEBUG("DOS: FindNext");
+        // Read index from DTA
+        uint16_t index = m_memory.read16(dtaAddr + 14);
+        index++;
+        
+        // Re-scan and find the indexth match (not efficient but correct for HLE)
+        std::vector<fs::path> matches;
+        try {
+            for (const auto& entry : fs::directory_iterator(m_currentDir)) {
+                matches.push_back(entry.path().filename());
+            }
+        } catch (...) {}
+
+        if (index >= matches.size()) {
+            m_cpu.setReg16(cpu::AX, 0x12); // No more files
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+            return;
+        }
+
+        // Store new index
+        m_memory.write16(dtaAddr + 14, index);
+
+        // Fill DTA
+        auto next = matches[index].string();
+        for (int i = 0; i < 13; ++i) {
+            uint8_t c = (i < next.length()) ? static_cast<uint8_t>(next[i]) : 0;
+            m_memory.write8(dtaAddr + 0x1E + i, c);
+        }
+        
+        m_cpu.setReg16(cpu::AX, 0);
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
     }
 }
 
