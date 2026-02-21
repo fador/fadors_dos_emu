@@ -49,11 +49,17 @@ int main(int argc, char* argv[]) {
         // Load program if provided
         if (argc > 1) {
             std::string path = argv[1];
+            std::string args;
+            for (int i = 2; i < argc; ++i) {
+                if (i > 2) args += " ";
+                args += argv[i];
+            }
+
             bool loaded = false;
             if (path.find(".com") != std::string::npos || path.find(".COM") != std::string::npos) {
-                loaded = loader.loadCOM(path, 0x1000);
+                loaded = loader.loadCOM(path, 0x1000, args);
             } else {
-                loaded = loader.loadEXE(path, 0x1000);
+                loaded = loader.loadEXE(path, 0x1000, args);
             }
             if (!loaded) {
                 LOG_ERROR("Failed to load program: ", path);
@@ -66,7 +72,7 @@ int main(int argc, char* argv[]) {
             return 0;
         }
 
-        renderer.clearScreen();
+        // renderer.clearScreen();
 
         bool running = true;
         auto lastRender = std::chrono::steady_clock::now();
@@ -89,17 +95,17 @@ int main(int argc, char* argv[]) {
 
             // Render at ~30 FPS
             auto now = std::chrono::steady_clock::now();
-            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastRender).count() > 33) {
+            /*if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastRender).count() > 33) {
                 renderer.render();
                 lastRender = now;
-            }
+            }*/
 
             // In a real implementation we'd check for termination signals
             // For now, let's keep running or check for specific HALT if implemented
         }
 
         // Final render to show any output before exit
-        renderer.render(true);
+        // renderer.render(true);
 
     } catch (const std::exception& e) {
         LOG_ERROR("Fatal system error: ", e.what());

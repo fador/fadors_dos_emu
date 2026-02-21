@@ -80,6 +80,7 @@ void BIOS::handleVideoService() {
             m_memory.write8(0x450, static_cast<uint8_t>(cursorCol));
             m_memory.write8(0x451, static_cast<uint8_t>(cursorRow));
             
+            std::cerr << (char)al << std::flush;
             LOG_TRACE("BIOS INT 10h: Teletype Output '", (char)al, "' at ", (int)cursorRow, ":", (int)cursorCol);
             break;
         }

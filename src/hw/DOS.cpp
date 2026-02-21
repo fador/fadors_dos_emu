@@ -49,13 +49,13 @@ void DOS::handleDOSService() {
     switch (ah) {
         case 0x02: { // Print Character
             uint8_t c = m_cpu.getReg8(cpu::DL);
-            std::cout << (char)c;
+            std::cerr << (char)c << std::flush;
             break;
         }
         case 0x06: { // Direct Console I/O
             uint8_t dl = m_cpu.getReg8(cpu::DL);
             if (dl != 0xFF) {
-                std::cout << (char)dl;
+                std::cerr << (char)dl << std::flush;
             } else {
                 // Input not implemented, set ZF if no char
                 m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_ZERO);
@@ -69,7 +69,7 @@ void DOS::handleDOSService() {
             
             std::string str = readDOSString(addr);
             // Print to real console
-            std::cout << str;
+            std::cerr << str << std::flush;
             break;
         }
         case 0x1A: { // Set DTA
@@ -163,7 +163,7 @@ void DOS::handleDOSService() {
             if (h == 1 || h == 2) { // Stdout/Stderr
                 std::string s;
                 for (int i = 0; i < cx; ++i) s += (char)m_memory.read8(addr + i);
-                std::cout << s;
+                std::cerr << s << std::flush;
                 m_cpu.setReg16(cpu::AX, cx);
                 m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
             } else if (h >= 5 && (h - 5) < m_fileHandles.size()) {

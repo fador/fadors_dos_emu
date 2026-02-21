@@ -263,38 +263,67 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             break;
         }
 
-        case 0x05: { // ADD EAX/AX, imm16/32
-            if (m_hasPrefix66) {
-                uint32_t imm = fetch32();
-                m_cpu.setReg32(EAX, m_cpu.getReg32(EAX) + imm);
-            } else {
-                uint16_t imm = fetch16();
-                m_cpu.setReg16(AX, m_cpu.getReg16(AX) + imm);
-            }
+        case 0x05: { // ADD AX/EAX, imm16/32
+            if (m_hasPrefix66) m_cpu.setReg32(EAX, m_cpu.getReg32(EAX) + fetch32());
+            else m_cpu.setReg16(AX, m_cpu.getReg16(AX) + fetch16());
             break;
         }
-        case 0x06: // PUSH ES
-            m_cpu.push16(m_cpu.getSegReg(ES));
-            break;
-        case 0x07: // POP ES
-            m_cpu.setSegReg(ES, m_cpu.pop16());
-            break;
-        case 0x0E: // PUSH CS
-            m_cpu.push16(m_cpu.getSegReg(CS));
-            break;
-        case 0x1F: // POP DS
-            m_cpu.setSegReg(DS, m_cpu.pop16());
-            break;
-        case 0x25: { // AND EAX/AX, imm16/32
-            if (m_hasPrefix66) {
-                uint32_t imm = fetch32();
-                m_cpu.setReg32(EAX, m_cpu.getReg32(EAX) & imm);
-            } else {
-                uint16_t imm = fetch16();
-                m_cpu.setReg16(AX, m_cpu.getReg16(AX) & imm);
-            }
+        case 0x0C: m_cpu.setReg8(AL, m_cpu.getReg8(AL) | fetch8()); break;
+        case 0x0D: { // OR AX/EAX, imm16/32
+            if (m_hasPrefix66) m_cpu.setReg32(EAX, m_cpu.getReg32(EAX) | fetch32());
+            else m_cpu.setReg16(AX, m_cpu.getReg16(AX) | fetch16());
             break;
         }
+        case 0x14: m_cpu.setReg8(AL, m_cpu.getReg8(AL) + fetch8() + ((m_cpu.getEFLAGS() & FLAG_CARRY) ? 1 : 0)); break;
+        case 0x15: { // ADC AX/EAX, imm16/32
+            uint8_t cf = (m_cpu.getEFLAGS() & FLAG_CARRY) ? 1 : 0;
+            if (m_hasPrefix66) m_cpu.setReg32(EAX, m_cpu.getReg32(EAX) + fetch32() + cf);
+            else m_cpu.setReg16(AX, m_cpu.getReg16(AX) + fetch16() + cf);
+            break;
+        }
+        case 0x1C: m_cpu.setReg8(AL, m_cpu.getReg8(AL) - (fetch8() + ((m_cpu.getEFLAGS() & FLAG_CARRY) ? 1 : 0))); break;
+        case 0x1D: { // SBB AX/EAX, imm16/32
+            uint8_t cf = (m_cpu.getEFLAGS() & FLAG_CARRY) ? 1 : 0;
+            if (m_hasPrefix66) m_cpu.setReg32(EAX, m_cpu.getReg32(EAX) - (fetch32() + cf));
+            else m_cpu.setReg16(AX, m_cpu.getReg16(AX) - (fetch16() + cf));
+            break;
+        }
+        case 0x24: m_cpu.setReg8(AL, m_cpu.getReg8(AL) & fetch8()); break;
+        case 0x25: { // AND AX/EAX, imm16/32
+            if (m_hasPrefix66) m_cpu.setReg32(EAX, m_cpu.getReg32(EAX) & fetch32());
+            else m_cpu.setReg16(AX, m_cpu.getReg16(AX) & fetch16());
+            break;
+        }
+        case 0x2C: m_cpu.setReg8(AL, m_cpu.getReg8(AL) - fetch8()); break;
+        case 0x2D: { // SUB AX/EAX, imm16/32
+            if (m_hasPrefix66) m_cpu.setReg32(EAX, m_cpu.getReg32(EAX) - fetch32());
+            else m_cpu.setReg16(AX, m_cpu.getReg16(AX) - fetch16());
+            break;
+        }
+        case 0x34: m_cpu.setReg8(AL, m_cpu.getReg8(AL) ^ fetch8()); break;
+        case 0x35: { // XOR AX/EAX, imm16/32
+            if (m_hasPrefix66) m_cpu.setReg32(EAX, m_cpu.getReg32(EAX) ^ fetch32());
+            else m_cpu.setReg16(AX, m_cpu.getReg16(AX) ^ fetch16());
+            break;
+        }
+        case 0x3C: { // CMP AL, imm8
+            fetch8(); // TODO: flags
+            break;
+        }
+        case 0x3D: { // CMP AX/EAX, imm16/32
+            if (m_hasPrefix66) fetch32(); else fetch16(); // TODO: flags
+            break;
+        }
+        case 0x3F: LOG_DEBUG("AAS (0x3F) - stubbed"); break;
+        case 0xD4: fetch8(); LOG_DEBUG("AAM (0xD4) - stubbed"); break;
+        case 0xD5: fetch8(); LOG_DEBUG("AAD (0xD5) - stubbed"); break;
+        case 0x06: m_cpu.push16(m_cpu.getSegReg(ES)); break;
+        case 0x07: m_cpu.setSegReg(ES, m_cpu.pop16()); break;
+        case 0x0E: m_cpu.push16(m_cpu.getSegReg(CS)); break;
+        case 0x16: m_cpu.push16(m_cpu.getSegReg(SS)); break;
+        case 0x17: m_cpu.setSegReg(SS, m_cpu.pop16()); break;
+        case 0x1E: m_cpu.push16(m_cpu.getSegReg(DS)); break;
+        case 0x1F: m_cpu.setSegReg(DS, m_cpu.pop16()); break;
 
         // ADD
         case 0x00: { // ADD r/m8, r8
@@ -677,8 +706,6 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             break;
         }
 
-        // PUSH/POP Segment Registers
-        case 0x1E: m_cpu.push16(m_cpu.getSegReg(DS)); break;
 
         // LOOPs
         case 0xE0: case 0xE1: case 0xE2: case 0xE3: {
@@ -744,7 +771,6 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             break;
         }
 
-        case 0x2C: m_cpu.setReg8(AL, m_cpu.getReg8(AL) - fetch8()); break; // SUB AL, imm8
         case 0xA0: { // MOV AL, [moffs8]
             uint32_t addr = (m_hasPrefix67) ? fetch32() : fetch16();
             uint8_t seg = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;

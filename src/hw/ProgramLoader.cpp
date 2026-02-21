@@ -9,7 +9,7 @@ ProgramLoader::ProgramLoader(cpu::CPU& cpu, memory::MemoryBus& memory)
     : m_cpu(cpu), m_memory(memory) {
 }
 
-bool ProgramLoader::loadCOM(const std::string& path, uint16_t segment) {
+bool ProgramLoader::loadCOM(const std::string& path, uint16_t segment, const std::string& args) {
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file.is_open()) {
         LOG_ERROR("ProgramLoader: Failed to open .COM file: ", path);
@@ -25,7 +25,7 @@ bool ProgramLoader::loadCOM(const std::string& path, uint16_t segment) {
     }
 
     // 1. Create PSP at segment:0000
-    createPSP(segment);
+    createPSP(segment, args);
 
     // 2. Load file data at segment:0100
     uint32_t loadAddr = (segment << 4) + 0x100;
@@ -51,7 +51,7 @@ bool ProgramLoader::loadCOM(const std::string& path, uint16_t segment) {
     return true;
 }
 
-bool ProgramLoader::loadEXE(const std::string& path, uint16_t segment) {
+bool ProgramLoader::loadEXE(const std::string& path, uint16_t segment, const std::string& args) {
     // Basic MZ Parsing
     std::ifstream file(path, std::ios::binary);
     if (!file.is_open()) {
@@ -94,7 +94,7 @@ bool ProgramLoader::loadEXE(const std::string& path, uint16_t segment) {
     
     // For now, let's just use a simple load to segment:0000 (after PSP)
     // Actually, EXE load usually puts PSP at segment, and image at segment + 10h (256 bytes)
-    createPSP(segment);
+    createPSP(segment, args);
     uint16_t loadSegment = segment + 0x10; // Image starts after 256-byte PSP
     uint32_t loadAddr = (loadSegment << 4);
 
@@ -134,7 +134,7 @@ bool ProgramLoader::loadEXE(const std::string& path, uint16_t segment) {
     return true;
 }
 
-void ProgramLoader::createPSP(uint16_t segment) {
+void ProgramLoader::createPSP(uint16_t segment, const std::string& args) {
     uint32_t pspAddr = (segment << 4);
     // INT 20h instruction (CD 20) at offset 0
     m_memory.write8(pspAddr + 0x00, 0xCD);
@@ -143,8 +143,18 @@ void ProgramLoader::createPSP(uint16_t segment) {
     // Segment of top of memory at offset 2 (stubbed to 640KB)
     m_memory.write16(pspAddr + 0x02, 0xA000); 
 
-    // Command tail size (stubbed)
-    m_memory.write8(pspAddr + 0x80, 0);
+    // Environment block segment at offset 0x2C (0 means same as parent, but for boot we can use 0 or a dummy)
+    m_memory.write16(pspAddr + 0x2C, 0); 
+
+    // Command tail size at offset 0x80
+    uint8_t len = static_cast<uint8_t>(std::min<size_t>(args.length(), 126));
+    m_memory.write8(pspAddr + 0x80, len);
+    
+    // Command tail at offset 0x81
+    for (uint8_t i = 0; i < len; ++i) {
+        m_memory.write8(pspAddr + 0x81 + i, static_cast<uint8_t>(args[i]));
+    }
+    m_memory.write8(pspAddr + 0x81 + len, 0x0D); // CR terminator
 }
 
 } // namespace fador::hw
