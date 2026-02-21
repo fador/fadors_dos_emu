@@ -42,7 +42,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(Catch2)
 
-set(TEST_FILES 
+set(TEST_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cpu_behavior.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_instruction_decoder.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_interrupts.cpp"

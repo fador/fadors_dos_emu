@@ -54,10 +54,15 @@
   - [ ] Memory Management (Ah=48h, 49h, 4Ah)
 
 ## Phase 6: Front-End UI
-- [ ] Console/Terminal Text-Mode Renderer backend
-- [ ] Raw keyboard input capture mapper
-- [ ] Basic built-in debugger CLI (disassembly, memory dumping, stepping)
-
-## Phase 7: Graphical Extension (Future)
+- [x] VRAM-to-Terminal Rendering (Text mode 80x25)
+- [x] Keyboard Input Mapping (conio.h based for Windows)
+- [x] Built-in Debugger CLI
+  - [x] Register inspection
+  - [x] Memory dump
+  - [x] Single-step execution
+- [ ] Direct disassembly view
+- [ ] GUI (Optional, maybe SDL2 later)
 - [ ] Decoupled video module
 - [ ] GUI renderer (e.g., SDL2 / OpenGL) focusing on pixel-perfect VGA/CGA rendering
+
+## Phase 7: Graphical Extension (Future)
