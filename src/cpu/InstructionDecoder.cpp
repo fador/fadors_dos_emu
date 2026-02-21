@@ -672,6 +672,9 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             if (m_hasPrefix66) m_cpu.setReg32(EAX, m_memory.read32((m_cpu.getSegReg(DS) << 4) + fetch32()));
             else m_cpu.setReg16(AX, m_memory.read16((m_cpu.getSegReg(DS) << 4) + fetch16()));
             break;
+            case 0xA0: // MOV AL, [imm16]
+                m_cpu.setReg8(AL, m_memory.read8((m_cpu.getSegReg(DS) << 4) + fetch16()));
+                break;
         case 0xA3: // MOV [imm16/32], AX/EAX
             if (m_hasPrefix66) m_memory.write32((m_cpu.getSegReg(DS) << 4) + fetch32(), m_cpu.getReg32(EAX));
             else m_memory.write16((m_cpu.getSegReg(DS) << 4) + fetch16(), m_cpu.getReg16(AX));
@@ -683,6 +686,9 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             m_cpu.setReg16(DI, m_cpu.getReg16(DI) + ((m_cpu.getEFLAGS() & 0x0400) ? -1 : 1));
             m_cpu.setReg16(SI, m_cpu.getReg16(SI) + ((m_cpu.getEFLAGS() & 0x0400) ? -1 : 1));
             break;
+            case 0xDE: // FPU op stub
+                LOG_DEBUG("FPU opcode 0xDE encountered - stubbed");
+                break;
         case 0xA5: // MOVSW/MOVSD
             if (m_hasPrefix66) {
                 m_memory.write32((m_cpu.getSegReg(ES) << 4) + m_cpu.getReg32(EDI), m_memory.read32((m_cpu.getSegReg(DS) << 4) + m_cpu.getReg32(ESI)));

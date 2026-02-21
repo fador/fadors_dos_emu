@@ -84,6 +84,32 @@ void DOS::handleDOSService() {
             LOG_DEBUG("DOS: Set DTA to ", std::hex, ds, ":", dx);
             break;
         }
+        case 0x25: { // Set Interrupt Vector
+            uint8_t intNum = m_cpu.getReg8(cpu::AL);
+            uint16_t ds = m_cpu.getSegReg(cpu::DS);
+            uint16_t dx = m_cpu.getReg16(cpu::DX);
+            uint32_t addr = (ds << 4) + dx;
+            // Write vector
+            m_memory.write16(intNum * 4, dx);
+            m_memory.write16(intNum * 4 + 2, ds);
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+            LOG_DEBUG("DOS: Set INT vector ", intNum, " to ", std::hex, ds, ":", dx);
+            break;
+        }
+        case 0x35: { // Get Interrupt Vector
+            uint8_t intNum = m_cpu.getReg8(cpu::AL);
+            uint16_t seg = m_memory.read16(intNum * 4 + 2);
+            uint16_t off = m_memory.read16(intNum * 4);
+            uint16_t es = m_cpu.getSegReg(cpu::ES);
+            uint16_t bx = m_cpu.getReg16(cpu::BX);
+            uint32_t addr = (es << 4) + bx;
+            m_memory.write16(addr, off);
+            m_memory.write16(addr + 2, seg);
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+            LOG_DEBUG("DOS: Get INT vector ", intNum, " -> ", std::hex, seg, ":", off);
+            break;
+        }
+        
 
         case 0x2E: { // Set/Reset Verify Flag (Not implemented)
             LOG_DEBUG("DOS: Set/Reset Verify Flag (AH=2Eh) - Not implemented");
