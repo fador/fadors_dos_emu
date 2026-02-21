@@ -47,6 +47,41 @@ bool BIOS::handleInterrupt(uint8_t vector) {
         case 0x1A:
             handleTimeService();
             return true;
+        // HLE stubs for common BIOS/system interrupts
+        case 0x11: // Equipment List
+            m_cpu.setReg16(cpu::AX, 0x002F); // Typical: FDD, video, RAM, etc.
+            LOG_DEBUG("BIOS INT 11h: Equipment List (stubbed)");
+            return true;
+        case 0x12: // Memory Size
+            m_cpu.setReg16(cpu::AX, 640); // 640KB conventional
+            LOG_DEBUG("BIOS INT 12h: Memory Size (stubbed)");
+            return true;
+        case 0x14: // Serial Port
+            m_cpu.setReg8(cpu::AH, 0); // No error
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+            LOG_DEBUG("BIOS INT 14h: Serial Port (stubbed)");
+            return true;
+        case 0x15: // System Services
+            m_cpu.setReg8(cpu::AH, 0x86); // Function not supported (default)
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+            LOG_DEBUG("BIOS INT 15h: System Services (stubbed)");
+            return true;
+        case 0x17: // Printer
+            m_cpu.setReg8(cpu::AH, 0); // No error
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+            LOG_DEBUG("BIOS INT 17h: Printer (stubbed)");
+            return true;
+        case 0x2F: // Multiplex/TSR/Network
+            m_cpu.setReg8(cpu::AL, 0); // Not present
+            LOG_DEBUG("BIOS INT 2Fh: Multiplex (stubbed)");
+            return true;
+        case 0x1B: // Ctrl-Break
+        case 0x1C: // Timer Tick
+        case 0x1D: // Video Parameters
+        case 0x1E: // Diskette Params
+        case 0x1F: // Graphics Char Table
+            LOG_DEBUG("BIOS INT ", std::hex, (int)vector, ": System stub (no-op)");
+            return true;
     }
     return false;
 }
@@ -54,34 +89,24 @@ bool BIOS::handleInterrupt(uint8_t vector) {
 void BIOS::handleVideoService() {
     uint8_t ah = m_cpu.getReg8(cpu::AH);
     switch (ah) {
-        case 0x0E: { // Teletype Output
+        case 0x00: { // Set Video Mode
             uint8_t al = m_cpu.getReg8(cpu::AL);
-            // Get cursor position from BDA (0x40:0x50 - Page 0 cursor pos)
-            uint16_t cursorCol = m_memory.read8(0x450);
-            uint16_t cursorRow = m_memory.read8(0x451);
-
-            // Write to VRAM (0xB800:0000)
-            // 80x25 text mode: 2 bytes per char (char, attribute)
-            uint32_t offset = (cursorRow * 80 + cursorCol) * 2;
-            m_memory.write8(0xB8000 + offset, al);
-            m_memory.write8(0xB8000 + offset + 1, 0x07); // Light gray on black
-
-            // Advance cursor
-            cursorCol++;
-            if (cursorCol >= 80) {
-                cursorCol = 0;
-                cursorRow++;
-            }
-            if (cursorRow >= 25) {
-                // Should scroll, but for now just wrap
-                cursorRow = 0;
-            }
-
-            m_memory.write8(0x450, static_cast<uint8_t>(cursorCol));
-            m_memory.write8(0x451, static_cast<uint8_t>(cursorRow));
-            
-            std::cerr << (char)al << std::flush;
-            LOG_TRACE("BIOS INT 10h: Teletype Output '", (char)al, "' at ", (int)cursorRow, ":", (int)cursorCol);
+            // Only text mode 03h supported for now
+            m_memory.write8(0x449, al); // BIOS Data Area: current mode
+            // Clear VRAM
+            for (uint32_t i = 0; i < 80 * 25 * 2; ++i) m_memory.write8(0xB8000 + i, 0);
+            LOG_DEBUG("BIOS INT 10h: Set Video Mode ", (int)al);
+            break;
+        }
+        case 0x0F: { // Get Video Mode
+            m_cpu.setReg8(cpu::AL, m_memory.read8(0x449)); // Current mode
+            m_cpu.setReg8(cpu::AH, 80); // Columns
+            m_cpu.setReg8(cpu::BH, 0); // Active page
+            break;
+        }
+        case 0x01: { // Set Cursor Type
+            m_memory.write16(0x460, m_cpu.getReg16(cpu::CX));
+            LOG_DEBUG("BIOS INT 10h: Set Cursor Type CX=", m_cpu.getReg16(cpu::CX));
             break;
         }
         case 0x02: { // Set Cursor Position
@@ -92,10 +117,49 @@ void BIOS::handleVideoService() {
             LOG_DEBUG("BIOS INT 10h: Set Cursor Position to ", (int)dh, ":", (int)dl);
             break;
         }
-        case 0x03: { // Get Cursor Position
+        case 0x03: { // Get Cursor Position/Type
             m_cpu.setReg8(cpu::DH, m_memory.read8(0x451));
             m_cpu.setReg8(cpu::DL, m_memory.read8(0x450));
-            m_cpu.setReg16(cpu::CX, 0x0607); // Standard cursor shape
+            m_cpu.setReg16(cpu::CX, m_memory.read16(0x460));
+            break;
+        }
+        case 0x05: { // Set Active Page
+            m_memory.write8(0x462, m_cpu.getReg8(cpu::AL));
+            LOG_DEBUG("BIOS INT 10h: Set Active Page ", (int)m_cpu.getReg8(cpu::AL));
+            break;
+        }
+        case 0x06: // Scroll Up
+        case 0x07: { // Scroll Down
+            // For now, just clear the window if whole screen
+            uint8_t al = m_cpu.getReg8(cpu::AL);
+            uint8_t row1 = m_cpu.getReg8(cpu::CH);
+            uint8_t row2 = m_cpu.getReg8(cpu::DH);
+            uint8_t col1 = m_cpu.getReg8(cpu::CL);
+            uint8_t col2 = m_cpu.getReg8(cpu::DL);
+            uint8_t attr = m_cpu.getReg8(cpu::BH);
+            if (row1 == 0 && col1 == 0 && row2 == 24 && col2 == 79) {
+                for (uint32_t i = 0; i < 80 * 25 * 2; i += 2) {
+                    m_memory.write8(0xB8000 + i, ' ');
+                    m_memory.write8(0xB8000 + i + 1, attr);
+                }
+            }
+            LOG_DEBUG("BIOS INT 10h: Scroll ", (ah == 0x06 ? "Up" : "Down"), " AL=", (int)al, " Window=", (int)row1, ",", (int)col1, "-", (int)row2, ",", (int)col2);
+            break;
+        }
+        case 0x0E: { // Teletype Output
+            uint8_t al = m_cpu.getReg8(cpu::AL);
+            uint16_t cursorCol = m_memory.read8(0x450);
+            uint16_t cursorRow = m_memory.read8(0x451);
+            uint32_t offset = (cursorRow * 80 + cursorCol) * 2;
+            m_memory.write8(0xB8000 + offset, al);
+            m_memory.write8(0xB8000 + offset + 1, 0x07);
+            cursorCol++;
+            if (cursorCol >= 80) { cursorCol = 0; cursorRow++; }
+            if (cursorRow >= 25) { cursorRow = 0; }
+            m_memory.write8(0x450, static_cast<uint8_t>(cursorCol));
+            m_memory.write8(0x451, static_cast<uint8_t>(cursorRow));
+            std::cerr << (char)al << std::flush;
+            LOG_TRACE("BIOS INT 10h: Teletype Output '", (char)al, "' at ", (int)cursorRow, ":", (int)cursorCol);
             break;
         }
         default:

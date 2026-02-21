@@ -67,3 +67,22 @@
 - [ ] GUI renderer (e.g., SDL2 / OpenGL) focusing on pixel-perfect VGA/CGA rendering
 
 ## Phase 7: Graphical Extension (Future)
+
+## Missing Features / Compatibility Gaps
+- [ ] High-level emulation (HLE) for more INT vectors:
+  - [ ] INT 11h (Equipment List)
+  - [ ] INT 12h (Memory Size)
+  - [ ] INT 14h (Serial Port)
+  - [ ] INT 15h (System Services)
+  - [ ] INT 17h (Printer)
+  - [ ] INT 2Fh (Multiplex/TSR/Network)
+  - [ ] INT 1Bh, 1Ch, 1Dh, 1Eh, 1Fh (System/Timer/Video/ROM)
+- [ ] More complete INT 10h (Video) support:
+  - [ ] Implement all major AH functions (mode set, cursor, page, palette, block transfer, etc.)
+  - [ ] Support for graphics modes (VGA, EGA, CGA)
+  - [ ] BIOS video state save/restore
+  - [ ] VESA extensions (optional)
+- [ ] More complete INT 13h, 16h, 1Ah, 21h subfunctions
+- [ ] Fallback/logging for unhandled INTs (warn with vector/reg state)
+- [ ] Stubs for common but unimplemented INTs to avoid program crashes
+- [ ] Automated test coverage for INT HLEs
