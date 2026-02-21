@@ -1,5 +1,7 @@
 # Fador's DOS Emulator
 
+!note! This software is more or less AI hallucination, work in progress.
+
 ## Overview
 Fador's DOS Emulator is a multiplatform MS-DOS emulator written in modern C++20. The primary goal is to support all Intel 80386 instructions and most standard BIOS and DOS interrupts.
 
