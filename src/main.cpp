@@ -78,6 +78,12 @@ int main(int argc, char* argv[]) {
             // Execute instruction
             decoder.step();
 
+            if (dos.isTerminated()) {
+                LOG_INFO("Program terminated normally with exit code ", (int)dos.getExitCode());
+                running = false;
+                break;
+            }
+
             // Handle PIT ticks (approximate performance)
             pit.update(); 
 
@@ -91,6 +97,9 @@ int main(int argc, char* argv[]) {
             // In a real implementation we'd check for termination signals
             // For now, let's keep running or check for specific HALT if implemented
         }
+
+        // Final render to show any output before exit
+        renderer.render(true);
 
     } catch (const std::exception& e) {
         LOG_ERROR("Fatal system error: ", e.what());

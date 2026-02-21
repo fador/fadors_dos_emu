@@ -20,12 +20,17 @@ public:
     // Initialization (PSP setup, etc.)
     void initialize();
 
+    bool isTerminated() const { return m_terminated; }
+    uint8_t getExitCode() const { return m_exitCode; }
+
 private:
     cpu::CPU& m_cpu;
     memory::MemoryBus& m_memory;
     std::string m_currentDir = "."; // Emulated C:\ starting at current host dir
     uint8_t m_currentDrive = 2;     // 0=A, 1=B, 2=C... default to C:
     uint32_t m_dtaPtr = 0x00000000; // Pointer to DTA (segmented)
+    bool m_terminated = false;
+    uint8_t m_exitCode = 0;
 
     // File handle emulation
     struct FileHandle {

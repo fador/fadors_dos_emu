@@ -47,13 +47,27 @@ bool DOS::handleInterrupt(uint8_t vector) {
 void DOS::handleDOSService() {
     uint8_t ah = m_cpu.getReg8(cpu::AH);
     switch (ah) {
+        case 0x02: { // Print Character
+            uint8_t c = m_cpu.getReg8(cpu::DL);
+            std::cout << (char)c;
+            break;
+        }
+        case 0x06: { // Direct Console I/O
+            uint8_t dl = m_cpu.getReg8(cpu::DL);
+            if (dl != 0xFF) {
+                std::cout << (char)dl;
+            } else {
+                // Input not implemented, set ZF if no char
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_ZERO);
+            }
+            break;
+        }
         case 0x09: { // Print String
             uint16_t ds = m_cpu.getSegReg(cpu::DS);
             uint16_t dx = m_cpu.getReg16(cpu::DX);
             uint32_t addr = (ds << 4) + dx;
             
             std::string str = readDOSString(addr);
-            LOG_INFO("DOS: PrintString: ", str);
             // Print to real console
             std::cout << str;
             break;
@@ -218,8 +232,8 @@ void DOS::handleDOSService() {
 
 void DOS::terminateProcess(uint8_t exitCode) {
     LOG_INFO("DOS: Process terminated with exit code ", (int)exitCode);
-    // In a real emulator, we might halt or jump back to a shell loop
-    // For now, we'll just log it.
+    m_terminated = true;
+    m_exitCode = exitCode;
 }
 
 std::string DOS::readDOSString(uint32_t address) {
