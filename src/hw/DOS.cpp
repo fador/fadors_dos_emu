@@ -31,16 +31,25 @@ void DOS::initialize() {
     first.size = (0x0FFF - 0x0700 - 1); // 0x8FE paras
     for (int i = 0; i < 8; ++i) first.name[i] = 0;
     writeMCB(FIRST_MCB_SEGMENT, first);
+    m_pspSegment = 0x1000;
 
     // Block 2: 0x0FFF (for block at 0x1000)
     MCB psp;
-    psp.type = 'Z';
-    psp.owner = 0x1000; // Owned by the program
-    psp.size = static_cast<uint16_t>(LAST_PARA - 0x1000 - 1);
+    psp.type = 'M'; // Not the last block anymore
+    psp.owner = m_pspSegment; 
+    psp.size = 0x7000; // 448KB (+ PSP = 512KB total)
     for (int i = 0; i < 8; ++i) psp.name[i] = 0;
     writeMCB(0x1000 - 1, psp);
 
-    LOG_INFO("DOS: Initial MCB chain setup. PSP block at 0x1000, size 0x", std::hex, psp.size, " paras");
+    // Block 3: The rest of memory as free
+    MCB freeRest;
+    freeRest.type = 'Z'; // Last block
+    freeRest.owner = 0;
+    freeRest.size = static_cast<uint16_t>(LAST_PARA - (0x1000 + 0x7000) - 1);
+    for (int i = 0; i < 8; ++i) freeRest.name[i] = 0;
+    writeMCB(0x1000 + 0x7000, freeRest);
+
+    LOG_INFO("DOS: Initial MCB chain setup. PSP block at 0x1000 size 0x7000, Free block at 0x", std::hex, 0x1000 + 0x7000 + 1, " size 0x", freeRest.size);
 
     // Default DTA is at offset 0x80 of the initial PSP
     m_dtaPtr = (0x1000 << 16) | 0x0080;
@@ -468,7 +477,12 @@ void DOS::handleMemoryManagement() {
                 LOG_ERROR("DOS: Corrupted MCB with size 0 at 0x", std::hex, current);
                 break;
             }
-            current = static_cast<uint16_t>(current + mcb.size + 1);
+            uint32_t next = (uint32_t)current + mcb.size + 1;
+            if (next > 0xFFFF || next > LAST_PARA) {
+                LOG_DEBUG("DOS: MCB chain ends/wraps at 0x", std::hex, current, " size 0x", mcb.size);
+                break;
+            }
+            current = static_cast<uint16_t>(next);
         }
 
         if (bestFit != 0) {
@@ -482,14 +496,14 @@ void DOS::handleMemoryManagement() {
                 
                 mcb.type = 'M';
                 mcb.size = requested;
-                mcb.owner = 0xFFFF; // Temporary owner
+                mcb.owner = m_pspSegment; 
                 
                 writeMCB(bestFit, mcb);
                 uint16_t nextMcbSeg = static_cast<uint16_t>(bestFit + requested + 1);
                 writeMCB(nextMcbSeg, next);
                 LOG_DEBUG("DOS: Created new free MCB at 0x", std::hex, nextMcbSeg, " size 0x", next.size);
             } else {
-                mcb.owner = 0xFFFF;
+                mcb.owner = m_pspSegment;
                 writeMCB(bestFit, mcb);
             }
             m_cpu.setReg16(cpu::AX, bestFit + 1);

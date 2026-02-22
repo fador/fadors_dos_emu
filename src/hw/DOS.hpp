@@ -44,7 +44,7 @@ private:
     uint32_t m_dtaPtr = 0x00000000; // Pointer to DTA (segmented)
     bool m_terminated = false;
     uint8_t m_exitCode = 0;
-
+    uint16_t m_pspSegment = 0x1000;
     // VROOMM State
     std::string m_programPath;
     uint16_t m_neAlignShift = 0;

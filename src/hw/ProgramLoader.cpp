@@ -88,6 +88,9 @@ bool ProgramLoader::loadEXE(const std::string& path, uint16_t segment, DOS& dos,
         return false;
     }
 
+    LOG_INFO("ProgramLoader: MZ Stack initial SS:SP = ", std::hex, header.ss, ":", header.sp);
+    LOG_INFO("ProgramLoader: MZ Entry CS:IP = ", std::hex, header.cs, ":", header.ip);
+
     // Check for NE header offset at 0x3C
     file.seekg(0x3C, std::ios::beg);
     uint16_t neOffset = 0;
@@ -170,6 +173,13 @@ bool ProgramLoader::loadEXE(const std::string& path, uint16_t segment, DOS& dos,
             file.read(reinterpret_cast<char*>(&numPages), 2);
             uint32_t mzSize = (numPages - 1) * 512 + (lastPageSize == 0 ? 512 : lastPageSize);
             LOG_INFO("ProgramLoader: MZ Header reports image size 0x", std::hex, mzSize, " bytes");
+
+            file.seekg(10, std::ios::beg);
+            uint16_t minAlloc = 0;
+            file.read(reinterpret_cast<char*>(&minAlloc), 2);
+            uint16_t maxAlloc = 0;
+            file.read(reinterpret_cast<char*>(&maxAlloc), 2);
+            LOG_INFO("ProgramLoader: MZ Header minAlloc=0x", std::hex, minAlloc, " maxAlloc=0x", maxAlloc);
 
             uint32_t firstSegFileOff = 0;
 
