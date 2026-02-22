@@ -68,12 +68,15 @@ bool DOS::handleInterrupt(uint8_t vector) {
                      m_memory.read8(addr+2), " ", m_memory.read8(addr+3));
              LOG_DOS("DOS: VROOMM interpreted: segIndex=", std::dec, segIndex, " (0x", std::hex, segIndex, ") offset=0x", targetOffset);
              
-             if (segIndex >= m_neSegments.size()) {
+             // Borland thunks natively use 1-based segment indices (same as NE specs)
+             uint16_t internalSegIdx = (segIndex > 0) ? segIndex - 1 : 0;
+
+             if (internalSegIdx >= m_neSegments.size()) {
                  LOG_ERROR("DOS: VROOMM invalid segment index ", std::dec, segIndex, " (max=", m_neSegments.size(), ")");
                  return true;
              }
 
-             uint16_t loadedSeg = loadOverlaySegment(segIndex);
+             uint16_t loadedSeg = loadOverlaySegment(internalSegIdx);
              if (loadedSeg == 0) {
                  LOG_ERROR("DOS: VROOMM failed to load segment index ", std::dec, segIndex);
                  return true;
@@ -832,10 +835,10 @@ uint16_t DOS::loadOverlaySegment(uint16_t segIndex) {
             uint8_t r[8];
             file.read(reinterpret_cast<char*>(r), 8);
             
-            uint8_t sourceType = r[0]; // 1=Seg, 2=Far, 3=Offset
+            uint8_t sourceType = r[0]; // Standard NE: 0=LoByte, 2=Segment, 3=Far Addr, 5=Offset
             uint8_t flags = r[1];
             uint16_t nextOffset = *reinterpret_cast<uint16_t*>(&r[2]);
-            uint16_t targetSegIdx = *reinterpret_cast<uint16_t*>(&r[4]);
+            uint16_t targetSegIdx = *reinterpret_cast<uint16_t*>(&r[4]); // 1-based index
             uint16_t targetOffset = *reinterpret_cast<uint16_t*>(&r[6]);
             
             uint8_t relocType = flags & 0x03;
@@ -844,8 +847,7 @@ uint16_t DOS::loadOverlaySegment(uint16_t segIndex) {
             if (relocType == 0) { // Internal Reference
                 uint16_t actualTargetSeg = 0;
                 LOG_DOS("DOS: Reloc Internal index ", std::dec, targetSegIdx, " offset 0x", std::hex, targetOffset, 
-                        " at relOffset 0x", nextOffset, " raw: ", std::hex, (int)r[0], " ", (int)r[1], " ", (int)r[2], 
-                        " ", (int)r[3], " ", (int)r[4], " ", (int)r[5], " ", (int)r[6], " ", (int)r[7]);
+                        " at relOffset 0x", nextOffset);
                 
                 if (targetSegIdx > 0 && targetSegIdx <= m_neSegments.size()) {
                     actualTargetSeg = m_neSegments[targetSegIdx - 1].loadedSegment;
@@ -858,24 +860,42 @@ uint16_t DOS::loadOverlaySegment(uint16_t segIndex) {
                 if (actualTargetSeg == 0) continue;
                 
                 while (nextOffset != 0xFFFF) {
-                    if ((size_t)nextOffset + 1 >= buffer.size()) break;
-                    uint16_t currentSiteValue = *reinterpret_cast<uint16_t*>(&buffer[nextOffset]);
+                    if ((size_t)nextOffset >= buffer.size()) break;
                     
-                    if (sourceType == 1) { // Segment
-                        buffer[nextOffset] = actualTargetSeg & 0xFF;
-                        buffer[nextOffset+1] = (actualTargetSeg >> 8) & 0xFF;
-                    } else if (sourceType == 2) { // Far Address
-                        if ((size_t)nextOffset + 3 >= buffer.size()) break;
-                        buffer[nextOffset] = targetOffset & 0xFF;
-                        buffer[nextOffset+1] = (targetOffset >> 8) & 0xFF;
-                        buffer[nextOffset+2] = actualTargetSeg & 0xFF;
-                        buffer[nextOffset+3] = (actualTargetSeg >> 8) & 0xFF;
-                    } else if (sourceType == 3) { // Offset
-                        buffer[nextOffset] = targetOffset & 0xFF;
-                        buffer[nextOffset+1] = (targetOffset >> 8) & 0xFF;
+                    uint16_t currentSiteValue = 0;
+                    if ((size_t)nextOffset + 1 < buffer.size()) {
+                        currentSiteValue = *reinterpret_cast<uint16_t*>(&buffer[nextOffset]);
                     }
-                    if (additive) break;
-                    nextOffset = currentSiteValue;
+
+                    // For additive relocations, apply the target offset over the existing inline offset.
+                    uint16_t finalOffset = targetOffset;
+                    if (additive) {
+                        finalOffset += currentSiteValue;
+                    }
+
+                    if (sourceType == 2) { // 16-bit Segment (2 bytes)
+                        if ((size_t)nextOffset + 1 < buffer.size()) {
+                            buffer[nextOffset] = actualTargetSeg & 0xFF;
+                            buffer[nextOffset+1] = (actualTargetSeg >> 8) & 0xFF;
+                        }
+                    } else if (sourceType == 3) { // 32-bit Far Address (16-bit offset + 16-bit segment)
+                        if ((size_t)nextOffset + 3 < buffer.size()) {
+                            buffer[nextOffset] = finalOffset & 0xFF;
+                            buffer[nextOffset+1] = (finalOffset >> 8) & 0xFF;
+                            buffer[nextOffset+2] = actualTargetSeg & 0xFF;
+                            buffer[nextOffset+3] = (actualTargetSeg >> 8) & 0xFF;
+                        }
+                    } else if (sourceType == 5) { // 16-bit Offset (2 bytes)
+                        if ((size_t)nextOffset + 1 < buffer.size()) {
+                            buffer[nextOffset] = finalOffset & 0xFF;
+                            buffer[nextOffset+1] = (finalOffset >> 8) & 0xFF;
+                        }
+                    } else if (sourceType == 0) { // 8-bit LoByte (1 byte)
+                        buffer[nextOffset] = finalOffset & 0xFF;
+                    }
+                    
+                    if (additive) break; // Additive relocations do not chain
+                    nextOffset = currentSiteValue; // Move to next item in chain
                 }
             } else if (relocType == 1 || relocType == 2) {
                 // Imported Ordinal / Name - Not implemented yet
