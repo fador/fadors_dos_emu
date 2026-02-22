@@ -74,7 +74,7 @@ int main(int argc, char* argv[]) {
             if (path.find(".com") != std::string::npos || path.find(".COM") != std::string::npos) {
                 loaded = loader.loadCOM(path, 0x1000, args);
             } else {
-                loaded = loader.loadEXE(path, 0x1000, args, useHimem);
+                loaded = loader.loadEXE(path, 0x1000, dos, args, useHimem);
             }
             if (!loaded) {
                 LOG_ERROR("Failed to load program: ", path);

@@ -620,8 +620,6 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                 m_cpu.setReg32(modrm.reg, (uint32_t)result);
                 // CF/OF are set if result doesn't fit in 32 bits
                 uint32_t flags = m_cpu.getEFLAGS();
-                if (result != (int16_t)result) { // Wait, for 32 bit it's (int32_t)result
-                }
                 if (result < -2147483648LL || result > 2147483647LL) flags |= (FLAG_CARRY | FLAG_OVERFLOW);
                 else flags &= ~(FLAG_CARRY | FLAG_OVERFLOW);
                 m_cpu.setEFLAGS(flags);

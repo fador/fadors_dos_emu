@@ -3,6 +3,7 @@
 #include <fstream>
 #include <vector>
 #include "../memory/himem/HIMEM.hpp"
+#include "DOS.hpp"
 
 namespace fador::hw {
 
@@ -52,7 +53,7 @@ bool ProgramLoader::loadCOM(const std::string& path, uint16_t segment, const std
     return true;
 }
 
-bool ProgramLoader::loadEXE(const std::string& path, uint16_t segment, const std::string& args, bool useHimem) {
+bool ProgramLoader::loadEXE(const std::string& path, uint16_t segment, DOS& dos, const std::string& args, bool useHimem) {
     // Basic MZ Parsing
     std::ifstream file(path, std::ios::binary);
     if (!file.is_open()) {
@@ -87,6 +88,85 @@ bool ProgramLoader::loadEXE(const std::string& path, uint16_t segment, const std
         return false;
     }
 
+    // Check for NE header offset at 0x3C
+    file.seekg(0x3C, std::ios::beg);
+    uint16_t neOffset = 0;
+    file.read(reinterpret_cast<char*>(&neOffset), sizeof(neOffset));
+
+    if (neOffset > 0) {
+        file.seekg(neOffset, std::ios::beg);
+        uint16_t neSig = 0;
+        file.read(reinterpret_cast<char*>(&neSig), sizeof(neSig));
+        if (neSig == 0x454E) { // 'NE'
+            LOG_INFO("ProgramLoader: NE Header found at 0x", std::hex, neOffset);
+            
+            // Read NE Header fields for VROOMM
+            file.seekg(neOffset + 0x1C, std::ios::beg);
+            uint16_t numSegments = 0;
+            file.read(reinterpret_cast<char*>(&numSegments), sizeof(numSegments));
+            
+            file.seekg(neOffset + 0x22, std::ios::beg);
+            uint16_t segTableOffset = 0;
+            file.read(reinterpret_cast<char*>(&segTableOffset), sizeof(segTableOffset));
+            
+            file.seekg(neOffset + 0x32, std::ios::beg);
+            uint16_t alignShift = 0;
+            file.read(reinterpret_cast<char*>(&alignShift), sizeof(alignShift));
+            
+            // Read more tables for debugging relocations
+            file.seekg(neOffset + 0x1E, std::ios::beg);
+            uint16_t numModRefs = 0;
+            file.read(reinterpret_cast<char*>(&numModRefs), 2);
+            
+            file.seekg(neOffset + 0x26, std::ios::beg);
+            uint16_t modRefTableOff = 0;
+            file.read(reinterpret_cast<char*>(&modRefTableOff), 2);
+            
+            file.seekg(neOffset + 0x28, std::ios::beg);
+            uint16_t importTableOff = 0;
+            file.read(reinterpret_cast<char*>(&importTableOff), 2);
+            
+            LOG_INFO("ProgramLoader: NE Modules: ", numModRefs, " ModRefOff: 0x", std::hex, modRefTableOff, " ImportOff: 0x", importTableOff);
+            
+            for (int i = 0; i < numModRefs; ++i) {
+                file.seekg(neOffset + modRefTableOff + (i * 2), std::ios::beg);
+                uint16_t nameOff = 0;
+                file.read(reinterpret_cast<char*>(&nameOff), 2);
+                file.seekg(neOffset + importTableOff + nameOff, std::ios::beg);
+                uint8_t len = 0;
+                file.read(reinterpret_cast<char*>(&len), 1);
+                std::string name(len, ' ');
+                file.read(&name[0], len);
+                LOG_INFO("ProgramLoader: Module ", i + 1, ": ", name);
+            }
+
+            // Read Segment Table
+            std::vector<DOS::NESegment> segments;
+            file.seekg(neOffset + segTableOffset, std::ios::beg);
+            for (int i = 0; i < numSegments; ++i) {
+                DOS::NESegment seg;
+                file.read(reinterpret_cast<char*>(&seg.fileOffsetSector), 2);
+                file.read(reinterpret_cast<char*>(&seg.length), 2);
+                file.read(reinterpret_cast<char*>(&seg.flags), 2);
+                file.read(reinterpret_cast<char*>(&seg.minAlloc), 2);
+                
+                // Check if this segment is part of the initial MZ area
+                // In TCC.EXE, usually the first few segments are resident.
+                // For now, let's keep track of them but mark them as not loaded yet
+                // if they are not the primary segment.
+                // Actually, the MZ loader loads the WHOLE FILE area starting from 0 to the end of the MZ image.
+                // The NE segments might point into this area.
+                seg.loadedSegment = 0;
+                segments.push_back(seg);
+                LOG_INFO("ProgramLoader: Segment ", std::dec, i + 1, ": sector=0x", std::hex, seg.fileOffsetSector, 
+                         " len=0x", seg.length, " flags=0x", seg.flags, " minAlloc=0x", seg.minAlloc);
+            }
+            
+            dos.setNEInfo(path, alignShift, segments, segment + 0x10);
+            LOG_INFO("ProgramLoader: VROOMM Info set. Segments: ", std::dec, numSegments, " AlignShift: ", alignShift);
+        }
+    }
+
     // Load actual program image
     uint32_t imageOffset = header.headerSize * 16;
     file.seekg(0, std::ios::end);
@@ -100,7 +180,6 @@ bool ProgramLoader::loadEXE(const std::string& path, uint16_t segment, const std
 
     uint16_t loadSegment = segment + 0x10; // Image starts after 256-byte PSP
     uint32_t loadAddr = (loadSegment << 4);
-
 
     bool loadedToXMS = false;
     std::vector<uint8_t> buffer(imageSize);

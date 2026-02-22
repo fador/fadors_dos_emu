@@ -23,6 +23,16 @@ public:
 
     bool isTerminated() const { return m_terminated; }
     uint8_t getExitCode() const { return m_exitCode; }
+    
+    // VROOMM Overlay Support
+    struct NESegment {
+        uint16_t fileOffsetSector; // Offset in sectors from start of file
+        uint16_t length;           // Length in bytes (0 = 64KB)
+        uint16_t flags;
+        uint16_t minAlloc;         // Minimum paragraphs to allocate
+        uint16_t loadedSegment;    // Actual emulated segment, 0 if not loaded
+    };
+    void setNEInfo(const std::string& path, uint16_t alignShift, const std::vector<NESegment>& segments, uint16_t initialLoadSegment);
 
 private:
     // HIMEM (XMS) support
@@ -34,6 +44,14 @@ private:
     uint32_t m_dtaPtr = 0x00000000; // Pointer to DTA (segmented)
     bool m_terminated = false;
     uint8_t m_exitCode = 0;
+
+    // VROOMM State
+    std::string m_programPath;
+    uint16_t m_neAlignShift = 0;
+    uint16_t m_neInitialLoadSegment = 0;
+    std::vector<NESegment> m_neSegments;
+
+    uint16_t loadOverlaySegment(uint16_t segIndex);
 
     // File handle emulation
     struct FileHandle {

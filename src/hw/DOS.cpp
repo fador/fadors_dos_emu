@@ -54,20 +54,41 @@ bool DOS::handleInterrupt(uint8_t vector) {
         case 0x21: // DOS API
             handleDOSService();
             return true;
-        case 0x3F: { // Overlay Manager / Generic Proxy
-             uint16_t ax = m_cpu.getReg16(cpu::AX);
-             uint16_t dx = m_cpu.getReg16(cpu::DX);
-             uint32_t eip = m_cpu.getEIP();
+        case 0x3F: { // Overlay Manager / Generic Proxy (VROOMM)
              uint16_t cs = m_cpu.getSegReg(cpu::CS);
+             uint32_t eip = m_cpu.getEIP();
              uint32_t addr = (cs << 4) + eip;
              
-             uint32_t metadata = m_memory.read32(addr);
-             LOG_DOS("DOS: INT 3Fh called. AX=0x", std::hex, ax, " DX=0x", dx, 
-                     " DS=0x", m_cpu.getSegReg(cpu::DS), " ES=0x", m_cpu.getSegReg(cpu::ES),
-                     " at ", cs, ":", eip, " metadata: 0x", metadata);
+             // Metadata follows INT 3F: [uint16_t offset, uint16_t segmentIndex]
+             uint16_t targetOffset = m_memory.read16(addr);
+             uint16_t segIndex = m_memory.read16(addr + 2);
              
-             // Advance EIP to skip metadata (assume 4 bytes for thunk table)
-             m_cpu.setEIP(eip + 4);
+             LOG_DOS("DOS: VROOMM INT 3Fh at ", std::hex, cs, ":", (eip-2), ". raw metadata: ", 
+                     m_memory.read8(addr), " ", m_memory.read8(addr+1), " ", 
+                     m_memory.read8(addr+2), " ", m_memory.read8(addr+3));
+             LOG_DOS("DOS: VROOMM interpreted: segIndex=", std::dec, segIndex, " (0x", std::hex, segIndex, ") offset=0x", targetOffset);
+             
+             if (segIndex >= m_neSegments.size()) {
+                 LOG_ERROR("DOS: VROOMM invalid segment index ", std::dec, segIndex, " (max=", m_neSegments.size(), ")");
+                 return true;
+             }
+
+             uint16_t loadedSeg = loadOverlaySegment(segIndex);
+             if (loadedSeg == 0) {
+                 LOG_ERROR("DOS: VROOMM failed to load segment index ", std::dec, segIndex);
+                 return true;
+             }
+
+             // Patch the thunk at [CS:EIP-2] with a JMP FAR (EA OO OO SS SS)
+             uint32_t thunkStart = (cs << 4) + (eip - 2);
+             m_memory.write8(thunkStart, 0xEA); // JMP far
+             m_memory.write16(thunkStart + 1, targetOffset);
+             m_memory.write16(thunkStart + 3, loadedSeg);
+             
+             LOG_DOS("DOS: Thunk at ", std::hex, cs, ":", (eip-2), " patched to JMP ", loadedSeg, ":", targetOffset);
+
+             // Rewind EIP to re-execute the patched instruction
+             m_cpu.setEIP(eip - 2);
              return true;
         }
         case 0x2F: { // Multiplex
@@ -183,10 +204,11 @@ void DOS::handleDOSService() {
         case 0x3D: { // Open File
             uint16_t ds = m_cpu.getSegReg(cpu::DS);
             uint16_t dx = m_cpu.getReg16(cpu::DX);
-            std::string filename = readFilename((ds << 4) + dx);
+            uint32_t nameAddr = (ds << 4) + dx;
+            std::string filename = readFilename(nameAddr);
             uint8_t mode = m_cpu.getReg8(cpu::AL);
 
-            LOG_DOS("DOS: Open file '", filename, "' mode ", (int)mode);
+            LOG_DOS("DOS: Open file '", filename, "' at 0x", std::hex, nameAddr, " mode ", (int)mode);
 
             std::ios_base::openmode openmode = std::ios::binary | std::ios::in;
             if ((mode & 0x03) == 1) openmode = std::ios::binary | std::ios::out;
@@ -738,5 +760,136 @@ void DOS::dumpMCBChain() {
     }
 }
 
+
+void DOS::setNEInfo(const std::string& path, uint16_t alignShift, const std::vector<NESegment>& segments, uint16_t initialLoadSegment) {
+    m_programPath = path;
+    m_neAlignShift = alignShift;
+    m_neSegments = segments;
+    m_neInitialLoadSegment = initialLoadSegment;
+    
+    // Mark the first code segment as loaded if it's already in memory
+    // (Actually, ProgramLoader loads the first segment of code to m_neInitialLoadSegment)
+    if (!m_neSegments.empty()) {
+        m_neSegments[0].loadedSegment = m_neInitialLoadSegment;
+    }
+
+    LOG_INFO("DOS: VROOMM Registered ", segments.size(), " segments. Initial: 0x", std::hex, initialLoadSegment, " AlignShift: ", alignShift);
+}
+
+uint16_t DOS::loadOverlaySegment(uint16_t segIndex) {
+    LOG_DEBUG("DOS: loadOverlaySegment(", std::dec, segIndex, ")");
+    if (segIndex >= m_neSegments.size()) {
+        LOG_ERROR("DOS: loadOverlaySegment out of bounds: ", segIndex);
+        return 0;
+    }
+    if (m_neSegments[segIndex].loadedSegment != 0) return m_neSegments[segIndex].loadedSegment;
+
+    auto& seg = m_neSegments[segIndex];
+    LOG_DOS("DOS: Loading overlay segment ", std::dec, segIndex + 1, " from ", m_programPath);
+    
+    std::ifstream file(m_programPath, std::ios::binary);
+    if (!file) {
+        LOG_ERROR("DOS: Failed to open program file for overlay loading: ", m_programPath);
+        return 0;
+    }
+
+    uint32_t fileOffset = static_cast<uint32_t>(seg.fileOffsetSector) << m_neAlignShift;
+    uint32_t sizeInFile = seg.length == 0 ? 0x10000 : seg.length;
+    uint32_t memSize = seg.minAlloc == 0 ? 0x10000 : seg.minAlloc;
+    if (sizeInFile > memSize) memSize = sizeInFile;
+
+    LOG_DOS("DOS: Overlay seg ", std::dec, segIndex + 1, ": sector=0x", std::hex, seg.fileOffsetSector, 
+            " (fileOff=0x", fileOffset, ") len=0x", seg.length, " flags=0x", seg.flags, " minAlloc=0x", seg.minAlloc);
+
+    uint16_t paragraphs = (uint16_t)((memSize + 15) / 16);
+
+    // Allocate memory using AH=48h logic
+    m_cpu.setReg8(cpu::AH, 0x48);
+    m_cpu.setReg16(cpu::BX, paragraphs);
+    handleMemoryManagement();
+    
+    if (m_cpu.getEFLAGS() & cpu::FLAG_CARRY) {
+        LOG_ERROR("DOS: Failed to allocate memory (", std::dec, paragraphs, " paras) for overlay segment ", segIndex + 1);
+        return 0;
+    }
+    
+    uint16_t targetSegment = (uint16_t)m_cpu.getReg16(cpu::AX);
+    seg.loadedSegment = targetSegment;
+
+    file.seekg(fileOffset, std::ios::beg);
+    std::vector<uint8_t> buffer(paragraphs * 16, 0);
+    file.read(reinterpret_cast<char*>(buffer.data()), sizeInFile);
+    
+    // Check for relocation information (flag 0x0100)
+    if (seg.flags & 0x0100) {
+        LOG_DOS("DOS: Segment ", std::dec, segIndex + 1, " has relocation information.");
+        file.seekg(fileOffset + sizeInFile, std::ios::beg);
+        uint16_t numRelocs = 0;
+        file.read(reinterpret_cast<char*>(&numRelocs), 2);
+        LOG_DOS("DOS: Applying ", std::dec, numRelocs, " fixups...");
+        
+        for (int i = 0; i < numRelocs; ++i) {
+            uint8_t r[8];
+            file.read(reinterpret_cast<char*>(r), 8);
+            
+            uint8_t sourceType = r[0]; // 1=Seg, 2=Far, 3=Offset
+            uint8_t flags = r[1];
+            uint16_t nextOffset = *reinterpret_cast<uint16_t*>(&r[2]);
+            uint16_t targetSegIdx = *reinterpret_cast<uint16_t*>(&r[4]);
+            uint16_t targetOffset = *reinterpret_cast<uint16_t*>(&r[6]);
+            
+            uint8_t relocType = flags & 0x03;
+            bool additive = (flags & 0x04) != 0;
+
+            if (relocType == 0) { // Internal Reference
+                uint16_t actualTargetSeg = 0;
+                LOG_DOS("DOS: Reloc Internal index ", std::dec, targetSegIdx, " offset 0x", std::hex, targetOffset, 
+                        " at relOffset 0x", nextOffset, " raw: ", std::hex, (int)r[0], " ", (int)r[1], " ", (int)r[2], 
+                        " ", (int)r[3], " ", (int)r[4], " ", (int)r[5], " ", (int)r[6], " ", (int)r[7]);
+                
+                if (targetSegIdx > 0 && targetSegIdx <= m_neSegments.size()) {
+                    actualTargetSeg = m_neSegments[targetSegIdx - 1].loadedSegment;
+                    if (actualTargetSeg == 0) actualTargetSeg = loadOverlaySegment(targetSegIdx - 1);
+                } else {
+                    LOG_ERROR("DOS: Reloc Internal Ref invalid segment index ", std::dec, targetSegIdx);
+                    continue;
+                }
+                
+                if (actualTargetSeg == 0) continue;
+                
+                while (nextOffset != 0xFFFF) {
+                    if ((size_t)nextOffset + 1 >= buffer.size()) break;
+                    uint16_t currentSiteValue = *reinterpret_cast<uint16_t*>(&buffer[nextOffset]);
+                    
+                    if (sourceType == 1) { // Segment
+                        buffer[nextOffset] = actualTargetSeg & 0xFF;
+                        buffer[nextOffset+1] = (actualTargetSeg >> 8) & 0xFF;
+                    } else if (sourceType == 2) { // Far Address
+                        if ((size_t)nextOffset + 3 >= buffer.size()) break;
+                        buffer[nextOffset] = targetOffset & 0xFF;
+                        buffer[nextOffset+1] = (targetOffset >> 8) & 0xFF;
+                        buffer[nextOffset+2] = actualTargetSeg & 0xFF;
+                        buffer[nextOffset+3] = (actualTargetSeg >> 8) & 0xFF;
+                    } else if (sourceType == 3) { // Offset
+                        buffer[nextOffset] = targetOffset & 0xFF;
+                        buffer[nextOffset+1] = (targetOffset >> 8) & 0xFF;
+                    }
+                    if (additive) break;
+                    nextOffset = currentSiteValue;
+                }
+            } else if (relocType == 1 || relocType == 2) {
+                // Imported Ordinal / Name - Not implemented yet
+            }
+        }
+    }
+
+    uint32_t targetAddr = (targetSegment << 4);
+    for (uint32_t i = 0; i < buffer.size(); ++i) {
+        m_memory.write8(targetAddr + i, buffer[i]);
+    }
+    
+    LOG_DOS("DOS: Loaded overlay segment ", std::dec, segIndex + 1, " to 0x", std::hex, targetSegment);
+    return targetSegment;
+}
 
 } // namespace fador::hw
