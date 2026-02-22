@@ -100,6 +100,22 @@ bool ProgramLoader::loadEXE(const std::string& path, uint16_t segment, DOS& dos,
         if (neSig == 0x454E) { // 'NE'
             LOG_INFO("ProgramLoader: NE Header found at 0x", std::hex, neOffset);
             
+            file.seekg(neOffset + 0x0E, std::ios::beg);
+            uint16_t appFlags = 0;
+            file.read(reinterpret_cast<char*>(&appFlags), sizeof(appFlags));
+            
+            file.seekg(neOffset + 0x36, std::ios::beg);
+            uint8_t targetOS = 0;
+            file.read(reinterpret_cast<char*>(&targetOS), sizeof(targetOS));
+            LOG_INFO("ProgramLoader: NE Header AppFlags=0x", std::hex, appFlags, " TargetOS=0x", (int)targetOS);
+
+            file.seekg(neOffset + 0x14, std::ios::beg);
+            uint16_t entryIP = 0;
+            file.read(reinterpret_cast<char*>(&entryIP), sizeof(entryIP));
+            uint16_t entrySegIdx = 0;
+            file.read(reinterpret_cast<char*>(&entrySegIdx), sizeof(entrySegIdx));
+            LOG_INFO("ProgramLoader: NE Entry Point: SegIdx=", std::dec, entrySegIdx, " IP=0x", std::hex, entryIP);
+            
             // Read NE Header fields for VROOMM
             file.seekg(neOffset + 0x1C, std::ios::beg);
             uint16_t numSegments = 0;
@@ -142,6 +158,21 @@ bool ProgramLoader::loadEXE(const std::string& path, uint16_t segment, DOS& dos,
 
             // Read Segment Table
             std::vector<DOS::NESegment> segments;
+            
+            file.seekg(neOffset + segTableOffset, std::ios::beg);
+            LOG_INFO("ProgramLoader: NE alignShift=", std::dec, alignShift);
+
+            // Get MZ size to determine which segments are resident
+            file.seekg(2, std::ios::beg);
+            uint16_t lastPageSize = 0;
+            file.read(reinterpret_cast<char*>(&lastPageSize), 2);
+            uint16_t numPages = 0;
+            file.read(reinterpret_cast<char*>(&numPages), 2);
+            uint32_t mzSize = (numPages - 1) * 512 + (lastPageSize == 0 ? 512 : lastPageSize);
+            LOG_INFO("ProgramLoader: MZ Header reports image size 0x", std::hex, mzSize, " bytes");
+
+            uint32_t firstSegFileOff = 0;
+
             file.seekg(neOffset + segTableOffset, std::ios::beg);
             for (int i = 0; i < numSegments; ++i) {
                 DOS::NESegment seg;
@@ -150,14 +181,20 @@ bool ProgramLoader::loadEXE(const std::string& path, uint16_t segment, DOS& dos,
                 file.read(reinterpret_cast<char*>(&seg.flags), 2);
                 file.read(reinterpret_cast<char*>(&seg.minAlloc), 2);
                 
-                // Check if this segment is part of the initial MZ area
-                // In TCC.EXE, usually the first few segments are resident.
-                // For now, let's keep track of them but mark them as not loaded yet
-                // if they are not the primary segment.
-                // Actually, the MZ loader loads the WHOLE FILE area starting from 0 to the end of the MZ image.
-                // The NE segments might point into this area.
-                seg.loadedSegment = 0;
-                segments.push_back(seg);
+                uint32_t fileOff = (uint32_t)seg.fileOffsetSector << alignShift;
+
+                if (fileOff > 0 && fileOff < mzSize) {
+                    uint32_t mzBaseIdx = (uint32_t)header.headerSize * 16;
+                    if (fileOff >= mzBaseIdx) {
+                        seg.loadedSegment = (segment + 0x10) + (uint16_t)((fileOff - mzBaseIdx) / 16);
+                        LOG_INFO("ProgramLoader: Segment ", i + 1, " marked as resident at 0x", std::hex, seg.loadedSegment);
+                    } else {
+                        seg.loadedSegment = 0;
+                    }
+                } else {
+                    seg.loadedSegment = 0;
+                }
+               segments.push_back(seg);
                 LOG_INFO("ProgramLoader: Segment ", std::dec, i + 1, ": sector=0x", std::hex, seg.fileOffsetSector, 
                          " len=0x", seg.length, " flags=0x", seg.flags, " minAlloc=0x", seg.minAlloc);
             }

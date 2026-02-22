@@ -24,11 +24,11 @@ void DOS::initialize() {
     LOG_INFO("DOS: Kernel initialized.");
 
     // Setup initial MCB chain
-    // Block 1: 0x0700 to 0x0FFF (reserved/free)
+    // Block 1: 0x0700 to 0x0FFE (reserved/free)
     MCB first;
     first.type = 'M';
     first.owner = 0x0000;
-    first.size = (0x0FFF - 0x0700);
+    first.size = (0x0FFF - 0x0700 - 1); // 0x8FE paras
     for (int i = 0; i < 8; ++i) first.name[i] = 0;
     writeMCB(FIRST_MCB_SEGMENT, first);
 
@@ -62,16 +62,14 @@ bool DOS::handleInterrupt(uint8_t vector) {
              // Metadata follows INT 3F: [uint16_t offset, uint16_t segmentIndex]
              uint16_t targetOffset = m_memory.read16(addr);
              uint16_t segIndex = m_memory.read16(addr + 2);
-             
-             LOG_DOS("DOS: VROOMM INT 3Fh at ", std::hex, cs, ":", (eip-2), ". raw metadata: ", 
-                     m_memory.read8(addr), " ", m_memory.read8(addr+1), " ", 
+             LOG_DOS("DOS: VROOMM thunk raw: ", std::hex, m_memory.read8(addr), " ", m_memory.read8(addr+1), " ", 
                      m_memory.read8(addr+2), " ", m_memory.read8(addr+3));
              LOG_DOS("DOS: VROOMM interpreted: segIndex=", std::dec, segIndex, " (0x", std::hex, segIndex, ") offset=0x", targetOffset);
              
              // Borland thunks natively use 1-based segment indices (same as NE specs)
+             // Segment 1 is often resident, thunks usually refer to segments 2+
              uint16_t internalSegIdx = (segIndex > 0) ? segIndex - 1 : 0;
-
-             if (internalSegIdx >= m_neSegments.size()) {
+            if (internalSegIdx >= m_neSegments.size()) {
                  LOG_ERROR("DOS: VROOMM invalid segment index ", std::dec, segIndex, " (max=", m_neSegments.size(), ")");
                  return true;
              }
@@ -449,9 +447,16 @@ void DOS::handleMemoryManagement() {
         uint16_t current = FIRST_MCB_SEGMENT;
         uint16_t bestFit = 0;
         uint16_t bestFitSize = 0xFFFF;
+        int mcbCount = 0;
 
         while (true) {
+            if (mcbCount++ > 1000) {
+                LOG_ERROR("DOS: MCB chain corrupted or too long (infinite loop?)");
+                break;
+            }
             MCB mcb = readMCB(current);
+            LOG_DEBUG("DOS: Checking MCB at 0x", std::hex, current, " type=", (char)mcb.type, " owner=0x", mcb.owner, " size=0x", mcb.size);
+            
             if (mcb.owner == 0 && mcb.size >= requested) {
                 if (mcb.size < bestFitSize) {
                     bestFit = current;
@@ -459,11 +464,16 @@ void DOS::handleMemoryManagement() {
                 }
             }
             if (mcb.type == 'Z') break;
+            if (mcb.size == 0 && mcb.type != 'Z') {
+                LOG_ERROR("DOS: Corrupted MCB with size 0 at 0x", std::hex, current);
+                break;
+            }
             current = static_cast<uint16_t>(current + mcb.size + 1);
         }
 
         if (bestFit != 0) {
             MCB mcb = readMCB(bestFit);
+            LOG_DEBUG("DOS: Splitting MCB at 0x", std::hex, bestFit, " requested 0x", requested, " total 0x", mcb.size);
             if (mcb.size > requested + 1) { // Split
                 MCB next;
                 next.type = mcb.type;
@@ -472,20 +482,22 @@ void DOS::handleMemoryManagement() {
                 
                 mcb.type = 'M';
                 mcb.size = requested;
-                mcb.owner = 0xFFFF; // Temporary owner (will be fixed by whoever calls this if they set ES)
+                mcb.owner = 0xFFFF; // Temporary owner
                 
                 writeMCB(bestFit, mcb);
-                writeMCB(static_cast<uint16_t>(bestFit + requested + 1), next);
+                uint16_t nextMcbSeg = static_cast<uint16_t>(bestFit + requested + 1);
+                writeMCB(nextMcbSeg, next);
+                LOG_DEBUG("DOS: Created new free MCB at 0x", std::hex, nextMcbSeg, " size 0x", next.size);
             } else {
                 mcb.owner = 0xFFFF;
                 writeMCB(bestFit, mcb);
             }
             m_cpu.setReg16(cpu::AX, bestFit + 1);
             m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-            LOG_DEBUG("DOS: Allocated ", requested, " paras at segment ", std::hex, bestFit + 1);
+            LOG_DEBUG("DOS: Allocated 0x", std::hex, requested, " paras at 0x", bestFit + 1);
         } else {
-            m_cpu.setReg16(cpu::AX, 0x08); // Insufficient memory
-            m_cpu.setReg16(cpu::BX, bestFitSize == 0xFFFF ? 0 : bestFitSize); // Max available
+            m_cpu.setReg16(cpu::AX, 0x0008); // Insufficient memory
+            m_cpu.setReg16(cpu::BX, 0x0000); // Largest block
             m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
             LOG_WARN("DOS: Failed to allocate ", requested, " paras");
         }
@@ -852,6 +864,9 @@ uint16_t DOS::loadOverlaySegment(uint16_t segIndex) {
                 if (targetSegIdx > 0 && targetSegIdx <= m_neSegments.size()) {
                     actualTargetSeg = m_neSegments[targetSegIdx - 1].loadedSegment;
                     if (actualTargetSeg == 0) actualTargetSeg = loadOverlaySegment(targetSegIdx - 1);
+                } else if (targetSegIdx == 255) {
+                    actualTargetSeg = m_neSegments[segIndex].loadedSegment;
+                    LOG_DOS("DOS: Reloc mapping segment 255 -> self (0x", std::hex, actualTargetSeg, ")");
                 } else {
                     LOG_ERROR("DOS: Reloc Internal Ref invalid segment index ", std::dec, targetSegIdx);
                     continue;
@@ -859,7 +874,13 @@ uint16_t DOS::loadOverlaySegment(uint16_t segIndex) {
                 
                 if (actualTargetSeg == 0) continue;
                 
+                int chainCount = 0;
                 while (nextOffset != 0xFFFF) {
+                    LOG_DEBUG("DOS: Reloc chain site: targetSeg=0x", std::hex, actualTargetSeg, " at relOffset=0x", nextOffset);
+                    if (chainCount++ > 100) {
+                        LOG_ERROR("DOS: Relocation chain too long or cyclic at relOffset 0x", std::hex, nextOffset);
+                        break;
+                    }
                     if ((size_t)nextOffset >= buffer.size()) break;
                     
                     uint16_t currentSiteValue = 0;
