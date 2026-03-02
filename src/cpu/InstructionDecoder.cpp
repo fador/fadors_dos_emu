@@ -12,14 +12,15 @@ InstructionDecoder::InstructionDecoder(CPU& cpu, memory::MemoryBus& memory, hw::
     , m_iobus(iobus)
     , m_bios(bios)
     , m_dos(dos)
+    , m_stepCount(0)
     , m_hasPrefix66(false)
     , m_hasPrefix67(false)
     , m_hasRepnz(false)
     , m_hasRepz(false)
     , m_segmentOverride(0xFF)
     , m_currentEA(0)
+    , m_currentOffset(0)
     , m_eaResolved(false)
-    , m_stepCount(0)
 {
     m_cpu.setMemoryBus(&m_memory);
 }

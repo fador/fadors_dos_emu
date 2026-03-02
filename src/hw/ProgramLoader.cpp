@@ -181,8 +181,6 @@ bool ProgramLoader::loadEXE(const std::string& path, uint16_t segment, DOS& dos,
             file.read(reinterpret_cast<char*>(&maxAlloc), 2);
             LOG_INFO("ProgramLoader: MZ Header minAlloc=0x", std::hex, minAlloc, " maxAlloc=0x", maxAlloc);
 
-            uint32_t firstSegFileOff = 0;
-
             file.seekg(neOffset + segTableOffset, std::ios::beg);
             for (int i = 0; i < numSegments; ++i) {
                 DOS::NESegment seg;
@@ -228,7 +226,6 @@ bool ProgramLoader::loadEXE(const std::string& path, uint16_t segment, DOS& dos,
     uint16_t loadSegment = segment + 0x10; // Image starts after 256-byte PSP
     uint32_t loadAddr = (loadSegment << 4);
 
-    bool loadedToXMS = false;
     std::vector<uint8_t> buffer(imageSize);
     if (!file.read(reinterpret_cast<char*>(buffer.data()), imageSize)) {
         LOG_ERROR("ProgramLoader: Failed to read EXE image");
@@ -245,7 +242,6 @@ bool ProgramLoader::loadEXE(const std::string& path, uint16_t segment, DOS& dos,
                 uint8_t* xmsPtr = g_himem->getBlock(handle);
                 if (xmsPtr) {
                     std::copy(buffer.begin(), buffer.end(), xmsPtr);
-                    loadedToXMS = true;
                     LOG_WARN("ProgramLoader: Loaded EXE into XMS (HIMEM) at handle ", handle, ". This is not true DOS behavior.");
                     // Set CPU state to a fake segment (e.g., 0xF000) for test/demo only
                     m_cpu.setSegReg(cpu::CS, 0xF000);

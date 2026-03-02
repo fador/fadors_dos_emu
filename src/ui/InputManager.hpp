@@ -2,12 +2,16 @@
 #include <cstdint>
 #include "../hw/KeyboardController.hpp"
 
+#ifndef _WIN32
+#include <termios.h>
+#endif
+
 namespace fador::ui {
 
 class InputManager {
 public:
     InputManager(hw::KeyboardController& kbd);
-    ~InputManager() = default;
+    ~InputManager();
 
     // Checks for host keyboard input and pushes scancodes to the controller
     // Returns true if input was processed
@@ -18,10 +22,11 @@ private:
 
     // Maps ASCII/Special keys to PC/XT scancodes
     void handleKey(int key, bool pressed);
-    
-    // Windows-specific non-blocking input check
-    bool kbhit();
-    int getch();
+
+#ifndef _WIN32
+    struct termios m_origTermios;
+    bool m_rawMode = false;
+#endif
 };
 
 } // namespace fador::ui
