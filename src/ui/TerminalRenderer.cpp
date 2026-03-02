@@ -56,16 +56,39 @@ void TerminalRenderer::render(bool force) {
 }
 
 const char* TerminalRenderer::getAnsiColor(uint8_t color, bool background) {
-    switch (color & 0x07) {
-        case 0: return background ? "40" : "30"; // Black
-        case 1: return background ? "44" : "34"; // Blue
-        case 2: return background ? "42" : "32"; // Green
-        case 3: return background ? "46" : "36"; // Cyan
-        case 4: return background ? "41" : "31"; // Red
-        case 5: return background ? "45" : "35"; // Magenta
-        case 6: return background ? "43" : "33"; // Brown/Yellow
-        case 7: return background ? "47" : "37"; // Light Gray
-        default: return background ? "40" : "37";
+    if (background) {
+        // Background uses 3 bits (0-7)
+        switch (color & 0x07) {
+            case 0: return "40"; // Black
+            case 1: return "44"; // Blue
+            case 2: return "42"; // Green
+            case 3: return "46"; // Cyan
+            case 4: return "41"; // Red
+            case 5: return "45"; // Magenta
+            case 6: return "43"; // Brown/Yellow
+            case 7: return "47"; // Light Gray
+            default: return "40";
+        }
+    }
+    // Foreground uses 4 bits (0-15), with 8-15 being bright/bold variants
+    switch (color & 0x0F) {
+        case 0:  return "30";  // Black
+        case 1:  return "34";  // Blue
+        case 2:  return "32";  // Green
+        case 3:  return "36";  // Cyan
+        case 4:  return "31";  // Red
+        case 5:  return "35";  // Magenta
+        case 6:  return "33";  // Brown/Yellow
+        case 7:  return "37";  // Light Gray
+        case 8:  return "90";  // Dark Gray (bright black)
+        case 9:  return "94";  // Bright Blue
+        case 10: return "92";  // Bright Green
+        case 11: return "96";  // Bright Cyan
+        case 12: return "91";  // Bright Red
+        case 13: return "95";  // Bright Magenta
+        case 14: return "93";  // Bright Yellow
+        case 15: return "97";  // Bright White
+        default: return "37";
     }
 }
 

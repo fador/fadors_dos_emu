@@ -34,6 +34,9 @@ public:
     };
     void setNEInfo(const std::string& path, uint16_t alignShift, const std::vector<NESegment>& segments, uint16_t initialLoadSegment);
 
+    // Set the working directory to the program's parent directory
+    void setProgramDir(const std::string& programPath);
+
 private:
     // HIMEM (XMS) support
     std::unique_ptr<memory::HIMEM> m_himem;
@@ -86,6 +89,7 @@ private:
     std::string readDOSString(uint32_t address); // Read '$' terminated string
     std::string readFilename(uint32_t address);  // Read null-terminated string
     void writeCharToVRAM(uint8_t c);             // Teletype-style output to B800 VRAM
+    std::string resolvePath(const std::string& path); // Resolve relative paths against m_currentDir
 };
 
 } // namespace fador::hw

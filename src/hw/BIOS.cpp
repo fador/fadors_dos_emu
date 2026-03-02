@@ -4,6 +4,7 @@
 #include "../utils/Logger.hpp"
 #include <fstream>
 #include <algorithm>
+#include <thread>
 
 namespace fador::hw {
 
@@ -490,8 +491,12 @@ void BIOS::handleVideoService() {
             LOG_DEBUG("BIOS INT 10h AH=1Bh: State Info (filled)");
             break;
         }
-        case 0xFE: { // VBE Protected Mode Info
-            LOG_DEBUG("BIOS INT 10h AH=FEh: VBE PM Info (stubbed)");
+        case 0xFE: { // Get Video Buffer Segment (Borland/TopView API)
+            // Programs pass a guessed video segment in ES:DI and expect
+            // ES to be updated with the actual segment to write to.
+            // For text mode on CGA/EGA/VGA the answer is always B800h.
+            m_cpu.setSegReg(cpu::ES, 0xB800);
+            LOG_DEBUG("BIOS INT 10h AH=FEh: Get Video Buffer -> ES=B800h");
             break;
         }
         default:
@@ -503,25 +508,36 @@ void BIOS::handleVideoService() {
 void BIOS::handleKeyboardService() {
     uint8_t ah = m_cpu.getReg8(cpu::AH);
     switch (ah) {
+        case 0x10: // Enhanced Read (fall through to 00h)
         case 0x00: { // Read Character (Blocking)
-            LOG_TRACE("BIOS INT 16h: Read Character (Blocking)");
-            // In a better emulator, we'd yield or loop until a key is pushed
-            // For now, we just check and return whatever is in the buffer or 0
-            uint8_t scancode = m_kbd.read8(0x60);
-            m_cpu.setReg16(cpu::AX, (static_cast<uint16_t>(scancode) << 8)); // Scancode in AH, ASCII in AL (simplified)
+            if (!m_kbd.hasKey()) {
+                // No key available — rewind EIP so INT 16h re-executes
+                // next step(), giving the main loop a chance to poll input.
+                m_cpu.setEIP(m_cpu.getEIP() - 2);
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                return;
+            }
+            auto [ascii, scancode] = m_kbd.popKey();
+            m_cpu.setReg16(cpu::AX,
+                (static_cast<uint16_t>(scancode) << 8) | ascii);
+            LOG_TRACE("BIOS INT 16h AH=00h: key scan=", std::hex, (int)scancode,
+                      " ascii=", (int)ascii);
             break;
         }
-        case 0x01: { // Get Keyboard Status
-            uint8_t status = m_kbd.read8(0x64);
-            if (status & 0x01) {
-                m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_ZERO);
-                // Return character in AX without removing it (peek)
-                // This is slightly tricky as our KBD buffer pops on read60.
-                // For HLE, we might need a peek function.
-                m_cpu.setReg16(cpu::AX, 0); // Mock for now
+        case 0x11: // Enhanced Status (fall through to 01h)
+        case 0x01: { // Get Keyboard Status (peek, don't consume)
+            if (m_kbd.hasKey()) {
+                auto [ascii, scancode] = m_kbd.peekKey();
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_ZERO); // ZF=0 → key available
+                m_cpu.setReg16(cpu::AX,
+                    (static_cast<uint16_t>(scancode) << 8) | ascii);
             } else {
-                m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_ZERO);
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_ZERO);  // ZF=1 → no key
             }
+            break;
+        }
+        case 0x02: { // Get Shift Flags
+            m_cpu.setReg8(cpu::AL, 0); // No modifier keys pressed
             break;
         }
         default:
@@ -532,12 +548,29 @@ void BIOS::handleKeyboardService() {
 
 void BIOS::initialize() {
     // 1. Setup BDA (BIOS Data Area) at 0x40:0x00
-    // Cursor position already handled at 0x450
-    m_memory.write8(0x450, 0); // Col
-    m_memory.write8(0x451, 0); // Row
-    
+    m_memory.write8(0x449, 0x03);    // Current video mode: 80x25 color text
+    m_memory.write16(0x44A, 80);     // Number of columns
+    m_memory.write16(0x44C, 80*25*2);// Page size in bytes
+    m_memory.write16(0x44E, 0);      // Current page offset
+    // Cursor positions for all 8 pages
+    for (int p = 0; p < 8; ++p) {
+        m_memory.write8(0x450 + p * 2, 0); // Col
+        m_memory.write8(0x450 + p * 2 + 1, 0); // Row
+    }
+    m_memory.write16(0x460, 0x0607); // Cursor type: start=6 end=7
+    m_memory.write8(0x462, 0);       // Active video page
+    m_memory.write16(0x463, 0x3D4);  // CRTC base I/O port (color)
+    m_memory.write8(0x484, 24);      // Number of rows - 1
+    m_memory.write16(0x485, 16);     // Character height in pixels
+
     // Memory size at 0x40:0x13
     m_memory.write16(0x413, 640); // 640KB conventional memory
+
+    // Initialize VRAM to spaces with default attribute
+    for (uint32_t i = 0; i < 80 * 25 * 2; i += 2) {
+        m_memory.write8(0xB8000 + i, ' ');
+        m_memory.write8(0xB8000 + i + 1, 0x07);
+    }
 
     // 2. Setup IVT (Interrupt Vector Table) vectors
     // Even though we HLE, we point them to a dummy IRET at 0xFFFF:0x000E

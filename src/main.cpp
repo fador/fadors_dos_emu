@@ -99,6 +99,7 @@ int main(int argc, char* argv[]) {
                 LOG_ERROR("Failed to load program: ", path);
                 return 1;
             }
+            dos.setProgramDir(path);
         } else {
             LOG_WARN("No program specified. Use: fadors_emu [--himem] [--debug=cpu,video,dos] <program.com|exe> [program-args...]");
             // Start debugger by default if no program

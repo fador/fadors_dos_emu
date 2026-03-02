@@ -141,6 +141,17 @@ void DOS::handleDOSService() {
             std::cerr << str << std::flush;
             break;
         }
+        case 0x0A: { // Buffered Keyboard Input
+            uint16_t ds = m_cpu.getSegReg(cpu::DS);
+            uint16_t dx = m_cpu.getReg16(cpu::DX);
+            uint32_t bufAddr = (ds << 4) + dx;
+            uint8_t maxLen = m_memory.read8(bufAddr); // First byte = max chars
+            // For now, store empty input (0 chars read, CR terminated)
+            m_memory.write8(bufAddr + 1, 0);    // Actual chars read = 0
+            m_memory.write8(bufAddr + 2, 0x0D); // CR terminator
+            LOG_DOS("DOS: Buffered Input (stubbed, max=", (int)maxLen, ")");
+            break;
+        }
         case 0x1A: { // Set DTA
             uint16_t ds = m_cpu.getSegReg(cpu::DS);
             uint16_t dx = m_cpu.getReg16(cpu::DX);
@@ -233,7 +244,7 @@ void DOS::handleDOSService() {
             uint16_t ds = m_cpu.getSegReg(cpu::DS);
             uint16_t dx = m_cpu.getReg16(cpu::DX);
             uint32_t nameAddr = (ds << 4) + dx;
-            std::string filename = readFilename(nameAddr);
+            std::string filename = resolvePath(readFilename(nameAddr));
 
             LOG_DOS("DOS: Create file '", filename, "'");
 
@@ -264,7 +275,7 @@ void DOS::handleDOSService() {
             uint16_t ds = m_cpu.getSegReg(cpu::DS);
             uint16_t dx = m_cpu.getReg16(cpu::DX);
             uint32_t nameAddr = (ds << 4) + dx;
-            std::string filename = readFilename(nameAddr);
+            std::string filename = resolvePath(readFilename(nameAddr));
             uint8_t mode = m_cpu.getReg8(cpu::AL);
 
             LOG_DOS("DOS: Open file '", filename, "' at 0x", std::hex, nameAddr, " mode ", (int)mode);
@@ -417,7 +428,7 @@ void DOS::handleDOSService() {
             uint8_t  al = m_cpu.getReg8(cpu::AL);
             uint16_t ds = m_cpu.getSegReg(cpu::DS);
             uint16_t dx = m_cpu.getReg16(cpu::DX);
-            std::string filename = readFilename((static_cast<uint32_t>(ds) << 4) + dx);
+            std::string filename = resolvePath(readFilename((static_cast<uint32_t>(ds) << 4) + dx));
             LOG_DOS("DOS: Get/Set Attributes AL=", (int)al, " file='", filename, "'");
 
             if (al == 0x00) { // Get attributes
@@ -487,7 +498,7 @@ void DOS::handleDOSService() {
             uint8_t mode = m_cpu.getReg8(cpu::AL);
             uint16_t ds = m_cpu.getSegReg(cpu::DS);
             uint16_t dx = m_cpu.getReg16(cpu::DX);
-            std::string filename = readFilename((ds << 4) + dx);
+            std::string filename = resolvePath(readFilename((ds << 4) + dx));
             LOG_DOS("DOS: Exec '", filename, "' mode ", (int)mode);
             m_cpu.setReg16(cpu::AX, 0x02); // File not found (simplified stub)
             m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
@@ -568,6 +579,20 @@ std::string DOS::readFilename(uint32_t address) {
         result += (char)c;
     }
     return result;
+}
+
+void DOS::setProgramDir(const std::string& programPath) {
+    fs::path p = fs::absolute(programPath);
+    m_currentDir = p.parent_path().string();
+    LOG_INFO("DOS: Working directory set to '", m_currentDir, "'");
+}
+
+std::string DOS::resolvePath(const std::string& path) {
+    // If path is already absolute, use as-is
+    fs::path p(path);
+    if (p.is_absolute()) return path;
+    // Resolve relative to m_currentDir
+    return (fs::path(m_currentDir) / p).string();
 }
 
 void DOS::writeCharToVRAM(uint8_t c) {
@@ -791,7 +816,7 @@ void DOS::handleDirectoryService() {
 
     try {
         if (ah == 0x39) { // MKDIR
-            std::string path = readFilename(addr);
+            std::string path = resolvePath(readFilename(addr));
             LOG_DEBUG("DOS: MKDIR '", path, "'");
             if (fs::create_directory(path)) {
                 m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
@@ -801,7 +826,7 @@ void DOS::handleDirectoryService() {
                 m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
             }
         } else if (ah == 0x3A) { // RMDIR
-            std::string path = readFilename(addr);
+            std::string path = resolvePath(readFilename(addr));
             LOG_DEBUG("DOS: RMDIR '", path, "'");
             if (fs::remove(path)) {
                 m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
@@ -811,7 +836,7 @@ void DOS::handleDirectoryService() {
                 m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
             }
         } else if (ah == 0x3B) { // CHDIR
-            std::string path = readFilename(addr);
+            std::string path = resolvePath(readFilename(addr));
             LOG_DEBUG("DOS: CHDIR '", path, "'");
             if (fs::exists(path) && fs::is_directory(path)) {
                 m_currentDir = path;
@@ -885,7 +910,7 @@ void DOS::handleDirectorySearch() {
     if (ah == 0x4E) { // Find First
         uint16_t ds = m_cpu.getSegReg(cpu::DS);
         uint16_t dx = m_cpu.getReg16(cpu::DX);
-        std::string pattern = readFilename((ds << 4) + dx);
+        std::string pattern = resolvePath(readFilename((ds << 4) + dx));
         uint8_t attr = m_cpu.getReg8(cpu::CL);
 
         LOG_DEBUG("DOS: FindFirst '", pattern, "' attr 0x", std::hex, (int)attr);

@@ -82,33 +82,74 @@ bool InputManager::pollInput() {
 
 void InputManager::handleKey(int key, bool pressed) {
     uint8_t scancode = 0;
-    
-    // Simple mapping for demonstration
-    // In a full implementation, we'd have a large switch or map
+    uint8_t ascii = 0;
+
+    // Full ASCII-to-PC/XT scancode mapping
     switch (key) {
-        case 27:   scancode = 0x01; break; // ESC
-        case '1':  scancode = 0x02; break;
-        case '2':  scancode = 0x03; break;
-        case 'w':  scancode = 0x11; break;
-        case 'a':  scancode = 0x1E; break;
-        case 's':  scancode = 0x1F; break;
-        case 'd':  scancode = 0x20; break;
-        case 13:   scancode = 0x1C; break; // Enter
-        case ' ':  scancode = 0x39; break; // Space
-        case 8:    scancode = 0x0E; break; // Backspace
-        
-        // Arrow keys (Extended)
-        case 0x148: scancode = 0x48; break; // Up
-        case 0x150: scancode = 0x50; break; // Down
-        case 0x14B: scancode = 0x4B; break; // Left
-        case 0x14D: scancode = 0x4D; break; // Right
+        case 27:            scancode = 0x01; ascii = 27;  break; // ESC
+        case '1': case '!': scancode = 0x02; ascii = static_cast<uint8_t>(key); break;
+        case '2': case '@': scancode = 0x03; ascii = static_cast<uint8_t>(key); break;
+        case '3': case '#': scancode = 0x04; ascii = static_cast<uint8_t>(key); break;
+        case '4': case '$': scancode = 0x05; ascii = static_cast<uint8_t>(key); break;
+        case '5': case '%': scancode = 0x06; ascii = static_cast<uint8_t>(key); break;
+        case '6': case '^': scancode = 0x07; ascii = static_cast<uint8_t>(key); break;
+        case '7': case '&': scancode = 0x08; ascii = static_cast<uint8_t>(key); break;
+        case '8': case '*': scancode = 0x09; ascii = static_cast<uint8_t>(key); break;
+        case '9': case '(': scancode = 0x0A; ascii = static_cast<uint8_t>(key); break;
+        case '0': case ')': scancode = 0x0B; ascii = static_cast<uint8_t>(key); break;
+        case '-': case '_': scancode = 0x0C; ascii = static_cast<uint8_t>(key); break;
+        case '=': case '+': scancode = 0x0D; ascii = static_cast<uint8_t>(key); break;
+        case 8:   case 127: scancode = 0x0E; ascii = 8;   break; // Backspace (127 = DEL on some terminals)
+        case 9:             scancode = 0x0F; ascii = 9;   break; // Tab
+        case 'q': case 'Q': scancode = 0x10; ascii = static_cast<uint8_t>(key); break;
+        case 'w': case 'W': scancode = 0x11; ascii = static_cast<uint8_t>(key); break;
+        case 'e': case 'E': scancode = 0x12; ascii = static_cast<uint8_t>(key); break;
+        case 'r': case 'R': scancode = 0x13; ascii = static_cast<uint8_t>(key); break;
+        case 't': case 'T': scancode = 0x14; ascii = static_cast<uint8_t>(key); break;
+        case 'y': case 'Y': scancode = 0x15; ascii = static_cast<uint8_t>(key); break;
+        case 'u': case 'U': scancode = 0x16; ascii = static_cast<uint8_t>(key); break;
+        case 'i': case 'I': scancode = 0x17; ascii = static_cast<uint8_t>(key); break;
+        case 'o': case 'O': scancode = 0x18; ascii = static_cast<uint8_t>(key); break;
+        case 'p': case 'P': scancode = 0x19; ascii = static_cast<uint8_t>(key); break;
+        case '[': case '{': scancode = 0x1A; ascii = static_cast<uint8_t>(key); break;
+        case ']': case '}': scancode = 0x1B; ascii = static_cast<uint8_t>(key); break;
+        case 13:  case 10:  scancode = 0x1C; ascii = 13;  break; // Enter
+        case 'a': case 'A': scancode = 0x1E; ascii = static_cast<uint8_t>(key); break;
+        case 's': case 'S': scancode = 0x1F; ascii = static_cast<uint8_t>(key); break;
+        case 'd': case 'D': scancode = 0x20; ascii = static_cast<uint8_t>(key); break;
+        case 'f': case 'F': scancode = 0x21; ascii = static_cast<uint8_t>(key); break;
+        case 'g': case 'G': scancode = 0x22; ascii = static_cast<uint8_t>(key); break;
+        case 'h': case 'H': scancode = 0x23; ascii = static_cast<uint8_t>(key); break;
+        case 'j': case 'J': scancode = 0x24; ascii = static_cast<uint8_t>(key); break;
+        case 'k': case 'K': scancode = 0x25; ascii = static_cast<uint8_t>(key); break;
+        case 'l': case 'L': scancode = 0x26; ascii = static_cast<uint8_t>(key); break;
+        case ';': case ':': scancode = 0x27; ascii = static_cast<uint8_t>(key); break;
+        case '\'': case '"': scancode = 0x28; ascii = static_cast<uint8_t>(key); break;
+        case '`': case '~': scancode = 0x29; ascii = static_cast<uint8_t>(key); break;
+        case '\\': case '|': scancode = 0x2B; ascii = static_cast<uint8_t>(key); break;
+        case 'z': case 'Z': scancode = 0x2C; ascii = static_cast<uint8_t>(key); break;
+        case 'x': case 'X': scancode = 0x2D; ascii = static_cast<uint8_t>(key); break;
+        case 'c': case 'C': scancode = 0x2E; ascii = static_cast<uint8_t>(key); break;
+        case 'v': case 'V': scancode = 0x2F; ascii = static_cast<uint8_t>(key); break;
+        case 'b': case 'B': scancode = 0x30; ascii = static_cast<uint8_t>(key); break;
+        case 'n': case 'N': scancode = 0x31; ascii = static_cast<uint8_t>(key); break;
+        case 'm': case 'M': scancode = 0x32; ascii = static_cast<uint8_t>(key); break;
+        case ',': case '<': scancode = 0x33; ascii = static_cast<uint8_t>(key); break;
+        case '.': case '>': scancode = 0x34; ascii = static_cast<uint8_t>(key); break;
+        case '/': case '?': scancode = 0x35; ascii = static_cast<uint8_t>(key); break;
+        case ' ':           scancode = 0x39; ascii = ' '; break;
+        // Arrow keys (extended - no ASCII)
+        case 0x148: scancode = 0x48; ascii = 0; break; // Up
+        case 0x150: scancode = 0x50; ascii = 0; break; // Down
+        case 0x14B: scancode = 0x4B; ascii = 0; break; // Left
+        case 0x14D: scancode = 0x4D; ascii = 0; break; // Right
     }
 
     if (scancode != 0) {
         if (pressed) {
-            m_kbd.pushScancode(scancode);
+            m_kbd.pushKey(ascii, scancode);
         } else {
-            m_kbd.pushScancode(scancode | 0x80); // Break code
+            m_kbd.pushKey(0, scancode | 0x80); // Break code
         }
     }
 }
