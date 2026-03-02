@@ -116,12 +116,14 @@ void DOS::handleDOSService() {
     switch (ah) {
         case 0x02: { // Print Character
             uint8_t c = m_cpu.getReg8(cpu::DL);
+            writeCharToVRAM(c);
             std::cerr << (char)c << std::flush;
             break;
         }
         case 0x06: { // Direct Console I/O
             uint8_t dl = m_cpu.getReg8(cpu::DL);
             if (dl != 0xFF) {
+                writeCharToVRAM(dl);
                 std::cerr << (char)dl << std::flush;
             } else {
                 // Input not implemented, set ZF if no char
@@ -135,7 +137,7 @@ void DOS::handleDOSService() {
             uint32_t addr = (ds << 4) + dx;
             
             std::string str = readDOSString(addr);
-            // Print to real console
+            for (uint8_t c : str) writeCharToVRAM(c);
             std::cerr << str << std::flush;
             break;
         }
@@ -203,12 +205,59 @@ void DOS::handleDOSService() {
         case 0x36: // Get Free Disk Space
             handleDriveService();
             break;
+        case 0x37: { // Get/Set Switch Character
+            uint8_t al = m_cpu.getReg8(cpu::AL);
+            if (al == 0x00) {
+                // Get switch character
+                m_cpu.setReg8(cpu::DL, '/'); // Standard DOS switch char
+                m_cpu.setReg8(cpu::AL, 0x00); // Success
+                LOG_DOS("DOS: Get Switch Character -> '/'");
+            } else if (al == 0x01) {
+                // Set switch character — accept but ignore
+                m_cpu.setReg8(cpu::AL, 0x00);
+                LOG_DOS("DOS: Set Switch Character (ignored)");
+            } else {
+                m_cpu.setReg8(cpu::AL, 0xFF); // Invalid subfunction
+            }
+            break;
+        }
         case 0x30: { // Get DOS Version
             LOG_DOS("DOS: Get DOS Version (Reported: 5.0)");
             m_cpu.setReg8(cpu::AL, 5); // Major 5
             m_cpu.setReg8(cpu::AH, 0); // Minor 0
             m_cpu.setReg16(cpu::BX, 0xFF00); // OEM
             m_cpu.setReg16(cpu::CX, 0x0000);
+            break;
+        }
+        case 0x3C: { // Create File
+            uint16_t ds = m_cpu.getSegReg(cpu::DS);
+            uint16_t dx = m_cpu.getReg16(cpu::DX);
+            uint32_t nameAddr = (ds << 4) + dx;
+            std::string filename = readFilename(nameAddr);
+
+            LOG_DOS("DOS: Create file '", filename, "'");
+
+            auto handle = std::make_unique<FileHandle>();
+            handle->path = filename;
+            // Create/truncate the file for read+write
+            handle->stream.open(filename, std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc);
+            if (!handle->stream.is_open()) {
+                // File may not exist yet; create it then reopen for r/w
+                { std::ofstream touch(filename, std::ios::binary); }
+                handle->stream.open(filename, std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc);
+            }
+
+            if (handle->stream.is_open()) {
+                m_fileHandles.push_back(std::move(handle));
+                uint16_t h = static_cast<uint16_t>(m_fileHandles.size() + 4);
+                m_cpu.setReg16(cpu::AX, h);
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+                LOG_DOS("DOS: Created '", filename, "' as handle ", h);
+            } else {
+                m_cpu.setReg16(cpu::AX, 0x03); // Path not found
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+                LOG_WARN("DOS: Failed to create '", filename, "'");
+            }
             break;
         }
         case 0x3D: { // Open File
@@ -313,7 +362,11 @@ void DOS::handleDOSService() {
 
             if (h == 1 || h == 2) { // Stdout/Stderr
                 std::string s;
-                for (int i = 0; i < cx; ++i) s += (char)m_memory.read8(addr + i);
+                for (int i = 0; i < cx; ++i) {
+                    uint8_t c = m_memory.read8(addr + i);
+                    s += (char)c;
+                    writeCharToVRAM(c);
+                }
                 LOG_DOS("DOS: Write to ", (h==1?"stdout":"stderr"), ": '", s, "'");
                 std::cerr << s << std::flush;
                 m_cpu.setReg16(cpu::AX, cx);
@@ -360,17 +413,76 @@ void DOS::handleDOSService() {
             handleDirectoryService();
             break;
 
-        case 0x48: // Allocate Memory
-        case 0x49: // Free Memory
-        case 0x4A: // Resize Block
-            handleMemoryManagement();
-            break;
+        case 0x43: { // Get/Set File Attributes (CHMOD)
+            uint8_t  al = m_cpu.getReg8(cpu::AL);
+            uint16_t ds = m_cpu.getSegReg(cpu::DS);
+            uint16_t dx = m_cpu.getReg16(cpu::DX);
+            std::string filename = readFilename((static_cast<uint32_t>(ds) << 4) + dx);
+            LOG_DOS("DOS: Get/Set Attributes AL=", (int)al, " file='", filename, "'");
 
-        case 0x4E: // Find First
-        case 0x4F: // Find Next
-            handleDirectorySearch();
+            if (al == 0x00) { // Get attributes
+                std::error_code ec;
+                bool exists = fs::exists(filename, ec);
+                if (!exists || ec) {
+                    m_cpu.setReg16(cpu::AX, 0x02); // File not found
+                    m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+                } else {
+                    uint16_t attr = 0x20; // Archive bit
+                    if (fs::is_directory(filename, ec)) attr = 0x10;
+                    auto perms = fs::status(filename, ec).permissions();
+                    using p = fs::perms;
+                    if ((perms & p::owner_write) == p::none) attr |= 0x01; // Read-only
+                    m_cpu.setReg16(cpu::CX, attr);
+                    m_cpu.setReg16(cpu::AX, attr); // Some programs check AX too
+                    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+                    LOG_DOS("DOS: Attributes for '", filename, "' = 0x", std::hex, attr);
+                }
+            } else if (al == 0x01) { // Set attributes
+                uint16_t cx = m_cpu.getReg16(cpu::CX);
+                std::error_code ec;
+                if (!fs::exists(filename, ec)) {
+                    m_cpu.setReg16(cpu::AX, 0x02);
+                    m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+                } else {
+                    // Only honour read-only bit mapping
+                    auto perms = fs::status(filename, ec).permissions();
+                    using p = fs::perms;
+                    if (cx & 0x01) { // Read-only: remove write permission
+                        fs::permissions(filename,
+                            perms & ~(p::owner_write | p::group_write | p::others_write), ec);
+                    } else {          // Writable: restore owner write
+                        fs::permissions(filename, perms | p::owner_write, ec);
+                    }
+                    m_cpu.setReg16(cpu::AX, 0);
+                    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+                }
+            } else {
+                m_cpu.setReg16(cpu::AX, 0x01); // Invalid function
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+            }
             break;
-
+        }
+        case 0x44: { // IOCTL
+            uint8_t al = m_cpu.getReg8(cpu::AL);
+            uint16_t bx = m_cpu.getReg16(cpu::BX);
+            if (al == 0x00) { // Get Device Info
+                // Return device info word: bit 7=1 means character device (stdin/stdout/stderr)
+                uint16_t info = 0;
+                if (bx == 0) info = 0x80 | 0x01; // STDIN  - char device, EOF on input
+                else if (bx == 1) info = 0x80 | 0x02; // STDOUT - char device
+                else if (bx == 2) info = 0x80 | 0x02; // STDERR - char device
+                else info = 0x0002;  // Disk file (bit 1=non-removable)
+                m_cpu.setReg16(cpu::DX, info);
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+                LOG_DOS("DOS: IOCTL Get Device Info handle=", bx, " info=0x", std::hex, info);
+            } else {
+                // Other IOCTL subfunction – stub as unsupported
+                m_cpu.setReg16(cpu::AX, 0x01); // Function not supported
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+                LOG_DOS("DOS: IOCTL AL=", (int)al, " not implemented");
+            }
+            break;
+        }
         case 0x4B: { // Exec
             uint8_t mode = m_cpu.getReg8(cpu::AL);
             uint16_t ds = m_cpu.getSegReg(cpu::DS);
@@ -395,8 +507,36 @@ void DOS::handleDOSService() {
             terminateProcess(al);
             break;
         }
-        case 0x57: {
-            LOG_DOS("DOS: Set/Reset Verify Flag (AH=0x57) - Not implemented");
+        case 0x48: // Allocate Memory
+        case 0x49: // Free Memory
+        case 0x4A: // Resize Block
+            handleMemoryManagement();
+            break;
+
+        case 0x4E: // Find First
+        case 0x4F: // Find Next
+            handleDirectorySearch();
+            break;
+        case 0x57: { // Get/Set File Date and Time
+            uint8_t  al  = m_cpu.getReg8(cpu::AL);
+            uint16_t bx  = m_cpu.getReg16(cpu::BX);
+            if (al == 0x00) { // Get
+                // Return a plausible DOS timestamp (2026-03-02 12:00:00)
+                // Date: (year-1980)<<9 | month<<5 | day
+                // Time: hour<<11 | min<<5 | (sec/2)
+                uint16_t date = ((2026 - 1980) << 9) | (3 << 5) | 2;
+                uint16_t time = (12 << 11) | (0 << 5) | 0;
+                m_cpu.setReg16(cpu::CX, time);
+                m_cpu.setReg16(cpu::DX, date);
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+                LOG_DOS("DOS: Get File Date/Time handle=", bx);
+            } else if (al == 0x01) { // Set (ignore, just confirm)
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+                LOG_DOS("DOS: Set File Date/Time handle=", bx, " (ignored)");
+            } else {
+                m_cpu.setReg16(cpu::AX, 0x01);
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+            }
             break;
         }
         default:
@@ -428,6 +568,54 @@ std::string DOS::readFilename(uint32_t address) {
         result += (char)c;
     }
     return result;
+}
+
+void DOS::writeCharToVRAM(uint8_t c) {
+    uint8_t col = m_memory.read8(0x450);
+    uint8_t row = m_memory.read8(0x451);
+
+    switch (c) {
+        case 0x07: break; // BEL
+        case 0x08: // Backspace
+            if (col > 0) col--;
+            break;
+        case 0x0A: // Line Feed
+            row++;
+            break;
+        case 0x0D: // Carriage Return
+            col = 0;
+            break;
+        default: {
+            uint32_t off = (row * 80 + col) * 2;
+            m_memory.write8(0xB8000 + off, c);
+            uint8_t attr = m_memory.read8(0xB8000 + off + 1);
+            if (attr == 0) m_memory.write8(0xB8000 + off + 1, 0x07);
+            col++;
+            if (col >= 80) { col = 0; row++; }
+            break;
+        }
+    }
+
+    // Scroll up if past last row
+    if (row >= 25) {
+        for (uint8_t r = 0; r < 24; ++r) {
+            for (uint8_t cc = 0; cc < 80; ++cc) {
+                uint32_t dst = (r * 80 + cc) * 2;
+                uint32_t src = ((r + 1) * 80 + cc) * 2;
+                m_memory.write8(0xB8000 + dst, m_memory.read8(0xB8000 + src));
+                m_memory.write8(0xB8000 + dst + 1, m_memory.read8(0xB8000 + src + 1));
+            }
+        }
+        for (uint8_t cc = 0; cc < 80; ++cc) {
+            uint32_t off = (24 * 80 + cc) * 2;
+            m_memory.write8(0xB8000 + off, ' ');
+            m_memory.write8(0xB8000 + off + 1, 0x07);
+        }
+        row = 24;
+    }
+
+    m_memory.write8(0x450, col);
+    m_memory.write8(0x451, row);
 }
 
 

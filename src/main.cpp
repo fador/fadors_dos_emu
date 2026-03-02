@@ -42,30 +42,49 @@ int main(int argc, char* argv[]) {
         fador::cpu::InstructionDecoder decoder(cpu, memory, iobus, bios, dos);
         fador::hw::ProgramLoader loader(cpu, memory);
         fador::ui::TerminalRenderer renderer(memory);
-        fador::ui::InputManager input(kbd);
         fador::ui::Debugger debugger(cpu, memory, decoder);
 
         LOG_INFO("System initialized successfully.");
 
-        // Parse command line for --himem
+        // Parse command line:
+        //   fadors_emu [--himem] [--debug=<cats>] <program.com|exe> [program-args...]
+        // Emulator flags (--himem, --debug=) are consumed only before the program path.
+        // Everything after the program path is forwarded verbatim to the DOS program,
+        // so program arguments that look like flags (e.g. -? /h) are passed through
+        // unchanged.  In shells that glob-expand bare '?' (zsh, bash with failglob),
+        // quote such arguments: fadors_emu prog.exe '-?' or fadors_emu prog.exe -- -?
         bool useHimem = false;
         std::string path;
         std::string args;
         for (int i = 1; i < argc; ++i) {
             std::string arg = argv[i];
+
+            if (!path.empty()) {
+                // Program path already found – everything else belongs to the program.
+                // '--' after the path is a conventional shell separator; discard it.
+                if (arg == "--") continue;
+                if (!args.empty()) args += ' ';
+                args += arg;
+                continue;
+            }
+
+            // Emulator-specific flags (must appear before the program path).
             if (arg == "--himem") {
                 useHimem = true;
             } else if (arg.find("--debug=") == 0) {
                 fador::utils::currentLevel = fador::utils::LogLevel::Debug;
-                std::string cats = arg.substr(8);
-                if (cats.find("cpu") != std::string::npos) fador::utils::enabledCategories |= fador::utils::CAT_CPU;
+                const std::string cats = arg.substr(8);
+                if (cats.find("cpu")   != std::string::npos) fador::utils::enabledCategories |= fador::utils::CAT_CPU;
                 if (cats.find("video") != std::string::npos) fador::utils::enabledCategories |= fador::utils::CAT_VIDEO;
-                if (cats.find("dos") != std::string::npos) fador::utils::enabledCategories |= fador::utils::CAT_DOS;
-            } else if (path.empty() && (arg.find(".com") != std::string::npos || arg.find(".exe") != std::string::npos || arg.find(".COM") != std::string::npos || arg.find(".EXE") != std::string::npos)) {
-                path = arg;
+                if (cats.find("dos")   != std::string::npos) fador::utils::enabledCategories |= fador::utils::CAT_DOS;
+            } else if (arg == "--") {
+                // Explicit end-of-emulator-flags sentinel; next arg is the program path.
+                if (i + 1 < argc) {
+                    path = argv[++i];
+                }
             } else {
-                if (!args.empty()) args += " ";
-                args += arg;
+                // First non-flag argument is the program path.
+                path = arg;
             }
         }
 
@@ -81,7 +100,7 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
         } else {
-            LOG_WARN("No program specified. Use: fadors_emu <program.com|exe> [--himem]");
+            LOG_WARN("No program specified. Use: fadors_emu [--himem] [--debug=cpu,video,dos] <program.com|exe> [program-args...]");
             // Start debugger by default if no program
             debugger.run();
             return 0;
@@ -89,6 +108,7 @@ int main(int argc, char* argv[]) {
 
         renderer.clearScreen();
 
+        fador::ui::InputManager input(kbd);
         bool running = true;
 
         while (running) {

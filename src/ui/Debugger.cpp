@@ -11,7 +11,7 @@ Debugger::Debugger(cpu::CPU& cpu, memory::MemoryBus& memory, cpu::InstructionDec
 
 bool Debugger::run() {
     std::string line;
-    std::cout << "\n[Fador Debugger] > ";
+    std::cout << "\n[Fador Debugger] > " << std::flush;
     
     while (std::getline(std::cin, line)) {
         if (line.empty()) {
@@ -43,7 +43,7 @@ bool Debugger::run() {
             std::cout << "Unknown command: " << cmd << "\n";
         }
 
-        std::cout << "\n[Fador Debugger] > ";
+        std::cout << "\n[Fador Debugger] > " << std::flush;
     }
     return true;
 }

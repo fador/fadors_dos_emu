@@ -85,6 +85,7 @@ private:
 
     std::string readDOSString(uint32_t address); // Read '$' terminated string
     std::string readFilename(uint32_t address);  // Read null-terminated string
+    void writeCharToVRAM(uint8_t c);             // Teletype-style output to B800 VRAM
 };
 
 } // namespace fador::hw

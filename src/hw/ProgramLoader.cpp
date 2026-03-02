@@ -2,6 +2,7 @@
 #include "../utils/Logger.hpp"
 #include <fstream>
 #include <vector>
+#include <filesystem>
 #include "../memory/himem/HIMEM.hpp"
 #include "DOS.hpp"
 
@@ -27,7 +28,7 @@ bool ProgramLoader::loadCOM(const std::string& path, uint16_t segment, const std
     }
 
     // 1. Create PSP at segment:0000
-    createPSP(segment, args);
+    createPSP(segment, args, path);
 
     // 2. Load file data at segment:0100
     uint32_t loadAddr = (segment << 4) + 0x100;
@@ -218,15 +219,38 @@ bool ProgramLoader::loadEXE(const std::string& path, uint16_t segment, DOS& dos,
     uint32_t fileSize = file.tellg();
     file.seekg(imageOffset, std::ios::beg);
     uint32_t imageSize = fileSize - imageOffset;
+
+    // For NE (VROOMM) executables, load only the MZ stub portion.
+    // All NE overlay segments live at file offsets beyond the MZ image and are
+    // loaded on demand by loadOverlaySegment().  Loading the entire file would
+    // fill conventional memory, leaving no free MCB space for overlay allocation.
+    bool isNEExe = false;
+    uint32_t mzStubSize = imageSize; // default: plain MZ, load everything
+    if (neOffset > 0) {
+        file.seekg(neOffset, std::ios::beg);
+        uint16_t neSig2 = 0;
+        file.read(reinterpret_cast<char*>(&neSig2), sizeof(neSig2));
+        if (neSig2 == 0x454E) {
+            isNEExe = true;
+            // Use the MZ-reported image size (the VROOMM stub) rather than the full file.
+            uint32_t mzImageBytes = (static_cast<uint32_t>(header.numPages) - 1) * 512
+                                  + (header.lastPageSize == 0 ? 512 : header.lastPageSize);
+            mzStubSize = mzImageBytes - imageOffset; // bytes of the stub itself
+            imageSize  = mzStubSize;
+            LOG_INFO("ProgramLoader: NE exe: loading only MZ stub (0x", std::hex, mzStubSize,
+                     " bytes); overlay segments loaded on demand");
+        }
+    }
     
     // For now, let's just use a simple load to segment:0000 (after PSP)
     // Actually, EXE load usually puts PSP at segment, and image at segment + 10h (256 bytes)
-    createPSP(segment, args);
+    createPSP(segment, args, path);
 
     uint16_t loadSegment = segment + 0x10; // Image starts after 256-byte PSP
     uint32_t loadAddr = (loadSegment << 4);
 
     std::vector<uint8_t> buffer(imageSize);
+    file.seekg(imageOffset, std::ios::beg);
     if (!file.read(reinterpret_cast<char*>(buffer.data()), imageSize)) {
         LOG_ERROR("ProgramLoader: Failed to read EXE image");
         return false;
@@ -267,6 +291,35 @@ bool ProgramLoader::loadEXE(const std::string& path, uint16_t segment, DOS& dos,
         for (uint32_t i = 0; i < imageSize; ++i) {
             m_memory.write8(loadAddr + i, buffer[i]);
         }
+
+        // For NE executables, the PSP MCB was sized at 0x7000 paragraphs in
+        // DOS::initialize().  Now that we only loaded the MZ stub, shrink the
+        // MCB to the actual stub footprint so the remaining conventional memory
+        // is available as a free block for overlay segment allocations.
+        if (isNEExe) {
+            // PSP (16 para) + MZ stub (rounded up to paragraph boundary)
+            uint16_t stubParas    = static_cast<uint16_t>((mzStubSize + 15u) / 16u);
+            uint16_t loadedParas  = 0x10u + stubParas; // PSP + stub
+            uint16_t pspMcbSeg    = static_cast<uint16_t>(segment - 1); // 0x0FFF
+
+            // Update PSP MCB size (byte offset 3 within MCB header)
+            m_memory.write16(static_cast<uint32_t>(pspMcbSeg << 4) + 3u, loadedParas);
+            // PSP MCB type must be 'M' (already set by DOS::initialize, just be sure)
+            m_memory.write8(static_cast<uint32_t>(pspMcbSeg << 4), 'M');
+
+            // Write a new free MCB right after the PSP+stub block
+            uint16_t freeMcbSeg  = static_cast<uint16_t>(pspMcbSeg + loadedParas + 1u);
+            uint32_t freeMcbAddr = static_cast<uint32_t>(freeMcbSeg) << 4u;
+            uint16_t freeSize    = static_cast<uint16_t>(0x9FFFu - freeMcbSeg - 1u);
+            m_memory.write8 (freeMcbAddr + 0u, 'Z');   // last MCB in chain
+            m_memory.write16(freeMcbAddr + 1u, 0u);    // owner = 0 (free)
+            m_memory.write16(freeMcbAddr + 3u, freeSize);
+            for (int k = 0; k < 8; ++k) m_memory.write8(freeMcbAddr + 8u + k, 0u);
+
+            LOG_INFO("ProgramLoader: NE MCB updated – PSP block 0x", std::hex, loadedParas,
+                     " paras; free block at seg 0x", freeMcbSeg,
+                     " size 0x", freeSize, " paras");
+        }
     }
 
     // Relocations
@@ -298,7 +351,7 @@ bool ProgramLoader::loadEXE(const std::string& path, uint16_t segment, DOS& dos,
     return true;
 }
 
-void ProgramLoader::createPSP(uint16_t segment, const std::string& args) {
+void ProgramLoader::createPSP(uint16_t segment, const std::string& args, const std::string& programPath) {
     uint32_t pspAddr = (segment << 4);
     // INT 20h instruction (CD 20) at offset 0
     m_memory.write8(pspAddr + 0x00, 0xCD);
@@ -311,19 +364,27 @@ void ProgramLoader::createPSP(uint16_t segment, const std::string& args) {
     // Let's place it at segment + 0x08 (dummy small block before code)
     uint16_t envSegment = segment + 0x08;
     uint32_t envAddr = (envSegment << 4);
+
+    // Derive directory containing the program for PATH/LIB/INCLUDE
+    std::filesystem::path progFsPath = std::filesystem::absolute(programPath);
+    std::string progDir = progFsPath.parent_path().string();
+    std::string progFullPath = progFsPath.string();
+
     // Format: VAR=VAL\0\0\0\x01\x00PROGRAM_PATH\0
-    std::string envStr = "PATH=C:\\TCC\0";
-    envStr += "LIB=C:\\TCC\\LIB\0";
-    envStr += "INCLUDE=C:\\TCC\\INCLUDE\0";
-    envStr += "\0"; // End of variables
+    std::string envStr;
+    envStr += "PATH=";     envStr += progDir; envStr += '\0';
+    envStr += "LIB=";      envStr += progDir; envStr += '\0';
+    envStr += "INCLUDE=";  envStr += progDir; envStr += '\0';
+    envStr += '\0'; // End of variables
     envStr += "\x01\x00"; // Signature for program name follows
-    envStr += "C:\\TCC\\TCC.EXE\0";
+    envStr += progFullPath; envStr += '\0';
     
     for (size_t i = 0; i < envStr.length(); ++i) {
         m_memory.write8(envAddr + i, static_cast<uint8_t>(envStr[i]));
     }
     m_memory.write16(pspAddr + 0x2C, envSegment);
-    LOG_INFO("ProgramLoader: Environment block created at segment 0x", std::hex, envSegment);
+    LOG_INFO("ProgramLoader: Environment block created at segment 0x", std::hex, envSegment,
+             ", program path: ", progFullPath);
 
     // Command tail size at offset 0x80
     std::string tail = " " + args; // Leading space is required

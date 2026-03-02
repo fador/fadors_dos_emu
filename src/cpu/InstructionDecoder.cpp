@@ -504,6 +504,8 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
         case 0x1E: m_cpu.push16(m_cpu.getSegReg(DS)); break;
         case 0x1F: m_cpu.setSegReg(DS, m_cpu.pop16()); break;
 
+        case 0x9B: break; // FWAIT/WAIT — no FPU, no-op
+
         // PUSHF / POPF
         case 0x9C: 
             if (m_hasPrefix66) m_cpu.push32(m_cpu.getEFLAGS());
@@ -1146,10 +1148,11 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             break;
         }
 
-        case 0xFA: m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~0x0200); break; // CLI
-        case 0xFB: m_cpu.setEFLAGS(m_cpu.getEFLAGS() | 0x0200); break;  // STI
+        case 0xF5: m_cpu.setEFLAGS(m_cpu.getEFLAGS() ^ FLAG_CARRY); break; // CMC
         case 0xF8: m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~0x0001); break; // CLC
         case 0xF9: m_cpu.setEFLAGS(m_cpu.getEFLAGS() | 0x0001); break;  // STC
+        case 0xFA: m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~0x0200); break; // CLI
+        case 0xFB: m_cpu.setEFLAGS(m_cpu.getEFLAGS() | 0x0200); break;  // STI
         case 0xFC: m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~0x0400); break; // CLD
         case 0xFD: m_cpu.setEFLAGS(m_cpu.getEFLAGS() | 0x0400); break;  // STD
 
@@ -1346,6 +1349,14 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             else m_iobus.write16(m_cpu.getReg16(DX), m_cpu.getReg16(AX));
             break;
 
+        case 0xD6: { // SALC – Set AL from Carry (undocumented Intel; used by Borland RTL)
+            m_cpu.setReg8(AL, (m_cpu.getEFLAGS() & FLAG_CARRY) ? 0xFF : 0x00);
+            break;
+        }
+
+        case 0xF1: // INT1 / ICEBP – treat as debug breakpoint (no-op)
+            LOG_INFO("INT1/ICEBP at ", std::hex, m_cpu.getSegReg(CS), ":", m_cpu.getEIP() - 1);
+            break;
         case 0xF4: LOG_INFO("HLT encountered at ", std::hex, m_cpu.getSegReg(CS), ":", m_cpu.getEIP() - 1); break;
 
         default:
@@ -1358,12 +1369,6 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
 
 void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
     switch(opcode) {
-        case 0xA4: // MOVSB
-            LOG_CPU("MOVS - stubbed (use string instructions)");
-            break;
-        case 0xA5: // MOVSW / MOVSD
-            LOG_CPU("MOVS - stubbed (use string instructions)");
-            break;
         case 0x00: { // Group 6
             ModRM modrm = decodeModRM(fetch8());
             switch (modrm.reg) {
@@ -1393,10 +1398,45 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
             }
             break;
         }
+        case 0x02: { // LAR r, r/m  – Load Access Rights
+            ModRM modrm = decodeModRM(fetch8());
+            (void)readModRM16(modrm); // consume operand
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~FLAG_ZERO); // ZF=0: not valid in real mode
+            break;
+        }
+        case 0x03: { // LSL r, r/m  – Load Segment Limit
+            ModRM modrm = decodeModRM(fetch8());
+            (void)readModRM16(modrm); // consume operand
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~FLAG_ZERO); // ZF=0: not valid in real mode
+            break;
+        }
+        case 0x08: // INVD  – Invalidate Cache (no-op)
+            break;
+        case 0x09: // WBINVD – Write Back & Invalidate Cache (no-op)
+            break;
+        case 0x0B: // UD2  – intentional #UD
+            triggerInterrupt(6);
+            break;
         case 0x06: { // CLTS
             LOG_CPU("CLTS - stubbed (no task switching)");
             break;
         }
+        case 0x10: { // MOVUPS / MOVSS xmm, xmm/m  – SSE stub, just consume ModRM
+            ModRM modrm = decodeModRM(fetch8());
+            (void)modrm;
+            break;
+        }
+        case 0x11: { // MOVUPS / MOVSS xmm/m, xmm  – SSE stub
+            ModRM modrm = decodeModRM(fetch8());
+            (void)modrm;
+            break;
+        }
+        case 0x35: // SYSEXIT  – no-op in real mode
+            break;
+        case 0x77: // EMMS – Empty MMX state (no-op)
+            break;
+        case 0xEE: // FEMMS – AMD 3DNow! fast EMMS (no-op, no ModRM)
+            break;
         case 0x80: case 0x81: case 0x82: case 0x83:
         case 0x84: case 0x85: case 0x86: case 0x87:
         case 0x88: case 0x89: case 0x8A: case 0x8B:
@@ -1409,12 +1449,200 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
             break;
         }
         
+        case 0x40: case 0x41: case 0x42: case 0x43:
+        case 0x44: case 0x45: case 0x46: case 0x47:
+        case 0x48: case 0x49: case 0x4A: case 0x4B:
+        case 0x4C: case 0x4D: case 0x4E: case 0x4F: { // CMOVcc r16/32, r/m16/32
+            ModRM modrm = decodeModRM(fetch8());
+            if (checkCondition(opcode)) {
+                if (m_hasPrefix66) m_cpu.setReg32(modrm.reg, readModRM32(modrm));
+                else               m_cpu.setReg16(modrm.reg, readModRM16(modrm));
+            } else {
+                // Condition false: still consume the operand but don't write
+                if (m_hasPrefix66) readModRM32(modrm);
+                else               readModRM16(modrm);
+            }
+            break;
+        }
+
         case 0x90: case 0x91: case 0x92: case 0x93:
         case 0x94: case 0x95: case 0x96: case 0x97:
         case 0x98: case 0x99: case 0x9A: case 0x9B:
         case 0x9C: case 0x9D: case 0x9E: case 0x9F: { // SETcc rm8
             ModRM modrm = decodeModRM(fetch8());
             writeModRM8(modrm, checkCondition(opcode) ? 1 : 0);
+            break;
+        }
+
+        // PUSH/POP FS (0F A0/A1) and GS (0F A8/A9)
+        case 0xA0: m_cpu.push16(m_cpu.getSegReg(FS)); break;
+        case 0xA1: m_cpu.setSegReg(FS, m_cpu.pop16()); break;
+        case 0xA8: m_cpu.push16(m_cpu.getSegReg(GS)); break;
+        case 0xA9: m_cpu.setSegReg(GS, m_cpu.pop16()); break;
+
+        case 0xA3: { // BT r/m, r
+            ModRM modrm = decodeModRM(fetch8());
+            uint16_t bit = m_cpu.getReg16(modrm.reg) & 0x0F;
+            uint16_t val = readModRM16(modrm);
+            if ((val >> bit) & 1) m_cpu.setEFLAGS(m_cpu.getEFLAGS() | FLAG_CARRY);
+            else                  m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~FLAG_CARRY);
+            break;
+        }
+        case 0xAB: { // BTS r/m, r
+            ModRM modrm = decodeModRM(fetch8());
+            uint16_t bit = m_cpu.getReg16(modrm.reg) & 0x0F;
+            uint16_t val = readModRM16(modrm);
+            if ((val >> bit) & 1) m_cpu.setEFLAGS(m_cpu.getEFLAGS() | FLAG_CARRY);
+            else                  m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~FLAG_CARRY);
+            writeModRM16(modrm, val | static_cast<uint16_t>(1u << bit));
+            break;
+        }
+        case 0xB3: { // BTR r/m, r
+            ModRM modrm = decodeModRM(fetch8());
+            uint16_t bit = m_cpu.getReg16(modrm.reg) & 0x0F;
+            uint16_t val = readModRM16(modrm);
+            if ((val >> bit) & 1) m_cpu.setEFLAGS(m_cpu.getEFLAGS() | FLAG_CARRY);
+            else                  m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~FLAG_CARRY);
+            writeModRM16(modrm, val & ~static_cast<uint16_t>(1u << bit));
+            break;
+        }
+        case 0xBB: { // BTC r/m, r
+            ModRM modrm = decodeModRM(fetch8());
+            uint16_t bit = m_cpu.getReg16(modrm.reg) & 0x0F;
+            uint16_t val = readModRM16(modrm);
+            if ((val >> bit) & 1) m_cpu.setEFLAGS(m_cpu.getEFLAGS() | FLAG_CARRY);
+            else                  m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~FLAG_CARRY);
+            writeModRM16(modrm, val ^ static_cast<uint16_t>(1u << bit));
+            break;
+        }
+        case 0xBA: { // Group 8: BT/BTS/BTR/BTC r/m, imm8
+            ModRM modrm = decodeModRM(fetch8());
+            uint8_t imm = fetch8();
+            uint16_t bit = imm & 0x0F;
+            uint16_t val = readModRM16(modrm);
+            bool oldBit = (val >> bit) & 1;
+            if (oldBit) m_cpu.setEFLAGS(m_cpu.getEFLAGS() | FLAG_CARRY);
+            else        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~FLAG_CARRY);
+            switch (modrm.reg) {
+                case 4: break; // BT  – read only
+                case 5: writeModRM16(modrm, val |  static_cast<uint16_t>(1u << bit)); break; // BTS
+                case 6: writeModRM16(modrm, val & ~static_cast<uint16_t>(1u << bit)); break; // BTR
+                case 7: writeModRM16(modrm, val ^  static_cast<uint16_t>(1u << bit)); break; // BTC
+                default: LOG_WARN("Group 8 (0x0F 0xBA) unknown sub-opcode ", (int)modrm.reg); break;
+            }
+            break;
+        }
+
+        case 0xA4: { // SHLD r/m, r, imm8
+            ModRM modrm = decodeModRM(fetch8());
+            uint8_t count = fetch8() & 0x1F;
+            uint16_t dst = readModRM16(modrm);
+            uint16_t src = m_cpu.getReg16(modrm.reg);
+            if (count) {
+                uint32_t tmp = (static_cast<uint32_t>(dst) << 16) | src;
+                uint32_t res = tmp << count;
+                writeModRM16(modrm, static_cast<uint16_t>(res >> 16));
+            }
+            break;
+        }
+        case 0xA5: { // SHLD r/m, r, CL
+            ModRM modrm = decodeModRM(fetch8());
+            uint8_t count = m_cpu.getReg8(CL) & 0x1F;
+            uint16_t dst = readModRM16(modrm);
+            uint16_t src = m_cpu.getReg16(modrm.reg);
+            if (count) {
+                uint32_t tmp = (static_cast<uint32_t>(dst) << 16) | src;
+                uint32_t res = tmp << count;
+                writeModRM16(modrm, static_cast<uint16_t>(res >> 16));
+            }
+            break;
+        }
+        case 0xAC: { // SHRD r/m, r, imm8
+            ModRM modrm = decodeModRM(fetch8());
+            uint8_t count = fetch8() & 0x1F;
+            uint16_t dst = readModRM16(modrm);
+            uint16_t src = m_cpu.getReg16(modrm.reg);
+            if (count) {
+                uint32_t tmp = (static_cast<uint32_t>(src) << 16) | dst;
+                uint32_t res = tmp >> count;
+                writeModRM16(modrm, static_cast<uint16_t>(res & 0xFFFF));
+            }
+            break;
+        }
+        case 0xAD: { // SHRD r/m, r, CL
+            ModRM modrm = decodeModRM(fetch8());
+            uint8_t count = m_cpu.getReg8(CL) & 0x1F;
+            uint16_t dst = readModRM16(modrm);
+            uint16_t src = m_cpu.getReg16(modrm.reg);
+            if (count) {
+                uint32_t tmp = (static_cast<uint32_t>(src) << 16) | dst;
+                uint32_t res = tmp >> count;
+                writeModRM16(modrm, static_cast<uint16_t>(res & 0xFFFF));
+            }
+            break;
+        }
+
+        case 0xBC: { // BSF r16/32, r/m16/32
+            ModRM modrm = decodeModRM(fetch8());
+            uint16_t val = readModRM16(modrm);
+            if (val == 0) {
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() | FLAG_ZERO);
+            } else {
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~FLAG_ZERO);
+                uint16_t idx = 0;
+                while (idx < 16 && !((val >> idx) & 1)) ++idx;
+                m_cpu.setReg16(modrm.reg, idx);
+            }
+            break;
+        }
+        case 0xBD: { // BSR r16/32, r/m16/32
+            ModRM modrm = decodeModRM(fetch8());
+            uint16_t val = readModRM16(modrm);
+            if (val == 0) {
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() | FLAG_ZERO);
+            } else {
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~FLAG_ZERO);
+                uint16_t idx = 15;
+                while (idx > 0 && !((val >> idx) & 1)) --idx;
+                m_cpu.setReg16(modrm.reg, idx);
+            }
+            break;
+        }
+
+        case 0xB2: { // LSS r16/32, m16:16
+            ModRM modrm = decodeModRM(fetch8());
+            uint32_t addr = m_hasPrefix67 ? getEffectiveAddress32(modrm) : getEffectiveAddress16(modrm);
+            if (m_hasPrefix66) {
+                m_cpu.setReg32(modrm.reg, m_memory.read32(addr));
+                m_cpu.setSegReg(SS, m_memory.read16(addr + 4));
+            } else {
+                m_cpu.setReg16(modrm.reg, m_memory.read16(addr));
+                m_cpu.setSegReg(SS, m_memory.read16(addr + 2));
+            }
+            break;
+        }
+        case 0xB4: { // LFS r16/32, m16:16
+            ModRM modrm = decodeModRM(fetch8());
+            uint32_t addr = m_hasPrefix67 ? getEffectiveAddress32(modrm) : getEffectiveAddress16(modrm);
+            if (m_hasPrefix66) {
+                m_cpu.setReg32(modrm.reg, m_memory.read32(addr));
+                m_cpu.setSegReg(FS, m_memory.read16(addr + 4));
+            } else {
+                m_cpu.setReg16(modrm.reg, m_memory.read16(addr));
+                m_cpu.setSegReg(FS, m_memory.read16(addr + 2));
+            }
+            break;
+        }
+        case 0xB5: { // LGS r16/32, m16:16
+            ModRM modrm = decodeModRM(fetch8());
+            uint32_t addr = m_hasPrefix67 ? getEffectiveAddress32(modrm) : getEffectiveAddress16(modrm);
+            if (m_hasPrefix66) {
+                m_cpu.setReg32(modrm.reg, m_memory.read32(addr));
+                m_cpu.setSegReg(GS, m_memory.read16(addr + 4));
+            } else {
+                m_cpu.setReg16(modrm.reg, m_memory.read16(addr));
+                m_cpu.setSegReg(GS, m_memory.read16(addr + 2));
+            }
             break;
         }
 
@@ -1459,8 +1687,12 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
         }
 
         default:
-            LOG_WARN("0x0F 0x", std::hex, static_cast<int>(opcode), " not implemented.");
-            triggerInterrupt(6);
+            // For unknown 0x0F opcodes: speculatively consume one byte (likely a
+            // ModRM) so the stream doesn't cascade into garbage decodes, then
+            // just warn and continue instead of triggering INT 6 (which would push
+            // an interrupt frame and make things worse for not-yet-implemented ops).
+            (void)fetch8(); // consume assumed ModRM
+            LOG_WARN("0x0F 0x", std::hex, static_cast<int>(opcode), " not implemented (skipped w/ assumed ModRM).");
             break;
     }
 }

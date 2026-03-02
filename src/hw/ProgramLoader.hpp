@@ -23,7 +23,7 @@ private:
     memory::MemoryBus& m_memory;
 
     // Creates a 256-byte Program Segment Prefix at the given segment
-    void createPSP(uint16_t segment, const std::string& args);
+    void createPSP(uint16_t segment, const std::string& args, const std::string& programPath);
 };
 
 } // namespace fador::hw
