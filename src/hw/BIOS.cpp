@@ -776,21 +776,13 @@ void BIOS::initialize() {
     }
 
     // 2. Setup IVT (Interrupt Vector Table) vectors
-    // Even though we HLE, we point them to a dummy IRET at 0xFFFF:0x000E
+    // Even though we HLE, we point ALL 256 vectors to a dummy IRET at 0xFFFF:0x000E
+    // so that any unhandled INT n returns cleanly instead of jumping to 0000:0000.
     uint16_t dummyCS = 0xFFFF;
     uint16_t dummyIP = 0x000E;
     m_memory.write8(0xFFFFE, 0xCF); // IRET instruction at dummy location
 
-    // Low exception vectors (0x00–0x07: divide, debug, NMI, breakpoint, overflow,
-    // bounds, #UD, device-not-avail) – also point at the dummy IRET so that a
-    // triggerInterrupt(6) for an unrecognised opcode returns cleanly instead of
-    // executing the IVT table as code (CS:0 crash).
-    for (uint8_t v = 0x00; v <= 0x07; ++v) {
-        m_memory.write16(v * 4, dummyIP);
-        m_memory.write16(v * 4 + 2, dummyCS);
-    }
-    uint8_t handledVectors[] = { 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F };
-    for (uint8_t v : handledVectors) {
+    for (int v = 0; v < 256; ++v) {
         m_memory.write16(v * 4, dummyIP);
         m_memory.write16(v * 4 + 2, dummyCS);
     }

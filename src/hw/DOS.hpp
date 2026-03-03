@@ -4,6 +4,7 @@
 #include <vector>
 #include <memory>
 #include <fstream>
+#include <filesystem>
 #include "../cpu/CPU.hpp"
 #include "../memory/MemoryBus.hpp"
 #include "../memory/himem/HIMEM.hpp"
@@ -81,6 +82,12 @@ private:
     void handleDriveService();     // AH=0Eh, 19h, 36h
     void handleDirectorySearch();  // AH=4Eh, 4Fh
     void terminateProcess(uint8_t exitCode); // AH=4Ch or INT 20h
+
+    // FindFirst/FindNext search state
+    std::vector<std::filesystem::path> m_searchResults;
+    size_t m_searchIndex = 0;
+    std::string m_searchPattern;
+    std::string m_searchDir;
 
     // Helpers
     MCB readMCB(uint16_t segment);

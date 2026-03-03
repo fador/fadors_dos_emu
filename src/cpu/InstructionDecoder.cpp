@@ -1075,29 +1075,111 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             ModRM modrm = decodeModRM(fetch8());
             uint8_t count = (opcode == 0xC0 || opcode == 0xC1) ? fetch8() : ((opcode == 0xD0 || opcode == 0xD1) ? 1 : m_cpu.getReg8(CL));
 
-            auto shift = [&](uint32_t val, uint8_t c, int size) {
-                if (c == 0) return val;
-                uint32_t mask = (size == 8) ? 0xFF : (size == 16) ? 0xFFFF : 0xFFFFFFFF;
-                val &= mask;
+            auto shiftRotate = [&](uint32_t val, uint8_t c, int size) -> uint32_t {
                 c &= 0x1F;
+                if (c == 0) return val;
+                uint32_t mask = (size == 8) ? 0xFFu : (size == 16) ? 0xFFFFu : 0xFFFFFFFFu;
+                val &= mask;
+                uint32_t flags = m_cpu.getEFLAGS();
+                bool cf = flags & FLAG_CARRY;
+
                 switch (modrm.reg) {
-                    case 4: case 6: return (val << c) & mask; // SHL/SAL
-                    case 5: return (val >> c) & mask; // SHR
+                    case 0: { // ROL
+                        uint8_t ec = c % size;
+                        if (ec) val = ((val << ec) | (val >> (size - ec))) & mask;
+                        cf = val & 1;
+                        flags = (flags & ~FLAG_CARRY) | (cf ? FLAG_CARRY : 0);
+                        if (c == 1) {
+                            bool msb = (val >> (size - 1)) & 1;
+                            flags = (flags & ~FLAG_OVERFLOW) | ((msb ^ cf) ? FLAG_OVERFLOW : 0);
+                        }
+                        m_cpu.setEFLAGS(flags);
+                        return val;
+                    }
+                    case 1: { // ROR
+                        uint8_t ec = c % size;
+                        if (ec) val = ((val >> ec) | (val << (size - ec))) & mask;
+                        cf = (val >> (size - 1)) & 1;
+                        flags = (flags & ~FLAG_CARRY) | (cf ? FLAG_CARRY : 0);
+                        if (c == 1) {
+                            bool bit2 = (val >> (size - 2)) & 1;
+                            flags = (flags & ~FLAG_OVERFLOW) | ((cf ^ bit2) ? FLAG_OVERFLOW : 0);
+                        }
+                        m_cpu.setEFLAGS(flags);
+                        return val;
+                    }
+                    case 2: { // RCL
+                        for (uint8_t i = 0; i < c; ++i) {
+                            bool msb = (val >> (size - 1)) & 1;
+                            val = ((val << 1) | (cf ? 1u : 0u)) & mask;
+                            cf = msb;
+                        }
+                        flags = (flags & ~FLAG_CARRY) | (cf ? FLAG_CARRY : 0);
+                        if (c == 1) {
+                            bool msb = (val >> (size - 1)) & 1;
+                            flags = (flags & ~FLAG_OVERFLOW) | ((msb ^ cf) ? FLAG_OVERFLOW : 0);
+                        }
+                        m_cpu.setEFLAGS(flags);
+                        return val;
+                    }
+                    case 3: { // RCR
+                        for (uint8_t i = 0; i < c; ++i) {
+                            bool lsb = val & 1;
+                            val = ((val >> 1) | (cf ? (1u << (size - 1)) : 0u)) & mask;
+                            cf = lsb;
+                        }
+                        flags = (flags & ~FLAG_CARRY) | (cf ? FLAG_CARRY : 0);
+                        if (c == 1) {
+                            bool msb = (val >> (size - 1)) & 1;
+                            bool bit2 = (val >> (size - 2)) & 1;
+                            flags = (flags & ~FLAG_OVERFLOW) | ((msb ^ bit2) ? FLAG_OVERFLOW : 0);
+                        }
+                        m_cpu.setEFLAGS(flags);
+                        return val;
+                    }
+                    case 4: case 6: { // SHL/SAL
+                        cf = (val >> (size - c)) & 1;
+                        val = (val << c) & mask;
+                        break;
+                    }
+                    case 5: { // SHR
+                        bool oldMsb = (val >> (size - 1)) & 1;
+                        cf = (val >> (c - 1)) & 1;
+                        val = (val >> c) & mask;
+                        flags = (flags & ~FLAG_OVERFLOW);
+                        if (c == 1) flags |= (oldMsb ? FLAG_OVERFLOW : 0);
+                        break;
+                    }
                     case 7: { // SAR
-                        int32_t sval = (size == 8) ? static_cast<int8_t>(val) : 
+                        int32_t sval = (size == 8) ? static_cast<int8_t>(val) :
                                        (size == 16) ? static_cast<int16_t>(val) : static_cast<int32_t>(val);
-                        return static_cast<uint32_t>(sval >> c) & mask;
+                        cf = (sval >> (c - 1)) & 1;
+                        val = static_cast<uint32_t>(sval >> c) & mask;
+                        flags &= ~FLAG_OVERFLOW; // OF always 0 for SAR
+                        break;
                     }
                     default: return val;
                 }
+                // Common flag update for SHL/SHR/SAR (cases 4-7)
+                flags = (flags & ~(FLAG_CARRY | FLAG_ZERO | FLAG_SIGN | FLAG_PARITY));
+                if (cf) flags |= FLAG_CARRY;
+                if (val == 0) flags |= FLAG_ZERO;
+                if (val & (1u << (size - 1))) flags |= FLAG_SIGN;
+                { uint8_t p = val & 0xFF; p ^= p >> 4; p ^= p >> 2; p ^= p >> 1; if (!(p & 1)) flags |= FLAG_PARITY; }
+                if (c == 1 && modrm.reg == 4) {
+                    bool msb = (val >> (size - 1)) & 1;
+                    flags = (flags & ~FLAG_OVERFLOW) | ((msb ^ cf) ? FLAG_OVERFLOW : 0);
+                }
+                m_cpu.setEFLAGS(flags);
+                return val;
             };
 
             if (opcode == 0xC0 || opcode == 0xD0 || opcode == 0xD2) {
-                writeModRM8(modrm, static_cast<uint8_t>(shift(readModRM8(modrm), count, 8)));
+                writeModRM8(modrm, static_cast<uint8_t>(shiftRotate(readModRM8(modrm), count, 8)));
             } else if (m_hasPrefix66) {
-                writeModRM32(modrm, shift(readModRM32(modrm), count, 32));
+                writeModRM32(modrm, shiftRotate(readModRM32(modrm), count, 32));
             } else {
-                writeModRM16(modrm, static_cast<uint16_t>(shift(readModRM16(modrm), count, 16)));
+                writeModRM16(modrm, static_cast<uint16_t>(shiftRotate(readModRM16(modrm), count, 16)));
             }
             break;
         }

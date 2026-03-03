@@ -169,10 +169,17 @@ void DOS::handleDOSService() {
             m_cpu.setReg8(cpu::AL, now->tm_wday);        // Day of week (0=Sun, 1=Mon, ..., 6=Sat)
             break;
         }
-        case 0x2B: { // Get Current PSP
-            uint16_t pspSegment = m_cpu.getSegReg(cpu::DS);
-            m_cpu.setReg16(cpu::BX, pspSegment);
-            LOG_DOS("DOS: Get Current PSP -> ", std::hex, pspSegment);
+        case 0x2B: { // Set System Date
+            // Accept but ignore
+            m_cpu.setReg8(cpu::AL, 0); // Success
+            LOG_DOS("DOS: Set Date (ignored)");
+            break;
+        }
+        case 0x51:  // Get Current PSP (undocumented)
+        case 0x62: { // Get Current PSP
+            m_cpu.setReg16(cpu::BX, m_pspSegment);
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+            LOG_DOS("DOS: Get Current PSP -> 0x", std::hex, m_pspSegment);
             break;
         }
         case 0x2F: { // Get DTA Address
@@ -686,6 +693,7 @@ void DOS::handleMemoryManagement() {
         uint16_t current = FIRST_MCB_SEGMENT;
         uint16_t bestFit = 0;
         uint16_t bestFitSize = 0xFFFF;
+        uint16_t largestFree = 0;
         int mcbCount = 0;
 
         while (true) {
@@ -696,8 +704,9 @@ void DOS::handleMemoryManagement() {
             MCB mcb = readMCB(current);
             LOG_DEBUG("DOS: Checking MCB at 0x", std::hex, current, " type=", (char)mcb.type, " owner=0x", mcb.owner, " size=0x", mcb.size);
             
-            if (mcb.owner == 0 && mcb.size >= requested) {
-                if (mcb.size < bestFitSize) {
+            if (mcb.owner == 0) {
+                if (mcb.size > largestFree) largestFree = mcb.size;
+                if (mcb.size >= requested && mcb.size < bestFitSize) {
                     bestFit = current;
                     bestFitSize = mcb.size;
                 }
@@ -741,9 +750,9 @@ void DOS::handleMemoryManagement() {
             LOG_DEBUG("DOS: Allocated 0x", std::hex, requested, " paras at 0x", bestFit + 1);
         } else {
             m_cpu.setReg16(cpu::AX, 0x0008); // Insufficient memory
-            m_cpu.setReg16(cpu::BX, 0x0000); // Largest block
+            m_cpu.setReg16(cpu::BX, largestFree); // Largest available block
             m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
-            LOG_WARN("DOS: Failed to allocate ", requested, " paras");
+            LOG_WARN("DOS: Failed to allocate ", std::hex, requested, " paras (largest free: 0x", largestFree, ")");
         }
     } else if (ah == 0x49) { // Free
         uint16_t segment = m_cpu.getSegReg(cpu::ES);
@@ -920,87 +929,139 @@ void DOS::handleDriveService() {
     }
 }
 
+// Case-insensitive DOS wildcard match: '?' matches any single char, '*' matches any sequence
+static bool dosWildcardMatch(const std::string& pattern, const std::string& name) {
+    size_t pi = 0, ni = 0;
+    size_t starP = std::string::npos, starN = 0;
+    while (ni < name.size()) {
+        if (pi < pattern.size() && (pattern[pi] == '?' || std::tolower(static_cast<unsigned char>(pattern[pi])) == std::tolower(static_cast<unsigned char>(name[ni])))) {
+            ++pi; ++ni;
+        } else if (pi < pattern.size() && pattern[pi] == '*') {
+            starP = pi++; starN = ni;
+        } else if (starP != std::string::npos) {
+            pi = starP + 1; ni = ++starN;
+        } else {
+            return false;
+        }
+    }
+    while (pi < pattern.size() && pattern[pi] == '*') ++pi;
+    return pi == pattern.size();
+}
+
 void DOS::handleDirectorySearch() {
     uint8_t ah = m_cpu.getReg8(cpu::AH);
     uint32_t dtaAddr = ((m_dtaPtr >> 16) << 4) + (m_dtaPtr & 0xFFFF);
 
+    auto fillDTA = [&](const fs::path& fullPath, const std::string& dosName) {
+        // Byte 0x15: file attributes
+        std::error_code ec;
+        uint8_t dosAttr = 0x20; // Archive
+        if (fs::is_directory(fullPath, ec)) dosAttr = 0x10;
+        auto perms = fs::status(fullPath, ec).permissions();
+        if ((perms & fs::perms::owner_write) == fs::perms::none) dosAttr |= 0x01;
+        m_memory.write8(dtaAddr + 0x15, dosAttr);
+
+        // Bytes 0x16-0x17: file time, 0x18-0x19: file date
+        auto ftime = fs::last_write_time(fullPath, ec);
+        // Use a plausible default timestamp
+        uint16_t dosTime = (12 << 11) | (0 << 5) | 0; // 12:00:00
+        uint16_t dosDate = ((2026 - 1980) << 9) | (3 << 5) | 2; // 2026-03-02
+        m_memory.write16(dtaAddr + 0x16, dosTime);
+        m_memory.write16(dtaAddr + 0x18, dosDate);
+
+        // Bytes 0x1A-0x1D: file size (32-bit)
+        uint32_t fileSize = 0;
+        if (fs::is_regular_file(fullPath, ec))
+            fileSize = static_cast<uint32_t>(fs::file_size(fullPath, ec));
+        m_memory.write32(dtaAddr + 0x1A, fileSize);
+
+        // Bytes 0x1E-0x2A: filename (null-terminated, uppercase 8.3)
+        std::string upper = dosName;
+        for (auto& ch : upper) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+        for (int i = 0; i < 13; ++i) {
+            uint8_t c = (static_cast<size_t>(i) < upper.size()) ? static_cast<uint8_t>(upper[i]) : 0;
+            m_memory.write8(dtaAddr + 0x1E + i, c);
+        }
+    };
+
     if (ah == 0x4E) { // Find First
         uint16_t ds = m_cpu.getSegReg(cpu::DS);
         uint16_t dx = m_cpu.getReg16(cpu::DX);
-        std::string pattern = resolvePath(readFilename((ds << 4) + dx));
+        uint32_t nameAddr = (ds << 4) + dx;
+        std::string rawPattern = readFilename(nameAddr);
         uint8_t attr = m_cpu.getReg8(cpu::CL);
 
-        LOG_DEBUG("DOS: FindFirst '", pattern, "' attr 0x", std::hex, (int)attr);
-
-        // Store pattern in DTA (first 13 bytes)
-        for (int i = 0; i < 13; ++i) {
-            uint8_t c = (i < static_cast<int>(pattern.length())) ? static_cast<uint8_t>(pattern[i]) : 0;
-            m_memory.write8(dtaAddr + i, c);
+        // Separate directory and filename pattern
+        fs::path resolved = fs::path(resolvePath(rawPattern));
+        std::string searchDir;
+        std::string filePattern;
+        if (fs::is_directory(resolved)) {
+            searchDir = resolved.string();
+            filePattern = "*.*";
+        } else {
+            searchDir = resolved.parent_path().string();
+            filePattern = resolved.filename().string();
         }
-        // Store index 0 in DTA (bytes 14-15)
-        m_memory.write16(dtaAddr + 14, 0);
+        if (searchDir.empty()) searchDir = m_currentDir;
 
-        // Perform search
-        // For now, very simplified: just list the current directory
-        std::vector<fs::path> matches;
+        LOG_DEBUG("DOS: FindFirst raw='", rawPattern, "' dir='", searchDir, "' pattern='", filePattern, "' attr 0x", std::hex, (int)attr);
+
+        // Collect matching files
+        m_searchResults.clear();
+        m_searchIndex = 0;
+        m_searchPattern = filePattern;
+        m_searchDir = searchDir;
+
         try {
-            for (const auto& entry : fs::directory_iterator(m_currentDir)) {
-                // TODO: Actual glob matching. For now, just match anything or fixed names.
-                matches.push_back(entry.path().filename());
+            for (const auto& entry : fs::directory_iterator(searchDir)) {
+                std::string fname = entry.path().filename().string();
+                // Skip . and ..
+                if (fname == "." || fname == "..") continue;
+                // Attribute filtering: skip dirs unless attr includes 0x10
+                if (fs::is_directory(entry.path()) && !(attr & 0x10)) continue;
+
+                if (dosWildcardMatch(filePattern, fname)) {
+                    m_searchResults.push_back(entry.path());
+                }
             }
         } catch (...) {
-            m_cpu.setReg16(cpu::AX, 0x02); // File not found
+            m_cpu.setReg16(cpu::AX, 0x03); // Path not found
             m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
             return;
         }
 
-        if (matches.empty()) {
+        if (m_searchResults.empty()) {
             m_cpu.setReg16(cpu::AX, 0x12); // No more files
             m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+            LOG_DEBUG("DOS: FindFirst no matches for '", filePattern, "' in '", searchDir, "'");
             return;
         }
 
-        // Fill DTA with first match
-        auto first = matches[0].string();
-        for (int i = 0; i < 13; ++i) {
-            uint8_t c = (i < static_cast<int>(first.length())) ? static_cast<uint8_t>(first[i]) : 0;
-            m_memory.write8(dtaAddr + 0x1E + i, c);
-        }
-        m_memory.write32(dtaAddr + 0x1A, 0); // Size (mock)
-        
+        // Store search state in DTA reserved area
+        m_memory.write16(dtaAddr + 0x00, 0); // match index = 0
+
+        fillDTA(m_searchResults[0], m_searchResults[0].filename().string());
+        LOG_DOS("DOS: FindFirst matched '", m_searchResults[0].filename().string(), "' (", m_searchResults.size(), " total)");
+
         m_cpu.setReg16(cpu::AX, 0);
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
 
     } else if (ah == 0x4F) { // Find Next
-        LOG_DEBUG("DOS: FindNext");
-        // Read index from DTA
-        uint16_t index = m_memory.read16(dtaAddr + 14);
+        uint16_t index = m_memory.read16(dtaAddr + 0x00);
         index++;
-        
-        // Re-scan and find the indexth match (not efficient but correct for HLE)
-        std::vector<fs::path> matches;
-        try {
-            for (const auto& entry : fs::directory_iterator(m_currentDir)) {
-                matches.push_back(entry.path().filename());
-            }
-        } catch (...) {}
 
-        if (index >= matches.size()) {
+        if (index >= m_searchResults.size()) {
             m_cpu.setReg16(cpu::AX, 0x12); // No more files
             m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+            LOG_DEBUG("DOS: FindNext end of results");
             return;
         }
 
-        // Store new index
-        m_memory.write16(dtaAddr + 14, index);
+        m_memory.write16(dtaAddr + 0x00, index);
 
-        // Fill DTA
-        auto next = matches[index].string();
-        for (int i = 0; i < 13; ++i) {
-            uint8_t c = (static_cast<size_t>(i) < next.length()) ? static_cast<uint8_t>(next[i]) : 0;
-            m_memory.write8(dtaAddr + 0x1E + i, c);
-        }
-        
+        fillDTA(m_searchResults[index], m_searchResults[index].filename().string());
+        LOG_DOS("DOS: FindNext matched '", m_searchResults[index].filename().string(), "'");
+
         m_cpu.setReg16(cpu::AX, 0);
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
     }

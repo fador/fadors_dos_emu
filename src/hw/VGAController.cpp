@@ -37,8 +37,11 @@ uint8_t VGAController::read8(uint16_t port) {
 
         // --- Input Status ---
         case 0x3DA: {
+            // Bit 0: Display Enable (set during h-retrace and v-retrace)
+            // Bit 3: Vertical Retrace
+            // Toggle both on every read to satisfy programs waiting for either bit.
             m_verticalRetrace = !m_verticalRetrace;
-            return m_verticalRetrace ? 0x08 : 0x00;
+            return m_verticalRetrace ? 0x09 : 0x00;
         }
 
         default:
