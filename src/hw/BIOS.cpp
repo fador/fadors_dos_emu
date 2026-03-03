@@ -499,6 +499,13 @@ void BIOS::handleVideoService() {
             LOG_DEBUG("BIOS INT 10h AH=FEh: Get Video Buffer -> ES=B800h");
             break;
         }
+        case 0x6F: { // Borland video BIOS extensions
+            // Turbo C/Pascal call this to detect extended video capabilities.
+            // Return AL != 6Fh to indicate not supported.
+            m_cpu.setReg8(cpu::AL, 0x00);
+            LOG_DEBUG("BIOS INT 10h AH=6Fh: Borland video extension (not supported)");
+            break;
+        }
         default:
             LOG_WARN("BIOS INT 10h: Unknown function AH=0x", std::hex, (int)ah);
             break;

@@ -232,6 +232,23 @@ void DOS::handleDOSService() {
             }
             break;
         }
+        case 0x33: { // Get/Set Ctrl-Break Check State
+            uint8_t al = m_cpu.getReg8(cpu::AL);
+            if (al == 0x00) {
+                // Get current state
+                m_cpu.setReg8(cpu::DL, m_ctrlBreakCheck ? 1 : 0);
+                LOG_DOS("DOS: Get Ctrl-Break Check -> ", (int)m_ctrlBreakCheck);
+            } else if (al == 0x01) {
+                // Set state
+                m_ctrlBreakCheck = (m_cpu.getReg8(cpu::DL) != 0);
+                LOG_DOS("DOS: Set Ctrl-Break Check -> ", (int)m_ctrlBreakCheck);
+            } else if (al == 0x05) {
+                // Get boot drive
+                m_cpu.setReg8(cpu::DL, 3); // C: drive
+                LOG_DOS("DOS: Get Boot Drive -> C:");
+            }
+            break;
+        }
         case 0x30: { // Get DOS Version
             LOG_DOS("DOS: Get DOS Version (Reported: 5.0)");
             m_cpu.setReg8(cpu::AL, 5); // Major 5
