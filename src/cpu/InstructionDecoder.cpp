@@ -268,16 +268,6 @@ bool InstructionDecoder::checkCondition(uint8_t cond) {
 
 void InstructionDecoder::step() {
     m_stepCount++;
-    /*if (m_stepCount <= 500000) {
-        uint16_t cs = m_cpu.getSegReg(CS);
-        uint32_t eip = m_cpu.getEIP();
-        uint16_t ss = m_cpu.getSegReg(SS);
-        uint16_t sp = m_cpu.getReg16(SP);
-        uint8_t opcode = m_memory.read8((cs << 4) + eip);
-        uint16_t stackTop = m_memory.read16((ss << 4) + sp);
-        LOG_INFO("TRACE: step=", std::dec, m_stepCount, " CS:EIP=", std::hex, cs, ":", eip, 
-                 " Opcode=0x", (int)opcode, " SS:SP=", ss, ":", sp, " [SP]=0x", stackTop);
-    }*/
 
     m_hasPrefix66 = false;
     m_hasPrefix67 = false;
@@ -1304,10 +1294,16 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             m_cpu.setEIP(ip);
             break;
         }
-        case 0xE9: // JMP rel16/32
-            if (m_hasPrefix66) m_cpu.setEIP(m_cpu.getEIP() + fetch32());
-            else m_cpu.setEIP(static_cast<uint16_t>(m_cpu.getEIP() + fetch16()));
+        case 0xE9: { // JMP rel16/32
+            if (m_hasPrefix66) {
+                int32_t rel = static_cast<int32_t>(fetch32());
+                m_cpu.setEIP(m_cpu.getEIP() + rel);
+            } else {
+                int16_t rel = static_cast<int16_t>(fetch16());
+                m_cpu.setEIP(static_cast<uint16_t>(m_cpu.getEIP() + rel));
+            }
             break;
+        }
         case 0xEA: { // JMP far imm16:imm16
             uint16_t ip = fetch16();
             uint16_t cs = fetch16();
@@ -1315,7 +1311,11 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             m_cpu.setEIP(ip);
             break;
         }
-        case 0xEB: m_cpu.setEIP(m_cpu.getEIP() + static_cast<int8_t>(fetch8())); break; // JMP rel8
+        case 0xEB: { // JMP rel8
+            int8_t disp = static_cast<int8_t>(fetch8());
+            m_cpu.setEIP(m_cpu.getEIP() + disp);
+            break;
+        }
 
         // Immediate to Reg Moves
         case 0xB0: case 0xB1: case 0xB2: case 0xB3:
@@ -1711,7 +1711,7 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
 
     uint16_t newIP = m_memory.read16(vector * 4);
     uint16_t newCS = m_memory.read16((vector * 4) + 2);
-    
+
     m_cpu.setSegReg(CS, newCS);
     m_cpu.setEIP(newIP);
 }
