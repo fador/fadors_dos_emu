@@ -8,6 +8,7 @@
 #include "hw/PIC8259.hpp"
 #include "hw/PIT8254.hpp"
 #include "hw/ProgramLoader.hpp"
+#include "hw/VGAController.hpp"
 #include "ui/TerminalRenderer.hpp"
 #include "ui/InputManager.hpp"
 #include "ui/Debugger.hpp"
@@ -25,12 +26,15 @@ int main(int argc, char* argv[]) {
         fador::hw::PIC8259 pic(true); // Master
         fador::hw::KeyboardController kbd;
         fador::hw::PIT8254 pit;
+        fador::hw::VGAController vga(memory);
 
         // Register devices with IOBus
         iobus.registerDevice(0x20, 0x21, &pic);
         iobus.registerDevice(0x40, 0x43, &pit);
         iobus.registerDevice(0x60, 0x60, &kbd);
         iobus.registerDevice(0x64, 0x64, &kbd);
+        iobus.registerDevice(0x3C0, 0x3CF, &vga);
+        iobus.registerDevice(0x3D0, 0x3DF, &vga);
         kbd.setMemoryBus(&memory);
         fador::cpu::CPU cpu;
         fador::hw::DOS dos(cpu, memory);

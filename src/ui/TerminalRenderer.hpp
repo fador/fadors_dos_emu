@@ -29,7 +29,22 @@ private:
     };
 
     std::vector<CharCell> m_lastFrame;
-    
+    int m_lastTextCols = 0;
+    int m_lastTextRows = 0;
+
+    // Graphics mode state
+    static constexpr int TARGET_COLS = 80; // terminal width target
+    static constexpr uint32_t PALETTE_BASE = 0xE0000;
+
+    std::vector<uint32_t> m_lastGraphicsFrame; // packed RGB per cell
+    uint8_t m_lastVideoMode = 0xFF;
+
+    void renderTextMode(bool force);
+    void renderGraphicsMode(bool force);
+
+    // Decode a pixel's palette index from VRAM depending on mode layout
+    uint8_t readPixel(int x, int y, uint8_t mode) const;
+
     // Maps BIOS color attributes to ANSI escape codes
     const char* getAnsiColor(uint8_t attr, bool background);
 };

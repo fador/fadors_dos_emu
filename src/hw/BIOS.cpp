@@ -1,9 +1,11 @@
 #include "BIOS.hpp"
 #include "KeyboardController.hpp"
 #include "PIT8254.hpp"
+#include "VideoMode.hpp"
 #include "../utils/Logger.hpp"
 #include <fstream>
 #include <algorithm>
+#include <cstring>
 #include <thread>
 
 namespace fador::hw {
@@ -95,10 +97,8 @@ void BIOS::handleVideoService() {
         case 0x00: { // Set Video Mode
             uint8_t al = m_cpu.getReg8(cpu::AL) & 0x7F; // bit 7 = don't clear if set
             bool clearScreen = !(m_cpu.getReg8(cpu::AL) & 0x80);
+            const auto* mi = findVideoMode(al);
             m_memory.write8(0x449, al); // BDA: current mode
-            m_memory.write16(0x44A, 80); // BDA: columns per row
-            m_memory.write8(0x484, 24);  // BDA: rows - 1
-            m_memory.write16(0x44C, 80 * 25 * 2); // BDA: page size in bytes
             m_memory.write8(0x462, 0);   // BDA: active page = 0
             m_memory.write16(0x44E, 0);  // BDA: page offset = 0
             // Reset cursor for all 8 pages
@@ -106,13 +106,28 @@ void BIOS::handleVideoService() {
                 m_memory.write8(0x450 + p * 2, 0);     // col
                 m_memory.write8(0x450 + p * 2 + 1, 0); // row
             }
-            if (clearScreen) {
-                for (uint32_t i = 0; i < 80 * 25 * 2; i += 2) {
-                    m_memory.write8(0xB8000 + i, ' ');
-                    m_memory.write8(0xB8000 + i + 1, 0x07);
+            if (mi) {
+                m_memory.write16(0x44A, mi->textCols);
+                m_memory.write8(0x484, mi->textRows - 1);
+                m_memory.write16(0x44C, static_cast<uint16_t>(mi->pageSize));
+                if (clearScreen) {
+                    if (mi->isGraphics) {
+                        std::memset(m_memory.directAccess(mi->vramBase), 0, mi->pageSize);
+                    } else {
+                        uint32_t cells = static_cast<uint32_t>(mi->textCols) * mi->textRows;
+                        for (uint32_t i = 0; i < cells * 2; i += 2) {
+                            m_memory.write8(mi->vramBase + i, ' ');
+                            m_memory.write8(mi->vramBase + i + 1, 0x07);
+                        }
+                    }
                 }
+            } else {
+                // Unknown mode — default to 80x25 text
+                m_memory.write16(0x44A, 80);
+                m_memory.write8(0x484, 24);
+                m_memory.write16(0x44C, 80 * 25 * 2);
             }
-            LOG_VIDEO("BIOS INT 10h: Set Video Mode ", (int)al);
+            LOG_VIDEO("BIOS INT 10h: Set Video Mode 0x", std::hex, (int)al);
             break;
         }
         case 0x0F: { // Get Video Mode
@@ -153,7 +168,7 @@ void BIOS::handleVideoService() {
             uint8_t page = m_cpu.getReg8(cpu::AL);
             if (page > 7) page = 0;
             m_memory.write8(0x462, page);
-            m_memory.write16(0x44E, static_cast<uint16_t>(page * 80 * 25 * 2));
+            m_memory.write16(0x44E, static_cast<uint16_t>(page * m_memory.read16(0x44C)));
             LOG_DEBUG("BIOS INT 10h: Set Active Page ", (int)page);
             break;
         }
@@ -165,13 +180,15 @@ void BIOS::handleVideoService() {
             uint8_t col1 = m_cpu.getReg8(cpu::CL);
             uint8_t col2 = m_cpu.getReg8(cpu::DL);
             uint8_t attr = m_cpu.getReg8(cpu::BH);
-            if (row2 > 24) row2 = 24;
-            if (col2 > 79) col2 = 79;
+            uint16_t cols = m_memory.read16(0x44A);
+            uint8_t  maxRow = m_memory.read8(0x484);
+            if (row2 > maxRow) row2 = maxRow;
+            if (col2 >= cols) col2 = static_cast<uint8_t>(cols - 1);
             uint8_t lines = al;
             if (lines == 0 || lines > (row2 - row1 + 1)) {
                 for (uint8_t r = row1; r <= row2; ++r) {
                     for (uint8_t c = col1; c <= col2; ++c) {
-                        uint32_t off = (r * 80 + c) * 2;
+                        uint32_t off = (r * cols + c) * 2;
                         m_memory.write8(0xB8000 + off, ' ');
                         m_memory.write8(0xB8000 + off + 1, attr);
                     }
@@ -179,15 +196,15 @@ void BIOS::handleVideoService() {
             } else if (ah == 0x06) {
                 for (uint8_t r = row1; r <= row2 - lines; ++r) {
                     for (uint8_t c = col1; c <= col2; ++c) {
-                        uint32_t dst = (r * 80 + c) * 2;
-                        uint32_t src = ((r + lines) * 80 + c) * 2;
+                        uint32_t dst = (r * cols + c) * 2;
+                        uint32_t src = ((r + lines) * cols + c) * 2;
                         m_memory.write8(0xB8000 + dst, m_memory.read8(0xB8000 + src));
                         m_memory.write8(0xB8000 + dst + 1, m_memory.read8(0xB8000 + src + 1));
                     }
                 }
                 for (uint8_t r = row2 - lines + 1; r <= row2; ++r) {
                     for (uint8_t c = col1; c <= col2; ++c) {
-                        uint32_t off = (r * 80 + c) * 2;
+                        uint32_t off = (r * cols + c) * 2;
                         m_memory.write8(0xB8000 + off, ' ');
                         m_memory.write8(0xB8000 + off + 1, attr);
                     }
@@ -195,15 +212,15 @@ void BIOS::handleVideoService() {
             } else {
                 for (uint8_t r = row2; r >= row1 + lines; --r) {
                     for (uint8_t c = col1; c <= col2; ++c) {
-                        uint32_t dst = (r * 80 + c) * 2;
-                        uint32_t src = ((r - lines) * 80 + c) * 2;
+                        uint32_t dst = (r * cols + c) * 2;
+                        uint32_t src = ((r - lines) * cols + c) * 2;
                         m_memory.write8(0xB8000 + dst, m_memory.read8(0xB8000 + src));
                         m_memory.write8(0xB8000 + dst + 1, m_memory.read8(0xB8000 + src + 1));
                     }
                 }
                 for (uint8_t r = row1; r < row1 + lines; ++r) {
                     for (uint8_t c = col1; c <= col2; ++c) {
-                        uint32_t off = (r * 80 + c) * 2;
+                        uint32_t off = (r * cols + c) * 2;
                         m_memory.write8(0xB8000 + off, ' ');
                         m_memory.write8(0xB8000 + off + 1, attr);
                     }
@@ -215,9 +232,10 @@ void BIOS::handleVideoService() {
         case 0x08: { // Read Character and Attribute at Cursor
             uint8_t page = m_cpu.getReg8(cpu::BH);
             if (page > 7) page = 0;
+            uint16_t cols = m_memory.read16(0x44A);
             uint8_t col = m_memory.read8(0x450 + page * 2);
             uint8_t row = m_memory.read8(0x450 + page * 2 + 1);
-            uint32_t off = (row * 80 + col) * 2;
+            uint32_t off = (row * cols + col) * 2;
             m_cpu.setReg8(cpu::AL, m_memory.read8(0xB8000 + off));
             m_cpu.setReg8(cpu::AH, m_memory.read8(0xB8000 + off + 1));
             break;
@@ -226,15 +244,17 @@ void BIOS::handleVideoService() {
             uint8_t c = m_cpu.getReg8(cpu::AL);
             uint8_t attr = m_cpu.getReg8(cpu::BL);
             uint16_t count = m_cpu.getReg16(cpu::CX);
+            uint16_t cols = m_memory.read16(0x44A);
+            uint8_t maxRow = m_memory.read8(0x484);
             uint8_t cursorCol = m_memory.read8(0x450);
             uint8_t cursorRow = m_memory.read8(0x451);
             for (uint16_t i = 0; i < count; ++i) {
-                uint32_t off = (cursorRow * 80 + cursorCol) * 2;
+                uint32_t off = (cursorRow * cols + cursorCol) * 2;
                 m_memory.write8(0xB8000 + off, c);
                 m_memory.write8(0xB8000 + off + 1, attr);
                 cursorCol++;
-                if (cursorCol >= 80) { cursorCol = 0; cursorRow++; }
-                if (cursorRow >= 25) { cursorRow = 24; }
+                if (cursorCol >= cols) { cursorCol = 0; cursorRow++; }
+                if (cursorRow > maxRow) { cursorRow = maxRow; }
             }
             // AH=09h does NOT advance the cursor in the BDA
             LOG_VIDEO("BIOS INT 10h AH=09h: Write Char '", (char)c, "' attr=", std::hex, (int)attr, " count=", count);
@@ -243,15 +263,17 @@ void BIOS::handleVideoService() {
         case 0x0A: { // Write Character Only at Cursor (no attribute change)
             uint8_t c = m_cpu.getReg8(cpu::AL);
             uint16_t count = m_cpu.getReg16(cpu::CX);
+            uint16_t cols = m_memory.read16(0x44A);
+            uint8_t maxRow = m_memory.read8(0x484);
             uint8_t cursorCol = m_memory.read8(0x450);
             uint8_t cursorRow = m_memory.read8(0x451);
             for (uint16_t i = 0; i < count; ++i) {
-                uint32_t off = (cursorRow * 80 + cursorCol) * 2;
+                uint32_t off = (cursorRow * cols + cursorCol) * 2;
                 m_memory.write8(0xB8000 + off, c);
                 // attribute byte left unchanged
                 cursorCol++;
-                if (cursorCol >= 80) { cursorCol = 0; cursorRow++; }
-                if (cursorRow >= 25) { cursorRow = 24; }
+                if (cursorCol >= cols) { cursorCol = 0; cursorRow++; }
+                if (cursorRow > maxRow) { cursorRow = maxRow; }
             }
             LOG_VIDEO("BIOS INT 10h AH=0Ah: Write Char Only '", (char)c, "' count=", count);
             break;
@@ -262,10 +284,107 @@ void BIOS::handleVideoService() {
             LOG_DEBUG("BIOS INT 10h AH=0Bh: Set Palette BH=", (int)bh, " BL=", (int)bl, " (stubbed)");
             break;
         }
+        case 0x0C: { // Write Graphics Pixel
+            uint8_t mode = m_memory.read8(0x449);
+            const auto* mi = findVideoMode(mode);
+            if (mi && mi->isGraphics) {
+                uint8_t color = m_cpu.getReg8(cpu::AL);
+                uint16_t x = m_cpu.getReg16(cpu::CX);
+                uint16_t y = m_cpu.getReg16(cpu::DX);
+                if (x < mi->width && y < mi->height) {
+                    switch (mi->layout) {
+                        case VMemLayout::Linear256:
+                            m_memory.write8(mi->vramBase + y * mi->width + x, color);
+                            break;
+                        case VMemLayout::CGA4: {
+                            uint32_t bank = (y & 1) ? 0x2000 : 0;
+                            uint32_t off = bank + (y >> 1) * 80 + (x >> 2);
+                            uint8_t shift = (3 - (x & 3)) * 2;
+                            uint8_t b = m_memory.read8(mi->vramBase + off);
+                            b &= ~(0x03 << shift);
+                            b |= (color & 0x03) << shift;
+                            m_memory.write8(mi->vramBase + off, b);
+                            break;
+                        }
+                        case VMemLayout::CGA2: {
+                            uint32_t bank = (y & 1) ? 0x2000 : 0;
+                            uint32_t off = bank + (y >> 1) * 80 + (x >> 3);
+                            uint8_t bit = 7 - (x & 7);
+                            uint8_t b = m_memory.read8(mi->vramBase + off);
+                            if (color & 1) b |= (1 << bit); else b &= ~(1 << bit);
+                            m_memory.write8(mi->vramBase + off, b);
+                            break;
+                        }
+                        case VMemLayout::Planar: {
+                            // Write pixel across 4 planes stored sequentially
+                            uint32_t byteOff = (y * mi->width + x) / 8;
+                            uint8_t bit = 7 - (x & 7);
+                            uint32_t planeSize = (static_cast<uint32_t>(mi->width) * mi->height) / 8;
+                            for (int p = 0; p < 4; ++p) {
+                                uint8_t b = m_memory.read8(mi->vramBase + p * planeSize + byteOff);
+                                if (color & (1 << p)) b |= (1 << bit); else b &= ~(1 << bit);
+                                m_memory.write8(mi->vramBase + p * planeSize + byteOff, b);
+                            }
+                            break;
+                        }
+                        default: break;
+                    }
+                }
+            }
+            LOG_TRACE("BIOS INT 10h AH=0Ch: Write Pixel");
+            break;
+        }
+        case 0x0D: { // Read Graphics Pixel
+            uint8_t mode = m_memory.read8(0x449);
+            const auto* mi = findVideoMode(mode);
+            m_cpu.setReg8(cpu::AL, 0);
+            if (mi && mi->isGraphics) {
+                uint16_t x = m_cpu.getReg16(cpu::CX);
+                uint16_t y = m_cpu.getReg16(cpu::DX);
+                if (x < mi->width && y < mi->height) {
+                    switch (mi->layout) {
+                        case VMemLayout::Linear256:
+                            m_cpu.setReg8(cpu::AL, m_memory.read8(mi->vramBase + y * mi->width + x));
+                            break;
+                        case VMemLayout::CGA4: {
+                            uint32_t bank = (y & 1) ? 0x2000 : 0;
+                            uint32_t off = bank + (y >> 1) * 80 + (x >> 2);
+                            uint8_t shift = (3 - (x & 3)) * 2;
+                            m_cpu.setReg8(cpu::AL, (m_memory.read8(mi->vramBase + off) >> shift) & 0x03);
+                            break;
+                        }
+                        case VMemLayout::CGA2: {
+                            uint32_t bank = (y & 1) ? 0x2000 : 0;
+                            uint32_t off = bank + (y >> 1) * 80 + (x >> 3);
+                            uint8_t bit = 7 - (x & 7);
+                            m_cpu.setReg8(cpu::AL, (m_memory.read8(mi->vramBase + off) >> bit) & 1);
+                            break;
+                        }
+                        case VMemLayout::Planar: {
+                            uint32_t byteOff = (y * mi->width + x) / 8;
+                            uint8_t bit = 7 - (x & 7);
+                            uint32_t planeSize = (static_cast<uint32_t>(mi->width) * mi->height) / 8;
+                            uint8_t pixel = 0;
+                            for (int p = 0; p < 4; ++p) {
+                                if (m_memory.read8(mi->vramBase + p * planeSize + byteOff) & (1 << bit))
+                                    pixel |= (1 << p);
+                            }
+                            m_cpu.setReg8(cpu::AL, pixel);
+                            break;
+                        }
+                        default: break;
+                    }
+                }
+            }
+            LOG_TRACE("BIOS INT 10h AH=0Dh: Read Pixel");
+            break;
+        }
         case 0x0E: { // Teletype Output
             uint8_t al = m_cpu.getReg8(cpu::AL);
             uint8_t page = m_cpu.getReg8(cpu::BH);
             if (page > 7) page = 0;
+            uint16_t cols = m_memory.read16(0x44A);
+            uint8_t maxRow = m_memory.read8(0x484);
             uint8_t cursorCol = m_memory.read8(0x450 + page * 2);
             uint8_t cursorRow = m_memory.read8(0x450 + page * 2 + 1);
 
@@ -282,34 +401,34 @@ void BIOS::handleVideoService() {
                     cursorCol = 0;
                     break;
                 default: { // Printable character
-                    uint32_t off = (cursorRow * 80 + cursorCol) * 2;
+                    uint32_t off = (cursorRow * cols + cursorCol) * 2;
                     m_memory.write8(0xB8000 + off, al);
                     // Keep existing attribute
                     if (m_memory.read8(0xB8000 + off + 1) == 0)
                         m_memory.write8(0xB8000 + off + 1, 0x07);
                     cursorCol++;
-                    if (cursorCol >= 80) { cursorCol = 0; cursorRow++; }
+                    if (cursorCol >= cols) { cursorCol = 0; cursorRow++; }
                     break;
                 }
             }
             // Scroll up if past last row
-            if (cursorRow >= 25) {
+            if (cursorRow > maxRow) {
                 // Scroll entire screen up one line
-                for (uint8_t r = 0; r < 24; ++r) {
-                    for (uint8_t c = 0; c < 80; ++c) {
-                        uint32_t dst = (r * 80 + c) * 2;
-                        uint32_t src = ((r + 1) * 80 + c) * 2;
+                for (uint8_t r = 0; r < maxRow; ++r) {
+                    for (uint16_t c = 0; c < cols; ++c) {
+                        uint32_t dst = (r * cols + c) * 2;
+                        uint32_t src = ((r + 1) * cols + c) * 2;
                         m_memory.write8(0xB8000 + dst, m_memory.read8(0xB8000 + src));
                         m_memory.write8(0xB8000 + dst + 1, m_memory.read8(0xB8000 + src + 1));
                     }
                 }
                 // Clear last line
-                for (uint8_t c = 0; c < 80; ++c) {
-                    uint32_t off = (24 * 80 + c) * 2;
+                for (uint16_t c = 0; c < cols; ++c) {
+                    uint32_t off = (maxRow * cols + c) * 2;
                     m_memory.write8(0xB8000 + off, ' ');
                     m_memory.write8(0xB8000 + off + 1, 0x07);
                 }
-                cursorRow = 24;
+                cursorRow = maxRow;
             }
             m_memory.write8(0x450 + page * 2, cursorCol);
             m_memory.write8(0x450 + page * 2 + 1, cursorRow);
@@ -318,6 +437,7 @@ void BIOS::handleVideoService() {
         }
         case 0x10: { // DAC/Palette Functions
             uint8_t al = m_cpu.getReg8(cpu::AL);
+            constexpr uint32_t PAL = 0xE0000;
             switch (al) {
                 case 0x00: // Set Individual Palette Register
                     LOG_DEBUG("BIOS INT 10h AH=10h AL=00h: Set Palette Reg BL=", (int)m_cpu.getReg8(cpu::BL), " (stubbed)");
@@ -337,18 +457,53 @@ void BIOS::handleVideoService() {
                 case 0x08: // Read Overscan Register
                     m_cpu.setReg8(cpu::BH, 0x00); // Black border
                     break;
-                case 0x10: // Set Individual DAC Register
-                    LOG_DEBUG("BIOS INT 10h AH=10h AL=10h: Set DAC Reg (stubbed)");
+                case 0x10: { // Set Individual DAC Register
+                    uint16_t reg = m_cpu.getReg16(cpu::BX);
+                    if (reg < 256) {
+                        m_memory.write8(PAL + reg * 3 + 0, m_cpu.getReg8(cpu::DH) & 0x3F);
+                        m_memory.write8(PAL + reg * 3 + 1, m_cpu.getReg8(cpu::CH) & 0x3F);
+                        m_memory.write8(PAL + reg * 3 + 2, m_cpu.getReg8(cpu::CL) & 0x3F);
+                    }
+                    LOG_DEBUG("BIOS INT 10h AH=10h AL=10h: Set DAC Reg ", reg);
                     break;
-                case 0x12: // Set Block of DAC Registers
-                    LOG_DEBUG("BIOS INT 10h AH=10h AL=12h: Set DAC Block (stubbed)");
+                }
+                case 0x12: { // Set Block of DAC Registers
+                    uint16_t first = m_cpu.getReg16(cpu::BX);
+                    uint16_t count = m_cpu.getReg16(cpu::CX);
+                    uint16_t es = m_cpu.getSegReg(cpu::ES);
+                    uint16_t dx = m_cpu.getReg16(cpu::DX);
+                    uint32_t addr = (es << 4) + dx;
+                    for (uint16_t i = 0; i < count && (first + i) < 256; ++i) {
+                        m_memory.write8(PAL + (first + i) * 3 + 0, m_memory.read8(addr + i * 3 + 0) & 0x3F);
+                        m_memory.write8(PAL + (first + i) * 3 + 1, m_memory.read8(addr + i * 3 + 1) & 0x3F);
+                        m_memory.write8(PAL + (first + i) * 3 + 2, m_memory.read8(addr + i * 3 + 2) & 0x3F);
+                    }
+                    LOG_DEBUG("BIOS INT 10h AH=10h AL=12h: Set DAC Block first=", first, " count=", count);
                     break;
-                case 0x15: // Read Individual DAC Register
-                    m_cpu.setReg8(cpu::DH, 0); m_cpu.setReg8(cpu::CH, 0); m_cpu.setReg8(cpu::CL, 0);
+                }
+                case 0x15: { // Read Individual DAC Register
+                    uint16_t reg = m_cpu.getReg16(cpu::BX);
+                    if (reg < 256) {
+                        m_cpu.setReg8(cpu::DH, m_memory.read8(PAL + reg * 3 + 0));
+                        m_cpu.setReg8(cpu::CH, m_memory.read8(PAL + reg * 3 + 1));
+                        m_cpu.setReg8(cpu::CL, m_memory.read8(PAL + reg * 3 + 2));
+                    }
                     break;
-                case 0x17: // Read Block of DAC Registers
-                    LOG_DEBUG("BIOS INT 10h AH=10h AL=17h: Read DAC Block (stubbed)");
+                }
+                case 0x17: { // Read Block of DAC Registers
+                    uint16_t first = m_cpu.getReg16(cpu::BX);
+                    uint16_t count = m_cpu.getReg16(cpu::CX);
+                    uint16_t es = m_cpu.getSegReg(cpu::ES);
+                    uint16_t dx = m_cpu.getReg16(cpu::DX);
+                    uint32_t addr = (es << 4) + dx;
+                    for (uint16_t i = 0; i < count && (first + i) < 256; ++i) {
+                        m_memory.write8(addr + i * 3 + 0, m_memory.read8(PAL + (first + i) * 3 + 0));
+                        m_memory.write8(addr + i * 3 + 1, m_memory.read8(PAL + (first + i) * 3 + 1));
+                        m_memory.write8(addr + i * 3 + 2, m_memory.read8(PAL + (first + i) * 3 + 2));
+                    }
+                    LOG_DEBUG("BIOS INT 10h AH=10h AL=17h: Read DAC Block first=", first, " count=", count);
                     break;
+                }
                 case 0x1A: // Get Color Page State
                     m_cpu.setReg8(cpu::BL, 0); // Paging mode 0
                     m_cpu.setReg8(cpu::BH, 0); // Current page 0
@@ -423,6 +578,8 @@ void BIOS::handleVideoService() {
             uint16_t es = m_cpu.getSegReg(cpu::ES);
             uint16_t bp = m_cpu.getReg16(cpu::BP);
             uint32_t strAddr = (es << 4) + bp;
+            uint16_t cols = m_memory.read16(0x44A);
+            uint8_t maxRow = m_memory.read8(0x484);
 
             if (page > 7) page = 0;
 
@@ -444,12 +601,12 @@ void BIOS::handleVideoService() {
                 if (c == 0x08) { if (col > 0) col--; continue; }
                 if (c == 0x07) { continue; } // BEL
 
-                uint32_t off = (row * 80 + col) * 2;
+                uint32_t off = (row * cols + col) * 2;
                 m_memory.write8(0xB8000 + off, c);
                 m_memory.write8(0xB8000 + off + 1, charAttr);
                 col++;
-                if (col >= 80) { col = 0; row++; }
-                if (row >= 25) { row = 24; }
+                if (col >= cols) { col = 0; row++; }
+                if (row > maxRow) { row = maxRow; }
             }
 
             // Modes 1 and 3 update the cursor position
@@ -478,13 +635,15 @@ void BIOS::handleVideoService() {
             uint16_t es = m_cpu.getSegReg(cpu::ES);
             uint16_t di = m_cpu.getReg16(cpu::DI);
             uint32_t addr = (es << 4) + di;
+            uint16_t cols = m_memory.read16(0x44A);
+            uint8_t rows = m_memory.read8(0x484);
             // Zero the buffer
             for (int i = 0; i < 64; ++i) m_memory.write8(addr + i, 0);
             // Fill key fields
             m_memory.write8(addr + 0x00, m_memory.read8(0x449)); // Current mode
-            m_memory.write16(addr + 0x01, 80);  // Columns
-            m_memory.write16(addr + 0x22, 80 * 25 * 2); // Page size
-            m_memory.write8(addr + 0x27, 24);   // Rows - 1
+            m_memory.write16(addr + 0x01, cols);
+            m_memory.write16(addr + 0x22, m_memory.read16(0x44C)); // Page size
+            m_memory.write8(addr + 0x27, rows);   // Rows - 1
             m_memory.write16(addr + 0x28, 16);  // Char height
             m_memory.write8(addr + 0x2A, m_memory.read8(0x462)); // Active page
             m_cpu.setReg8(cpu::AL, 0x1B); // Function supported
@@ -577,6 +736,43 @@ void BIOS::initialize() {
     for (uint32_t i = 0; i < 80 * 25 * 2; i += 2) {
         m_memory.write8(0xB8000 + i, ' ');
         m_memory.write8(0xB8000 + i + 1, 0x07);
+    }
+
+    // Initialize VGA DAC palette at 0xE0000 (256 entries x 3 bytes = 768 bytes)
+    // Standard CGA colors first (6-bit VGA values, 0-63)
+    static const uint8_t cgaPal[16][3] = {
+        { 0,  0,  0}, { 0,  0, 42}, { 0, 42,  0}, { 0, 42, 42},
+        {42,  0,  0}, {42,  0, 42}, {42, 21,  0}, {42, 42, 42},
+        {21, 21, 21}, {21, 21, 63}, {21, 63, 21}, {21, 63, 63},
+        {63, 21, 21}, {63, 21, 63}, {63, 63, 21}, {63, 63, 63}
+    };
+    constexpr uint32_t PAL = 0xE0000;
+    for (int i = 0; i < 16; ++i) {
+        m_memory.write8(PAL + i * 3 + 0, cgaPal[i][0]);
+        m_memory.write8(PAL + i * 3 + 1, cgaPal[i][1]);
+        m_memory.write8(PAL + i * 3 + 2, cgaPal[i][2]);
+    }
+    // 16-31: Grayscale ramp
+    for (int i = 0; i < 16; ++i) {
+        uint8_t v = static_cast<uint8_t>(i * 63 / 15);
+        m_memory.write8(PAL + (16 + i) * 3 + 0, v);
+        m_memory.write8(PAL + (16 + i) * 3 + 1, v);
+        m_memory.write8(PAL + (16 + i) * 3 + 2, v);
+    }
+    // 32-247: 6x6x6 color cube
+    for (int i = 0; i < 216; ++i) {
+        uint8_t r = static_cast<uint8_t>((i / 36) * 12 + 3);
+        uint8_t g = static_cast<uint8_t>(((i % 36) / 6) * 12 + 3);
+        uint8_t b = static_cast<uint8_t>((i % 6) * 12 + 3);
+        m_memory.write8(PAL + (32 + i) * 3 + 0, r);
+        m_memory.write8(PAL + (32 + i) * 3 + 1, g);
+        m_memory.write8(PAL + (32 + i) * 3 + 2, b);
+    }
+    // 248-255: Black
+    for (int i = 248; i < 256; ++i) {
+        m_memory.write8(PAL + i * 3 + 0, 0);
+        m_memory.write8(PAL + i * 3 + 1, 0);
+        m_memory.write8(PAL + i * 3 + 2, 0);
     }
 
     // 2. Setup IVT (Interrupt Vector Table) vectors
