@@ -964,27 +964,32 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             LOG_CPU("FPU opcode 0x", std::hex, static_cast<int>(opcode), " encountered - stubbed");
             break;
         }
-        case 0xA4: // MOVSB
+        case 0xA4: { // MOVSB
             LOG_CPU("MOVSB");
-            m_memory.write8((m_cpu.getSegReg(ES) << 4) + m_cpu.getReg16(DI), m_memory.read8((m_cpu.getSegReg(DS) << 4) + m_cpu.getReg16(SI)));
+            uint8_t srcSeg = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
+            m_memory.write8((m_cpu.getSegReg(ES) << 4) + m_cpu.getReg16(DI), m_memory.read8((m_cpu.getSegReg(srcSeg) << 4) + m_cpu.getReg16(SI)));
             m_cpu.setReg16(DI, m_cpu.getReg16(DI) + ((m_cpu.getEFLAGS() & 0x0400) ? -1 : 1));
             m_cpu.setReg16(SI, m_cpu.getReg16(SI) + ((m_cpu.getEFLAGS() & 0x0400) ? -1 : 1));
             break;
-        case 0xA5: // MOVSW/MOVSD
+        }
+        case 0xA5: { // MOVSW/MOVSD
             LOG_CPU("MOVSW/D");
+            uint8_t srcSeg = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
             if (m_hasPrefix66) {
-                m_memory.write32((m_cpu.getSegReg(ES) << 4) + m_cpu.getReg32(EDI), m_memory.read32((m_cpu.getSegReg(DS) << 4) + m_cpu.getReg32(ESI)));
+                m_memory.write32((m_cpu.getSegReg(ES) << 4) + m_cpu.getReg32(EDI), m_memory.read32((m_cpu.getSegReg(srcSeg) << 4) + m_cpu.getReg32(ESI)));
                 m_cpu.setReg32(EDI, m_cpu.getReg32(EDI) + ((m_cpu.getEFLAGS() & 0x0400) ? -4 : 4));
                 m_cpu.setReg32(ESI, m_cpu.getReg32(ESI) + ((m_cpu.getEFLAGS() & 0x0400) ? -4 : 4));
             } else {
-                m_memory.write16((m_cpu.getSegReg(ES) << 4) + m_cpu.getReg16(DI), m_memory.read16((m_cpu.getSegReg(DS) << 4) + m_cpu.getReg16(SI)));
+                m_memory.write16((m_cpu.getSegReg(ES) << 4) + m_cpu.getReg16(DI), m_memory.read16((m_cpu.getSegReg(srcSeg) << 4) + m_cpu.getReg16(SI)));
                 m_cpu.setReg16(DI, m_cpu.getReg16(DI) + ((m_cpu.getEFLAGS() & 0x0400) ? -2 : 2));
                 m_cpu.setReg16(SI, m_cpu.getReg16(SI) + ((m_cpu.getEFLAGS() & 0x0400) ? -2 : 2));
             }
             break;
+        }
         case 0xA6: { // CMPSB
             LOG_CPU("CMPSB");
-            uint8_t val1 = m_memory.read8((m_cpu.getSegReg(DS) << 4) + (m_hasPrefix67 ? m_cpu.getReg32(ESI) : m_cpu.getReg16(SI)));
+            uint8_t srcSegC8 = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
+            uint8_t val1 = m_memory.read8((m_cpu.getSegReg(srcSegC8) << 4) + (m_hasPrefix67 ? m_cpu.getReg32(ESI) : m_cpu.getReg16(SI)));
             uint8_t val2 = m_memory.read8((m_cpu.getSegReg(ES) << 4) + (m_hasPrefix67 ? m_cpu.getReg32(EDI) : m_cpu.getReg16(DI)));
             aluOp(7, val1, val2, 8); // CMP
             int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -1 : 1;
@@ -993,15 +998,16 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             break;
         }
         case 0xA7: { // CMPSW/CMPSD
+            uint8_t srcSegCW = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
             if (m_hasPrefix66) {
-                uint32_t val1 = m_memory.read32((m_cpu.getSegReg(DS) << 4) + (m_hasPrefix67 ? m_cpu.getReg32(ESI) : m_cpu.getReg16(SI)));
+                uint32_t val1 = m_memory.read32((m_cpu.getSegReg(srcSegCW) << 4) + (m_hasPrefix67 ? m_cpu.getReg32(ESI) : m_cpu.getReg16(SI)));
                 uint32_t val2 = m_memory.read32((m_cpu.getSegReg(ES) << 4) + (m_hasPrefix67 ? m_cpu.getReg32(EDI) : m_cpu.getReg16(DI)));
                 aluOp(7, val1, val2, 32);
                 int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -4 : 4;
                 if (m_hasPrefix67) { m_cpu.setReg32(ESI, m_cpu.getReg32(ESI) + diff); m_cpu.setReg32(EDI, m_cpu.getReg32(EDI) + diff); }
                 else { m_cpu.setReg16(SI, static_cast<uint16_t>(m_cpu.getReg16(SI) + diff)); m_cpu.setReg16(DI, static_cast<uint16_t>(m_cpu.getReg16(DI) + diff)); }
             } else {
-                uint16_t val1 = m_memory.read16((m_cpu.getSegReg(DS) << 4) + (m_hasPrefix67 ? m_cpu.getReg32(ESI) : m_cpu.getReg16(SI)));
+                uint16_t val1 = m_memory.read16((m_cpu.getSegReg(srcSegCW) << 4) + (m_hasPrefix67 ? m_cpu.getReg32(ESI) : m_cpu.getReg16(SI)));
                 uint16_t val2 = m_memory.read16((m_cpu.getSegReg(ES) << 4) + (m_hasPrefix67 ? m_cpu.getReg32(EDI) : m_cpu.getReg16(DI)));
                 aluOp(7, val1, val2, 16);
                 int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -2 : 2;
@@ -1027,17 +1033,19 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             break;
         case 0xAC: { // LODSB
             LOG_CPU("LODSB");
-            m_cpu.setReg8(AL, m_memory.read8((m_cpu.getSegReg(DS) << 4) + m_cpu.getReg16(SI)));
+            uint8_t srcSegLB = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
+            m_cpu.setReg8(AL, m_memory.read8((m_cpu.getSegReg(srcSegLB) << 4) + m_cpu.getReg16(SI)));
             m_cpu.setReg16(SI, m_cpu.getReg16(SI) + ((m_cpu.getEFLAGS() & 0x0400) ? -1 : 1));
             break;
         }
         case 0xAD: { // LODSW/LODSD
             LOG_CPU("LODSW/D");
+            uint8_t srcSegLW = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
             if (m_hasPrefix66) {
-                m_cpu.setReg32(EAX, m_memory.read32((m_cpu.getSegReg(DS) << 4) + m_cpu.getReg32(ESI)));
+                m_cpu.setReg32(EAX, m_memory.read32((m_cpu.getSegReg(srcSegLW) << 4) + m_cpu.getReg32(ESI)));
                 m_cpu.setReg32(ESI, m_cpu.getReg32(ESI) + ((m_cpu.getEFLAGS() & 0x0400) ? -4 : 4));
             } else {
-                m_cpu.setReg16(AX, m_memory.read16((m_cpu.getSegReg(DS) << 4) + m_cpu.getReg16(SI)));
+                m_cpu.setReg16(AX, m_memory.read16((m_cpu.getSegReg(srcSegLW) << 4) + m_cpu.getReg16(SI)));
                 m_cpu.setReg16(SI, m_cpu.getReg16(SI) + ((m_cpu.getEFLAGS() & 0x0400) ? -2 : 2));
             }
             break;

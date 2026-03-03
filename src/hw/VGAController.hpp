@@ -1,6 +1,7 @@
 #pragma once
 #include "IODevice.hpp"
 #include "../memory/MemoryBus.hpp"
+#include <chrono>
 
 namespace fador::hw {
 
@@ -25,7 +26,10 @@ private:
     uint8_t m_dacWriteIndex = 0;
     uint8_t m_dacReadIndex = 0;
     uint8_t m_dacColorCycle = 0; // 0=R, 1=G, 2=B
-    bool m_verticalRetrace = false;
+
+    // VGA timing: simulate retrace using port read counter.
+    // After a certain number of reads, transition between retrace/display.
+    uint32_t m_retraceReadCount = 0;
 
     // Sequencer registers (port 0x3C4/0x3C5)
     uint8_t m_seqIndex = 0;

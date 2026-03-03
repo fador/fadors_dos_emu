@@ -113,18 +113,17 @@ bool DOS::handleInterrupt(uint8_t vector) {
 
 void DOS::handleDOSService() {
     uint8_t ah = m_cpu.getReg8(cpu::AH);
+    LOG_DEBUG("[DOS] INT 21h AH=0x", std::hex, (int)ah, " AL=0x", (int)m_cpu.getReg8(cpu::AL));
     switch (ah) {
         case 0x02: { // Print Character
             uint8_t c = m_cpu.getReg8(cpu::DL);
             writeCharToVRAM(c);
-            std::cerr << (char)c << std::flush;
             break;
         }
         case 0x06: { // Direct Console I/O
             uint8_t dl = m_cpu.getReg8(cpu::DL);
             if (dl != 0xFF) {
                 writeCharToVRAM(dl);
-                std::cerr << (char)dl << std::flush;
             } else {
                 // Input not implemented, set ZF if no char
                 m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_ZERO);
@@ -138,7 +137,6 @@ void DOS::handleDOSService() {
             
             std::string str = readDOSString(addr);
             for (uint8_t c : str) writeCharToVRAM(c);
-            std::cerr << str << std::flush;
             break;
         }
         case 0x0A: { // Buffered Keyboard Input
@@ -368,6 +366,8 @@ void DOS::handleDOSService() {
                     m_fileHandles[fd_index]->stream.read(buffer.data(), cx);
                     std::streamsize read = m_fileHandles[fd_index]->stream.gcount();
 
+                    LOG_DEBUG("[DOS] AH=3Fh Read handle=", h, " cx=", cx, " read=", (int)read, " dest=", std::hex, ds, ":", dx, " (flat 0x", ((ds << 4) + dx), ")");
+
                     // 3. Emulate proper 16-bit segment offset wrap-around
                     for (int i = 0; i < read; ++i) {
                         uint16_t offset = dx + i; 
@@ -396,14 +396,11 @@ void DOS::handleDOSService() {
             uint32_t addr = (ds << 4) + dx;
 
             if (h == 1 || h == 2) { // Stdout/Stderr
-                std::string s;
                 for (int i = 0; i < cx; ++i) {
                     uint8_t c = m_memory.read8(addr + i);
-                    s += (char)c;
                     writeCharToVRAM(c);
                 }
-                LOG_DOS("DOS: Write to ", (h==1?"stdout":"stderr"), ": '", s, "'");
-                std::cerr << s << std::flush;
+                LOG_DOS("DOS: Write to ", (h==1?"stdout":"stderr"), " ", cx, " bytes");
                 m_cpu.setReg16(cpu::AX, cx);
                 m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
             } else if (h >= 5 && (h - 5) < static_cast<int>(m_fileHandles.size())) {
@@ -421,6 +418,8 @@ void DOS::handleDOSService() {
             uint16_t h = m_cpu.getReg16(cpu::BX);
             uint8_t origin = m_cpu.getReg8(cpu::AL);
             int32_t offset = (static_cast<int32_t>(m_cpu.getReg16(cpu::CX)) << 16) | m_cpu.getReg16(cpu::DX);
+
+            LOG_DEBUG("[DOS] Seek handle=", h, " origin=", (int)origin, " offset=", offset, " CX=", std::hex, m_cpu.getReg16(cpu::CX), " DX=", m_cpu.getReg16(cpu::DX));
 
             if (h >= 5 && (h - 5) < static_cast<int>(m_fileHandles.size())) {
                 std::ios_base::seekdir dir;
@@ -620,6 +619,11 @@ std::string DOS::resolvePath(const std::string& path) {
 }
 
 void DOS::writeCharToVRAM(uint8_t c) {
+    uint16_t cols = m_memory.read16(0x44A);
+    uint8_t maxRow = m_memory.read8(0x484);
+    if (cols == 0) cols = 80;
+    if (maxRow == 0) maxRow = 24;
+
     uint8_t col = m_memory.read8(0x450);
     uint8_t row = m_memory.read8(0x451);
 
@@ -635,32 +639,32 @@ void DOS::writeCharToVRAM(uint8_t c) {
             col = 0;
             break;
         default: {
-            uint32_t off = (row * 80 + col) * 2;
+            uint32_t off = (row * cols + col) * 2;
             m_memory.write8(0xB8000 + off, c);
             uint8_t attr = m_memory.read8(0xB8000 + off + 1);
             if (attr == 0) m_memory.write8(0xB8000 + off + 1, 0x07);
             col++;
-            if (col >= 80) { col = 0; row++; }
+            if (col >= cols) { col = 0; row++; }
             break;
         }
     }
 
     // Scroll up if past last row
-    if (row >= 25) {
-        for (uint8_t r = 0; r < 24; ++r) {
-            for (uint8_t cc = 0; cc < 80; ++cc) {
-                uint32_t dst = (r * 80 + cc) * 2;
-                uint32_t src = ((r + 1) * 80 + cc) * 2;
+    if (row > maxRow) {
+        for (uint8_t r = 0; r < maxRow; ++r) {
+            for (uint16_t cc = 0; cc < cols; ++cc) {
+                uint32_t dst = (r * cols + cc) * 2;
+                uint32_t src = ((r + 1) * cols + cc) * 2;
                 m_memory.write8(0xB8000 + dst, m_memory.read8(0xB8000 + src));
                 m_memory.write8(0xB8000 + dst + 1, m_memory.read8(0xB8000 + src + 1));
             }
         }
-        for (uint8_t cc = 0; cc < 80; ++cc) {
-            uint32_t off = (24 * 80 + cc) * 2;
+        for (uint16_t cc = 0; cc < cols; ++cc) {
+            uint32_t off = (maxRow * cols + cc) * 2;
             m_memory.write8(0xB8000 + off, ' ');
             m_memory.write8(0xB8000 + off + 1, 0x07);
         }
-        row = 24;
+        row = maxRow;
     }
 
     m_memory.write8(0x450, col);

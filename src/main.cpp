@@ -115,13 +115,12 @@ int main(int argc, char* argv[]) {
 
         fador::ui::InputManager input(kbd);
         bool running = true;
+        uint32_t instrCount = 0;
 
         while (running) {
-            // Check for input
-            input.pollInput();
-
             // Execute instruction
             decoder.step();
+            instrCount++;
 
             if (dos.isTerminated()) {
                 LOG_INFO("Program terminated normally with exit code ", (int)dos.getExitCode());
@@ -129,15 +128,19 @@ int main(int argc, char* argv[]) {
                 break;
             }
 
-            // Handle PIT ticks (approximate performance)
-            pit.update(); 
+            // Throttle expensive operations: poll input every ~1024 instructions,
+            // render at ~30 FPS.  select() syscall in pollInput() is the
+            // main bottleneck if called every instruction.
+            if ((instrCount & 0x3FF) == 0) {
+                input.pollInput();
+                pit.update();
 
-            // Render at ~30 FPS (simplified throttle)
-            static auto lastRender = std::chrono::steady_clock::now();
-            auto now = std::chrono::steady_clock::now();
-            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastRender).count() > 33) {
-                renderer.render();
-                lastRender = now;
+                static auto lastRender = std::chrono::steady_clock::now();
+                auto now = std::chrono::steady_clock::now();
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastRender).count() > 33) {
+                    renderer.render();
+                    lastRender = now;
+                }
             }
 
             // In a real implementation we'd check for termination signals

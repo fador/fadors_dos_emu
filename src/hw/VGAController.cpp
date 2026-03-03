@@ -37,11 +37,16 @@ uint8_t VGAController::read8(uint16_t port) {
 
         // --- Input Status ---
         case 0x3DA: {
-            // Bit 0: Display Enable (set during h-retrace and v-retrace)
-            // Bit 3: Vertical Retrace
-            // Toggle both on every read to satisfy programs waiting for either bit.
-            m_verticalRetrace = !m_verticalRetrace;
-            return m_verticalRetrace ? 0x09 : 0x00;
+            // Bit 0: Display Enable (1 during retrace)
+            // Bit 3: Vertical Retrace (1 during retrace)
+            // Programs busy-wait in tight loops reading this port.
+            // Simulate by cycling through display/retrace states based on
+            // read count rather than wall clock (our CPU is much slower
+            // than real hardware). After ~32 reads in display period,
+            // enter retrace for ~4 reads, then cycle back.
+            m_retraceReadCount++;
+            bool inRetrace = (m_retraceReadCount % 36) >= 32;
+            return inRetrace ? 0x09 : 0x00;
         }
 
         default:

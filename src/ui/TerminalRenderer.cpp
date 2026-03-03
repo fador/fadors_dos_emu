@@ -62,23 +62,40 @@ void TerminalRenderer::renderTextMode(bool force) {
 
     if (!changed) return;
 
-    std::cout << "\033[H";
+    std::string buf;
+    buf.reserve(cols * rows * 4);
+    buf += "\033[?25l"; // Hide cursor during repaint
     uint8_t currentAttr = 0xFF;
 
     for (int row = 0; row < rows; ++row) {
+        buf += "\033[";
+        buf += std::to_string(row + 1);
+        buf += ";1H";
         for (int col = 0; col < cols; ++col) {
             const auto& cell = m_lastFrame[row * cols + col];
             if (cell.attr != currentAttr) {
-                std::cout << "\033[0;" << getAnsiColor(cell.attr & 0x0F, false)
-                          << ";" << getAnsiColor((cell.attr & 0x70) >> 4, true) << "m";
+                buf += "\033[0;";
+                buf += getAnsiColor(cell.attr & 0x0F, false);
+                buf += ";";
+                buf += getAnsiColor((cell.attr & 0x70) >> 4, true);
+                buf += "m";
                 currentAttr = cell.attr;
             }
-            if (cell.c == 0) std::cout << ' ';
-            else std::cout << (char)cell.c;
+            buf += (cell.c == 0) ? ' ' : static_cast<char>(cell.c);
         }
-        std::cout << "\n";
     }
-    std::cout << "\033[0m" << std::flush;
+    buf += "\033[0m";
+    // Position terminal cursor at the emulated cursor position
+    uint8_t curRow = m_memory.read8(0x451);
+    uint8_t curCol = m_memory.read8(0x450);
+    buf += "\033[";
+    buf += std::to_string(curRow + 1);
+    buf += ";";
+    buf += std::to_string(curCol + 1);
+    buf += "H";
+    buf += "\033[?25h"; // Show cursor
+    std::cout.write(buf.data(), buf.size());
+    std::cout.flush();
 }
 
 uint8_t TerminalRenderer::readPixel(int x, int y, uint8_t mode) const {

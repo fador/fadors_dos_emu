@@ -432,7 +432,6 @@ void BIOS::handleVideoService() {
             }
             m_memory.write8(0x450 + page * 2, cursorCol);
             m_memory.write8(0x450 + page * 2 + 1, cursorRow);
-            std::cerr << (char)al << std::flush;
             break;
         }
         case 0x10: { // DAC/Palette Functions
