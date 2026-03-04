@@ -793,12 +793,22 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
 
         case 0xC6: { // MOV r/m8, imm8
             ModRM modrm = decodeModRM(fetch8());
+            // Resolve EA before fetching immediate so displacement is consumed first
+            if (modrm.mod != 3) {
+                if (m_hasPrefix67) getEffectiveAddress32(modrm);
+                else getEffectiveAddress16(modrm);
+            }
             writeModRM8(modrm, fetch8());
             break;
         }
 
         case 0xC7: { // MOV r/m, imm
             ModRM modrm = decodeModRM(fetch8());
+            // Resolve EA before fetching immediate so displacement is consumed first
+            if (modrm.mod != 3) {
+                if (m_hasPrefix67) getEffectiveAddress32(modrm);
+                else getEffectiveAddress16(modrm);
+            }
             if (m_hasPrefix66) writeModRM32(modrm, fetch32());
             else writeModRM16(modrm, fetch16());
             break;
