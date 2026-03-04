@@ -11,6 +11,8 @@
 
 namespace fador::hw {
 
+class KeyboardController;
+
 class DOS {
 public:
     DOS(cpu::CPU& cpu, memory::MemoryBus& memory);
@@ -18,6 +20,10 @@ public:
 
     // Returns true if the interrupt was handled by HLE
     bool handleInterrupt(uint8_t vector);
+
+    // Keyboard access for INT 21h console input functions
+    void setKeyboard(KeyboardController& kbd) { m_kbd = &kbd; }
+    void setInputPollCallback(std::function<void()> cb) { m_pollInput = std::move(cb); }
 
     // Initialization (PSP setup, etc.)
     void initialize();
@@ -50,6 +56,8 @@ private:
     uint8_t m_exitCode = 0;
     bool m_ctrlBreakCheck = false;
     uint16_t m_pspSegment = 0x1000;
+    KeyboardController* m_kbd = nullptr;
+    std::function<void()> m_pollInput;
     // VROOMM State
     std::string m_programPath;
     uint16_t m_neAlignShift = 0;

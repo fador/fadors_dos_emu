@@ -2,12 +2,14 @@
 
 namespace fador { namespace hw { memory::HIMEM* g_himem = nullptr; } }
 #include "DOS.hpp"
+#include "KeyboardController.hpp"
 #include "../utils/Logger.hpp"
 #include <iostream>
 #include <iomanip>
 #include <fstream>
 #include <algorithm>
 #include <filesystem>
+#include <thread>
 
 namespace fs = std::filesystem;
 
@@ -115,6 +117,22 @@ void DOS::handleDOSService() {
     uint8_t ah = m_cpu.getReg8(cpu::AH);
     LOG_DEBUG("[DOS] INT 21h AH=0x", std::hex, (int)ah, " AL=0x", (int)m_cpu.getReg8(cpu::AL));
     switch (ah) {
+        case 0x01: { // Read Character with Echo (blocking)
+            if (!m_kbd || !m_kbd->hasKey()) {
+                if (m_pollInput) m_pollInput();
+                if (!m_kbd || !m_kbd->hasKey()) {
+                    m_cpu.setEIP(m_cpu.getEIP() - 2);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    return;
+                }
+            }
+            {
+                auto [ascii, scancode] = m_kbd->popKey();
+                m_cpu.setReg8(cpu::AL, ascii);
+                if (ascii >= 0x20) writeCharToVRAM(ascii);
+            }
+            break;
+        }
         case 0x02: { // Print Character
             uint8_t c = m_cpu.getReg8(cpu::DL);
             writeCharToVRAM(c);
@@ -125,8 +143,31 @@ void DOS::handleDOSService() {
             if (dl != 0xFF) {
                 writeCharToVRAM(dl);
             } else {
-                // Input not implemented, set ZF if no char
-                m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_ZERO);
+                if (m_kbd && !m_kbd->hasKey() && m_pollInput) m_pollInput();
+                if (m_kbd && m_kbd->hasKey()) {
+                    auto [ascii, scancode] = m_kbd->popKey();
+                    m_cpu.setReg8(cpu::AL, ascii);
+                    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_ZERO);
+                } else {
+                    m_cpu.setReg8(cpu::AL, 0);
+                    m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_ZERO);
+                }
+            }
+            break;
+        }
+        case 0x07: // Direct Character Input (no echo, no Ctrl-C check)
+        case 0x08: { // Character Input (no echo, Ctrl-C check)
+            if (!m_kbd || !m_kbd->hasKey()) {
+                if (m_pollInput) m_pollInput();
+                if (!m_kbd || !m_kbd->hasKey()) {
+                    m_cpu.setEIP(m_cpu.getEIP() - 2);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    return;
+                }
+            }
+            {
+                auto [ascii, scancode] = m_kbd->popKey();
+                m_cpu.setReg8(cpu::AL, ascii);
             }
             break;
         }
@@ -148,6 +189,23 @@ void DOS::handleDOSService() {
             m_memory.write8(bufAddr + 1, 0);    // Actual chars read = 0
             m_memory.write8(bufAddr + 2, 0x0D); // CR terminator
             LOG_DOS("DOS: Buffered Input (stubbed, max=", (int)maxLen, ")");
+            break;
+        }
+        case 0x0B: { // Get Stdin Status
+            if (m_kbd && !m_kbd->hasKey() && m_pollInput) m_pollInput();
+            m_cpu.setReg8(cpu::AL, (m_kbd && m_kbd->hasKey()) ? 0xFF : 0x00);
+            break;
+        }
+        case 0x0C: { // Flush Buffer and Read
+            if (m_kbd) {
+                while (m_kbd->hasKey()) m_kbd->popKey();
+            }
+            uint8_t subFunc = m_cpu.getReg8(cpu::AL);
+            if (subFunc == 0x01 || subFunc == 0x06 || subFunc == 0x07
+                || subFunc == 0x08 || subFunc == 0x0A) {
+                m_cpu.setReg8(cpu::AH, subFunc);
+                handleDOSService();
+            }
             break;
         }
         case 0x1A: { // Set DTA

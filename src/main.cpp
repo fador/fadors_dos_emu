@@ -114,6 +114,10 @@ int main(int argc, char* argv[]) {
         renderer.clearScreen();
 
         fador::ui::InputManager input(kbd);
+        input.setBIOS(bios);
+        bios.setInputPollCallback([&input]() { input.pollInput(); });
+        dos.setKeyboard(kbd);
+        dos.setInputPollCallback([&input]() { input.pollInput(); });
         bool running = true;
         uint32_t instrCount = 0;
 

@@ -87,8 +87,103 @@ bool BIOS::handleInterrupt(uint8_t vector) {
         case 0x1F: // Graphics Char Table
             LOG_DEBUG("BIOS INT ", std::hex, (int)vector, ": System stub (no-op)");
             return true;
+        case 0x33: // Mouse driver
+            handleMouseService();
+            return true;
     }
     return false;
+}
+
+void BIOS::handleMouseService() {
+    uint16_t ax = m_cpu.getReg16(cpu::AX);
+    switch (ax) {
+        case 0x0000: // Reset / detect
+            m_mouse.installed = true;
+            m_mouse.x = 0; m_mouse.y = 0;
+            m_mouse.buttons = 0;
+            m_mouse.visible = false;
+            for (int i = 0; i < 3; i++) {
+                m_mouse.pressCount[i] = 0;
+                m_mouse.releaseCount[i] = 0;
+            }
+            m_cpu.setReg16(cpu::AX, 0xFFFF); // Installed
+            m_cpu.setReg16(cpu::BX, 0x0002); // 2 buttons
+            LOG_DEBUG("INT 33h: Mouse reset, driver installed");
+            break;
+        case 0x0001: // Show cursor
+            m_mouse.visible = true;
+            break;
+        case 0x0002: // Hide cursor
+            m_mouse.visible = false;
+            break;
+        case 0x0003: // Get position and button status
+            m_cpu.setReg16(cpu::BX, m_mouse.buttons);
+            m_cpu.setReg16(cpu::CX, static_cast<uint16_t>(m_mouse.x));
+            m_cpu.setReg16(cpu::DX, static_cast<uint16_t>(m_mouse.y));
+            break;
+        case 0x0004: // Set position
+            m_mouse.x = static_cast<int16_t>(m_cpu.getReg16(cpu::CX));
+            m_mouse.y = static_cast<int16_t>(m_cpu.getReg16(cpu::DX));
+            break;
+        case 0x0005: { // Get button press info
+            uint16_t btn = m_cpu.getReg16(cpu::BX);
+            if (btn > 2) btn = 0;
+            m_cpu.setReg16(cpu::AX, m_mouse.buttons);
+            m_cpu.setReg16(cpu::BX, m_mouse.pressCount[btn]);
+            m_cpu.setReg16(cpu::CX, static_cast<uint16_t>(m_mouse.lastPressX[btn]));
+            m_cpu.setReg16(cpu::DX, static_cast<uint16_t>(m_mouse.lastPressY[btn]));
+            m_mouse.pressCount[btn] = 0;
+            break;
+        }
+        case 0x0006: { // Get button release info
+            uint16_t btn = m_cpu.getReg16(cpu::BX);
+            if (btn > 2) btn = 0;
+            m_cpu.setReg16(cpu::AX, m_mouse.buttons);
+            m_cpu.setReg16(cpu::BX, m_mouse.releaseCount[btn]);
+            m_cpu.setReg16(cpu::CX, static_cast<uint16_t>(m_mouse.lastReleaseX[btn]));
+            m_cpu.setReg16(cpu::DX, static_cast<uint16_t>(m_mouse.lastReleaseY[btn]));
+            m_mouse.releaseCount[btn] = 0;
+            break;
+        }
+        case 0x0007: // Set horizontal bounds
+            // Accept but ignore bounds for now
+            break;
+        case 0x0008: // Set vertical bounds
+            break;
+        case 0x000A: // Set text cursor
+            break;
+        case 0x000B: // Read motion counters
+            m_cpu.setReg16(cpu::CX, 0); // dx
+            m_cpu.setReg16(cpu::DX, 0); // dy
+            break;
+        case 0x000C: // Set event handler
+        case 0x0014: // Swap event handlers
+            // Store but effectively ignore — we poll directly
+            break;
+        case 0x000F: // Set mickey/pixel ratio
+        case 0x0010: // Set exclusive area
+        case 0x0013: // Set double-speed threshold
+            break;
+        case 0x0015: // Get driver storage size
+            m_cpu.setReg16(cpu::BX, 64);
+            break;
+        case 0x001A: // Set sensitivity
+        case 0x001B: // Get sensitivity
+            if (ax == 0x001B) {
+                m_cpu.setReg16(cpu::BX, 50); // horizontal
+                m_cpu.setReg16(cpu::CX, 50); // vertical
+                m_cpu.setReg16(cpu::DX, 50); // threshold
+            }
+            break;
+        case 0x0021: // Software reset
+            m_mouse.installed = true;
+            m_cpu.setReg16(cpu::AX, 0xFFFF); // Installed
+            m_cpu.setReg16(cpu::BX, 0x0002); // 2 buttons
+            break;
+        default:
+            LOG_DEBUG("INT 33h: Unhandled function AX=0x", std::hex, ax);
+            break;
+    }
 }
 
 void BIOS::handleVideoService() {
@@ -672,15 +767,19 @@ void BIOS::handleVideoService() {
 
 void BIOS::handleKeyboardService() {
     uint8_t ah = m_cpu.getReg8(cpu::AH);
+    LOG_TRACE("BIOS INT 16h AH=0x", std::hex, (int)ah, " hasKey=", m_kbd.hasKey());
     switch (ah) {
         case 0x10: // Enhanced Read (fall through to 00h)
         case 0x00: { // Read Character (Blocking)
             if (!m_kbd.hasKey()) {
-                // No key available — rewind EIP so INT 16h re-executes
-                // next step(), giving the main loop a chance to poll input.
-                m_cpu.setEIP(m_cpu.getEIP() - 2);
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                return;
+                // Poll host input directly while blocking so we don't have
+                // to wait for the main loop's periodic poll.
+                if (m_pollInput) m_pollInput();
+                if (!m_kbd.hasKey()) {
+                    m_cpu.setEIP(m_cpu.getEIP() - 2);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    return;
+                }
             }
             auto [ascii, scancode] = m_kbd.popKey();
             m_cpu.setReg16(cpu::AX,
@@ -691,6 +790,7 @@ void BIOS::handleKeyboardService() {
         }
         case 0x11: // Enhanced Status (fall through to 01h)
         case 0x01: { // Get Keyboard Status (peek, don't consume)
+            if (!m_kbd.hasKey() && m_pollInput) m_pollInput();
             if (m_kbd.hasKey()) {
                 auto [ascii, scancode] = m_kbd.peekKey();
                 m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_ZERO); // ZF=0 → key available
@@ -785,6 +885,14 @@ void BIOS::initialize() {
         m_memory.write16(v * 4, dummyIP);
         m_memory.write16(v * 4 + 2, dummyCS);
     }
+
+    // Mouse driver stub at F000:0033 — programs check if INT 33h handler is a
+    // bare IRET to detect presence. NOP + IRET avoids false "no driver" detection.
+    // HLE intercepts INT 33h before this code ever executes.
+    m_memory.write8(0xF0033, 0x90); // NOP
+    m_memory.write8(0xF0034, 0xCF); // IRET
+    m_memory.write16(0x33 * 4, 0x0033);      // INT 33h offset
+    m_memory.write16(0x33 * 4 + 2, 0xF000);  // INT 33h segment
     
     LOG_INFO("BIOS: BDA and IVT initialized.");
 }
