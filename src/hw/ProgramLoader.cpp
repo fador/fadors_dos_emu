@@ -361,8 +361,9 @@ void ProgramLoader::createPSP(uint16_t segment, const std::string& args, const s
     m_memory.write16(pspAddr + 0x02, 0xA000); 
 
     // Environment block segment at offset 0x2C
-    // Let's place it at segment + 0x08 (dummy small block before code)
-    uint16_t envSegment = segment + 0x08;
+    // Place environment 0x20 paragraphs (512 bytes) before the PSP
+    // to avoid overlapping with PSP/COM data.
+    uint16_t envSegment = segment - 0x20;
     uint32_t envAddr = (envSegment << 4);
 
     // Derive directory containing the program for PATH/LIB/INCLUDE
@@ -387,16 +388,22 @@ void ProgramLoader::createPSP(uint16_t segment, const std::string& args, const s
              ", program path: ", progFullPath);
 
     // Command tail size at offset 0x80
-    std::string tail = " " + args; // Leading space is required
-    uint8_t len = static_cast<uint8_t>(std::min<size_t>(tail.length(), 126));
-    m_memory.write8(pspAddr + 0x80, len);
-    LOG_INFO("ProgramLoader: PSP Command Tail: '", tail, "' (len=", (int)len, ")");
-    
-    // Command tail at offset 0x81
-    for (uint8_t i = 0; i < len; ++i) {
-        m_memory.write8(pspAddr + 0x81 + i, static_cast<uint8_t>(tail[i]));
+    // In DOS, the command tail starts with a space before args.
+    // If no args, length = 0 and offset 0x81 = CR.
+    if (args.empty()) {
+        m_memory.write8(pspAddr + 0x80, 0);       // Length = 0
+        m_memory.write8(pspAddr + 0x81, 0x0D);    // CR terminator
+        LOG_INFO("ProgramLoader: PSP Command Tail: (empty)");
+    } else {
+        std::string tail = " " + args; // Leading space is required
+        uint8_t len = static_cast<uint8_t>(std::min<size_t>(tail.length(), 126));
+        m_memory.write8(pspAddr + 0x80, len);
+        LOG_INFO("ProgramLoader: PSP Command Tail: '", tail, "' (len=", (int)len, ")");
+        for (uint8_t i = 0; i < len; ++i) {
+            m_memory.write8(pspAddr + 0x81 + i, static_cast<uint8_t>(tail[i]));
+        }
+        m_memory.write8(pspAddr + 0x81 + len, 0x0D); // CR terminator
     }
-    m_memory.write8(pspAddr + 0x81 + len, 0x0D); // CR terminator
 }
 
 } // namespace fador::hw

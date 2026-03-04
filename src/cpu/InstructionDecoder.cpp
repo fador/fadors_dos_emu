@@ -529,14 +529,20 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
         case 0x02: case 0x0A: case 0x12: case 0x1A: case 0x22: case 0x2A: case 0x32: case 0x3A: {
             uint8_t op = (opcode >> 3) & 0x07;
             ModRM modrm = decodeModRM(fetch8());
-            m_cpu.setReg8(modrm.reg, aluOp(op, m_cpu.getReg8(modrm.reg), readModRM8(modrm), 8));
+            uint8_t res = aluOp(op, m_cpu.getReg8(modrm.reg), readModRM8(modrm), 8);
+            if (op != 7) m_cpu.setReg8(modrm.reg, res);
             break;
         }
         case 0x03: case 0x0B: case 0x13: case 0x1B: case 0x23: case 0x2B: case 0x33: case 0x3B: {
             uint8_t op = (opcode >> 3) & 0x07;
             ModRM modrm = decodeModRM(fetch8());
-            if (m_hasPrefix66) m_cpu.setReg32(modrm.reg, aluOp(op, m_cpu.getReg32(modrm.reg), readModRM32(modrm), 32));
-            else m_cpu.setReg16(modrm.reg, aluOp(op, m_cpu.getReg16(modrm.reg), readModRM16(modrm), 16));
+            if (m_hasPrefix66) {
+                uint32_t res = aluOp(op, m_cpu.getReg32(modrm.reg), readModRM32(modrm), 32);
+                if (op != 7) m_cpu.setReg32(modrm.reg, res);
+            } else {
+                uint16_t res = aluOp(op, m_cpu.getReg16(modrm.reg), readModRM16(modrm), 16);
+                if (op != 7) m_cpu.setReg16(modrm.reg, res);
+            }
             break;
         }
 

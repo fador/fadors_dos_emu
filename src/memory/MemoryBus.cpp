@@ -48,7 +48,7 @@ void MemoryBus::write8(uint32_t address, uint8_t value) {
         m_ram[effectiveAddress] = value;
         // Simple hook for CGA/VGA text mode (0xB8000 - 0xBFFFF)
         if (effectiveAddress >= 0xB8000 && effectiveAddress < 0xBFFFF) {
-            LOG_VIDEO("VRAM WRITE at 0x", std::hex, effectiveAddress, " val: 0x", static_cast<int>(value), " ('", (char)(value >= 32 ? value : ' '), "')");
+            LOG_TRACE("VRAM WRITE at 0x", std::hex, effectiveAddress, " val: 0x", static_cast<int>(value), " ('", (char)(value >= 32 ? value : ' '), "')");
         }
     } else {
         LOG_WARN("Memory out of bounds WRITE 8-bit at: 0x", std::hex, address, " (Effective: 0x", effectiveAddress, ") val: 0x", static_cast<int>(value));

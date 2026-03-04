@@ -118,7 +118,6 @@ int main(int argc, char* argv[]) {
         uint32_t instrCount = 0;
 
         while (running) {
-            // Execute instruction
             decoder.step();
             instrCount++;
 
@@ -149,6 +148,22 @@ int main(int argc, char* argv[]) {
 
         // Final render to show any output before exit
         renderer.render(true);
+
+        // Debug: dump VRAM text content
+        {
+            std::cerr << "\n=== VRAM DUMP ===\n";
+            for (int row = 0; row < 25; row++) {
+                std::string line;
+                for (int col = 0; col < 80; col++) {
+                    uint8_t c = memory.read8(0xB8000 + (row * 80 + col) * 2);
+                    line += (c >= 32 && c < 127) ? (char)c : '.';
+                }
+                // Trim trailing spaces
+                while (!line.empty() && line.back() == ' ') line.pop_back();
+                std::cerr << (row < 10 ? " " : "") << row << ": " << line << "\n";
+            }
+            std::cerr << "=================\n";
+        }
 
     } catch (const std::exception& e) {
         LOG_ERROR("Fatal system error: ", e.what());
