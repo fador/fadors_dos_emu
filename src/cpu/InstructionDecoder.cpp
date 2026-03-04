@@ -894,6 +894,21 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                             m_cpu.setReg32(EDX, static_cast<uint32_t>(res >> 32));
                             break;
                         }
+                        case 5: { // IMUL
+                            int64_t res = static_cast<int64_t>(static_cast<int32_t>(m_cpu.getReg32(EAX))) * static_cast<int32_t>(rmVal);
+                            m_cpu.setReg32(EAX, static_cast<uint32_t>(res));
+                            m_cpu.setReg32(EDX, static_cast<uint32_t>(res >> 32));
+                            break;
+                        }
+                        case 6: { // DIV
+                            if (rmVal == 0) triggerInterrupt(0);
+                            else {
+                                uint64_t edxeax = (static_cast<uint64_t>(m_cpu.getReg32(EDX)) << 32) | m_cpu.getReg32(EAX);
+                                m_cpu.setReg32(EAX, static_cast<uint32_t>(edxeax / rmVal));
+                                m_cpu.setReg32(EDX, static_cast<uint32_t>(edxeax % rmVal));
+                            }
+                            break;
+                        }
                         case 7: { // IDIV
                             if (rmVal == 0) triggerInterrupt(0);
                             else {
@@ -917,10 +932,25 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                             m_cpu.setReg16(DX, static_cast<uint16_t>(res >> 16));
                             break;
                         }
+                        case 5: { // IMUL
+                            int32_t res = static_cast<int32_t>(static_cast<int16_t>(m_cpu.getReg16(AX))) * static_cast<int16_t>(rmVal);
+                            m_cpu.setReg16(AX, static_cast<uint16_t>(res));
+                            m_cpu.setReg16(DX, static_cast<uint16_t>(res >> 16));
+                            break;
+                        }
+                        case 6: { // DIV
+                            if (rmVal == 0) triggerInterrupt(0);
+                            else {
+                                uint32_t dxax = (static_cast<uint32_t>(m_cpu.getReg16(DX)) << 16) | m_cpu.getReg16(AX);
+                                m_cpu.setReg16(AX, static_cast<uint16_t>(dxax / rmVal));
+                                m_cpu.setReg16(DX, static_cast<uint16_t>(dxax % rmVal));
+                            }
+                            break;
+                        }
                         case 7: { // IDIV
                             if (rmVal == 0) triggerInterrupt(0);
                             else {
-                                int32_t dxax = (static_cast<int16_t>(m_cpu.getReg16(DX)) << 16) | m_cpu.getReg16(AX);
+                                int32_t dxax = (static_cast<int32_t>(m_cpu.getReg16(DX)) << 16) | m_cpu.getReg16(AX);
                                 m_cpu.setReg16(AX, static_cast<uint16_t>(dxax / static_cast<int16_t>(rmVal)));
                                 m_cpu.setReg16(DX, static_cast<uint16_t>(dxax % static_cast<int16_t>(rmVal)));
                             }
