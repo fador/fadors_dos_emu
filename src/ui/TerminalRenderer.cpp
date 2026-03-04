@@ -81,7 +81,7 @@ void TerminalRenderer::renderTextMode(bool force) {
                 buf += "m";
                 currentAttr = cell.attr;
             }
-            buf += (cell.c == 0) ? ' ' : static_cast<char>(cell.c);
+            appendCP437(buf, cell.c);
         }
     }
     buf += "\033[0m";
@@ -258,6 +258,66 @@ const char* TerminalRenderer::getAnsiColor(uint8_t color, bool background) {
         case 14: return "93";  // Bright Yellow
         case 15: return "97";  // Bright White
         default: return "37";
+    }
+}
+
+// Full CP437 to Unicode mapping table (256 entries).
+// Characters 0x00-0x1F map to special display glyphs (not control codes).
+// Characters 0x20-0x7E map to standard ASCII.
+// Characters 0x80-0xFF map to extended CP437 (accented, box-drawing, math).
+static constexpr char16_t cp437ToUnicode[256] = {
+    // 0x00-0x0F
+    u' ',      u'\u263A', u'\u263B', u'\u2665', u'\u2666', u'\u2663', u'\u2660', u'\u2022',
+    u'\u25D8', u'\u25CB', u'\u25D9', u'\u2642', u'\u2640', u'\u266A', u'\u266B', u'\u263C',
+    // 0x10-0x1F
+    u'\u25BA', u'\u25C4', u'\u2195', u'\u203C', u'\u00B6', u'\u00A7', u'\u25AC', u'\u21A8',
+    u'\u2191', u'\u2193', u'\u2192', u'\u2190', u'\u221F', u'\u2194', u'\u25B2', u'\u25BC',
+    // 0x20-0x7E: standard ASCII
+    u' ', u'!', u'"', u'#', u'$', u'%', u'&', u'\'', u'(', u')', u'*', u'+', u',', u'-', u'.', u'/',
+    u'0', u'1', u'2', u'3', u'4', u'5', u'6', u'7', u'8', u'9', u':', u';', u'<', u'=', u'>', u'?',
+    u'@', u'A', u'B', u'C', u'D', u'E', u'F', u'G', u'H', u'I', u'J', u'K', u'L', u'M', u'N', u'O',
+    u'P', u'Q', u'R', u'S', u'T', u'U', u'V', u'W', u'X', u'Y', u'Z', u'[', u'\\', u']', u'^', u'_',
+    u'`', u'a', u'b', u'c', u'd', u'e', u'f', u'g', u'h', u'i', u'j', u'k', u'l', u'm', u'n', u'o',
+    u'p', u'q', u'r', u's', u't', u'u', u'v', u'w', u'x', u'y', u'z', u'{', u'|', u'}', u'~',
+    // 0x7F
+    u'\u2302',
+    // 0x80-0x8F
+    u'\u00C7', u'\u00FC', u'\u00E9', u'\u00E2', u'\u00E4', u'\u00E0', u'\u00E5', u'\u00E7',
+    u'\u00EA', u'\u00EB', u'\u00E8', u'\u00EF', u'\u00EE', u'\u00EC', u'\u00C4', u'\u00C5',
+    // 0x90-0x9F
+    u'\u00C9', u'\u00E6', u'\u00C6', u'\u00F4', u'\u00F6', u'\u00F2', u'\u00FB', u'\u00F9',
+    u'\u00FF', u'\u00D6', u'\u00DC', u'\u00A2', u'\u00A3', u'\u00A5', u'\u20A7', u'\u0192',
+    // 0xA0-0xAF
+    u'\u00E1', u'\u00ED', u'\u00F3', u'\u00FA', u'\u00F1', u'\u00D1', u'\u00AA', u'\u00BA',
+    u'\u00BF', u'\u2310', u'\u00AC', u'\u00BD', u'\u00BC', u'\u00A1', u'\u00AB', u'\u00BB',
+    // 0xB0-0xBF: shade + box drawing
+    u'\u2591', u'\u2592', u'\u2593', u'\u2502', u'\u2524', u'\u2561', u'\u2562', u'\u2556',
+    u'\u2555', u'\u2563', u'\u2551', u'\u2557', u'\u255D', u'\u255C', u'\u255B', u'\u2510',
+    // 0xC0-0xCF
+    u'\u2514', u'\u2534', u'\u252C', u'\u251C', u'\u2500', u'\u253C', u'\u255E', u'\u255F',
+    u'\u255A', u'\u2554', u'\u2569', u'\u2566', u'\u2560', u'\u2550', u'\u256C', u'\u2567',
+    // 0xD0-0xDF
+    u'\u2568', u'\u2564', u'\u2565', u'\u2559', u'\u2558', u'\u2552', u'\u2553', u'\u256B',
+    u'\u256A', u'\u2518', u'\u250C', u'\u2588', u'\u2584', u'\u258C', u'\u2590', u'\u2580',
+    // 0xE0-0xEF: Greek/math
+    u'\u03B1', u'\u00DF', u'\u0393', u'\u03C0', u'\u03A3', u'\u03C3', u'\u00B5', u'\u03C4',
+    u'\u03A6', u'\u0398', u'\u03A9', u'\u03B4', u'\u221E', u'\u03C6', u'\u03B5', u'\u2229',
+    // 0xF0-0xFF
+    u'\u2261', u'\u00B1', u'\u2265', u'\u2264', u'\u2320', u'\u2321', u'\u00F7', u'\u2248',
+    u'\u00B0', u'\u2219', u'\u00B7', u'\u221A', u'\u207F', u'\u00B2', u'\u25A0', u'\u00A0',
+};
+
+void TerminalRenderer::appendCP437(std::string& buf, uint8_t ch) {
+    char16_t u = cp437ToUnicode[ch];
+    if (u < 0x80) {
+        buf += static_cast<char>(u);
+    } else if (u < 0x800) {
+        buf += static_cast<char>(0xC0 | (u >> 6));
+        buf += static_cast<char>(0x80 | (u & 0x3F));
+    } else {
+        buf += static_cast<char>(0xE0 | (u >> 12));
+        buf += static_cast<char>(0x80 | ((u >> 6) & 0x3F));
+        buf += static_cast<char>(0x80 | (u & 0x3F));
     }
 }
 

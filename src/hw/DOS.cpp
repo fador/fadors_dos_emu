@@ -302,6 +302,14 @@ void DOS::handleDOSService() {
 
             LOG_DOS("DOS: Open file '", filename, "' at 0x", std::hex, nameAddr, " mode ", (int)mode);
 
+            // Reject directories — DOS cannot open directories as files
+            if (fs::is_directory(filename)) {
+                m_cpu.setReg16(cpu::AX, 0x05); // Access Denied
+                m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+                LOG_DOS("DOS: Rejected directory open '", filename, "'");
+                break;
+            }
+
             std::ios_base::openmode openmode = std::ios::binary | std::ios::in;
             if ((mode & 0x03) == 1) openmode = std::ios::binary | std::ios::out;
             if ((mode & 0x03) == 2) openmode = std::ios::binary | std::ios::in | std::ios::out;

@@ -47,6 +47,9 @@ private:
 
     // Maps BIOS color attributes to ANSI escape codes
     const char* getAnsiColor(uint8_t attr, bool background);
+
+    // Appends the UTF-8 encoding of a CP437 character to the buffer
+    static void appendCP437(std::string& buf, uint8_t ch);
 };
 
 } // namespace fador::ui
