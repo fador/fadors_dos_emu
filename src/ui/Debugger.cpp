@@ -6,7 +6,7 @@
 namespace fador::ui {
 
 Debugger::Debugger(cpu::CPU& cpu, memory::MemoryBus& memory, cpu::InstructionDecoder& decoder)
-    : m_cpu(cpu), m_memory(memory), m_decoder(decoder) {
+    : m_cpu(cpu), m_memory(memory), m_decoder(decoder), m_disasm(memory) {
 }
 
 bool Debugger::run() {
@@ -32,12 +32,18 @@ bool Debugger::run() {
         } else if (cmd == "d") {
             uint32_t addr = (args.size() > 1) ? std::stoul(args[1], nullptr, 16) : (m_cpu.getSegReg(cpu::DS) << 4);
             dumpMemory(addr, 128);
+        } else if (cmd == "u") {
+            uint32_t addr = (args.size() > 1) ? std::stoul(args[1], nullptr, 16)
+                            : ((m_cpu.getSegReg(cpu::CS) << 4) + m_cpu.getEIP());
+            uint32_t cnt = (args.size() > 2) ? std::stoul(args[2]) : 16;
+            disassemble(addr, cnt);
         } else if (cmd == "h" || cmd == "?") {
             std::cout << "Commands:\n"
                       << "  s          - Single step\n"
                       << "  c          - Continue execution\n"
                       << "  r          - Print registers\n"
                       << "  d [addr]   - Dump memory (hex)\n"
+                      << "  u [addr] [n] - Disassemble n instructions\n"
                       << "  q          - Quit emulator\n";
         } else {
             std::cout << "Unknown command: " << cmd << "\n";
@@ -82,6 +88,31 @@ void Debugger::dumpMemory(uint32_t address, uint32_t count) {
         }
         std::cout << "\n";
     }
+}
+
+void Debugger::disassemble(uint32_t address, uint32_t count) {
+    auto instrs = m_disasm.disassembleRange(address, count);
+    for (const auto& instr : instrs) {
+        std::cout << std::hex << std::setw(8) << std::setfill('0') << instr.address
+                  << "  " << std::left << std::setw(24) << std::setfill(' ') << instr.hexBytes
+                  << instr.mnemonic << std::right << "\n";
+    }
+}
+
+void Debugger::dumpState(uint32_t contextLines) {
+    std::cout << "\n=== CPU State Dump ==="  << std::endl;
+    printRegisters();
+    std::cout << "\n--- Disassembly around CS:EIP ---" << std::endl;
+    uint32_t linearIP = (m_cpu.getSegReg(cpu::CS) << 4) + m_cpu.getEIP();
+    auto instrs = m_disasm.disassembleAround(linearIP, contextLines, contextLines + 1);
+    for (const auto& instr : instrs) {
+        const char* marker = (instr.address == linearIP) ? "-->" : "   ";
+        std::cout << marker << " " << std::hex << std::setw(8) << std::setfill('0')
+                  << instr.address << "  "
+                  << std::left << std::setw(24) << std::setfill(' ') << instr.hexBytes
+                  << instr.mnemonic << std::right << "\n";
+    }
+    std::cout << "=== End Dump ===\n" << std::endl;
 }
 
 std::vector<std::string> Debugger::split(const std::string& s, char delimiter) {

@@ -58,6 +58,7 @@ int main(int argc, char* argv[]) {
         // unchanged.  In shells that glob-expand bare '?' (zsh, bash with failglob),
         // quote such arguments: fadors_emu prog.exe '-?' or fadors_emu prog.exe -- -?
         bool useHimem = false;
+        uint64_t stopAfterCycles = 0; // 0 = disabled
         std::string path;
         std::string args;
         for (int i = 1; i < argc; ++i) {
@@ -75,6 +76,8 @@ int main(int argc, char* argv[]) {
             // Emulator-specific flags (must appear before the program path).
             if (arg == "--himem") {
                 useHimem = true;
+            } else if (arg.find("--stop-after=") == 0) {
+                stopAfterCycles = std::stoull(arg.substr(13));
             } else if (arg.find("--debug=") == 0) {
                 fador::utils::currentLevel = fador::utils::LogLevel::Debug;
                 const std::string cats = arg.substr(8);
@@ -105,7 +108,7 @@ int main(int argc, char* argv[]) {
             }
             dos.setProgramDir(path);
         } else {
-            LOG_WARN("No program specified. Use: fadors_emu [--himem] [--debug=cpu,video,dos] <program.com|exe> [program-args...]");
+            LOG_WARN("No program specified. Use: fadors_emu [--himem] [--debug=cpu,video,dos] [--stop-after=N] <program.com|exe> [program-args...]");
             // Start debugger by default if no program
             debugger.run();
             return 0;
@@ -119,11 +122,18 @@ int main(int argc, char* argv[]) {
         dos.setKeyboard(kbd);
         dos.setInputPollCallback([&input]() { input.pollInput(); });
         bool running = true;
-        uint32_t instrCount = 0;
+        uint64_t instrCount = 0;
 
         while (running) {
             decoder.step();
             instrCount++;
+
+            if (stopAfterCycles > 0 && instrCount >= stopAfterCycles) {
+                LOG_INFO("Stopped after ", instrCount, " cycles (--stop-after)");
+                debugger.dumpState();
+                running = false;
+                break;
+            }
 
             if (dos.isTerminated()) {
                 LOG_INFO("Program terminated normally with exit code ", (int)dos.getExitCode());
