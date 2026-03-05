@@ -8,11 +8,14 @@ Fador's DOS Emulator is a multiplatform MS-DOS emulator written in modern C++20.
 ## Features
 - **CPU Emulation:** Full Intel 80386 instruction set support.
 - **System Emulation:** Comprehensive support for PC architecture, memory mapping, and I/O ports.
-- **BIOS & DOS APIs:** Extensive support for INT 10h, INT 13h, INT 21h, etc. Refer to the `docs/` folder (Ralph Brown's interrupt list) for specifications.
+- **Realistic Memory Model:** Conventional memory (0x500–0x9FFFF) is pre-filled with a non-zero pattern (`0xCC`) to simulate residual data left by COMMAND.COM and device drivers on real hardware. BIOS, DOS, and program loaders overwrite the relevant regions; only truly uninitialised areas retain the fill. This prevents programs that rely on non-zero far-heap contents (e.g. Turbo C 2.01 Turbo Vision) from misbehaving.
+- **BIOS & DOS APIs:** Extensive support for INT 10h, INT 13h, INT 16h, INT 1Ah, INT 21h, and more. Refer to the `docs/` folder (Ralph Brown's interrupt list) for specifications.
+- **Hardware Devices:** PIC (8259), PIT (8254), Keyboard Controller (8042), VGA controller with text-mode VRAM.
+- **Program Loaders:** `.COM` and MZ `.EXE` file loading with full relocation support, PSP construction, and MCB-based memory management.
 - **Built-in Disassembler:** Read-only x86 real-mode disassembler that produces human-readable assembly from memory without modifying CPU state. Supports single-byte and two-byte (`0F`) opcodes, all prefix combinations, ModR/M and SIB addressing.
 - **Interactive Debugger:** Step through instructions, inspect registers, dump memory, and disassemble code at arbitrary addresses.
 - **Cycle-limited Execution:** Stop emulation after a configurable number of instruction cycles and automatically dump CPU registers and surrounding disassembly.
-- **Cross-Platform Interface:** Initially implemented as a text-mode console application.
+- **Cross-Platform Interface:** Initially implemented as a text-mode console application with ANSI terminal rendering.
 - **Decoupled Architecture:** Designed to easily integrate a separate graphical view (e.g., SDL2, OpenGL) in the future without changing the core emulator logic.
 
 ## Build Instructions
