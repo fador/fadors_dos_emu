@@ -610,6 +610,9 @@ void DOS::handleDOSService() {
         case 0x48: // Allocate Memory
         case 0x49: // Free Memory
         case 0x4A: // Resize Block
+            LOG_WARN("DOS: Memory management AH=0x", std::hex, (int)ah,
+                     " ES=0x", m_cpu.getSegReg(cpu::ES),
+                     " BX=0x", m_cpu.getReg16(cpu::BX));
             handleMemoryManagement();
             break;
 

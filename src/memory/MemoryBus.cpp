@@ -1,4 +1,5 @@
 #include "MemoryBus.hpp"
+#include <algorithm>
 #include <iostream>
 #include <iomanip>
 
@@ -6,6 +7,15 @@ namespace fador::memory {
 
 MemoryBus::MemoryBus() {
     m_ram.resize(MEMORY_SIZE, 0);
+
+    // Fill conventional memory above BDA (0x500–0x9FFFF) with a non-zero
+    // pattern.  On real hardware this region contains residue from
+    // COMMAND.COM, device drivers, etc.  Zeroed memory causes programs
+    // that read uninitialised far-heap allocations (e.g. Turbo C 2.01's
+    // Turbo Vision key-lookup table) to misinterpret zeroes as end-of-
+    // table sentinels, breaking keyboard input.
+    std::fill(m_ram.begin() + 0x500, m_ram.begin() + 0xA0000, uint8_t{0xCC});
+
     LOG_INFO("MemoryBus initialized with ", MEMORY_SIZE, " bytes");
 }
 

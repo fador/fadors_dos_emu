@@ -1839,6 +1839,8 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
 
     if (m_hasPrefix66) LOG_WARN("32-bit interrupts not fully implemented");
 
+    LOG_DEBUG("INT 0x", std::hex, (int)vector, " NOT handled by HLE, falling through to IVT");
+
     m_cpu.push16(static_cast<uint16_t>(m_cpu.getEFLAGS() & 0xFFFF));
     m_cpu.push16(m_cpu.getSegReg(CS));
     m_cpu.push16(static_cast<uint16_t>(m_cpu.getEIP() & 0xFFFF));

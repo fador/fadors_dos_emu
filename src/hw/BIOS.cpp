@@ -87,6 +87,8 @@ bool BIOS::handleInterrupt(uint8_t vector) {
         case 0x1F: // Graphics Char Table
             LOG_DEBUG("BIOS INT ", std::hex, (int)vector, ": System stub (no-op)");
             return true;
+        case 0x28: // DOS Idle
+            return true;
         case 0x33: // Mouse driver
             handleMouseService();
             return true;
@@ -96,6 +98,7 @@ bool BIOS::handleInterrupt(uint8_t vector) {
 
 void BIOS::handleMouseService() {
     uint16_t ax = m_cpu.getReg16(cpu::AX);
+    LOG_DEBUG("INT 33h: AX=0x", std::hex, ax);
     switch (ax) {
         case 0x0000: // Reset / detect
             m_mouse.installed = true;
@@ -767,7 +770,8 @@ void BIOS::handleVideoService() {
 
 void BIOS::handleKeyboardService() {
     uint8_t ah = m_cpu.getReg8(cpu::AH);
-    LOG_TRACE("BIOS INT 16h AH=0x", std::hex, (int)ah, " hasKey=", m_kbd.hasKey());
+    if (m_kbd.hasKey())
+        LOG_DEBUG("BIOS INT 16h AH=0x", std::hex, (int)ah, " hasKey=", m_kbd.hasKey());
     switch (ah) {
         case 0x10: // Enhanced Read (fall through to 00h)
         case 0x00: { // Read Character (Blocking)
@@ -784,8 +788,9 @@ void BIOS::handleKeyboardService() {
             auto [ascii, scancode] = m_kbd.popKey();
             m_cpu.setReg16(cpu::AX,
                 (static_cast<uint16_t>(scancode) << 8) | ascii);
-            LOG_TRACE("BIOS INT 16h AH=00h: key scan=", std::hex, (int)scancode,
-                      " ascii=", (int)ascii);
+            LOG_DEBUG("BIOS INT 16h AH=00h: CONSUMED key scan=0x", std::hex, (int)scancode,
+                      " ascii=0x", (int)ascii, " (AX=0x", m_cpu.getReg16(cpu::AX), ")",
+                      " CS:IP=", m_cpu.getSegReg(cpu::CS), ":", m_cpu.getEIP());
             break;
         }
         case 0x11: // Enhanced Status (fall through to 01h)

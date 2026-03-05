@@ -138,6 +138,12 @@ int main(int argc, char* argv[]) {
                 input.pollInput();
                 pit.update();
 
+                // Service PIT channel 0 (IRQ0 → INT 8 → timer tick)
+                if (pit.checkPendingIRQ0()) {
+                    uint32_t ticks = memory.read32(0x46C);
+                    memory.write32(0x46C, ticks + 1);
+                }
+
                 static auto lastRender = std::chrono::steady_clock::now();
                 auto now = std::chrono::steady_clock::now();
                 if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastRender).count() > 33) {
