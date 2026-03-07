@@ -49,7 +49,9 @@ private:
     std::unique_ptr<memory::HIMEM> m_himem;
     cpu::CPU& m_cpu;
     memory::MemoryBus& m_memory;
-    std::string m_currentDir = "."; // Emulated C:\ starting at current host dir
+    std::string m_currentDir = "."; // Host filesystem working directory
+    std::string m_hostRootDir = "."; // Host path that maps to DOS drive root (C:\)
+    std::string m_dosCurrentDir;     // DOS-style current dir relative to drive root (no leading \)
     uint8_t m_currentDrive = 2;     // 0=A, 1=B, 2=C... default to C:
     uint32_t m_dtaPtr = 0x00000000; // Pointer to DTA (segmented)
     bool m_terminated = false;
@@ -106,6 +108,8 @@ private:
     std::string readFilename(uint32_t address);  // Read null-terminated string
     void writeCharToVRAM(uint8_t c);             // Teletype-style output to B800 VRAM
     std::string resolvePath(const std::string& path); // Resolve relative paths against m_currentDir
+    std::string hostToDosPath(const std::string& hostPath); // Convert host path to DOS path
+    std::string dosToHostPath(const std::string& dosPath);  // Convert DOS path to host path
 };
 
 } // namespace fador::hw

@@ -25,11 +25,11 @@ private:
 
     void printRegisters();
     void dumpMemory(uint32_t address, uint32_t count);
-    void disassemble(uint32_t address, uint32_t count);
 
     std::vector<std::string> split(const std::string& s, char delimiter);
 
 public:
+    void disassemble(uint32_t address, uint32_t count);
     // Print registers and surrounding disassembly (used by --stop-after)
     void dumpState(uint32_t contextLines = 5);
 };

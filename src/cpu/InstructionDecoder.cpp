@@ -269,6 +269,32 @@ bool InstructionDecoder::checkCondition(uint8_t cond) {
 void InstructionDecoder::step() {
     m_stepCount++;
 
+    // --- HLE callback stub detection ---
+    // When a program hooks an interrupt, triggerInterrupt() pushes FLAGS/CS/IP
+    // and jumps to the program's handler.  The handler eventually chains to
+    // the BIOS-default stub (F000:01XX) which contains just IRET.  Before
+    // that IRET executes, we run the HLE service so the interrupt is actually
+    // handled —  then the IRET naturally pops FLAGS/CS/IP from the stack.
+    {
+        uint16_t cs = m_cpu.getSegReg(CS);
+        uint32_t eip = m_cpu.getEIP();
+        if (cs == hw::BIOS::HLE_STUB_SEG &&
+            eip >= hw::BIOS::HLE_STUB_BASE &&
+            eip < hw::BIOS::HLE_STUB_BASE + 256)
+        {
+            uint8_t vector = static_cast<uint8_t>(eip - hw::BIOS::HLE_STUB_BASE);
+            m_dos.handleInterrupt(vector);
+            m_bios.handleInterrupt(vector);
+            // Patch the saved-FLAGS copy on the stack so that IRET restores
+            // the flags set by the HLE handler (e.g. carry flag for errors).
+            uint16_t sp = m_cpu.getReg16(SP);
+            uint32_t ssBase = static_cast<uint32_t>(m_cpu.getSegReg(SS)) << 4;
+            m_memory.write16(ssBase + ((sp + 4) & 0xFFFF),
+                             static_cast<uint16_t>(m_cpu.getEFLAGS() & 0xFFFF));
+            // Fall through — the CPU will now execute the IRET at the stub.
+        }
+    }
+
     m_hasPrefix66 = false;
     m_hasPrefix67 = false;
     m_hasRepnz = false;
@@ -742,7 +768,12 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
 
         case 0xC8: { // ENTER
             uint16_t size = fetch16();
-            fetch8(); // Skip level byte for now
+            uint8_t level = fetch8();
+            if (level != 0) {
+                LOG_ERROR("ENTER with non-zero level=", (int)level, " size=", size,
+                          " at CS:IP=", std::hex, m_cpu.getSegReg(CS), ":",
+                          m_cpu.getEIP(), " SP=", m_cpu.getReg16(SP));
+            }
             m_cpu.push16(m_cpu.getReg16(BP));
             m_cpu.setReg16(BP, m_cpu.getReg16(SP));
             // simplified, doesn't handle nested levels correctly yet
@@ -1297,9 +1328,9 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                 switch (modrm.reg) {
                     case 0: writeModRM32(modrm, aluOp(0, val, 1, 32)); break;
                     case 1: writeModRM32(modrm, aluOp(5, val, 1, 32)); break;
-                    case 2: m_cpu.push32(m_cpu.getEIP()); m_cpu.setEIP(readModRM32(modrm)); break;
+                    case 2: { uint32_t target = readModRM32(modrm); m_cpu.push32(m_cpu.getEIP()); m_cpu.setEIP(target); break; }
                     case 3: { // CALL FAR
-                        uint32_t addr = getEffectiveAddress16(modrm); // Simplified, assuming 16-bit addressing for now
+                        uint32_t addr = m_hasPrefix67 ? getEffectiveAddress32(modrm) : getEffectiveAddress16(modrm);
                         uint32_t jumpIP = m_memory.read32(addr);
                         uint16_t jumpCS = m_memory.read16(addr + 4);
                         m_cpu.push16(m_cpu.getSegReg(CS));
@@ -1310,7 +1341,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                     }
                     case 4: m_cpu.setEIP(readModRM32(modrm)); break;
                     case 5: { // JMP FAR
-                        uint32_t addr = getEffectiveAddress16(modrm);
+                        uint32_t addr = m_hasPrefix67 ? getEffectiveAddress32(modrm) : getEffectiveAddress16(modrm);
                         uint32_t jumpIP = m_memory.read32(addr);
                         uint16_t jumpCS = m_memory.read16(addr + 4);
                         m_cpu.setSegReg(CS, jumpCS);
@@ -1325,9 +1356,9 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                 switch (modrm.reg) {
                     case 0: writeModRM16(modrm, aluOp(0, val, 1, 16)); break;
                     case 1: writeModRM16(modrm, aluOp(5, val, 1, 16)); break;
-                    case 2: m_cpu.push16(static_cast<uint16_t>(m_cpu.getEIP())); m_cpu.setEIP(readModRM16(modrm)); break;
+                    case 2: { uint16_t target = readModRM16(modrm); m_cpu.push16(static_cast<uint16_t>(m_cpu.getEIP())); m_cpu.setEIP(target); break; }
                     case 3: { // CALL FAR
-                        uint32_t addr = getEffectiveAddress16(modrm);
+                        uint32_t addr = m_hasPrefix67 ? getEffectiveAddress32(modrm) : getEffectiveAddress16(modrm);
                         uint16_t jumpIP = m_memory.read16(addr);
                         uint16_t jumpCS = m_memory.read16(addr + 2);
                         m_cpu.push16(m_cpu.getSegReg(CS));
@@ -1338,7 +1369,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                     }
                     case 4: m_cpu.setEIP(readModRM16(modrm)); break;
                     case 5: { // JMP FAR
-                        uint32_t addr = getEffectiveAddress16(modrm);
+                        uint32_t addr = m_hasPrefix67 ? getEffectiveAddress32(modrm) : getEffectiveAddress16(modrm);
                         uint16_t jumpIP = m_memory.read16(addr);
                         uint16_t jumpCS = m_memory.read16(addr + 2);
                         m_cpu.setSegReg(CS, jumpCS);
@@ -1834,24 +1865,50 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
 }
 
 void InstructionDecoder::triggerInterrupt(uint8_t vector) {
-    if (m_dos.handleInterrupt(vector)) return;
-    if (m_bios.handleInterrupt(vector)) return;
+    // Read the current IVT entry for this vector.
+    uint16_t ivtIP = m_memory.read16(vector * 4);
+    uint16_t ivtCS = m_memory.read16(vector * 4 + 2);
 
+    // If the IVT still points to the BIOS-default handler, use HLE directly
+    // (no stack manipulation needed — the caller's INT opcode is fully emulated
+    // in software without touching the real-mode stack).
+    if (m_bios.isOriginalIVT(vector, ivtCS, ivtIP)) {
+        if (m_dos.handleInterrupt(vector)) return;
+        if (m_bios.handleInterrupt(vector)) return;
+        // Neither HLE handled it — fall through to execute the IRET stub,
+        // which is harmless (just bounces back).
+    }
+
+    // The IVT was modified (program installed a hook) or HLE didn't handle the
+    // vector.  Behave like real hardware: push FLAGS/CS/IP, clear IF+TF, and
+    // transfer control to the IVT handler.
+    if (!m_bios.isOriginalIVT(vector, ivtCS, ivtIP)) {
+        LOG_WARN("INT 0x", std::hex, (int)vector,
+                  " hooked → ", ivtCS, ":", ivtIP);
+    }
     if (m_hasPrefix66) LOG_WARN("32-bit interrupts not fully implemented");
-
-    LOG_DEBUG("INT 0x", std::hex, (int)vector, " NOT handled by HLE, falling through to IVT");
 
     m_cpu.push16(static_cast<uint16_t>(m_cpu.getEFLAGS() & 0xFFFF));
     m_cpu.push16(m_cpu.getSegReg(CS));
     m_cpu.push16(static_cast<uint16_t>(m_cpu.getEIP() & 0xFFFF));
-    
+
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~(0x0200 | 0x0100)); // Clear IF and TF
 
-    uint16_t newIP = m_memory.read16(vector * 4);
-    uint16_t newCS = m_memory.read16((vector * 4) + 2);
+    m_cpu.setSegReg(CS, ivtCS);
+    m_cpu.setEIP(ivtIP);
+}
 
-    m_cpu.setSegReg(CS, newCS);
-    m_cpu.setEIP(newIP);
+void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
+    uint16_t ivtIP = m_memory.read16(vector * 4);
+    uint16_t ivtCS = m_memory.read16(vector * 4 + 2);
+
+    m_cpu.push16(static_cast<uint16_t>(m_cpu.getEFLAGS() & 0xFFFF));
+    m_cpu.push16(m_cpu.getSegReg(CS));
+    m_cpu.push16(static_cast<uint16_t>(m_cpu.getEIP() & 0xFFFF));
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~(0x0200 | 0x0100)); // Clear IF and TF
+
+    m_cpu.setSegReg(CS, ivtCS);
+    m_cpu.setEIP(ivtIP);
 }
 
 } // namespace fador::cpu

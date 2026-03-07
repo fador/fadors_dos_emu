@@ -9,12 +9,31 @@ MemoryBus::MemoryBus() {
     m_ram.resize(MEMORY_SIZE, 0);
 
     // Fill conventional memory above BDA (0x500–0x9FFFF) with a non-zero
-    // pattern.  On real hardware this region contains residue from
-    // COMMAND.COM, device drivers, etc.  Zeroed memory causes programs
-    // that read uninitialised far-heap allocations (e.g. Turbo C 2.01's
-    // Turbo Vision key-lookup table) to misinterpret zeroes as end-of-
-    // table sentinels, breaking keyboard input.
-    std::fill(m_ram.begin() + 0x500, m_ram.begin() + 0xA0000, uint8_t{0xCC});
+    // pattern that includes periodic zero bytes.  On real hardware this
+    // region contains residue from COMMAND.COM, device drivers, prior
+    // programs, etc. — a mix of non-zero data with natural zero bytes
+    // interspersed.
+    //
+    // Pure zero fill is wrong: programs that read uninitialised far-heap
+    // allocations (e.g. Turbo C 2.01's Turbo Vision) misinterpret zeroes
+    // as end-of-table sentinels before any table entries exist.
+    //
+    // Pure 0xCC fill is also wrong: it contains no null terminators, so
+    // string copies from uninitialised heap run off the end of buffers,
+    // causing stack corruption (buffer overflow into saved-BP).
+    //
+    // A deterministic pseudo-random fill (full-period LCG mod 256) gives
+    // a realistic mix: ~255 non-zero bytes between each naturally
+    // occurring zero, long enough to avoid false end-of-table matches
+    // within any single table entry, but short enough to terminate
+    // runaway string scans within a reasonable distance.
+    {
+        uint8_t val = 0xCC; // seed
+        for (size_t i = 0x500; i < 0xA0000; ++i) {
+            m_ram[i] = val;
+            val = static_cast<uint8_t>(val * 141 + 3);
+        }
+    }
 
     LOG_INFO("MemoryBus initialized with ", MEMORY_SIZE, " bytes");
 }

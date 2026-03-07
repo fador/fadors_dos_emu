@@ -880,15 +880,48 @@ void BIOS::initialize() {
     }
 
     // 2. Setup IVT (Interrupt Vector Table) vectors
-    // Even though we HLE, we point ALL 256 vectors to a dummy IRET at 0xFFFF:0x000E
-    // so that any unhandled INT n returns cleanly instead of jumping to 0000:0000.
-    uint16_t dummyCS = 0xFFFF;
-    uint16_t dummyIP = 0x000E;
-    m_memory.write8(0xFFFFE, 0xCF); // IRET instruction at dummy location
-
+    // Each vector gets a unique IRET callback stub at F000:(0x100 + vector).
+    // When a program hooks an interrupt (via INT 21h/AH=25h), the emulator can
+    // detect the modification and let the hook run before falling through to HLE.
     for (int v = 0; v < 256; ++v) {
-        m_memory.write16(v * 4, dummyIP);
-        m_memory.write16(v * 4 + 2, dummyCS);
+        uint16_t stubOff = HLE_STUB_BASE + static_cast<uint16_t>(v);
+        uint32_t stubPhys = (static_cast<uint32_t>(HLE_STUB_SEG) << 4) + stubOff;
+        m_memory.write8(stubPhys, 0xCF); // IRET at the stub
+
+        m_memory.write16(v * 4, stubOff);
+        m_memory.write16(v * 4 + 2, HLE_STUB_SEG);
+
+        m_originalIVT[v] = { stubOff, HLE_STUB_SEG };
+    }
+
+    // INT 8 (IRQ0 / timer tick) handler — real machine code so INT 1Ch
+    // chains work naturally when programs hook the user-timer vector.
+    //   PUSH DS; PUSH AX; MOV AX,0040; MOV DS,AX;
+    //   INC WORD [006C]; JNZ +4; INC WORD [006E];
+    //   INT 1C; POP AX; POP DS; MOV AL,20; OUT 20,AL; IRET
+    {
+        constexpr uint16_t INT8_HANDLER = 0x0200;
+        const uint32_t base = (static_cast<uint32_t>(HLE_STUB_SEG) << 4) + INT8_HANDLER;
+        const uint8_t code[] = {
+            0x1E,                   // PUSH DS
+            0x50,                   // PUSH AX
+            0xB8, 0x40, 0x00,       // MOV AX, 0040h
+            0x8E, 0xD8,             // MOV DS, AX
+            0xFF, 0x06, 0x6C, 0x00, // INC WORD [006Ch]
+            0x75, 0x04,             // JNZ +4
+            0xFF, 0x06, 0x6E, 0x00, // INC WORD [006Eh]
+            0xCD, 0x1C,             // INT 1Ch
+            0x58,                   // POP AX
+            0x1F,                   // POP DS
+            0xB0, 0x20,             // MOV AL, 20h
+            0xE6, 0x20,             // OUT 20h, AL
+            0xCF                    // IRET
+        };
+        for (size_t i = 0; i < sizeof(code); ++i)
+            m_memory.write8(base + i, code[i]);
+        m_memory.write16(0x08 * 4,     INT8_HANDLER);
+        m_memory.write16(0x08 * 4 + 2, HLE_STUB_SEG);
+        m_originalIVT[0x08] = { INT8_HANDLER, HLE_STUB_SEG };
     }
 
     // Mouse driver stub at F000:0033 — programs check if INT 33h handler is a
@@ -898,8 +931,14 @@ void BIOS::initialize() {
     m_memory.write8(0xF0034, 0xCF); // IRET
     m_memory.write16(0x33 * 4, 0x0033);      // INT 33h offset
     m_memory.write16(0x33 * 4 + 2, 0xF000);  // INT 33h segment
+    m_originalIVT[0x33] = { 0x0033, 0xF000 };
     
     LOG_INFO("BIOS: BDA and IVT initialized.");
+}
+
+bool BIOS::isOriginalIVT(uint8_t vector, uint16_t cs, uint16_t ip) const {
+    auto& orig = m_originalIVT[vector];
+    return (ip == orig.first && cs == orig.second);
 }
 
 void BIOS::handleTimeService() {

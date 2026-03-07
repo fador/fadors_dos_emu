@@ -32,6 +32,7 @@
 - [x] PIC (8259)
 - [x] PIT (8254)
 - [x] Keyboard Controller (8042)
+- [x] VGA Controller (Text/Graphics modes)
 - [ ] CMOS/RTC (Optional)
 
 ## Phase 4: BIOS Emulation
@@ -40,6 +41,7 @@
 - [x] INT 13h (Disk Services) - Basic floppy/hard drive image support
 - [x] INT 16h (Keyboard Services)
 - [x] INT 1Ah (Time of Day / RTC Services)
+- [x] INT 33h (Mouse Services)
 
 ## Phase 5: DOS Emulation (MS-DOS functionality)
 - [x] COM File Loader
@@ -61,9 +63,10 @@
   - [x] Register inspection
   - [x] Memory dump
   - [x] Single-step execution
-- [ ] Direct disassembly view
+  - [x] Cycle-limited execution
+- [x] Direct disassembly view
 - [ ] GUI (Optional, maybe SDL2 later)
-- [ ] Decoupled video module
+- [x] Decoupled video module
 - [ ] GUI renderer (e.g., SDL2 / OpenGL) focusing on pixel-perfect VGA/CGA rendering
 
 ## Phase 7: Graphical Extension (Future)
@@ -78,8 +81,8 @@
   - [ ] INT 2Fh (Multiplex/TSR/Network)
   - [ ] INT 1Bh, 1Ch, 1Dh, 1Eh, 1Fh (System/Timer/Video/ROM)
 - [ ] More complete INT 10h (Video) support:
-  - [ ] Implement all major AH functions (mode set, cursor, page, palette, block transfer, etc.)
-  - [ ] Support for graphics modes (VGA, EGA, CGA)
+  - [x] Implement all major AH functions (mode set, cursor, page, palette, block transfer, etc.)
+  - [x] Support for graphics modes (VGA, EGA, CGA)
   - [ ] BIOS video state save/restore
   - [ ] VESA extensions (optional)
 - [ ] More complete INT 13h, 16h, 1Ah, 21h subfunctions

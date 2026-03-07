@@ -35,23 +35,17 @@ void DOS::initialize() {
     writeMCB(FIRST_MCB_SEGMENT, first);
     m_pspSegment = 0x1000;
 
-    // Block 2: 0x0FFF (for block at 0x1000)
+    // Block 2: 0x0FFF (for block at 0x1000) — give program ALL remaining memory
+    // This matches real DOS behavior for maxAlloc=0xFFFF EXEs, and keeps
+    // PSP:02 (set to 0xA000 in createPSP) consistent with the MCB.
     MCB psp;
-    psp.type = 'M'; // Not the last block anymore
+    psp.type = 'Z'; // Last block in chain — all memory goes to the program
     psp.owner = m_pspSegment; 
-    psp.size = 0x7000; // 448KB (+ PSP = 512KB total)
+    psp.size = LAST_PARA - m_pspSegment + 1; // 0xA000 - 0x1000 = 0x9000 paras → PSP:02 = 0xA000
     for (int i = 0; i < 8; ++i) psp.name[i] = 0;
     writeMCB(0x1000 - 1, psp);
 
-    // Block 3: The rest of memory as free
-    MCB freeRest;
-    freeRest.type = 'Z'; // Last block
-    freeRest.owner = 0;
-    freeRest.size = static_cast<uint16_t>(LAST_PARA - (0x1000 + 0x7000) - 1);
-    for (int i = 0; i < 8; ++i) freeRest.name[i] = 0;
-    writeMCB(0x1000 + 0x7000, freeRest);
-
-    LOG_INFO("DOS: Initial MCB chain setup. PSP block at 0x1000 size 0x7000, Free block at 0x", std::hex, 0x1000 + 0x7000 + 1, " size 0x", freeRest.size);
+    LOG_INFO("DOS: Initial MCB chain setup. PSP block at 0x1000 size 0x", std::hex, psp.size);
 
     // Default DTA is at offset 0x80 of the initial PSP
     m_dtaPtr = (0x1000 << 16) | 0x0080;
@@ -255,6 +249,7 @@ void DOS::handleDOSService() {
             m_memory.write16(intNum * 4 + 2, ds);
             m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
             LOG_DOS("DOS: Set INT vector 0x", std::hex, (int)intNum, " to ", ds, ":", dx);
+            LOG_WARN("DOS: Set INT vector 0x", std::hex, (int)intNum, " to ", ds, ":", dx);
             break;
         }
         case 0x35: { // Get Interrupt Vector
@@ -355,10 +350,11 @@ void DOS::handleDOSService() {
             uint16_t ds = m_cpu.getSegReg(cpu::DS);
             uint16_t dx = m_cpu.getReg16(cpu::DX);
             uint32_t nameAddr = (ds << 4) + dx;
-            std::string filename = resolvePath(readFilename(nameAddr));
+            std::string rawName = readFilename(nameAddr);
+            std::string filename = resolvePath(rawName);
             uint8_t mode = m_cpu.getReg8(cpu::AL);
 
-            LOG_DOS("DOS: Open file '", filename, "' at 0x", std::hex, nameAddr, " mode ", (int)mode);
+            LOG_DOS("DOS: Open raw='", rawName, "' resolved='", filename, "' at 0x", std::hex, nameAddr, " mode ", (int)mode);
 
             // Reject directories — DOS cannot open directories as files
             if (fs::is_directory(filename)) {
@@ -676,11 +672,68 @@ std::string DOS::readFilename(uint32_t address) {
 void DOS::setProgramDir(const std::string& programPath) {
     fs::path p = fs::absolute(programPath);
     m_currentDir = p.parent_path().string();
+    // Drive root = parent of program directory, DOS current dir = program dir name
+    fs::path progDir = p.parent_path();
+    m_hostRootDir = progDir.parent_path().string();
+    if (m_hostRootDir.empty()) m_hostRootDir = progDir.string();
+    // DOS current directory = last component of host path, uppercased
+    std::string dirName = progDir.filename().string();
+    std::transform(dirName.begin(), dirName.end(), dirName.begin(), ::toupper);
+    m_dosCurrentDir = dirName;
     LOG_INFO("DOS: Working directory set to '", m_currentDir, "'");
+    LOG_INFO("DOS: Drive root = '", m_hostRootDir, "', DOS dir = '", m_dosCurrentDir, "'");
+}
+
+std::string DOS::hostToDosPath(const std::string& hostPath) {
+    // Convert a host filesystem path to a DOS-style path relative to the drive root
+    fs::path host(hostPath);
+    fs::path root(m_hostRootDir);
+    std::string result;
+    // Try to make the path relative to the drive root
+    auto rel = fs::relative(host, root);
+    if (!rel.empty() && rel.string().find("..") != 0) {
+        result = rel.string();
+    } else {
+        // Fallback: use just the last components
+        result = host.filename().string();
+    }
+    // Convert separators to backslash and uppercase
+    std::transform(result.begin(), result.end(), result.begin(), [](char c) {
+        return c == '/' ? '\\' : static_cast<char>(::toupper(static_cast<unsigned char>(c)));
+    });
+    return result;
+}
+
+std::string DOS::dosToHostPath(const std::string& dosPath) {
+    // Convert a DOS-style path to a host filesystem path
+    std::string path = dosPath;
+
+    // Strip drive letter prefix (e.g., "C:\")
+    if (path.size() >= 2 && std::isalpha(static_cast<unsigned char>(path[0])) && path[1] == ':') {
+        path = path.substr(2);
+    }
+    // Convert backslashes to forward slashes
+    std::transform(path.begin(), path.end(), path.begin(), [](char c) {
+        return c == '\\' ? '/' : c;
+    });
+    // If path starts with /, it's absolute from drive root
+    if (!path.empty() && path[0] == '/') {
+        return (fs::path(m_hostRootDir) / path.substr(1)).string();
+    }
+    // Relative path — resolve from current directory
+    return (fs::path(m_currentDir) / path).string();
 }
 
 std::string DOS::resolvePath(const std::string& path) {
-    // If path is already absolute, use as-is
+    // Check for DOS drive letter prefix (e.g. "C:\foo")
+    if (path.size() >= 2 && std::isalpha(static_cast<unsigned char>(path[0])) && path[1] == ':') {
+        return dosToHostPath(path);
+    }
+    // Check for DOS backslash paths
+    if (!path.empty() && path[0] == '\\') {
+        return dosToHostPath(path);
+    }
+    // If path is already an absolute host path, use as-is
     fs::path p(path);
     if (p.is_absolute()) return path;
     // Resolve relative to m_currentDir
@@ -935,10 +988,13 @@ void DOS::handleDirectoryService() {
                 m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
             }
         } else if (ah == 0x3B) { // CHDIR
-            std::string path = resolvePath(readFilename(addr));
-            LOG_DEBUG("DOS: CHDIR '", path, "'");
+            std::string rawPath = readFilename(addr);
+            std::string path = resolvePath(rawPath);
+            LOG_DEBUG("DOS: CHDIR raw='", rawPath, "' resolved='", path, "'");
             if (fs::exists(path) && fs::is_directory(path)) {
                 m_currentDir = path;
+                // Update DOS-style current directory
+                m_dosCurrentDir = hostToDosPath(path);
                 m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
                 m_cpu.setReg16(cpu::AX, 0);
             } else {
@@ -950,10 +1006,8 @@ void DOS::handleDirectoryService() {
             uint16_t si = m_cpu.getReg16(cpu::SI);
             uint32_t outAddr = (ds_si << 4) + si;
             
-            // DOS returns path relative to drive (no leading slash, no drive letter)
-            // For now we just return our tracked currentDir
-            std::string path = m_currentDir;
-            if (path == ".") path = "";
+            // DOS returns path relative to drive root (no leading backslash, no drive letter)
+            std::string path = m_dosCurrentDir;
             
             LOG_DEBUG("DOS: GETCWD returning '", path, "'");
             for (size_t i = 0; i < path.length(); ++i) {
@@ -961,7 +1015,7 @@ void DOS::handleDirectoryService() {
             }
             m_memory.write8(outAddr + path.length(), 0); // Null terminator
             
-            m_cpu.setReg16(cpu::AX, 0x0100); // Success (AX=0 is also common but AH=0 is enough)
+            m_cpu.setReg16(cpu::AX, 0x0100);
             m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
         }
     } catch (const std::exception& e) {

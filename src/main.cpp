@@ -58,6 +58,7 @@ int main(int argc, char* argv[]) {
         // unchanged.  In shells that glob-expand bare '?' (zsh, bash with failglob),
         // quote such arguments: fadors_emu prog.exe '-?' or fadors_emu prog.exe -- -?
         bool useHimem = false;
+        bool dumpOnExit = false;
         uint64_t stopAfterCycles = 0; // 0 = disabled
         std::string path;
         std::string args;
@@ -76,6 +77,8 @@ int main(int argc, char* argv[]) {
             // Emulator-specific flags (must appear before the program path).
             if (arg == "--himem") {
                 useHimem = true;
+            } else if (arg == "--dump-on-exit") {
+                dumpOnExit = true;
             } else if (arg.find("--stop-after=") == 0) {
                 stopAfterCycles = std::stoull(arg.substr(13));
             } else if (arg.find("--debug=") == 0) {
@@ -108,7 +111,7 @@ int main(int argc, char* argv[]) {
             }
             dos.setProgramDir(path);
         } else {
-            LOG_WARN("No program specified. Use: fadors_emu [--himem] [--debug=cpu,video,dos] [--stop-after=N] <program.com|exe> [program-args...]");
+            LOG_WARN("No program specified. Use: fadors_emu [--himem] [--debug=cpu,video,dos] [--stop-after=N] [--dump-on-exit] <program.com|exe> [program-args...]");
             // Start debugger by default if no program
             debugger.run();
             return 0;
@@ -136,7 +139,11 @@ int main(int argc, char* argv[]) {
             }
 
             if (dos.isTerminated()) {
-                LOG_INFO("Program terminated normally with exit code ", (int)dos.getExitCode());
+                LOG_INFO("Program terminated normally with exit code ", (int)dos.getExitCode(),
+                         " after ", instrCount, " instructions");
+                if (dumpOnExit) {
+                    debugger.dumpState();
+                }
                 running = false;
                 break;
             }
@@ -146,12 +153,14 @@ int main(int argc, char* argv[]) {
             // main bottleneck if called every instruction.
             if ((instrCount & 0x3FF) == 0) {
                 input.pollInput();
+
                 pit.update();
 
                 // Service PIT channel 0 (IRQ0 → INT 8 → timer tick)
                 if (pit.checkPendingIRQ0()) {
-                    uint32_t ticks = memory.read32(0x46C);
-                    memory.write32(0x46C, ticks + 1);
+                    if (cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) {
+                        decoder.injectHardwareInterrupt(0x08);
+                    }
                 }
 
                 static auto lastRender = std::chrono::steady_clock::now();

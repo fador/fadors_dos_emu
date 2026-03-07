@@ -29,6 +29,10 @@ public:
     // Main execution loop single step
     void step();
 
+    // Inject a hardware interrupt (always pushes FLAGS/CS/IP, unlike
+    // triggerInterrupt which may take the HLE fast-path).
+    void injectHardwareInterrupt(uint8_t vector);
+
     // Calculates effective address based on ModRM and SIB (public for testing)
     uint32_t getEffectiveAddress16(const ModRM& modrm);
     uint32_t getEffectiveAddress32(const ModRM& modrm);

@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <cstdint>
 #include <vector>
 #include <string>
@@ -38,10 +39,22 @@ public:
     // Set up IVT vectors and BDA defaults
     void initialize();
 
+    // Check if an IVT entry still points to the BIOS-default handler.
+    // Returns false when a program has hooked the vector via INT 21h/AH=25h.
+    bool isOriginalIVT(uint8_t vector, uint16_t cs, uint16_t ip) const;
+
+    // HLE callback stub constants – each vector gets a unique IRET stub
+    // at F000:(HLE_STUB_BASE + vector) so we can detect program hooks.
+    static constexpr uint16_t HLE_STUB_SEG  = 0xF000;
+    static constexpr uint16_t HLE_STUB_BASE = 0x0100;
+
     // Load a raw disk image for floppy 0 (0x00)
     bool loadDiskImage(const std::string& path);
 
 private:
+    // Original IVT entries written during initialize().
+    // Indexed by vector number; first = offset, second = segment.
+    std::array<std::pair<uint16_t, uint16_t>, 256> m_originalIVT{};
     cpu::CPU& m_cpu;
     memory::MemoryBus& m_memory;
     KeyboardController& m_kbd;

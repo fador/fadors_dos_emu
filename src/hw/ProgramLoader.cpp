@@ -292,6 +292,14 @@ bool ProgramLoader::loadEXE(const std::string& path, uint16_t segment, DOS& dos,
             m_memory.write8(loadAddr + i, buffer[i]);
         }
 
+        // The memory beyond the loaded image retains the 0xCC fill written
+        // by MemoryBus::MemoryBus().  This simulates dirty DOS RAM — real DOS
+        // leaves leftover data from the boot process / previous programs.
+        // Borland mixed-model programs (e.g. TC 2.01) scan their far-heap
+        // allocation and rely on non-zero bytes to avoid false end-of-table
+        // sentinel matches; zeroing this area causes premature table
+        // termination and broken initialisation paths.
+
         // For NE executables, the PSP MCB was sized at 0x7000 paragraphs in
         // DOS::initialize().  Now that we only loaded the MZ stub, shrink the
         // MCB to the actual stub footprint so the remaining conventional memory
@@ -353,12 +361,54 @@ bool ProgramLoader::loadEXE(const std::string& path, uint16_t segment, DOS& dos,
 
 void ProgramLoader::createPSP(uint16_t segment, const std::string& args, const std::string& programPath) {
     uint32_t pspAddr = (segment << 4);
+
+    // Zero the entire 256-byte PSP first so no fields contain 0xCC garbage
+    for (int i = 0; i < 256; ++i) {
+        m_memory.write8(pspAddr + i, 0x00);
+    }
+
     // INT 20h instruction (CD 20) at offset 0
     m_memory.write8(pspAddr + 0x00, 0xCD);
     m_memory.write8(pspAddr + 0x01, 0x20);
 
     // Segment of top of memory at offset 2 (stubbed to 640KB)
     m_memory.write16(pspAddr + 0x02, 0xA000); 
+
+    // Saved interrupt vectors (from IVT) at offsets 0x0A-0x15
+    // INT 22h (Terminate Address)
+    m_memory.write16(pspAddr + 0x0A, m_memory.read16(0x22 * 4));      // IP
+    m_memory.write16(pspAddr + 0x0C, m_memory.read16(0x22 * 4 + 2));  // CS
+    // INT 23h (Ctrl-Break Address)
+    m_memory.write16(pspAddr + 0x0E, m_memory.read16(0x23 * 4));
+    m_memory.write16(pspAddr + 0x10, m_memory.read16(0x23 * 4 + 2));
+    // INT 24h (Critical Error Address)
+    m_memory.write16(pspAddr + 0x12, m_memory.read16(0x24 * 4));
+    m_memory.write16(pspAddr + 0x14, m_memory.read16(0x24 * 4 + 2));
+
+    // Parent PSP segment at offset 0x16 (no parent — use own segment)
+    m_memory.write16(pspAddr + 0x16, segment);
+
+    // Job File Table (JFT) at offset 0x18: 20 bytes
+    // Handles 0-4 map to SFT indices 0-4 (stdin/stdout/stderr/stdaux/stdprn)
+    for (int i = 0; i < 5; ++i) {
+        m_memory.write8(pspAddr + 0x18 + i, static_cast<uint8_t>(i));
+    }
+    // Handles 5-19 are unused (0xFF = closed)
+    for (int i = 5; i < 20; ++i) {
+        m_memory.write8(pspAddr + 0x18 + i, 0xFF);
+    }
+
+    // JFT size at offset 0x32 (default 20 handles)
+    m_memory.write16(pspAddr + 0x32, 0x0014);
+
+    // JFT pointer at offset 0x34 (far pointer to PSP:0018)
+    m_memory.write16(pspAddr + 0x34, 0x0018);  // Offset
+    m_memory.write16(pspAddr + 0x36, segment);  // Segment
+
+    // DOS function dispatcher at offset 0x50: INT 21h / RETF
+    m_memory.write8(pspAddr + 0x50, 0xCD);  // INT
+    m_memory.write8(pspAddr + 0x51, 0x21);  // 21h
+    m_memory.write8(pspAddr + 0x52, 0xCB);  // RETF
 
     // Environment block segment at offset 0x2C
     // Place environment 0x20 paragraphs (512 bytes) before the PSP
@@ -369,23 +419,34 @@ void ProgramLoader::createPSP(uint16_t segment, const std::string& args, const s
     // Derive directory containing the program for PATH/LIB/INCLUDE
     std::filesystem::path progFsPath = std::filesystem::absolute(programPath);
     std::string progDir = progFsPath.parent_path().string();
-    std::string progFullPath = progFsPath.string();
+
+    // Convert host paths to DOS-style paths for the environment block.
+    // DOS programs expect backslash separators and a drive letter prefix.
+    // Use the last directory component as the DOS directory name.
+    std::string dirName = progFsPath.parent_path().filename().string();
+    std::transform(dirName.begin(), dirName.end(), dirName.begin(),
+        [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    std::string fileName = progFsPath.filename().string();
+    std::transform(fileName.begin(), fileName.end(), fileName.begin(),
+        [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    std::string dosDir = "C:\\" + dirName;
+    std::string dosFullPath = dosDir + "\\" + fileName;
 
     // Format: VAR=VAL\0\0\0\x01\x00PROGRAM_PATH\0
     std::string envStr;
-    envStr += "PATH=";     envStr += progDir; envStr += '\0';
-    envStr += "LIB=";      envStr += progDir; envStr += '\0';
-    envStr += "INCLUDE=";  envStr += progDir; envStr += '\0';
+    envStr += "PATH=";     envStr += dosDir; envStr += '\0';
+    envStr += "LIB=";      envStr += dosDir; envStr += '\0';
+    envStr += "INCLUDE=";  envStr += dosDir; envStr += '\0';
     envStr += '\0'; // End of variables
     envStr += "\x01\x00"; // Signature for program name follows
-    envStr += progFullPath; envStr += '\0';
+    envStr += dosFullPath; envStr += '\0';
     
     for (size_t i = 0; i < envStr.length(); ++i) {
         m_memory.write8(envAddr + i, static_cast<uint8_t>(envStr[i]));
     }
     m_memory.write16(pspAddr + 0x2C, envSegment);
     LOG_INFO("ProgramLoader: Environment block created at segment 0x", std::hex, envSegment,
-             ", program path: ", progFullPath);
+             ", program path: ", dosFullPath);
 
     // Command tail size at offset 0x80
     // In DOS, the command tail starts with a space before args.
