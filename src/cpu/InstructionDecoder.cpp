@@ -308,6 +308,7 @@ void InstructionDecoder::step() {
     m_segmentOverride = 0xFF;
     m_eaResolved = false;
 
+    uint32_t instrStartEIP = m_cpu.getEIP();
     uint8_t opcode = fetch8();
     
     while (true) {
@@ -338,11 +339,17 @@ void InstructionDecoder::step() {
             for (uint8_t op : stringOps) if (op == opcode) { isStringOp = true; break; }
             
             if (isStringOp) {
+                // Execute up to a batch of iterations per step() call.
+                // This prevents large REP operations (e.g. rep movsb cx=65535)
+                // from blocking the main loop for seconds — the main loop
+                // needs to run periodically for SDL event polling, rendering,
+                // and audio generation.
+                constexpr int MAX_REP_BATCH = 4096;
+                int batchCount = 0;
                 while (true) {
                     uint32_t cx = m_hasPrefix67 ? m_cpu.getReg32(ECX) : m_cpu.getReg16(CX);
                     if (cx == 0) break;
                     
-                    uint32_t eipBefore = m_cpu.getEIP();
                     executeOpcode(opcode);
                     
                     cx--;
@@ -356,8 +363,15 @@ void InstructionDecoder::step() {
                         if (m_hasRepnz && zf) break;
                     }
                     
-                    if (cx > 0) m_cpu.setEIP(eipBefore);
-                    else break;
+                    if (cx == 0) break;
+
+                    batchCount++;
+                    if (batchCount >= MAX_REP_BATCH) {
+                        // Yield back to the main loop; rewind IP to the start
+                        // of the REP instruction so it re-executes next step().
+                        m_cpu.setEIP(instrStartEIP);
+                        break;
+                    }
                 }
                 return;
             }

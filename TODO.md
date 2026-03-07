@@ -112,18 +112,18 @@
   - [x] Full integration test (set mode + print string + terminate)
 
 ## Phase 9: Audio Subsystem (Sound Blaster & AdLib)
-- [ ] **Native Audio Abstraction Layer**
-  - [ ] Integrate a cross-platform audio backend (e.g., SDL2 Audio) for native playback.
-  - [ ] Implement robust ring-buffers and asynchronous audio callbacks to ensure latency-free audio streaming.
-- [ ] **AdLib (OPL2 / YM3812) Emulation**
-  - [ ] Hook I/O ports `0x388` and `0x389` for AdLib register and data access.
-  - [ ] Integrate or build an OPL2 software synthesizer core.
-  - [ ] Render OPL2 FM synthesis output into the PCM mixing buffer.
-- [ ] **Sound Blaster Emulation (DSP & PCM)**
-  - [ ] Emulate ISA DMA Controller (Intel 8237) transfers, specifically Channel 1 for background audio streaming.
-  - [ ] Register Sound Blaster DSP I/O ports (Base `0x220` - `0x22F`).
-  - [ ] Implement standard DSP commands including direct mode, single-cycle audio DMA, and auto-initialize audio DMA.
-  - [ ] Trigger correct Sound Blaster hardware interrupts (typically IRQ 5 or 7) upon DMA completion.
-- [ ] **Output Mixer**
-  - [ ] Mix simultaneously playing OPL2 synth and Sound Blaster PCM streams.
-  - [ ] Forward the mixed stream to the platform's native audio interface.
+- [x] **Native Audio Abstraction Layer**
+  - [x] Integrate a cross-platform audio backend (e.g., SDL2 Audio) for native playback.
+  - [x] Implement robust ring-buffers and asynchronous audio callbacks to ensure latency-free audio streaming.
+- [x] **AdLib (OPL2 / YM3812) Emulation**
+  - [x] Hook I/O ports `0x388` and `0x389` for AdLib register and data access.
+  - [x] Integrate or build an OPL2 software synthesizer core.
+  - [x] Render OPL2 FM synthesis output into the PCM mixing buffer.
+- [x] **Sound Blaster Emulation (DSP & PCM)**
+  - [x] Emulate ISA DMA Controller (Intel 8237) transfers, specifically Channel 1 for background audio streaming.
+  - [x] Register Sound Blaster DSP I/O ports (Base `0x220` - `0x22F`).
+  - [x] Implement standard DSP commands including direct mode, single-cycle audio DMA, and auto-initialize audio DMA.
+  - [x] Trigger correct Sound Blaster hardware interrupts (typically IRQ 5 or 7) upon DMA completion.
+- [x] **Output Mixer**
+  - [x] Mix simultaneously playing OPL2 synth and Sound Blaster PCM streams.
+  - [x] Forward the mixed stream to the platform's native audio interface.
