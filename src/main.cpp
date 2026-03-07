@@ -12,6 +12,7 @@
 #include "ui/TerminalRenderer.hpp"
 #include "ui/InputManager.hpp"
 #include "ui/Debugger.hpp"
+#include "cpu/Assembler.hpp"
 
 #include <chrono>
 #include <thread>
@@ -60,6 +61,7 @@ int main(int argc, char* argv[]) {
         bool useHimem = false;
         bool dumpOnExit = false;
         uint64_t stopAfterCycles = 0; // 0 = disabled
+        std::string execAsm;  // --exec="asm instructions"
         std::string path;
         std::string args;
         for (int i = 1; i < argc; ++i) {
@@ -81,6 +83,8 @@ int main(int argc, char* argv[]) {
                 dumpOnExit = true;
             } else if (arg.find("--stop-after=") == 0) {
                 stopAfterCycles = std::stoull(arg.substr(13));
+            } else if (arg.find("--exec=") == 0) {
+                execAsm = arg.substr(7);
             } else if (arg.find("--debug=") == 0) {
                 fador::utils::currentLevel = fador::utils::LogLevel::Debug;
                 const std::string cats = arg.substr(8);
@@ -111,7 +115,35 @@ int main(int argc, char* argv[]) {
             }
             dos.setProgramDir(path);
         } else {
-            LOG_WARN("No program specified. Use: fadors_emu [--himem] [--debug=cpu,video,dos] [--stop-after=N] [--dump-on-exit] <program.com|exe> [program-args...]");
+            LOG_WARN("No program specified. Use: fadors_emu [--himem] [--debug=cpu,video,dos] [--stop-after=N] [--dump-on-exit] [--exec=\"asm\"] <program.com|exe> [program-args...]");
+            
+            // --exec mode: assemble, write to CS:IP, run, dump state
+            if (!execAsm.empty()) {
+                // Replace semicolons with newlines for multi-statement support
+                std::string asmText = execAsm;
+                for (auto& ch : asmText) { if (ch == ';') ch = '\n'; }
+                
+                uint32_t origin = (cpu.getSegReg(fador::cpu::CS) << 4) + cpu.getEIP();
+                fador::cpu::Assembler asmbler;
+                auto result = asmbler.assembleBlock(asmText, origin);
+                if (!result.error.empty()) {
+                    LOG_ERROR("Assembly error: ", result.error);
+                    return 1;
+                }
+                for (size_t i = 0; i < result.bytes.size(); ++i) {
+                    memory.write8(origin + static_cast<uint32_t>(i), result.bytes[i]);
+                }
+                LOG_INFO("Assembled ", result.bytes.size(), " bytes at ", std::hex, origin);
+                
+                uint64_t maxCycles = stopAfterCycles > 0 ? stopAfterCycles : 100000;
+                for (uint64_t i = 0; i < maxCycles; ++i) {
+                    decoder.step();
+                    if (dos.isTerminated()) break;
+                }
+                debugger.dumpState();
+                return 0;
+            }
+            
             // Start debugger by default if no program
             debugger.run();
             return 0;

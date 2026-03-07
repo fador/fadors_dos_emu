@@ -51,6 +51,7 @@ set(TEST_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_dos_drive.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_dos_search.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_addressing_modes.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_assembler.cpp"
 )
 
 add_executable(fadors_tests ${TEST_FILES})

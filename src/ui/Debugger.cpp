@@ -44,7 +44,23 @@ bool Debugger::run() {
                       << "  r          - Print registers\n"
                       << "  d [addr]   - Dump memory (hex)\n"
                       << "  u [addr] [n] - Disassemble n instructions\n"
+                      << "  a [addr]   - Assemble (enter instructions, blank line to exit)\n"
+                      << "  w addr bytes - Write hex bytes to memory\n"
                       << "  q          - Quit emulator\n";
+        } else if (cmd == "a") {
+            uint32_t addr = (args.size() > 1) ? std::stoul(args[1], nullptr, 16)
+                            : ((m_cpu.getSegReg(cpu::CS) << 4) + m_cpu.getEIP());
+            assembleMode(addr);
+        } else if (cmd == "w") {
+            if (args.size() >= 3) {
+                uint32_t addr = std::stoul(args[1], nullptr, 16);
+                for (size_t idx = 2; idx < args.size(); ++idx) {
+                    m_memory.write8(addr++, static_cast<uint8_t>(std::stoul(args[idx], nullptr, 16)));
+                }
+                std::cout << "Wrote " << (args.size() - 2) << " byte(s)\n";
+            } else {
+                std::cout << "Usage: w <addr> <byte1> [byte2] ...\n";
+            }
         } else {
             std::cout << "Unknown command: " << cmd << "\n";
         }
@@ -116,6 +132,38 @@ void Debugger::dumpState(uint32_t contextLines) {
                   << instr.mnemonic << std::right << "\n";
     }
     std::cout << "=== End Dump ===\n" << std::endl;
+}
+
+void Debugger::assembleMode(uint32_t startAddr) {
+    uint32_t addr = startAddr;
+    std::cout << "Entering assembly mode (blank line or '.' to exit)\n";
+    std::string asmLine;
+    while (true) {
+        std::cout << std::hex << std::setw(8) << std::setfill('0') << addr << "  " << std::flush;
+        if (!std::getline(std::cin, asmLine) || asmLine.empty() || asmLine == ".") break;
+        uint32_t written = assembleAndWrite(asmLine, addr);
+        if (written > 0) {
+            // Show what was assembled
+            auto instrs = m_disasm.disassembleRange(addr, 1);
+            for (const auto& instr : instrs) {
+                std::cout << "          " << std::left << std::setw(24) << std::setfill(' ')
+                          << instr.hexBytes << instr.mnemonic << std::right << "\n";
+            }
+            addr += written;
+        }
+    }
+}
+
+uint32_t Debugger::assembleAndWrite(const std::string& asmLine, uint32_t address) {
+    auto result = m_asm.assembleLine(asmLine, address);
+    if (!result.error.empty()) {
+        std::cout << "Error: " << result.error << "\n";
+        return 0;
+    }
+    for (size_t i = 0; i < result.bytes.size(); ++i) {
+        m_memory.write8(address + static_cast<uint32_t>(i), result.bytes[i]);
+    }
+    return static_cast<uint32_t>(result.bytes.size());
 }
 
 std::vector<std::string> Debugger::split(const std::string& s, char delimiter) {
