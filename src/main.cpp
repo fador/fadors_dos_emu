@@ -154,12 +154,13 @@ int main(int argc, char* argv[]) {
         fador::ui::InputManager input(kbd);
         input.setBIOS(bios);
         bios.setInputPollCallback([&input]() { input.pollInput(); });
-        bios.setIdleCallback([&renderer, &pit, &cpu, &decoder]() {
+        bios.setIdleCallback([&renderer, &pit, &cpu, &decoder, &kbd]() {
             pit.update();
-            if (pit.checkPendingIRQ0()) {
-                if (cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) {
-                    decoder.injectHardwareInterrupt(0x08);
-                }
+            if ((cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) && pit.checkPendingIRQ0()) {
+                decoder.injectHardwareInterrupt(0x08);
+            }
+            if ((cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) && kbd.checkPendingIRQ()) {
+                decoder.injectHardwareInterrupt(0x09);
             }
             static auto lr = std::chrono::steady_clock::now();
             auto now = std::chrono::steady_clock::now();
@@ -170,6 +171,10 @@ int main(int argc, char* argv[]) {
         });
         dos.setKeyboard(kbd);
         dos.setInputPollCallback([&input]() { input.pollInput(); });
+
+        // Enable hardware interrupts — real BIOS does STI before running programs
+        cpu.setEFLAGS(cpu.getEFLAGS() | fador::cpu::FLAG_INTERRUPT);
+
         bool running = true;
         uint64_t instrCount = 0;
 
@@ -203,10 +208,13 @@ int main(int argc, char* argv[]) {
                 pit.update();
 
                 // Service PIT channel 0 (IRQ0 → INT 8 → timer tick)
-                if (pit.checkPendingIRQ0()) {
-                    if (cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) {
-                        decoder.injectHardwareInterrupt(0x08);
-                    }
+                if ((cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) && pit.checkPendingIRQ0()) {
+                    decoder.injectHardwareInterrupt(0x08);
+                }
+
+                // Service keyboard IRQ1 → INT 9
+                if ((cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) && kbd.checkPendingIRQ()) {
+                    decoder.injectHardwareInterrupt(0x09);
                 }
 
                 static auto lastRender = std::chrono::steady_clock::now();

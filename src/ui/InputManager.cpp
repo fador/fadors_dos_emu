@@ -273,7 +273,7 @@ void InputManager::handleKey(int key, bool pressed) {
 
     if (scancode != 0) {
         if (pressed) {
-            m_kbd.pushKey(ascii, scancode);
+            m_kbd.pushKeyWithBreak(ascii, scancode);
         } else {
             m_kbd.pushKey(0, scancode | 0x80); // Break code
         }
@@ -328,7 +328,7 @@ void InputManager::handleAltKey(unsigned char ch) {
         scancode = 0x83;
     }
     if (scancode != 0) {
-        m_kbd.pushKey(0, scancode); // Alt keys have ascii=0
+        m_kbd.pushKeyWithBreak(0, scancode); // Alt keys have ascii=0
     }
 }
 

@@ -10,12 +10,13 @@ KeyboardController::KeyboardController()
 }
 
 uint8_t KeyboardController::read8(uint16_t port) {
-    if (port == 0x60) { // Data Port
-        if (m_keyBuffer.empty()) return 0;
-        uint8_t val = m_keyBuffer.front().scancode;
-        m_keyBuffer.pop();
-        if (m_keyBuffer.empty()) m_status &= ~0x01; // Clear Output Buffer Full
-        return val;
+    if (port == 0x60) { // Data Port — returns hardware scancode
+        if (!m_hwScanBuffer.empty()) {
+            m_lastScancode = m_hwScanBuffer.front();
+            m_hwScanBuffer.pop();
+            if (m_hwScanBuffer.empty()) m_status &= ~0x01;
+        }
+        return m_lastScancode;
     } else if (port == 0x64) { // Status Port
         return m_status;
     }
@@ -48,13 +49,24 @@ void KeyboardController::write8(uint16_t port, uint8_t value) {
 }
 
 void KeyboardController::pushScancode(uint8_t scancode) {
-    m_keyBuffer.push({0, scancode});
+    m_hwScanBuffer.push(scancode);
     m_status |= 0x01; // Set Output Buffer Full
 }
 
 void KeyboardController::pushKey(uint8_t ascii, uint8_t scancode) {
     m_keyBuffer.push({ascii, scancode});
+}
+
+void KeyboardController::pushKeyWithBreak(uint8_t ascii, uint8_t scancode) {
+    // Push make code to hardware buffer (for port 0x60 / INT 9)
+    m_hwScanBuffer.push(scancode);
     m_status |= 0x01;
+    ++m_pendingIRQCount;
+    // Push break code to hardware buffer
+    m_hwScanBuffer.push(static_cast<uint8_t>(scancode | 0x80));
+    ++m_pendingIRQCount;
+    // Also push to BIOS buffer so INT 16h still works
+    m_keyBuffer.push({ascii, scancode});
 }
 
 std::pair<uint8_t, uint8_t> KeyboardController::peekKey() const {

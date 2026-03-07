@@ -287,10 +287,16 @@ void InstructionDecoder::step() {
             m_bios.handleInterrupt(vector);
             // Patch the saved-FLAGS copy on the stack so that IRET restores
             // the flags set by the HLE handler (e.g. carry flag for errors).
+            // Preserve IF and TF from the original saved flags — the INT
+            // instruction clears IF before entering the handler, so current
+            // EFLAGS has IF=0; we must not overwrite the original IF=1.
             uint16_t sp = m_cpu.getReg16(SP);
             uint32_t ssBase = static_cast<uint32_t>(m_cpu.getSegReg(SS)) << 4;
-            m_memory.write16(ssBase + ((sp + 4) & 0xFFFF),
-                             static_cast<uint16_t>(m_cpu.getEFLAGS() & 0xFFFF));
+            uint16_t savedFlags = m_memory.read16(ssBase + ((sp + 4) & 0xFFFF));
+            uint16_t curFlags = static_cast<uint16_t>(m_cpu.getEFLAGS() & 0xFFFF);
+            // Keep arithmetic/status flags from HLE, preserve IF+TF from caller
+            uint16_t patchedFlags = (curFlags & ~0x0300u) | (savedFlags & 0x0300u);
+            m_memory.write16(ssBase + ((sp + 4) & 0xFFFF), patchedFlags);
             // Fall through — the CPU will now execute the IRET at the stub.
         }
     }
