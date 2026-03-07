@@ -106,6 +106,8 @@ void BIOS::handleMouseService() {
             m_mouse.buttons = 0;
             m_mouse.visible = false;
             m_mouse.mickeysX = 0; m_mouse.mickeysY = 0;
+            m_mouse.minX = 0; m_mouse.maxX = 639;
+            m_mouse.minY = 0; m_mouse.maxY = 199;
             for (int i = 0; i < 3; i++) {
                 m_mouse.pressCount[i] = 0;
                 m_mouse.releaseCount[i] = 0;
@@ -131,6 +133,10 @@ void BIOS::handleMouseService() {
         case 0x0004: // Set position
             m_mouse.x = static_cast<int16_t>(m_cpu.getReg16(cpu::CX));
             m_mouse.y = static_cast<int16_t>(m_cpu.getReg16(cpu::DX));
+            if (m_mouse.x < m_mouse.minX) m_mouse.x = m_mouse.minX;
+            if (m_mouse.x > m_mouse.maxX) m_mouse.x = m_mouse.maxX;
+            if (m_mouse.y < m_mouse.minY) m_mouse.y = m_mouse.minY;
+            if (m_mouse.y > m_mouse.maxY) m_mouse.y = m_mouse.maxY;
             break;
         case 0x0005: { // Get button press info
             uint16_t btn = m_cpu.getReg16(cpu::BX);
@@ -153,9 +159,14 @@ void BIOS::handleMouseService() {
             break;
         }
         case 0x0007: // Set horizontal bounds
-            // Accept but ignore bounds for now
+            m_mouse.minX = static_cast<int16_t>(m_cpu.getReg16(cpu::CX));
+            m_mouse.maxX = static_cast<int16_t>(m_cpu.getReg16(cpu::DX));
+            LOG_DEBUG("INT 33h: Set horizontal bounds ", m_mouse.minX, "-", m_mouse.maxX);
             break;
         case 0x0008: // Set vertical bounds
+            m_mouse.minY = static_cast<int16_t>(m_cpu.getReg16(cpu::CX));
+            m_mouse.maxY = static_cast<int16_t>(m_cpu.getReg16(cpu::DX));
+            LOG_DEBUG("INT 33h: Set vertical bounds ", m_mouse.minY, "-", m_mouse.maxY);
             break;
         case 0x000A: // Set text cursor
             break;

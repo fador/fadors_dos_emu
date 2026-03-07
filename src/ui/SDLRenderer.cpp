@@ -420,7 +420,7 @@ SDLRenderer::SDLRenderer(memory::MemoryBus& memory, hw::KeyboardController& kbd)
     }
 
     m_renderer = SDL_CreateRenderer(m_window, -1,
-        SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+        SDL_RENDERER_ACCELERATED);
     if (!m_renderer) {
         // Fall back to software renderer
         m_renderer = SDL_CreateRenderer(m_window, -1, SDL_RENDERER_SOFTWARE);
@@ -821,20 +821,23 @@ void SDLRenderer::handleSDLMouse(const SDL_Event& ev) {
     int winW = 1, winH = 1;
     SDL_GetWindowSize(m_window, &winW, &winH);
 
+    // Scale SDL coordinates to the game's mouse coordinate range
+    int rangeX = ms.maxX - ms.minX + 1;
+    int rangeY = ms.maxY - ms.minY + 1;
+
     if (ev.type == SDL_MOUSEMOTION) {
         // Use SDL relative motion for mickey counters
         ms.mickeysX += static_cast<int16_t>(ev.motion.xrel);
         ms.mickeysY += static_cast<int16_t>(ev.motion.yrel);
 
-        // Absolute position scaled to DOS 640x200 virtual coordinate space
-        ms.x = static_cast<int16_t>(ev.motion.x * 640 / winW);
-        ms.y = static_cast<int16_t>(ev.motion.y * 200 / winH);
+        // Absolute position scaled to the game's coordinate bounds
+        ms.x = static_cast<int16_t>(ms.minX + ev.motion.x * rangeX / winW);
+        ms.y = static_cast<int16_t>(ms.minY + ev.motion.y * rangeY / winH);
     }
 
     if (ev.type == SDL_MOUSEBUTTONDOWN || ev.type == SDL_MOUSEBUTTONUP) {
-        // Update absolute position from button event coordinates
-        ms.x = static_cast<int16_t>(ev.button.x * 640 / winW);
-        ms.y = static_cast<int16_t>(ev.button.y * 200 / winH);
+        ms.x = static_cast<int16_t>(ms.minX + ev.button.x * rangeX / winW);
+        ms.y = static_cast<int16_t>(ms.minY + ev.button.y * rangeY / winH);
 
         bool btnPressed = (ev.type == SDL_MOUSEBUTTONDOWN);
         int dosBtn = -1;
@@ -857,6 +860,12 @@ void SDLRenderer::handleSDLMouse(const SDL_Event& ev) {
             }
         }
     }
+
+    // Clamp to bounds
+    if (ms.x < ms.minX) ms.x = ms.minX;
+    if (ms.x > ms.maxX) ms.x = ms.maxX;
+    if (ms.y < ms.minY) ms.y = ms.minY;
+    if (ms.y > ms.maxY) ms.y = ms.maxY;
 }
 
 } // namespace fador::ui
