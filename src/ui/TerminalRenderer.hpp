@@ -33,14 +33,18 @@ private:
     int m_lastTextRows = 0;
 
     // Graphics mode state
-    static constexpr int TARGET_COLS = 80; // terminal width target
+    static constexpr int TARGET_COLS = 80; // terminal width target for downsampled mode
     static constexpr uint32_t PALETTE_BASE = 0xE0000;
 
-    std::vector<uint32_t> m_lastGraphicsFrame; // packed RGB per cell
+    bool m_fullResolution = false; // true = half-block pixel-perfect, false = downsampled ASCII
+    std::vector<uint32_t> m_lastGraphicsFrame; // packed RGB per cell (fg<<24|bg or just color)
     uint8_t m_lastVideoMode = 0xFF;
+    bool m_cursorHidden = false;
 
     void renderTextMode(bool force);
     void renderGraphicsMode(bool force);
+    void renderGraphicsFullRes(bool force);
+    void renderGraphicsDownsampled(bool force);
 
     // Decode a pixel's palette index from VRAM depending on mode layout
     uint8_t readPixel(int x, int y, uint8_t mode) const;
