@@ -102,6 +102,9 @@ void Debugger::disassemble(uint32_t address, uint32_t count) {
 void Debugger::dumpState(uint32_t contextLines) {
     std::cout << "\n=== CPU State Dump ==="  << std::endl;
     printRegisters();
+    std::cout << "\n--- Stack (SS:SP, 32 bytes) ---" << std::endl;
+    uint32_t stackAddr = (m_cpu.getSegReg(cpu::SS) << 4) + (m_cpu.getReg16(cpu::SP));
+    dumpMemory(stackAddr, 32);
     std::cout << "\n--- Disassembly around CS:EIP ---" << std::endl;
     uint32_t linearIP = (m_cpu.getSegReg(cpu::CS) << 4) + m_cpu.getEIP();
     auto instrs = m_disasm.disassembleAround(linearIP, contextLines, contextLines + 1);
