@@ -68,6 +68,9 @@ private:
     // Handle an SDL key event
     void handleSDLKey(const SDL_KeyboardEvent& ev);
 
+    // Update BDA shift flags (0x417/0x418) based on modifier key state
+    void updateShiftFlags(const SDL_KeyboardEvent& ev);
+
     // Handle an SDL mouse event
     void handleSDLMouse(const SDL_Event& ev);
 };

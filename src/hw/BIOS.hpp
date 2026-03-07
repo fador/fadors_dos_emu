@@ -34,6 +34,7 @@ public:
         uint16_t releaseCount[3] = {};
         int16_t lastPressX[3] = {}, lastPressY[3] = {};
         int16_t lastReleaseX[3] = {}, lastReleaseY[3] = {};
+        int16_t mickeysX = 0, mickeysY = 0; // Accumulated motion counters (mickeys)
     };
     MouseState& mouseState() { return m_mouse; }
 

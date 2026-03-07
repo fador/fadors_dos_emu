@@ -105,6 +105,7 @@ void BIOS::handleMouseService() {
             m_mouse.x = 0; m_mouse.y = 0;
             m_mouse.buttons = 0;
             m_mouse.visible = false;
+            m_mouse.mickeysX = 0; m_mouse.mickeysY = 0;
             for (int i = 0; i < 3; i++) {
                 m_mouse.pressCount[i] = 0;
                 m_mouse.releaseCount[i] = 0;
@@ -159,8 +160,10 @@ void BIOS::handleMouseService() {
         case 0x000A: // Set text cursor
             break;
         case 0x000B: // Read motion counters
-            m_cpu.setReg16(cpu::CX, 0); // dx
-            m_cpu.setReg16(cpu::DX, 0); // dy
+            m_cpu.setReg16(cpu::CX, static_cast<uint16_t>(m_mouse.mickeysX));
+            m_cpu.setReg16(cpu::DX, static_cast<uint16_t>(m_mouse.mickeysY));
+            m_mouse.mickeysX = 0;
+            m_mouse.mickeysY = 0;
             break;
         case 0x000C: { // Set event handler
             m_mouseCallbackMask = m_cpu.getReg16(cpu::CX);

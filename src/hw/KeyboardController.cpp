@@ -82,6 +82,30 @@ void KeyboardController::pushBreakKey(uint8_t scancode) {
     ++m_pendingIRQCount;
 }
 
+void KeyboardController::pushMakeKeyExtended(uint8_t ascii, uint8_t scancode) {
+    // Push 0xE0 prefix byte (triggers its own INT 9)
+    m_hwScanBuffer.push(0xE0);
+    m_status |= 0x01;
+    ++m_pendingIRQCount;
+    // Push actual make scancode
+    m_hwScanBuffer.push(scancode);
+    m_status |= 0x01;
+    ++m_pendingIRQCount;
+    // Also push to BIOS buffer for INT 16h
+    m_keyBuffer.push({ascii, scancode});
+}
+
+void KeyboardController::pushBreakKeyExtended(uint8_t scancode) {
+    // Push 0xE0 prefix byte
+    m_hwScanBuffer.push(0xE0);
+    m_status |= 0x01;
+    ++m_pendingIRQCount;
+    // Push break scancode
+    m_hwScanBuffer.push(static_cast<uint8_t>(scancode | 0x80));
+    m_status |= 0x01;
+    ++m_pendingIRQCount;
+}
+
 std::pair<uint8_t, uint8_t> KeyboardController::peekKey() const {
     if (m_keyBuffer.empty()) return {0, 0};
     return {m_keyBuffer.front().ascii, m_keyBuffer.front().scancode};

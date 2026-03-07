@@ -27,6 +27,9 @@ public:
     void pushMakeKey(uint8_t ascii, uint8_t scancode);
     // pushBreakKey: pushes break scancode to HW buffer + IRQ only
     void pushBreakKey(uint8_t scancode);
+    // Extended-key variants: push 0xE0 prefix byte before the scancode (for arrow keys, etc.)
+    void pushMakeKeyExtended(uint8_t ascii, uint8_t scancode);
+    void pushBreakKeyExtended(uint8_t scancode);
 
     // BIOS-level key access (for INT 16h)
     bool hasKey() const { return !m_keyBuffer.empty(); }

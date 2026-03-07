@@ -657,6 +657,7 @@ void SDLRenderer::handleSDLKey(const SDL_KeyboardEvent& ev) {
 
     uint8_t scancode = 0;
     uint8_t ascii = 0;
+    bool extended = false; // true for keys that need 0xE0 prefix
 
     // Map SDL scancodes to PC/XT scancodes + ASCII values
     switch (ev.keysym.scancode) {
@@ -725,22 +726,23 @@ void SDLRenderer::handleSDLKey(const SDL_KeyboardEvent& ev) {
         case SDL_SCANCODE_F8:        scancode = 0x42; ascii = 0;   break;
         case SDL_SCANCODE_F9:        scancode = 0x43; ascii = 0;   break;
         case SDL_SCANCODE_F10:       scancode = 0x44; ascii = 0;   break;
-        case SDL_SCANCODE_F11:       scancode = 0x57; ascii = 0;   break;
-        case SDL_SCANCODE_F12:       scancode = 0x58; ascii = 0;   break;
-        case SDL_SCANCODE_UP:        scancode = 0x48; ascii = 0;   break;
-        case SDL_SCANCODE_DOWN:      scancode = 0x50; ascii = 0;   break;
-        case SDL_SCANCODE_LEFT:      scancode = 0x4B; ascii = 0;   break;
-        case SDL_SCANCODE_RIGHT:     scancode = 0x4D; ascii = 0;   break;
-        case SDL_SCANCODE_HOME:      scancode = 0x47; ascii = 0;   break;
-        case SDL_SCANCODE_END:       scancode = 0x4F; ascii = 0;   break;
-        case SDL_SCANCODE_PAGEUP:    scancode = 0x49; ascii = 0;   break;
-        case SDL_SCANCODE_PAGEDOWN:  scancode = 0x51; ascii = 0;   break;
-        case SDL_SCANCODE_INSERT:    scancode = 0x52; ascii = 0;   break;
-        case SDL_SCANCODE_DELETE:    scancode = 0x53; ascii = 0;   break;
+        case SDL_SCANCODE_F11:       scancode = 0x57; ascii = 0;   extended = true; break;
+        case SDL_SCANCODE_F12:       scancode = 0x58; ascii = 0;   extended = true; break;
+        // Extended keys (arrow keys, navigation) - need 0xE0 prefix
+        case SDL_SCANCODE_UP:        scancode = 0x48; ascii = 0;   extended = true; break;
+        case SDL_SCANCODE_DOWN:      scancode = 0x50; ascii = 0;   extended = true; break;
+        case SDL_SCANCODE_LEFT:      scancode = 0x4B; ascii = 0;   extended = true; break;
+        case SDL_SCANCODE_RIGHT:     scancode = 0x4D; ascii = 0;   extended = true; break;
+        case SDL_SCANCODE_HOME:      scancode = 0x47; ascii = 0;   extended = true; break;
+        case SDL_SCANCODE_END:       scancode = 0x4F; ascii = 0;   extended = true; break;
+        case SDL_SCANCODE_PAGEUP:    scancode = 0x49; ascii = 0;   extended = true; break;
+        case SDL_SCANCODE_PAGEDOWN:  scancode = 0x51; ascii = 0;   extended = true; break;
+        case SDL_SCANCODE_INSERT:    scancode = 0x52; ascii = 0;   extended = true; break;
+        case SDL_SCANCODE_DELETE:    scancode = 0x53; ascii = 0;   extended = true; break;
         case SDL_SCANCODE_LCTRL:     scancode = 0x1D; ascii = 0;   break;
-        case SDL_SCANCODE_RCTRL:     scancode = 0x1D; ascii = 0;   break;
+        case SDL_SCANCODE_RCTRL:     scancode = 0x1D; ascii = 0;   extended = true; break;
         case SDL_SCANCODE_LALT:      scancode = 0x38; ascii = 0;   break;
-        case SDL_SCANCODE_RALT:      scancode = 0x38; ascii = 0;   break;
+        case SDL_SCANCODE_RALT:      scancode = 0x38; ascii = 0;   extended = true; break;
         default: break;
     }
 
@@ -756,13 +758,58 @@ void SDLRenderer::handleSDLKey(const SDL_KeyboardEvent& ev) {
         ascii = 0; // Alt combinations have zero ASCII
     }
 
+    // Update BDA shift flags at 0x417
+    updateShiftFlags(ev);
+
     if (scancode != 0) {
-        if (pressed) {
-            m_kbd.pushMakeKey(ascii, scancode);
+        if (extended) {
+            if (pressed) {
+                m_kbd.pushMakeKeyExtended(ascii, scancode);
+            } else {
+                m_kbd.pushBreakKeyExtended(scancode);
+            }
         } else {
-            m_kbd.pushBreakKey(scancode);
+            if (pressed) {
+                m_kbd.pushMakeKey(ascii, scancode);
+            } else {
+                m_kbd.pushBreakKey(scancode);
+            }
         }
     }
+}
+
+void SDLRenderer::updateShiftFlags(const SDL_KeyboardEvent& ev) {
+    // BDA 0x417 shift flag bits:
+    //   bit 0 = Right Shift pressed
+    //   bit 1 = Left Shift pressed
+    //   bit 2 = Ctrl pressed
+    //   bit 3 = Alt pressed
+    //   bit 4 = Scroll Lock active
+    //   bit 5 = Num Lock active
+    //   bit 6 = Caps Lock active
+    //   bit 7 = Insert active
+    uint8_t flags = m_memory.read8(0x417);
+
+    bool pressed = (ev.type == SDL_KEYDOWN);
+    switch (ev.keysym.scancode) {
+        case SDL_SCANCODE_RSHIFT:
+            if (pressed) flags |= 0x01; else flags &= ~0x01;
+            break;
+        case SDL_SCANCODE_LSHIFT:
+            if (pressed) flags |= 0x02; else flags &= ~0x02;
+            break;
+        case SDL_SCANCODE_LCTRL:
+        case SDL_SCANCODE_RCTRL:
+            if (pressed) flags |= 0x04; else flags &= ~0x04;
+            break;
+        case SDL_SCANCODE_LALT:
+        case SDL_SCANCODE_RALT:
+            if (pressed) flags |= 0x08; else flags &= ~0x08;
+            break;
+        default: break;
+    }
+
+    m_memory.write8(0x417, flags);
 }
 
 void SDLRenderer::handleSDLMouse(const SDL_Event& ev) {
@@ -774,20 +821,21 @@ void SDLRenderer::handleSDLMouse(const SDL_Event& ev) {
     int winW = 1, winH = 1;
     SDL_GetWindowSize(m_window, &winW, &winH);
 
-    int mouseX, mouseY;
     if (ev.type == SDL_MOUSEMOTION) {
-        mouseX = ev.motion.x;
-        mouseY = ev.motion.y;
-    } else {
-        mouseX = ev.button.x;
-        mouseY = ev.button.y;
+        // Use SDL relative motion for mickey counters
+        ms.mickeysX += static_cast<int16_t>(ev.motion.xrel);
+        ms.mickeysY += static_cast<int16_t>(ev.motion.yrel);
+
+        // Absolute position scaled to DOS 640x200 virtual coordinate space
+        ms.x = static_cast<int16_t>(ev.motion.x * 640 / winW);
+        ms.y = static_cast<int16_t>(ev.motion.y * 200 / winH);
     }
 
-    // Scale to DOS coordinate space (typically 640×200 for text mode mouse)
-    ms.x = static_cast<int16_t>(mouseX * 640 / winW);
-    ms.y = static_cast<int16_t>(mouseY * 200 / winH);
-
     if (ev.type == SDL_MOUSEBUTTONDOWN || ev.type == SDL_MOUSEBUTTONUP) {
+        // Update absolute position from button event coordinates
+        ms.x = static_cast<int16_t>(ev.button.x * 640 / winW);
+        ms.y = static_cast<int16_t>(ev.button.y * 200 / winH);
+
         bool btnPressed = (ev.type == SDL_MOUSEBUTTONDOWN);
         int dosBtn = -1;
         switch (ev.button.button) {
