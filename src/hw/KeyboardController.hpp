@@ -22,6 +22,12 @@ public:
     // Also pushes to BIOS buffer for INT 16h
     void pushKeyWithBreak(uint8_t ascii, uint8_t scancode);
 
+    // Separate make/break for backends with proper key-up events (SDL)
+    // pushMakeKey: pushes make scancode to HW buffer + IRQ, and to BIOS buffer
+    void pushMakeKey(uint8_t ascii, uint8_t scancode);
+    // pushBreakKey: pushes break scancode to HW buffer + IRQ only
+    void pushBreakKey(uint8_t scancode);
+
     // BIOS-level key access (for INT 16h)
     bool hasKey() const { return !m_keyBuffer.empty(); }
     std::pair<uint8_t, uint8_t> peekKey() const;  // {ascii, scancode}

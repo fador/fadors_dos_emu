@@ -69,6 +69,19 @@ void KeyboardController::pushKeyWithBreak(uint8_t ascii, uint8_t scancode) {
     m_keyBuffer.push({ascii, scancode});
 }
 
+void KeyboardController::pushMakeKey(uint8_t ascii, uint8_t scancode) {
+    m_hwScanBuffer.push(scancode);
+    m_status |= 0x01;
+    ++m_pendingIRQCount;
+    m_keyBuffer.push({ascii, scancode});
+}
+
+void KeyboardController::pushBreakKey(uint8_t scancode) {
+    m_hwScanBuffer.push(static_cast<uint8_t>(scancode | 0x80));
+    m_status |= 0x01;
+    ++m_pendingIRQCount;
+}
+
 std::pair<uint8_t, uint8_t> KeyboardController::peekKey() const {
     if (m_keyBuffer.empty()) return {0, 0};
     return {m_keyBuffer.front().ascii, m_keyBuffer.front().scancode};

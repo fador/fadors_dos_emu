@@ -758,9 +758,9 @@ void SDLRenderer::handleSDLKey(const SDL_KeyboardEvent& ev) {
 
     if (scancode != 0) {
         if (pressed) {
-            m_kbd.pushKeyWithBreak(ascii, scancode);
+            m_kbd.pushMakeKey(ascii, scancode);
         } else {
-            m_kbd.pushKey(0, scancode | 0x80); // Break code
+            m_kbd.pushBreakKey(scancode);
         }
     }
 }
