@@ -111,6 +111,9 @@ void BIOS::handleMouseService() {
             }
             m_cpu.setReg16(cpu::AX, 0xFFFF); // Installed
             m_cpu.setReg16(cpu::BX, 0x0002); // 2 buttons
+            m_mouseCallbackMask = 0;
+            m_mouseCallbackSeg = 0;
+            m_mouseCallbackOff = 0;
             LOG_DEBUG("INT 33h: Mouse reset, driver installed");
             break;
         case 0x0001: // Show cursor
@@ -159,10 +162,26 @@ void BIOS::handleMouseService() {
             m_cpu.setReg16(cpu::CX, 0); // dx
             m_cpu.setReg16(cpu::DX, 0); // dy
             break;
-        case 0x000C: // Set event handler
-        case 0x0014: // Swap event handlers
-            // Store but effectively ignore — we poll directly
+        case 0x000C: { // Set event handler
+            m_mouseCallbackMask = m_cpu.getReg16(cpu::CX);
+            m_mouseCallbackSeg  = m_cpu.getSegReg(cpu::ES);
+            m_mouseCallbackOff  = m_cpu.getReg16(cpu::DX);
+            LOG_DEBUG("INT 33h: Set event handler mask=0x", std::hex, m_mouseCallbackMask,
+                      " addr=", m_mouseCallbackSeg, ":", m_mouseCallbackOff);
             break;
+        }
+        case 0x0014: { // Swap event handlers
+            uint16_t oldMask = m_mouseCallbackMask;
+            uint16_t oldSeg  = m_mouseCallbackSeg;
+            uint16_t oldOff  = m_mouseCallbackOff;
+            m_mouseCallbackMask = m_cpu.getReg16(cpu::CX);
+            m_mouseCallbackSeg  = m_cpu.getSegReg(cpu::ES);
+            m_mouseCallbackOff  = m_cpu.getReg16(cpu::DX);
+            m_cpu.setReg16(cpu::CX, oldMask);
+            m_cpu.setSegReg(cpu::ES, oldSeg);
+            m_cpu.setReg16(cpu::DX, oldOff);
+            break;
+        }
         case 0x000F: // Set mickey/pixel ratio
         case 0x0010: // Set exclusive area
         case 0x0013: // Set double-speed threshold
@@ -780,6 +799,7 @@ void BIOS::handleKeyboardService() {
                 // to wait for the main loop's periodic poll.
                 if (m_pollInput) m_pollInput();
                 if (!m_kbd.hasKey()) {
+                    if (m_idleCallback) m_idleCallback();
                     m_cpu.setEIP(m_cpu.getEIP() - 2);
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                     return;
@@ -807,7 +827,24 @@ void BIOS::handleKeyboardService() {
             break;
         }
         case 0x02: { // Get Shift Flags
-            m_cpu.setReg8(cpu::AL, 0); // No modifier keys pressed
+            m_cpu.setReg8(cpu::AL, m_memory.read8(0x417));
+            break;
+        }
+        case 0x03: { // Set Typematic Rate/Delay
+            // Accept but ignore — no hardware to configure
+            LOG_DEBUG("BIOS INT 16h AH=03h: Set Typematic (stubbed)");
+            break;
+        }
+        case 0x05: { // Store Key in Keyboard Buffer
+            uint8_t ch = m_cpu.getReg8(cpu::CL);
+            uint8_t sc = m_cpu.getReg8(cpu::CH);
+            m_kbd.pushKey(ch, sc);
+            m_cpu.setReg8(cpu::AL, 0); // Success
+            break;
+        }
+        case 0x12: { // Get Extended Shift Flags
+            m_cpu.setReg8(cpu::AL, m_memory.read8(0x417));
+            m_cpu.setReg8(cpu::AH, m_memory.read8(0x418));
             break;
         }
         default:
@@ -832,6 +869,18 @@ void BIOS::initialize() {
     m_memory.write16(0x463, 0x3D4);  // CRTC base I/O port (color)
     m_memory.write8(0x484, 24);      // Number of rows - 1
     m_memory.write16(0x485, 16);     // Character height in pixels
+
+    // Keyboard buffer: circular 16-entry queue at 0x40:0x1E-0x3E
+    m_memory.write16(0x41A, 0x001E); // Buffer head (offset within seg 0x40)
+    m_memory.write16(0x41C, 0x001E); // Buffer tail (head==tail → empty)
+    m_memory.write16(0x480, 0x001E); // Buffer start offset
+    m_memory.write16(0x482, 0x003E); // Buffer end offset
+    // Zero the buffer area itself
+    for (uint16_t i = 0x41E; i < 0x43E; i += 2)
+        m_memory.write16(i, 0);
+    m_memory.write8(0x417, 0);       // Keyboard shift flags byte 1
+    m_memory.write8(0x418, 0);       // Keyboard shift flags byte 2
+    m_memory.write8(0x496, 0x10);    // Enhanced keyboard flag (101-key present)
 
     // Memory size at 0x40:0x13
     m_memory.write16(0x413, 640); // 640KB conventional memory

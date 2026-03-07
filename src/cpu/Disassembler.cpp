@@ -420,6 +420,8 @@ std::string Disassembler::disasmOpcode(Cursor& c, uint8_t op, bool p66, bool p67
     if (op == 0x9B) return "FWAIT";
     if (op == 0x9C) return p66 ? "PUSHFD" : "PUSHF";
     if (op == 0x9D) return p66 ? "POPFD" : "POPF";
+    if (op == 0x9E) return "SAHF";
+    if (op == 0x9F) return "LAHF";
 
     // ── MOV AL/AX, moffs ──
     if (op == 0xA0) return "MOV AL, [" + hexStr16(c.read16()) + "]";

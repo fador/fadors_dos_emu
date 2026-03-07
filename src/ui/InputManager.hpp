@@ -28,6 +28,7 @@ private:
 
     // Maps ASCII/Special keys to PC/XT scancodes
     void handleKey(int key, bool pressed);
+    void handleAltKey(unsigned char ch);
     void handleMouseEvent(int button, int col, int row, bool pressed);
 
 #ifndef _WIN32

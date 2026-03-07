@@ -532,6 +532,21 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             else m_cpu.setEFLAGS((m_cpu.getEFLAGS() & 0xFFFF0000) | m_cpu.pop16());
             break;
 
+        // SAHF / LAHF
+        case 0x9E: { // SAHF — Store AH into Flags (SF,ZF,AF,PF,CF)
+            uint32_t flags = m_cpu.getEFLAGS();
+            uint8_t ah = m_cpu.getReg8(AH);
+            // Only SF,ZF,AF,PF,CF are affected (bits 7,6,4,2,0)
+            constexpr uint32_t mask = 0xD5; // 1101 0101
+            flags = (flags & ~mask) | (ah & mask) | 0x02; // bit 1 always set
+            m_cpu.setEFLAGS(flags);
+            break;
+        }
+        case 0x9F: { // LAHF — Load AH from Flags (SF,ZF,AF,PF,CF)
+            m_cpu.setReg8(AH, static_cast<uint8_t>(m_cpu.getEFLAGS() & 0xFF));
+            break;
+        }
+
         // Std Alu r/m block (0x00 - 0x3B pattern matching extracted to aluOp)
         case 0x00: case 0x08: case 0x10: case 0x18: case 0x20: case 0x28: case 0x30: case 0x38: {
             uint8_t op = (opcode >> 3) & 0x07;

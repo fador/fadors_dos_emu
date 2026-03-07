@@ -22,6 +22,7 @@ public:
 
     // Set a callback that polls host input; called by INT 16h when blocking.
     void setInputPollCallback(std::function<void()> cb) { m_pollInput = std::move(cb); }
+    void setIdleCallback(std::function<void()> cb) { m_idleCallback = std::move(cb); }
 
     // Mouse state (updated by InputManager, read by INT 33h)
     struct MouseState {
@@ -65,7 +66,13 @@ private:
     bool m_floppyLoaded = false;
 
     std::function<void()> m_pollInput;
+    std::function<void()> m_idleCallback;
     MouseState m_mouse;
+
+    // INT 33h event handler callback
+    uint16_t m_mouseCallbackMask = 0;
+    uint16_t m_mouseCallbackSeg = 0;
+    uint16_t m_mouseCallbackOff = 0;
 
     void handleVideoService();      // INT 10h
     void handleKeyboardService();   // INT 16h

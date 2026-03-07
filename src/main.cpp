@@ -122,6 +122,20 @@ int main(int argc, char* argv[]) {
         fador::ui::InputManager input(kbd);
         input.setBIOS(bios);
         bios.setInputPollCallback([&input]() { input.pollInput(); });
+        bios.setIdleCallback([&renderer, &pit, &cpu, &decoder]() {
+            pit.update();
+            if (pit.checkPendingIRQ0()) {
+                if (cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) {
+                    decoder.injectHardwareInterrupt(0x08);
+                }
+            }
+            static auto lr = std::chrono::steady_clock::now();
+            auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lr).count() > 33) {
+                renderer.render();
+                lr = now;
+            }
+        });
         dos.setKeyboard(kbd);
         dos.setInputPollCallback([&input]() { input.pollInput(); });
         bool running = true;

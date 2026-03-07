@@ -153,8 +153,14 @@ bool InputManager::pollInput() {
                         }
                     }
                 } else {
-                    // Lone ESC or ESC + something we don't handle
-                    handleKey(27, true);
+                    // ESC + printable character → Alt+key combination
+                    // Terminal sends ESC followed by the key for Alt+letter
+                    if (n == 2 && buf[1] >= 0x20 && buf[1] < 0x7F) {
+                        handleAltKey(buf[1]);
+                    } else {
+                        // Lone ESC or ESC + something we don't handle
+                        handleKey(27, true);
+                    }
                 }
             } else if (n == 1 && buf[0] == 0x1B) {
                 handleKey(27, true); // Lone ESC
@@ -297,6 +303,32 @@ void InputManager::handleMouseEvent(int button, int col, int row, bool pressed) 
             ms.lastReleaseX[dosBtn] = ms.x;
             ms.lastReleaseY[dosBtn] = ms.y;
         }
+    }
+}
+
+void InputManager::handleAltKey(unsigned char ch) {
+    // Alt+letter in DOS returns ascii=0 and a special scan code.
+    // Map the printable character to its PC/XT scancode for Alt combinations.
+    static const uint8_t altScancodes[26] = {
+        0x1E, 0x30, 0x2E, 0x20, 0x12, 0x21, 0x22, 0x23, 0x17, 0x24, // A-J
+        0x25, 0x26, 0x32, 0x31, 0x18, 0x19, 0x10, 0x13, 0x1F, 0x14, // K-T
+        0x16, 0x2F, 0x11, 0x2D, 0x15, 0x2C                          // U-Z
+    };
+    uint8_t scancode = 0;
+    if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')) {
+        int idx = (ch | 0x20) - 'a'; // Case-insensitive index
+        scancode = altScancodes[idx];
+    } else if (ch >= '1' && ch <= '9') {
+        scancode = static_cast<uint8_t>(0x78 + (ch - '1')); // Alt+1=0x78 .. Alt+9=0x80
+    } else if (ch == '0') {
+        scancode = 0x81; // Alt+0
+    } else if (ch == '-') {
+        scancode = 0x82;
+    } else if (ch == '=') {
+        scancode = 0x83;
+    }
+    if (scancode != 0) {
+        m_kbd.pushKey(0, scancode); // Alt keys have ascii=0
     }
 }
 
