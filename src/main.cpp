@@ -13,6 +13,9 @@
 #include "ui/InputManager.hpp"
 #include "ui/Debugger.hpp"
 #include "cpu/Assembler.hpp"
+#ifdef HAVE_SDL2
+#include "ui/SDLRenderer.hpp"
+#endif
 
 #include <chrono>
 #include <thread>
@@ -62,6 +65,11 @@ int main(int argc, char* argv[]) {
         bool dumpOnExit = false;
         uint64_t stopAfterCycles = 0; // 0 = disabled
         std::string execAsm;  // --exec="asm instructions"
+#ifdef HAVE_SDL2
+        bool useSDL = true; // Default to SDL when available
+#else
+        bool useSDL = false;
+#endif
         std::string path;
         std::string args;
         for (int i = 1; i < argc; ++i) {
@@ -85,6 +93,14 @@ int main(int argc, char* argv[]) {
                 stopAfterCycles = std::stoull(arg.substr(13));
             } else if (arg.find("--exec=") == 0) {
                 execAsm = arg.substr(7);
+            } else if (arg == "--sdl") {
+#ifdef HAVE_SDL2
+                useSDL = true;
+#else
+                LOG_WARN("SDL2 not available, ignoring --sdl flag");
+#endif
+            } else if (arg == "--no-sdl") {
+                useSDL = false;
             } else if (arg.find("--debug=") == 0) {
                 fador::utils::currentLevel = fador::utils::LogLevel::Debug;
                 const std::string cats = arg.substr(8);
@@ -115,7 +131,7 @@ int main(int argc, char* argv[]) {
             }
             dos.setProgramDir(path);
         } else {
-            LOG_WARN("No program specified. Use: fadors_emu [--himem] [--debug=cpu,video,dos] [--stop-after=N] [--dump-on-exit] [--exec=\"asm\"] <program.com|exe> [program-args...]");
+            LOG_WARN("No program specified. Use: fadors_emu [--himem] [--sdl|--no-sdl] [--debug=cpu,video,dos] [--stop-after=N] [--dump-on-exit] [--exec=\"asm\"] <program.com|exe> [program-args...]");
             
             // --exec mode: assemble, write to CS:IP, run, dump state
             if (!execAsm.empty()) {
@@ -149,88 +165,159 @@ int main(int argc, char* argv[]) {
             return 0;
         }
 
-        renderer.clearScreen();
+#ifdef HAVE_SDL2
+        if (useSDL) {
+            // ── SDL2 graphical window path ──────────────────────────
+            fador::ui::SDLRenderer sdlRenderer(memory, kbd);
+            sdlRenderer.setBIOS(bios);
 
-        fador::ui::InputManager input(kbd);
-        input.setBIOS(bios);
-        bios.setInputPollCallback([&input]() { input.pollInput(); });
-        bios.setIdleCallback([&renderer, &pit, &cpu, &decoder, &kbd]() {
-            pit.update();
-            if ((cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) && pit.checkPendingIRQ0()) {
-                decoder.injectHardwareInterrupt(0x08);
-            }
-            if ((cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) && kbd.checkPendingIRQ()) {
-                decoder.injectHardwareInterrupt(0x09);
-            }
-            static auto lr = std::chrono::steady_clock::now();
-            auto now = std::chrono::steady_clock::now();
-            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lr).count() > 33) {
-                renderer.render();
-                lr = now;
-            }
-        });
-        dos.setKeyboard(kbd);
-        dos.setInputPollCallback([&input]() { input.pollInput(); });
-
-        // Enable hardware interrupts — real BIOS does STI before running programs
-        cpu.setEFLAGS(cpu.getEFLAGS() | fador::cpu::FLAG_INTERRUPT);
-
-        bool running = true;
-        uint64_t instrCount = 0;
-
-        while (running) {
-            decoder.step();
-            instrCount++;
-
-            if (stopAfterCycles > 0 && instrCount >= stopAfterCycles) {
-                LOG_INFO("Stopped after ", instrCount, " cycles (--stop-after)");
-                debugger.dumpState();
-                running = false;
-                break;
-            }
-
-            if (dos.isTerminated()) {
-                LOG_INFO("Program terminated normally with exit code ", (int)dos.getExitCode(),
-                         " after ", instrCount, " instructions");
-                if (dumpOnExit) {
-                    debugger.dumpState();
-                }
-                running = false;
-                break;
-            }
-
-            // Throttle expensive operations: poll input every ~1024 instructions,
-            // render at ~30 FPS.  select() syscall in pollInput() is the
-            // main bottleneck if called every instruction.
-            if ((instrCount & 0x3FF) == 0) {
-                input.pollInput();
-
+            bios.setInputPollCallback([&sdlRenderer]() { sdlRenderer.pollInput(); });
+            bios.setIdleCallback([&sdlRenderer, &pit, &cpu, &decoder, &kbd]() {
                 pit.update();
-
-                // Service PIT channel 0 (IRQ0 → INT 8 → timer tick)
                 if ((cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) && pit.checkPendingIRQ0()) {
                     decoder.injectHardwareInterrupt(0x08);
                 }
-
-                // Service keyboard IRQ1 → INT 9
                 if ((cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) && kbd.checkPendingIRQ()) {
                     decoder.injectHardwareInterrupt(0x09);
                 }
-
-                static auto lastRender = std::chrono::steady_clock::now();
+                static auto lr = std::chrono::steady_clock::now();
                 auto now = std::chrono::steady_clock::now();
-                if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastRender).count() > 33) {
-                    renderer.render();
-                    lastRender = now;
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lr).count() > 33) {
+                    sdlRenderer.render();
+                    lr = now;
+                }
+            });
+            dos.setKeyboard(kbd);
+            dos.setInputPollCallback([&sdlRenderer]() { sdlRenderer.pollInput(); });
+
+            cpu.setEFLAGS(cpu.getEFLAGS() | fador::cpu::FLAG_INTERRUPT);
+
+            bool running = true;
+            uint64_t instrCount = 0;
+
+            while (running) {
+                decoder.step();
+                instrCount++;
+
+                if (stopAfterCycles > 0 && instrCount >= stopAfterCycles) {
+                    LOG_INFO("Stopped after ", instrCount, " cycles (--stop-after)");
+                    debugger.dumpState();
+                    running = false;
+                    break;
+                }
+
+                if (dos.isTerminated()) {
+                    LOG_INFO("Program terminated normally with exit code ", (int)dos.getExitCode(),
+                             " after ", instrCount, " instructions");
+                    if (dumpOnExit) {
+                        debugger.dumpState();
+                    }
+                    running = false;
+                    break;
+                }
+
+                if (sdlRenderer.shouldQuit()) {
+                    LOG_INFO("Window closed by user after ", instrCount, " instructions");
+                    running = false;
+                    break;
+                }
+
+                if ((instrCount & 0x3FF) == 0) {
+                    sdlRenderer.pollInput();
+                    pit.update();
+
+                    if ((cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) && pit.checkPendingIRQ0()) {
+                        decoder.injectHardwareInterrupt(0x08);
+                    }
+                    if ((cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) && kbd.checkPendingIRQ()) {
+                        decoder.injectHardwareInterrupt(0x09);
+                    }
+
+                    static auto lastRender = std::chrono::steady_clock::now();
+                    auto now = std::chrono::steady_clock::now();
+                    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastRender).count() > 33) {
+                        sdlRenderer.render();
+                        lastRender = now;
+                    }
                 }
             }
 
-            // In a real implementation we'd check for termination signals
-            // For now, let's keep running or check for specific HALT if implemented
-        }
+            sdlRenderer.render(true);
+        } else
+#endif
+        {
+            // ── Terminal rendering path ─────────────────────────────
+            renderer.clearScreen();
 
-        // Final render to show any output before exit
-        renderer.render(true);
+            fador::ui::InputManager input(kbd);
+            input.setBIOS(bios);
+            bios.setInputPollCallback([&input]() { input.pollInput(); });
+            bios.setIdleCallback([&renderer, &pit, &cpu, &decoder, &kbd]() {
+                pit.update();
+                if ((cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) && pit.checkPendingIRQ0()) {
+                    decoder.injectHardwareInterrupt(0x08);
+                }
+                if ((cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) && kbd.checkPendingIRQ()) {
+                    decoder.injectHardwareInterrupt(0x09);
+                }
+                static auto lr = std::chrono::steady_clock::now();
+                auto now = std::chrono::steady_clock::now();
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lr).count() > 33) {
+                    renderer.render();
+                    lr = now;
+                }
+            });
+            dos.setKeyboard(kbd);
+            dos.setInputPollCallback([&input]() { input.pollInput(); });
+
+            cpu.setEFLAGS(cpu.getEFLAGS() | fador::cpu::FLAG_INTERRUPT);
+
+            bool running = true;
+            uint64_t instrCount = 0;
+
+            while (running) {
+                decoder.step();
+                instrCount++;
+
+                if (stopAfterCycles > 0 && instrCount >= stopAfterCycles) {
+                    LOG_INFO("Stopped after ", instrCount, " cycles (--stop-after)");
+                    debugger.dumpState();
+                    running = false;
+                    break;
+                }
+
+                if (dos.isTerminated()) {
+                    LOG_INFO("Program terminated normally with exit code ", (int)dos.getExitCode(),
+                             " after ", instrCount, " instructions");
+                    if (dumpOnExit) {
+                        debugger.dumpState();
+                    }
+                    running = false;
+                    break;
+                }
+
+                if ((instrCount & 0x3FF) == 0) {
+                    input.pollInput();
+                    pit.update();
+
+                    if ((cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) && pit.checkPendingIRQ0()) {
+                        decoder.injectHardwareInterrupt(0x08);
+                    }
+                    if ((cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) && kbd.checkPendingIRQ()) {
+                        decoder.injectHardwareInterrupt(0x09);
+                    }
+
+                    static auto lastRender = std::chrono::steady_clock::now();
+                    auto now = std::chrono::steady_clock::now();
+                    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastRender).count() > 33) {
+                        renderer.render();
+                        lastRender = now;
+                    }
+                }
+            }
+
+            renderer.render(true);
+        }
 
     } catch (const std::exception& e) {
         LOG_ERROR("Fatal system error: ", e.what());

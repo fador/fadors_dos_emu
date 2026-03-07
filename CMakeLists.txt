@@ -5,6 +5,14 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF) # Ensure strict standard C++
 
+# Optional SDL2 graphics backend
+find_package(SDL2 QUIET)
+if(SDL2_FOUND)
+    message(STATUS "SDL2 found — graphical window backend enabled")
+else()
+    message(STATUS "SDL2 not found — using terminal-only rendering")
+endif()
+
 # Define the source directory
 set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
@@ -12,12 +20,22 @@ set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
 # Gather all source files EXCEPT main.cpp, and ensure HIMEM.cpp is included
 file(GLOB_RECURSE SRC_FILES "${SRC_DIR}/*.cpp")
 list(REMOVE_ITEM SRC_FILES "${SRC_DIR}/main.cpp")
+# Exclude SDL renderer when SDL2 is not available
+if(NOT SDL2_FOUND)
+    list(REMOVE_ITEM SRC_FILES "${SRC_DIR}/ui/SDLRenderer.cpp")
+endif()
 # Ensure HIMEM.cpp is included (in case GLOB_RECURSE misses nested folders or symlinks)
 list(APPEND SRC_FILES "${SRC_DIR}/memory/himem/HIMEM.cpp")
 
 # Define an internal static library for the emulator core
 add_library(fadors_core STATIC ${SRC_FILES})
 target_include_directories(fadors_core PUBLIC ${SRC_DIR})
+
+if(SDL2_FOUND)
+    target_compile_definitions(fadors_core PUBLIC HAVE_SDL2=1)
+    target_include_directories(fadors_core PUBLIC ${SDL2_INCLUDE_DIRS})
+    target_link_libraries(fadors_core PUBLIC SDL2::SDL2)
+endif()
 
 # Define the main emulator executable
 add_executable(fadors_emu ${SRC_DIR}/main.cpp)

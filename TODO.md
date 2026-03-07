@@ -113,7 +113,7 @@
 
 ## Phase 9: Audio Subsystem (Sound Blaster & AdLib)
 - [ ] **Native Audio Abstraction Layer**
-  - [ ] Integrate a cross-platform audio backend (e.g., MiniAudio or SDL2 Audio) for native playback.
+  - [ ] Integrate a cross-platform audio backend (e.g., SDL2 Audio) for native playback.
   - [ ] Implement robust ring-buffers and asynchronous audio callbacks to ensure latency-free audio streaming.
 - [ ] **AdLib (OPL2 / YM3812) Emulation**
   - [ ] Hook I/O ports `0x388` and `0x389` for AdLib register and data access.
