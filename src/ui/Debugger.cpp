@@ -2,14 +2,42 @@
 #include <iostream>
 #include <sstream>
 #include <iomanip>
+#ifndef _WIN32
+#include <termios.h>
+#include <unistd.h>
+#endif
 
 namespace fador::ui {
+
+// RAII guard: if the terminal is in raw mode, temporarily restore canonical
+// (cooked) mode so std::getline / echo work.  Restores on destruction.
+struct CookedModeGuard {
+#ifndef _WIN32
+    struct termios saved{};
+    bool active = false;
+    CookedModeGuard() {
+        if (tcgetattr(STDIN_FILENO, &saved) == 0 && !(saved.c_lflag & ICANON)) {
+            struct termios cooked = saved;
+            cooked.c_iflag |= ICRNL;
+            cooked.c_lflag |= ICANON | ECHO;
+            cooked.c_cc[VMIN]  = 1;
+            cooked.c_cc[VTIME] = 0;
+            tcsetattr(STDIN_FILENO, TCSAFLUSH, &cooked);
+            active = true;
+        }
+    }
+    ~CookedModeGuard() {
+        if (active) tcsetattr(STDIN_FILENO, TCSAFLUSH, &saved);
+    }
+#endif
+};
 
 Debugger::Debugger(cpu::CPU& cpu, memory::MemoryBus& memory, cpu::InstructionDecoder& decoder)
     : m_cpu(cpu), m_memory(memory), m_decoder(decoder), m_disasm(memory) {
 }
 
 bool Debugger::run() {
+    CookedModeGuard cookedGuard;
     std::string line;
     std::cout << "\n[Fador Debugger] > " << std::flush;
     
@@ -135,6 +163,7 @@ void Debugger::dumpState(uint32_t contextLines) {
 }
 
 void Debugger::assembleMode(uint32_t startAddr) {
+    CookedModeGuard cookedGuard;
     uint32_t addr = startAddr;
     std::cout << "Entering assembly mode (blank line or '.' to exit)\n";
     std::string asmLine;

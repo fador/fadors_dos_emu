@@ -1029,24 +1029,29 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             break;
         }
 
-        case 0xA1: // MOV AX/EAX, [imm16/32]
-            if (m_hasPrefix66) m_cpu.setReg32(EAX, m_memory.read32((m_cpu.getSegReg(DS) << 4) + (m_hasPrefix67 ? fetch32() : fetch16())));
-            else m_cpu.setReg16(AX, m_memory.read16((m_cpu.getSegReg(DS) << 4) + fetch16()));
-            break;
         case 0xA0: // MOV AL, [imm]
-            m_cpu.setReg8(AL, m_memory.read8((m_cpu.getSegReg(DS) << 4) + (m_hasPrefix67 ? fetch32() : fetch16())));
-            break;
+        case 0xA1: // MOV AX/EAX, [imm16/32]
         case 0xA2: // MOV [imm], AL
-            m_memory.write8((m_cpu.getSegReg(DS) << 4) + (m_hasPrefix67 ? fetch32() : fetch16()), m_cpu.getReg8(AL));
+        case 0xA3: { // MOV [imm], AX/EAX
+            uint8_t moffsSeg = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
+            uint32_t moffsAddr = (m_cpu.getSegReg(static_cast<SegRegIndex>(moffsSeg)) << 4)
+                               + (m_hasPrefix67 ? fetch32() : fetch16());
+            if (opcode == 0xA0) m_cpu.setReg8(AL, m_memory.read8(moffsAddr));
+            else if (opcode == 0xA1) {
+                if (m_hasPrefix66) m_cpu.setReg32(EAX, m_memory.read32(moffsAddr));
+                else m_cpu.setReg16(AX, m_memory.read16(moffsAddr));
+            } else if (opcode == 0xA2) m_memory.write8(moffsAddr, m_cpu.getReg8(AL));
+            else {
+                if (m_hasPrefix66) m_memory.write32(moffsAddr, m_cpu.getReg32(EAX));
+                else m_memory.write16(moffsAddr, m_cpu.getReg16(AX));
+            }
             break;
-        case 0xA3: // MOV [imm], AX/EAX
-            if (m_hasPrefix66) m_memory.write32((m_cpu.getSegReg(DS) << 4) + (m_hasPrefix67 ? fetch32() : fetch16()), m_cpu.getReg32(EAX));
-            else m_memory.write16((m_cpu.getSegReg(DS) << 4) + fetch16(), m_cpu.getReg16(AX));
-            break;
+        }
 
 
         case 0xD7: { // XLAT
-            uint32_t addr = (m_cpu.getSegReg(DS) << 4) + m_cpu.getReg16(BX) + m_cpu.getReg8(AL);
+            uint8_t xlatSeg = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
+            uint32_t addr = (m_cpu.getSegReg(static_cast<SegRegIndex>(xlatSeg)) << 4) + m_cpu.getReg16(BX) + m_cpu.getReg8(AL);
             m_cpu.setReg8(AL, m_memory.read8(addr));
             break;
         }
