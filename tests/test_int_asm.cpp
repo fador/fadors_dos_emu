@@ -1,0 +1,783 @@
+// test_int_asm.cpp – assembler-driven integration tests for interrupt handlers.
+// Each test assembles real x86 instructions, writes them into memory, and runs
+// them through the full InstructionDecoder pipeline.
+
+#include "test_framework.hpp"
+#include <cstdio>
+#include <fstream>
+#include "cpu/CPU.hpp"
+#include "cpu/InstructionDecoder.hpp"
+#include "cpu/Assembler.hpp"
+#include "memory/MemoryBus.hpp"
+#include "hw/IOBus.hpp"
+#include "hw/BIOS.hpp"
+#include "hw/DOS.hpp"
+#include "hw/KeyboardController.hpp"
+#include "hw/PIT8254.hpp"
+
+using namespace fador;
+
+// ── Helper: creates a full emulator stack and assembles+executes code ──
+struct IntTestEnv {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::IOBus iobus;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::DOS dos;
+    hw::BIOS bios;
+    cpu::InstructionDecoder decoder;
+    cpu::Assembler assembler;
+
+    static constexpr uint16_t CODE_SEG = 0x1000;
+    static constexpr uint16_t CODE_OFF = 0x100;
+    static constexpr uint32_t CODE_LINEAR = (CODE_SEG << 4) + CODE_OFF;
+
+    IntTestEnv()
+        : dos(cpu, mem), bios(cpu, mem, kbd, pit),
+          decoder(cpu, mem, iobus, bios, dos)
+    {
+        bios.initialize();
+        dos.initialize();
+        cpu.setSegReg(cpu::CS, CODE_SEG);
+        cpu.setSegReg(cpu::DS, CODE_SEG);
+        cpu.setSegReg(cpu::ES, CODE_SEG);
+        cpu.setSegReg(cpu::SS, 0x0000);
+        cpu.setReg16(cpu::SP, 0xFFFE);
+        cpu.setEIP(CODE_OFF);
+    }
+
+    // Assemble block, write to CS:IP, return number of bytes
+    uint32_t assemble(const std::string& code) {
+        auto r = assembler.assembleBlock(code, CODE_LINEAR);
+        if (!r.error.empty())
+            throw std::runtime_error("Assembly error: " + r.error);
+        for (size_t i = 0; i < r.bytes.size(); ++i)
+            mem.write8(CODE_LINEAR + static_cast<uint32_t>(i), r.bytes[i]);
+        return static_cast<uint32_t>(r.bytes.size());
+    }
+
+    // Step N instructions
+    void run(int n) {
+        for (int i = 0; i < n; ++i)
+            decoder.step();
+    }
+
+    // Write a null-terminated string at DS:offset
+    void writeString(uint16_t offset, const std::string& s) {
+        uint32_t base = (cpu.getSegReg(cpu::DS) << 4) + offset;
+        for (size_t i = 0; i < s.size(); ++i)
+            mem.write8(base + static_cast<uint32_t>(i), static_cast<uint8_t>(s[i]));
+        mem.write8(base + static_cast<uint32_t>(s.size()), 0);
+    }
+
+    // Write a '$'-terminated string at DS:offset
+    void writeDollarString(uint16_t offset, const std::string& s) {
+        uint32_t base = (cpu.getSegReg(cpu::DS) << 4) + offset;
+        for (size_t i = 0; i < s.size(); ++i)
+            mem.write8(base + static_cast<uint32_t>(i), static_cast<uint8_t>(s[i]));
+        mem.write8(base + static_cast<uint32_t>(s.size()), '$');
+    }
+};
+
+// ════════════════════════════════════════════════════════════════════════════
+//  INT 10h – Video BIOS
+// ════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("INT 10h AH=00h Set Video Mode via asm", "[int][asm][video]") {
+    IntTestEnv e;
+    e.assemble("MOV AX, 03h\nINT 10h");
+    e.run(2); // MOV + INT
+    REQUIRE(e.mem.read8(0x449) == 0x03); // BDA current mode
+    REQUIRE(e.mem.read8(0x462) == 0x00); // Active page reset to 0
+}
+
+TEST_CASE("INT 10h AH=01h Set Cursor Type via asm", "[int][asm][video]") {
+    IntTestEnv e;
+    e.assemble("MOV AH, 01h\nMOV CX, 0607h\nINT 10h");
+    e.run(3);
+    REQUIRE(e.mem.read16(0x460) == 0x0607);
+}
+
+TEST_CASE("INT 10h AH=02h Set Cursor Position via asm", "[int][asm][video]") {
+    IntTestEnv e;
+    // Set cursor to row 5, col 10, page 0
+    e.assemble("MOV AH, 02h\nMOV BH, 0\nMOV DH, 05h\nMOV DL, 0Ah\nINT 10h");
+    e.run(5);
+    REQUIRE(e.mem.read8(0x450) == 10); // Column
+    REQUIRE(e.mem.read8(0x451) == 5);  // Row
+}
+
+TEST_CASE("INT 10h AH=03h Get Cursor Position via asm", "[int][asm][video]") {
+    IntTestEnv e;
+    // Pre-set cursor at row 3, col 7
+    e.mem.write8(0x450, 7);  // Col
+    e.mem.write8(0x451, 3);  // Row
+    e.mem.write16(0x460, 0x0C0D); // Cursor type
+    e.assemble("MOV AH, 03h\nMOV BH, 0\nINT 10h");
+    e.run(3);
+    REQUIRE(e.cpu.getReg8(cpu::DL) == 7); // Col
+    REQUIRE(e.cpu.getReg8(cpu::DH) == 3); // Row
+    REQUIRE(e.cpu.getReg16(cpu::CX) == 0x0C0D); // Cursor type
+}
+
+TEST_CASE("INT 10h AH=05h Set Active Display Page via asm", "[int][asm][video]") {
+    IntTestEnv e;
+    e.assemble("MOV AH, 05h\nMOV AL, 02h\nINT 10h");
+    e.run(3);
+    REQUIRE(e.mem.read8(0x462) == 2);
+}
+
+TEST_CASE("INT 10h AH=0Eh Teletype Output via asm", "[int][asm][video]") {
+    IntTestEnv e;
+    // Reset cursor to 0,0
+    e.mem.write8(0x450, 0);
+    e.mem.write8(0x451, 0);
+    // Write 'H' then 'i'
+    e.assemble("MOV AH, 0Eh\nMOV AL, 48h\nINT 10h\nMOV AL, 69h\nINT 10h");
+    e.run(5);
+    REQUIRE(e.mem.read8(0xB8000) == 'H');
+    REQUIRE(e.mem.read8(0xB8002) == 'i');
+    REQUIRE(e.mem.read8(0x450) == 2); // Cursor advanced by 2
+}
+
+TEST_CASE("INT 10h AH=08h Read Char at Cursor via asm", "[int][asm][video]") {
+    IntTestEnv e;
+    // Put 'Z' with attribute 0x1F at page 0, row 0, col 0
+    e.mem.write8(0xB8000, 'Z');
+    e.mem.write8(0xB8001, 0x1F);
+    e.mem.write8(0x450, 0); e.mem.write8(0x451, 0); // Cursor at 0,0
+    e.assemble("MOV AH, 08h\nMOV BH, 0\nINT 10h");
+    e.run(3);
+    REQUIRE(e.cpu.getReg8(cpu::AL) == 'Z');
+    REQUIRE(e.cpu.getReg8(cpu::AH) == 0x1F);
+}
+
+TEST_CASE("INT 10h AH=09h Write Char and Attr via asm", "[int][asm][video]") {
+    IntTestEnv e;
+    e.mem.write8(0x450, 0); e.mem.write8(0x451, 0);
+    // Write 'A' with attr 0x4E, 3 times
+    e.assemble("MOV AH, 09h\nMOV AL, 41h\nMOV BL, 4Eh\nMOV CX, 3\nINT 10h");
+    e.run(5);
+    for (int i = 0; i < 3; ++i) {
+        REQUIRE(e.mem.read8(0xB8000 + i * 2) == 'A');
+        REQUIRE(e.mem.read8(0xB8000 + i * 2 + 1) == 0x4E);
+    }
+    // Cursor should NOT advance (INT 10h/09h doesn't move it)
+    REQUIRE(e.mem.read8(0x450) == 0);
+}
+
+TEST_CASE("INT 10h AH=0Ah Write Char Only via asm", "[int][asm][video]") {
+    IntTestEnv e;
+    e.mem.write8(0x450, 0); e.mem.write8(0x451, 0);
+    // Pre-fill attr so we can verify it's preserved
+    e.mem.write8(0xB8001, 0x07);
+    e.assemble("MOV AH, 0Ah\nMOV AL, 42h\nMOV CX, 1\nINT 10h");
+    e.run(4);
+    REQUIRE(e.mem.read8(0xB8000) == 'B');
+    REQUIRE(e.mem.read8(0xB8001) == 0x07); // Attribute preserved
+}
+
+TEST_CASE("INT 10h AH=0Fh Get Video Mode via asm", "[int][asm][video]") {
+    IntTestEnv e;
+    e.mem.write8(0x449, 0x03); // Mode 3
+    e.mem.write8(0x44A, 80);   // 80 columns
+    e.mem.write8(0x462, 0);    // Page 0
+    e.assemble("MOV AH, 0Fh\nINT 10h");
+    e.run(2);
+    REQUIRE(e.cpu.getReg8(cpu::AL) == 0x03);
+    REQUIRE(e.cpu.getReg8(cpu::AH) == 80);
+    REQUIRE(e.cpu.getReg8(cpu::BH) == 0);
+}
+
+TEST_CASE("INT 10h AH=06h Scroll Up via asm", "[int][asm][video]") {
+    IntTestEnv e;
+    // Fill line 0 with 'X'
+    for (int i = 0; i < 80; ++i) {
+        e.mem.write8(0xB8000 + i * 2, 'X');
+        e.mem.write8(0xB8000 + i * 2 + 1, 0x07);
+    }
+    // Fill line 1 with 'Y'
+    for (int i = 0; i < 80; ++i) {
+        e.mem.write8(0xB8000 + 160 + i * 2, 'Y');
+        e.mem.write8(0xB8000 + 160 + i * 2 + 1, 0x07);
+    }
+    // Scroll up 1 line, full screen, fill with attr 0x07
+    e.assemble("MOV AH, 06h\nMOV AL, 01h\nMOV BH, 07h\nMOV CX, 0\nMOV DX, 184Fh\nINT 10h");
+    e.run(6);
+    // Line 0 should now contain 'Y' (scrolled up from line 1)
+    REQUIRE(e.mem.read8(0xB8000) == 'Y');
+    // Last line should be blank (space with attr 0x07)
+    uint32_t lastLine = 0xB8000 + 24 * 160;
+    REQUIRE(e.mem.read8(lastLine) == ' ');
+    REQUIRE(e.mem.read8(lastLine + 1) == 0x07);
+}
+
+TEST_CASE("INT 10h AH=07h Scroll Down via asm", "[int][asm][video]") {
+    IntTestEnv e;
+    // Fill line 0 with 'A'
+    for (int i = 0; i < 80; ++i) {
+        e.mem.write8(0xB8000 + i * 2, 'A');
+        e.mem.write8(0xB8000 + i * 2 + 1, 0x07);
+    }
+    // Scroll down 1 line, full screen
+    e.assemble("MOV AH, 07h\nMOV AL, 01h\nMOV BH, 07h\nMOV CX, 0\nMOV DX, 184Fh\nINT 10h");
+    e.run(6);
+    // Line 0 should now be blank
+    REQUIRE(e.mem.read8(0xB8000) == ' ');
+    REQUIRE(e.mem.read8(0xB8001) == 0x07);
+    // Line 1 should have 'A' (scrolled down)
+    REQUIRE(e.mem.read8(0xB8000 + 160) == 'A');
+}
+
+TEST_CASE("INT 10h AH=13h Write String via asm", "[int][asm][video]") {
+    IntTestEnv e;
+    // Put string "Hi" at ES:BP
+    e.cpu.setSegReg(cpu::ES, 0x2000);
+    e.mem.write8(0x20000, 'H');
+    e.mem.write8(0x20001, 'i');
+    // Write string: AL=01 (move cursor), BL=0x07, CX=2, DH=0, DL=0, page 0
+    e.assemble(
+        "MOV AH, 13h\n"
+        "MOV AL, 01h\n"
+        "MOV BH, 0\n"
+        "MOV BL, 07h\n"
+        "MOV CX, 2\n"
+        "MOV DH, 0\n"
+        "MOV DL, 0\n"
+        "INT 10h"
+    );
+    // Set BP to point to string
+    e.cpu.setReg16(cpu::BP, 0x0000);
+    e.run(8);
+    REQUIRE(e.mem.read8(0xB8000) == 'H');
+    REQUIRE(e.mem.read8(0xB8002) == 'i');
+    // Cursor should have advanced (mode 01)
+    REQUIRE(e.mem.read8(0x450) == 2);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  INT 16h – Keyboard BIOS
+// ════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("INT 16h AH=01h Peek keyboard (no key) via asm", "[int][asm][kbd]") {
+    IntTestEnv e;
+    e.assemble("MOV AH, 01h\nINT 16h");
+    e.run(2);
+    REQUIRE(e.cpu.getEFLAGS() & cpu::FLAG_ZERO); // ZF=1: no key
+}
+
+TEST_CASE("INT 16h AH=01h Peek keyboard (key present) via asm", "[int][asm][kbd]") {
+    IntTestEnv e;
+    e.kbd.pushKey('a', 0x1E); // 'A' key (ascii + scancode)
+    e.assemble("MOV AH, 01h\nINT 16h");
+    e.run(2);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_ZERO)); // ZF=0: key present
+    REQUIRE(e.cpu.getReg8(cpu::AL) == 'a'); // ASCII
+    REQUIRE(e.cpu.getReg8(cpu::AH) == 0x1E); // Scan code
+}
+
+TEST_CASE("INT 16h AH=02h Get Shift Flags via asm", "[int][asm][kbd]") {
+    IntTestEnv e;
+    e.mem.write8(0x417, 0x03); // Left Shift + Right Shift
+    e.assemble("MOV AH, 02h\nINT 16h");
+    e.run(2);
+    REQUIRE(e.cpu.getReg8(cpu::AL) == 0x03);
+}
+
+TEST_CASE("INT 16h AH=05h Store Key in buffer via asm", "[int][asm][kbd]") {
+    IntTestEnv e;
+    // Store key 'Z' (scancode 0x2C) into buffer, then peek it
+    e.assemble(
+        "MOV AH, 05h\n"
+        "MOV CL, 5Ah\n"  // ASCII 'Z'
+        "MOV CH, 2Ch\n"  // Scancode
+        "INT 16h\n"
+        "MOV AH, 01h\n"
+        "INT 16h"
+    );
+    e.run(6);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_ZERO)); // Key present
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  INT 1Ah – Timer
+// ════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("INT 1Ah AH=00h Read Timer Ticks via asm", "[int][asm][timer]") {
+    IntTestEnv e;
+    // Set tick count in BDA at 0x46C (dword)
+    e.mem.write16(0x46C, 0x1234);
+    e.mem.write16(0x46E, 0x0056);
+    e.assemble("MOV AH, 0\nINT 1Ah");
+    e.run(2);
+    REQUIRE(e.cpu.getReg16(cpu::DX) == 0x1234); // Low word
+    REQUIRE(e.cpu.getReg16(cpu::CX) == 0x0056); // High word
+    REQUIRE(e.cpu.getReg8(cpu::AL) == 0); // No midnight
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  INT 11h / INT 12h – Equipment / Memory Size
+// ════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("INT 11h Equipment List via asm", "[int][asm]") {
+    IntTestEnv e;
+    e.assemble("INT 11h");
+    e.run(1);
+    REQUIRE(e.cpu.getReg16(cpu::AX) == 0x002F);
+}
+
+TEST_CASE("INT 12h Memory Size via asm", "[int][asm]") {
+    IntTestEnv e;
+    e.assemble("INT 12h");
+    e.run(1);
+    REQUIRE(e.cpu.getReg16(cpu::AX) == 640);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  INT 13h – Disk BIOS
+// ════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("INT 13h AH=00h Reset Disk via asm", "[int][asm][disk]") {
+    IntTestEnv e;
+    e.assemble("MOV AH, 0\nMOV DL, 0\nINT 13h");
+    e.run(3);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(e.cpu.getReg8(cpu::AH) == 0);
+}
+
+TEST_CASE("INT 13h AH=08h Get Drive Params via asm", "[int][asm][disk]") {
+    IntTestEnv e;
+    e.assemble("MOV AH, 08h\nMOV DL, 0\nINT 13h");
+    e.run(3);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(e.cpu.getReg8(cpu::BL) == 0x04); // 1.44MB
+    REQUIRE(e.cpu.getReg8(cpu::CL) == 18);   // 18 sectors
+}
+
+TEST_CASE("INT 13h AH=15h Get Disk Type via asm", "[int][asm][disk]") {
+    IntTestEnv e;
+    e.assemble("MOV AH, 15h\nMOV DL, 0\nINT 13h");
+    e.run(3);
+    REQUIRE(e.cpu.getReg8(cpu::AH) == 0x01); // Floppy, no change line
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  INT 14h / INT 15h / INT 17h – Stubs
+// ════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("INT 14h Serial Stub via asm", "[int][asm]") {
+    IntTestEnv e;
+    e.assemble("MOV AH, 0FFh\nINT 14h");
+    e.run(2);
+    REQUIRE(e.cpu.getReg8(cpu::AH) == 0);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+}
+
+TEST_CASE("INT 15h System Services Stub via asm", "[int][asm]") {
+    IntTestEnv e;
+    e.assemble("MOV AH, 0\nINT 15h");
+    e.run(2);
+    REQUIRE(e.cpu.getReg8(cpu::AH) == 0x86);
+    REQUIRE(e.cpu.getEFLAGS() & cpu::FLAG_CARRY);
+}
+
+TEST_CASE("INT 17h Printer Stub via asm", "[int][asm]") {
+    IntTestEnv e;
+    e.assemble("MOV AH, 0FFh\nINT 17h");
+    e.run(2);
+    REQUIRE(e.cpu.getReg8(cpu::AH) == 0);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  INT 33h – Mouse
+// ════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("INT 33h AX=0000h Mouse Reset via asm", "[int][asm][mouse]") {
+    IntTestEnv e;
+    e.assemble("MOV AX, 0\nINT 33h");
+    e.run(2);
+    REQUIRE(e.cpu.getReg16(cpu::AX) == 0xFFFF); // Installed
+    REQUIRE(e.cpu.getReg16(cpu::BX) == 0x0002); // 2 buttons
+}
+
+TEST_CASE("INT 33h AX=0001h/0002h Show/Hide cursor via asm", "[int][asm][mouse]") {
+    IntTestEnv e;
+    // Reset first
+    e.bios.mouseState().installed = true;
+    e.assemble("MOV AX, 1\nINT 33h");
+    e.run(2);
+    REQUIRE(e.bios.mouseState().visible == true);
+    // Now hide
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble("MOV AX, 2\nINT 33h");
+    e.run(2);
+    REQUIRE(e.bios.mouseState().visible == false);
+}
+
+TEST_CASE("INT 33h AX=0003h Get Mouse Position via asm", "[int][asm][mouse]") {
+    IntTestEnv e;
+    e.bios.mouseState().installed = true;
+    e.bios.mouseState().x = 100;
+    e.bios.mouseState().y = 50;
+    e.bios.mouseState().buttons = 1; // Left button
+    e.assemble("MOV AX, 3\nINT 33h");
+    e.run(2);
+    REQUIRE(e.cpu.getReg16(cpu::BX) == 1);   // Buttons
+    REQUIRE(e.cpu.getReg16(cpu::CX) == 100); // X
+    REQUIRE(e.cpu.getReg16(cpu::DX) == 50);  // Y
+}
+
+TEST_CASE("INT 33h AX=0004h Set Mouse Position via asm", "[int][asm][mouse]") {
+    IntTestEnv e;
+    e.bios.mouseState().installed = true;
+    e.assemble("MOV AX, 4\nMOV CX, 200\nMOV DX, 150\nINT 33h");
+    e.run(4);
+    REQUIRE(e.bios.mouseState().x == 200);
+    REQUIRE(e.bios.mouseState().y == 150);
+}
+
+TEST_CASE("INT 33h AX=0021h Software Reset via asm", "[int][asm][mouse]") {
+    IntTestEnv e;
+    e.assemble("MOV AX, 21h\nINT 33h");
+    e.run(2);
+    REQUIRE(e.cpu.getReg16(cpu::AX) == 0xFFFF);
+    REQUIRE(e.cpu.getReg16(cpu::BX) == 0x0002);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  INT 2Fh – Multiplex
+// ════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("INT 2Fh Multiplex not-installed via asm", "[int][asm]") {
+    IntTestEnv e;
+    e.assemble("MOV AX, 1234h\nINT 2Fh");
+    e.run(2);
+    REQUIRE(e.cpu.getReg8(cpu::AL) == 0);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  INT 20h – Terminate
+// ════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("INT 20h Terminate via asm", "[int][asm][dos]") {
+    IntTestEnv e;
+    e.assemble("INT 20h");
+    e.run(1);
+    REQUIRE(e.dos.isTerminated());
+    REQUIRE(e.dos.getExitCode() == 0);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  INT 21h – DOS API
+// ════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("INT 21h AH=02h Print Character via asm", "[int][asm][dos]") {
+    IntTestEnv e;
+    e.mem.write8(0x450, 0); e.mem.write8(0x451, 0); // Cursor at 0,0
+    e.assemble("MOV AH, 02h\nMOV DL, 41h\nINT 21h"); // Print 'A'
+    e.run(3);
+    REQUIRE(e.mem.read8(0xB8000) == 'A');
+}
+
+TEST_CASE("INT 21h AH=09h Print Dollar String via asm", "[int][asm][dos]") {
+    IntTestEnv e;
+    e.mem.write8(0x450, 0); e.mem.write8(0x451, 0);
+    // Put "Hi$" at DS:0200h
+    e.writeDollarString(0x200, "Hi");
+    e.assemble("MOV AH, 09h\nMOV DX, 200h\nINT 21h");
+    e.run(3);
+    REQUIRE(e.mem.read8(0xB8000) == 'H');
+    REQUIRE(e.mem.read8(0xB8002) == 'i');
+}
+
+TEST_CASE("INT 21h AH=25h/35h Set and Get Interrupt Vector via asm", "[int][asm][dos]") {
+    IntTestEnv e;
+    // Set vector 0x77 to DS:1234h
+    e.assemble(
+        "MOV AH, 25h\n"
+        "MOV AL, 77h\n"
+        "MOV DX, 1234h\n"
+        "INT 21h\n"
+        "MOV AH, 35h\n"
+        "MOV AL, 77h\n"
+        "INT 21h"
+    );
+    e.run(7);
+    // After Get Vector: ES:BX should be DS:1234h
+    REQUIRE(e.cpu.getReg16(cpu::BX) == 0x1234);
+    REQUIRE(e.cpu.getSegReg(cpu::ES) == e.cpu.getSegReg(cpu::DS));
+}
+
+TEST_CASE("INT 21h AH=2Ah Get Date via asm", "[int][asm][dos]") {
+    IntTestEnv e;
+    e.assemble("MOV AH, 2Ah\nINT 21h");
+    e.run(2);
+    // Year should be reasonable (2020-2030 range)
+    uint16_t year = e.cpu.getReg16(cpu::CX);
+    REQUIRE(year >= 2020);
+    REQUIRE(year <= 2030);
+    // Month 1-12
+    uint8_t month = e.cpu.getReg8(cpu::DH);
+    REQUIRE(month >= 1);
+    REQUIRE(month <= 12);
+    // Day 1-31
+    uint8_t day = e.cpu.getReg8(cpu::DL);
+    REQUIRE(day >= 1);
+    REQUIRE(day <= 31);
+}
+
+TEST_CASE("INT 21h AH=2Ch Get Time via asm", "[int][asm][dos]") {
+    IntTestEnv e;
+    e.assemble("MOV AH, 2Ch\nINT 21h");
+    e.run(2);
+    uint8_t hour = e.cpu.getReg8(cpu::CH);
+    uint8_t minute = e.cpu.getReg8(cpu::CL);
+    REQUIRE(hour <= 23);
+    REQUIRE(minute <= 59);
+}
+
+TEST_CASE("INT 21h AH=30h Get DOS Version via asm", "[int][asm][dos]") {
+    IntTestEnv e;
+    e.assemble("MOV AH, 30h\nINT 21h");
+    e.run(2);
+    // Major version in AL (should be 3 or 5 depending on implementation)
+    uint8_t major = e.cpu.getReg8(cpu::AL);
+    REQUIRE((major == 3 || major == 5));
+}
+
+TEST_CASE("INT 21h AH=36h Get Free Disk Space via asm", "[int][asm][dos]") {
+    IntTestEnv e;
+    e.assemble("MOV AH, 36h\nMOV DL, 0\nINT 21h");
+    e.run(3);
+    REQUIRE(e.cpu.getReg16(cpu::AX) == 32);    // Sectors per cluster
+    REQUIRE(e.cpu.getReg16(cpu::CX) == 512);   // Bytes per sector
+    // BX = free clusters (should be > 0)
+    REQUIRE(e.cpu.getReg16(cpu::BX) > 0);
+}
+
+TEST_CASE("INT 21h AH=4Ch Terminate with exit code via asm", "[int][asm][dos]") {
+    IntTestEnv e;
+    e.assemble("MOV AH, 4Ch\nMOV AL, 42h\nINT 21h");
+    e.run(3);
+    REQUIRE(e.dos.isTerminated());
+    REQUIRE(e.dos.getExitCode() == 0x42);
+}
+
+TEST_CASE("INT 21h AH=51h Get PSP via asm", "[int][asm][dos]") {
+    IntTestEnv e;
+    e.assemble("MOV AH, 51h\nINT 21h");
+    e.run(2);
+    REQUIRE(e.cpu.getReg16(cpu::BX) == 0x1000);
+}
+
+TEST_CASE("INT 21h AH=62h Get PSP (documented) via asm", "[int][asm][dos]") {
+    IntTestEnv e;
+    e.assemble("MOV AH, 62h\nINT 21h");
+    e.run(2);
+    REQUIRE(e.cpu.getReg16(cpu::BX) == 0x1000);
+}
+
+TEST_CASE("INT 21h AH=44h IOCTL Get Device Info via asm", "[int][asm][dos]") {
+    IntTestEnv e;
+    // Stdin handle = 0
+    e.assemble("MOV AH, 44h\nMOV AL, 0\nMOV BX, 0\nINT 21h");
+    e.run(4);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    // Bit 7 should be set (character device)
+    REQUIRE(e.cpu.getReg16(cpu::DX) & 0x80);
+}
+
+TEST_CASE("INT 21h AH=2Fh Get DTA Address via asm", "[int][asm][dos]") {
+    IntTestEnv e;
+    e.assemble("MOV AH, 2Fh\nINT 21h");
+    e.run(2);
+    // Default DTA is at PSP:0080h
+    REQUIRE(e.cpu.getReg16(cpu::BX) == 0x0080);
+}
+
+TEST_CASE("INT 21h AH=1Ah Set DTA via asm", "[int][asm][dos]") {
+    IntTestEnv e;
+    e.assemble("MOV AH, 1Ah\nMOV DX, 300h\nINT 21h\nMOV AH, 2Fh\nINT 21h");
+    e.run(5);
+    // After setting DTA to DS:0300h, Get DTA should return it
+    REQUIRE(e.cpu.getReg16(cpu::BX) == 0x0300);
+}
+
+TEST_CASE("INT 21h AH=37h Get Switch Character via asm", "[int][asm][dos]") {
+    IntTestEnv e;
+    e.assemble("MOV AH, 37h\nMOV AL, 0\nINT 21h");
+    e.run(3);
+    REQUIRE(e.cpu.getReg8(cpu::DL) == '/');
+}
+
+TEST_CASE("INT 21h AH=33h Get Ctrl-Break / Boot Drive via asm", "[int][asm][dos]") {
+    IntTestEnv e;
+    // AL=05h: Get boot drive
+    e.assemble("MOV AH, 33h\nMOV AL, 05h\nINT 21h");
+    e.run(3);
+    REQUIRE(e.cpu.getReg8(cpu::DL) == 3); // C: drive
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  INT 21h – File I/O (Create, Write, Read, Seek, Close)
+// ════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("INT 21h File I/O roundtrip via asm", "[int][asm][dos][file]") {
+    IntTestEnv e;
+    const char* fname = "asm_test_file.txt";
+
+    // Write filename at DS:0200
+    e.writeString(0x200, fname);
+
+    // AH=3Ch: Create file
+    e.assemble("MOV AH, 3Ch\nMOV CX, 0\nMOV DX, 200h\nINT 21h");
+    e.run(4);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    uint16_t handle = e.cpu.getReg16(cpu::AX);
+    REQUIRE(handle >= 5);
+
+    // AH=40h: Write "Hello" (5 bytes at DS:0300)
+    e.writeDollarString(0x300, "Hello"); // '$' after, but we only write 5 bytes
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble("MOV AH, 40h\nMOV CX, 5\nMOV DX, 300h\nINT 21h");
+    e.cpu.setReg16(cpu::BX, handle);
+    e.run(4);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(e.cpu.getReg16(cpu::AX) == 5);
+
+    // AH=42h: Seek to beginning (AL=0, CX:DX=0)
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble("MOV AH, 42h\nMOV AL, 0\nMOV CX, 0\nMOV DX, 0\nINT 21h");
+    e.cpu.setReg16(cpu::BX, handle);
+    e.run(5);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+
+    // AH=3Fh: Read back 5 bytes into DS:0400
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble("MOV AH, 3Fh\nMOV CX, 5\nMOV DX, 400h\nINT 21h");
+    e.cpu.setReg16(cpu::BX, handle);
+    e.run(4);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(e.cpu.getReg16(cpu::AX) == 5);
+    uint32_t readBase = (e.cpu.getSegReg(cpu::DS) << 4) + 0x400;
+    REQUIRE(e.mem.read8(readBase + 0) == 'H');
+    REQUIRE(e.mem.read8(readBase + 1) == 'e');
+    REQUIRE(e.mem.read8(readBase + 2) == 'l');
+    REQUIRE(e.mem.read8(readBase + 3) == 'l');
+    REQUIRE(e.mem.read8(readBase + 4) == 'o');
+
+    // AH=3Eh: Close file
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble("MOV AH, 3Eh\nINT 21h");
+    e.cpu.setReg16(cpu::BX, handle);
+    e.run(2);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+
+    std::remove(fname);
+}
+
+TEST_CASE("INT 21h AH=43h Get File Attributes via asm", "[int][asm][dos][file]") {
+    IntTestEnv e;
+    const char* fname = "asm_attr_test.txt";
+    { std::ofstream ofs(fname); ofs << "test"; }
+
+    e.writeString(0x200, fname);
+
+    // AL=00h: Get attributes
+    e.assemble("MOV AH, 43h\nMOV AL, 0\nMOV DX, 200h\nINT 21h");
+    e.run(4);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    // CX should contain archive bit (0x20) at minimum
+    uint16_t attr = e.cpu.getReg16(cpu::CX);
+    REQUIRE((attr & 0x20) == 0x20); // Archive bit
+
+    std::remove(fname);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  INT 21h – Memory Management
+// ════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("INT 21h AH=48h/49h Alloc and Free Memory via asm", "[int][asm][dos][mem]") {
+    IntTestEnv e;
+    // Allocate 16 paragraphs (256 bytes)
+    e.assemble("MOV AH, 48h\nMOV BX, 10h\nINT 21h");
+    e.run(3);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    uint16_t allocSeg = e.cpu.getReg16(cpu::AX);
+    REQUIRE(allocSeg > 0);
+
+    // Free it: ES = allocated segment
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.cpu.setSegReg(cpu::ES, allocSeg);
+    e.assemble("MOV AH, 49h\nINT 21h");
+    e.run(2);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+}
+
+TEST_CASE("INT 21h AH=4Ah Resize Memory via asm", "[int][asm][dos][mem]") {
+    IntTestEnv e;
+    // Allocate 16 paragraphs
+    e.assemble("MOV AH, 48h\nMOV BX, 10h\nINT 21h");
+    e.run(3);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    uint16_t allocSeg = e.cpu.getReg16(cpu::AX);
+
+    // Resize to 32 paragraphs
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.cpu.setSegReg(cpu::ES, allocSeg);
+    e.assemble("MOV AH, 4Ah\nMOV BX, 20h\nINT 21h");
+    e.run(3);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+
+    // Free
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble("MOV AH, 49h\nINT 21h");
+    e.run(2);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  INT 21h – Directory Operations
+// ════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("INT 21h AH=47h Get Current Directory via asm", "[int][asm][dos][dir]") {
+    IntTestEnv e;
+    // Buffer at DS:SI for result
+    e.assemble("MOV AH, 47h\nMOV DL, 0\nMOV SI, 400h\nINT 21h");
+    e.run(4);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Multi-instruction program: full int pipeline test
+// ════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("Full program: set mode, print string, terminate via asm", "[int][asm][integration]") {
+    IntTestEnv e;
+    // Put "OK$" at DS:0200
+    e.writeDollarString(0x200, "OK");
+
+    e.assemble(
+        "MOV AX, 03h\n"      // INT 10h: Set mode 3
+        "INT 10h\n"
+        "MOV AH, 09h\n"      // INT 21h: Print "$"-string
+        "MOV DX, 200h\n"
+        "INT 21h\n"
+        "MOV AH, 4Ch\n"      // INT 21h: Terminate
+        "MOV AL, 0\n"
+        "INT 21h"
+    );
+    e.run(8);
+
+    // Mode should be 3
+    REQUIRE(e.mem.read8(0x449) == 0x03);
+    // "OK" should be in VRAM
+    REQUIRE(e.mem.read8(0xB8000) == 'O');
+    REQUIRE(e.mem.read8(0xB8002) == 'K');
+    // Program terminated
+    REQUIRE(e.dos.isTerminated());
+    REQUIRE(e.dos.getExitCode() == 0);
+}
