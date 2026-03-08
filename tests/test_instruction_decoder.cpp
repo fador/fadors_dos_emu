@@ -200,4 +200,75 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
         REQUIRE(cpu.getReg16(cpu::Reg16Index::SI) == 0x0FFF);
         REQUIRE(cpu.getReg16(cpu::Reg16Index::DI) == 0x1FFF);
     }
+
+    SECTION("SHRD r/m32, r32, imm8 sets ZF correctly for 32-bit result") {
+        // SHRD ECX, EBX, 16 with ECX=0, EBX=1 → ECX=0x00010000 (non-zero)
+        // This is the exact case that caused Runtime Error 200 in LIERO:
+        // ZF must NOT be set because 32-bit ECX = 0x00010000, even though CX = 0
+        cpu.setReg32(cpu::Reg16Index::CX, 0x00000000);
+        cpu.setReg32(cpu::Reg16Index::BX, 0x00000001);
+        cpu.setEFLAGS(cpu.getEFLAGS() | cpu::FLAG_ZERO); // start with ZF=1
+
+        // 66 0F AC D9 10 = SHRD ECX, EBX, 16
+        mem.write8(0x100, 0x66); // operand size prefix
+        mem.write8(0x101, 0x0F);
+        mem.write8(0x102, 0xAC);
+        mem.write8(0x103, 0xD9); // ModRM: mod=11 reg=011(EBX) rm=001(ECX)
+        mem.write8(0x104, 0x10); // imm8 = 16
+        decoder.step();
+
+        REQUIRE(cpu.getReg32(cpu::Reg16Index::CX) == 0x00010000);
+        REQUIRE((cpu.getEFLAGS() & cpu::FLAG_ZERO) == 0); // ZF must be clear
+    }
+
+    SECTION("SHRD r/m16, r16, imm8 sets ZF when result is zero") {
+        // SHRD CX, BX, 8 with CX=0x00FF, BX=0x0000 → CX=0x0000
+        cpu.setReg16(cpu::Reg16Index::CX, 0x00FF);
+        cpu.setReg16(cpu::Reg16Index::BX, 0x0000);
+
+        // 0F AC D9 08 = SHRD CX, BX, 8
+        mem.write8(0x100, 0x0F);
+        mem.write8(0x101, 0xAC);
+        mem.write8(0x102, 0xD9);
+        mem.write8(0x103, 0x08); // imm8 = 8
+        decoder.step();
+
+        REQUIRE(cpu.getReg16(cpu::Reg16Index::CX) == 0x0000);
+        REQUIRE((cpu.getEFLAGS() & cpu::FLAG_ZERO) != 0); // ZF must be set
+    }
+
+    SECTION("SHLD r/m32, r32, imm8 sets flags correctly") {
+        // SHLD EAX, EDX, 16 with EAX=0x0000ABCD, EDX=0x12340000
+        // Result: ((ABCD << 32) | 12340000) << 16 → bits [63:32] = ABCD1234
+        cpu.setReg32(cpu::Reg16Index::AX, 0x0000ABCD);
+        cpu.setReg32(cpu::Reg16Index::DX, 0x12340000);
+
+        // 66 0F A4 D0 10 = SHLD EAX, EDX, 16
+        mem.write8(0x100, 0x66);
+        mem.write8(0x101, 0x0F);
+        mem.write8(0x102, 0xA4);
+        mem.write8(0x103, 0xD0); // ModRM: mod=11 reg=010(EDX) rm=000(EAX)
+        mem.write8(0x104, 0x10); // imm8 = 16
+        decoder.step();
+
+        REQUIRE(cpu.getReg32(cpu::Reg16Index::AX) == 0xABCD1234);
+        REQUIRE((cpu.getEFLAGS() & cpu::FLAG_ZERO) == 0);      // non-zero
+        REQUIRE((cpu.getEFLAGS() & cpu::FLAG_SIGN) != 0);      // MSB set
+    }
+
+    SECTION("SHRD sets CF to last bit shifted out") {
+        // SHRD CX, BX, 1 with CX=0x0003, BX=0x0000 → CX=0x0001, CF=1
+        cpu.setReg16(cpu::Reg16Index::CX, 0x0003);
+        cpu.setReg16(cpu::Reg16Index::BX, 0x0000);
+
+        // 0F AC D9 01 = SHRD CX, BX, 1
+        mem.write8(0x100, 0x0F);
+        mem.write8(0x101, 0xAC);
+        mem.write8(0x102, 0xD9);
+        mem.write8(0x103, 0x01); // imm8 = 1
+        decoder.step();
+
+        REQUIRE(cpu.getReg16(cpu::Reg16Index::CX) == 0x0001);
+        REQUIRE((cpu.getEFLAGS() & cpu::FLAG_CARRY) != 0); // CF=1 (bit 0 of 0x0003)
+    }
 }

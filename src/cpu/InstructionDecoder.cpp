@@ -931,7 +931,9 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                         if (rmVal == 0) triggerInterrupt(0);
                         else {
                             uint16_t ax = m_cpu.getReg16(AX);
-                            m_cpu.setReg8(AL, static_cast<uint8_t>(ax / rmVal));
+                            uint16_t quotient = ax / rmVal;
+                            if (quotient > 0xFF) { triggerInterrupt(0); break; }
+                            m_cpu.setReg8(AL, static_cast<uint8_t>(quotient));
                             m_cpu.setReg8(AH, static_cast<uint8_t>(ax % rmVal));
                         }
                         break;
@@ -941,7 +943,9 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                         else {
                             int16_t ax = static_cast<int16_t>(m_cpu.getReg16(AX));
                             int8_t div = static_cast<int8_t>(rmVal);
-                            m_cpu.setReg8(AL, static_cast<uint8_t>(ax / div));
+                            int16_t quotient = ax / div;
+                            if (quotient > 127 || quotient < -128) { triggerInterrupt(0); break; }
+                            m_cpu.setReg8(AL, static_cast<uint8_t>(quotient));
                             m_cpu.setReg8(AH, static_cast<uint8_t>(ax % div));
                         }
                         break;
@@ -970,7 +974,9 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                             if (rmVal == 0) triggerInterrupt(0);
                             else {
                                 uint64_t edxeax = (static_cast<uint64_t>(m_cpu.getReg32(EDX)) << 32) | m_cpu.getReg32(EAX);
-                                m_cpu.setReg32(EAX, static_cast<uint32_t>(edxeax / rmVal));
+                                uint64_t quotient = edxeax / rmVal;
+                                if (quotient > 0xFFFFFFFFULL) { triggerInterrupt(0); break; }
+                                m_cpu.setReg32(EAX, static_cast<uint32_t>(quotient));
                                 m_cpu.setReg32(EDX, static_cast<uint32_t>(edxeax % rmVal));
                             }
                             break;
@@ -979,8 +985,11 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                             if (rmVal == 0) triggerInterrupt(0);
                             else {
                                 int64_t edxeax = (static_cast<int64_t>(m_cpu.getReg32(EDX)) << 32) | m_cpu.getReg32(EAX);
-                                m_cpu.setReg32(EAX, static_cast<uint32_t>(edxeax / static_cast<int32_t>(rmVal)));
-                                m_cpu.setReg32(EDX, static_cast<uint32_t>(edxeax % static_cast<int32_t>(rmVal)));
+                                int32_t divisor = static_cast<int32_t>(rmVal);
+                                int64_t quotient = edxeax / divisor;
+                                if (quotient > INT32_MAX || quotient < INT32_MIN) { triggerInterrupt(0); break; }
+                                m_cpu.setReg32(EAX, static_cast<uint32_t>(quotient));
+                                m_cpu.setReg32(EDX, static_cast<uint32_t>(edxeax % divisor));
                             }
                             break;
                         }
@@ -1008,7 +1017,9 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                             if (rmVal == 0) triggerInterrupt(0);
                             else {
                                 uint32_t dxax = (static_cast<uint32_t>(m_cpu.getReg16(DX)) << 16) | m_cpu.getReg16(AX);
-                                m_cpu.setReg16(AX, static_cast<uint16_t>(dxax / rmVal));
+                                uint32_t quotient = dxax / rmVal;
+                                if (quotient > 0xFFFF) { triggerInterrupt(0); break; }
+                                m_cpu.setReg16(AX, static_cast<uint16_t>(quotient));
                                 m_cpu.setReg16(DX, static_cast<uint16_t>(dxax % rmVal));
                             }
                             break;
@@ -1017,8 +1028,11 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                             if (rmVal == 0) triggerInterrupt(0);
                             else {
                                 int32_t dxax = (static_cast<int32_t>(m_cpu.getReg16(DX)) << 16) | m_cpu.getReg16(AX);
-                                m_cpu.setReg16(AX, static_cast<uint16_t>(dxax / static_cast<int16_t>(rmVal)));
-                                m_cpu.setReg16(DX, static_cast<uint16_t>(dxax % static_cast<int16_t>(rmVal)));
+                                int16_t divisor = static_cast<int16_t>(rmVal);
+                                int32_t quotient = dxax / divisor;
+                                if (quotient > 32767 || quotient < -32768) { triggerInterrupt(0); break; }
+                                m_cpu.setReg16(AX, static_cast<uint16_t>(quotient));
+                                m_cpu.setReg16(DX, static_cast<uint16_t>(dxax % divisor));
                             }
                             break;
                         }
@@ -1743,48 +1757,144 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
         case 0xA4: { // SHLD r/m, r, imm8
             ModRM modrm = decodeModRM(fetch8());
             uint8_t count = fetch8() & 0x1F;
-            uint16_t dst = readModRM16(modrm);
-            uint16_t src = m_cpu.getReg16(modrm.reg);
             if (count) {
-                uint32_t tmp = (static_cast<uint32_t>(dst) << 16) | src;
-                uint32_t res = tmp << count;
-                writeModRM16(modrm, static_cast<uint16_t>(res >> 16));
+                uint32_t flags = m_cpu.getEFLAGS();
+                if (m_hasPrefix66) {
+                    uint32_t dst = readModRM32(modrm);
+                    uint32_t src = m_cpu.getReg32(modrm.reg);
+                    uint64_t tmp = (static_cast<uint64_t>(dst) << 32) | src;
+                    uint64_t res64 = tmp << count;
+                    uint32_t result = static_cast<uint32_t>(res64 >> 32);
+                    writeModRM32(modrm, result);
+                    bool cf = (dst >> (32 - count)) & 1;
+                    flags &= ~(FLAG_CARRY | FLAG_ZERO | FLAG_SIGN | FLAG_PARITY | FLAG_OVERFLOW);
+                    if (cf) flags |= FLAG_CARRY;
+                    if (result == 0) flags |= FLAG_ZERO;
+                    if (result & 0x80000000u) flags |= FLAG_SIGN;
+                    { uint8_t p = result & 0xFF; p ^= p >> 4; p ^= p >> 2; p ^= p >> 1; if (!(p & 1)) flags |= FLAG_PARITY; }
+                } else {
+                    uint16_t dst = readModRM16(modrm);
+                    uint16_t src = m_cpu.getReg16(modrm.reg);
+                    uint32_t tmp = (static_cast<uint32_t>(dst) << 16) | src;
+                    uint32_t res32 = tmp << count;
+                    uint16_t result = static_cast<uint16_t>(res32 >> 16);
+                    writeModRM16(modrm, result);
+                    bool cf = (dst >> (16 - count)) & 1;
+                    flags &= ~(FLAG_CARRY | FLAG_ZERO | FLAG_SIGN | FLAG_PARITY | FLAG_OVERFLOW);
+                    if (cf) flags |= FLAG_CARRY;
+                    if (result == 0) flags |= FLAG_ZERO;
+                    if (result & 0x8000u) flags |= FLAG_SIGN;
+                    { uint8_t p = result & 0xFF; p ^= p >> 4; p ^= p >> 2; p ^= p >> 1; if (!(p & 1)) flags |= FLAG_PARITY; }
+                }
+                m_cpu.setEFLAGS(flags);
             }
             break;
         }
         case 0xA5: { // SHLD r/m, r, CL
             ModRM modrm = decodeModRM(fetch8());
             uint8_t count = m_cpu.getReg8(CL) & 0x1F;
-            uint16_t dst = readModRM16(modrm);
-            uint16_t src = m_cpu.getReg16(modrm.reg);
             if (count) {
-                uint32_t tmp = (static_cast<uint32_t>(dst) << 16) | src;
-                uint32_t res = tmp << count;
-                writeModRM16(modrm, static_cast<uint16_t>(res >> 16));
+                uint32_t flags = m_cpu.getEFLAGS();
+                if (m_hasPrefix66) {
+                    uint32_t dst = readModRM32(modrm);
+                    uint32_t src = m_cpu.getReg32(modrm.reg);
+                    uint64_t tmp = (static_cast<uint64_t>(dst) << 32) | src;
+                    uint64_t res64 = tmp << count;
+                    uint32_t result = static_cast<uint32_t>(res64 >> 32);
+                    writeModRM32(modrm, result);
+                    bool cf = (dst >> (32 - count)) & 1;
+                    flags &= ~(FLAG_CARRY | FLAG_ZERO | FLAG_SIGN | FLAG_PARITY | FLAG_OVERFLOW);
+                    if (cf) flags |= FLAG_CARRY;
+                    if (result == 0) flags |= FLAG_ZERO;
+                    if (result & 0x80000000u) flags |= FLAG_SIGN;
+                    { uint8_t p = result & 0xFF; p ^= p >> 4; p ^= p >> 2; p ^= p >> 1; if (!(p & 1)) flags |= FLAG_PARITY; }
+                } else {
+                    uint16_t dst = readModRM16(modrm);
+                    uint16_t src = m_cpu.getReg16(modrm.reg);
+                    uint32_t tmp = (static_cast<uint32_t>(dst) << 16) | src;
+                    uint32_t res32 = tmp << count;
+                    uint16_t result = static_cast<uint16_t>(res32 >> 16);
+                    writeModRM16(modrm, result);
+                    bool cf = (dst >> (16 - count)) & 1;
+                    flags &= ~(FLAG_CARRY | FLAG_ZERO | FLAG_SIGN | FLAG_PARITY | FLAG_OVERFLOW);
+                    if (cf) flags |= FLAG_CARRY;
+                    if (result == 0) flags |= FLAG_ZERO;
+                    if (result & 0x8000u) flags |= FLAG_SIGN;
+                    { uint8_t p = result & 0xFF; p ^= p >> 4; p ^= p >> 2; p ^= p >> 1; if (!(p & 1)) flags |= FLAG_PARITY; }
+                }
+                m_cpu.setEFLAGS(flags);
             }
             break;
         }
         case 0xAC: { // SHRD r/m, r, imm8
             ModRM modrm = decodeModRM(fetch8());
             uint8_t count = fetch8() & 0x1F;
-            uint16_t dst = readModRM16(modrm);
-            uint16_t src = m_cpu.getReg16(modrm.reg);
             if (count) {
-                uint32_t tmp = (static_cast<uint32_t>(src) << 16) | dst;
-                uint32_t res = tmp >> count;
-                writeModRM16(modrm, static_cast<uint16_t>(res & 0xFFFF));
+                uint32_t flags = m_cpu.getEFLAGS();
+                if (m_hasPrefix66) {
+                    uint32_t dst = readModRM32(modrm);
+                    uint32_t src = m_cpu.getReg32(modrm.reg);
+                    uint64_t tmp = (static_cast<uint64_t>(src) << 32) | dst;
+                    uint64_t res = tmp >> count;
+                    uint32_t result = static_cast<uint32_t>(res & 0xFFFFFFFF);
+                    writeModRM32(modrm, result);
+                    bool cf = (dst >> (count - 1)) & 1;
+                    flags &= ~(FLAG_CARRY | FLAG_ZERO | FLAG_SIGN | FLAG_PARITY | FLAG_OVERFLOW);
+                    if (cf) flags |= FLAG_CARRY;
+                    if (result == 0) flags |= FLAG_ZERO;
+                    if (result & 0x80000000u) flags |= FLAG_SIGN;
+                    { uint8_t p = result & 0xFF; p ^= p >> 4; p ^= p >> 2; p ^= p >> 1; if (!(p & 1)) flags |= FLAG_PARITY; }
+                } else {
+                    uint16_t dst = readModRM16(modrm);
+                    uint16_t src = m_cpu.getReg16(modrm.reg);
+                    uint32_t tmp = (static_cast<uint32_t>(src) << 16) | dst;
+                    uint32_t res = tmp >> count;
+                    uint16_t result = static_cast<uint16_t>(res & 0xFFFF);
+                    writeModRM16(modrm, result);
+                    bool cf = (dst >> (count - 1)) & 1;
+                    flags &= ~(FLAG_CARRY | FLAG_ZERO | FLAG_SIGN | FLAG_PARITY | FLAG_OVERFLOW);
+                    if (cf) flags |= FLAG_CARRY;
+                    if (result == 0) flags |= FLAG_ZERO;
+                    if (result & 0x8000u) flags |= FLAG_SIGN;
+                    { uint8_t p = result & 0xFF; p ^= p >> 4; p ^= p >> 2; p ^= p >> 1; if (!(p & 1)) flags |= FLAG_PARITY; }
+                }
+                m_cpu.setEFLAGS(flags);
             }
             break;
         }
         case 0xAD: { // SHRD r/m, r, CL
             ModRM modrm = decodeModRM(fetch8());
             uint8_t count = m_cpu.getReg8(CL) & 0x1F;
-            uint16_t dst = readModRM16(modrm);
-            uint16_t src = m_cpu.getReg16(modrm.reg);
             if (count) {
-                uint32_t tmp = (static_cast<uint32_t>(src) << 16) | dst;
-                uint32_t res = tmp >> count;
-                writeModRM16(modrm, static_cast<uint16_t>(res & 0xFFFF));
+                uint32_t flags = m_cpu.getEFLAGS();
+                if (m_hasPrefix66) {
+                    uint32_t dst = readModRM32(modrm);
+                    uint32_t src = m_cpu.getReg32(modrm.reg);
+                    uint64_t tmp = (static_cast<uint64_t>(src) << 32) | dst;
+                    uint64_t res = tmp >> count;
+                    uint32_t result = static_cast<uint32_t>(res & 0xFFFFFFFF);
+                    writeModRM32(modrm, result);
+                    bool cf = (dst >> (count - 1)) & 1;
+                    flags &= ~(FLAG_CARRY | FLAG_ZERO | FLAG_SIGN | FLAG_PARITY | FLAG_OVERFLOW);
+                    if (cf) flags |= FLAG_CARRY;
+                    if (result == 0) flags |= FLAG_ZERO;
+                    if (result & 0x80000000u) flags |= FLAG_SIGN;
+                    { uint8_t p = result & 0xFF; p ^= p >> 4; p ^= p >> 2; p ^= p >> 1; if (!(p & 1)) flags |= FLAG_PARITY; }
+                } else {
+                    uint16_t dst = readModRM16(modrm);
+                    uint16_t src = m_cpu.getReg16(modrm.reg);
+                    uint32_t tmp = (static_cast<uint32_t>(src) << 16) | dst;
+                    uint32_t res = tmp >> count;
+                    uint16_t result = static_cast<uint16_t>(res & 0xFFFF);
+                    writeModRM16(modrm, result);
+                    bool cf = (dst >> (count - 1)) & 1;
+                    flags &= ~(FLAG_CARRY | FLAG_ZERO | FLAG_SIGN | FLAG_PARITY | FLAG_OVERFLOW);
+                    if (cf) flags |= FLAG_CARRY;
+                    if (result == 0) flags |= FLAG_ZERO;
+                    if (result & 0x8000u) flags |= FLAG_SIGN;
+                    { uint8_t p = result & 0xFF; p ^= p >> 4; p ^= p >> 2; p ^= p >> 1; if (!(p & 1)) flags |= FLAG_PARITY; }
+                }
+                m_cpu.setEFLAGS(flags);
             }
             break;
         }
@@ -1905,6 +2015,15 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
 }
 
 void InstructionDecoder::triggerInterrupt(uint8_t vector) {
+    if (vector == 0) {
+        // Log the faulting address from the stack (if pushed) or current CS:IP
+        LOG_WARN("INT 0 (DIV exception) at CS:IP=", std::hex,
+                 m_cpu.getSegReg(CS), ":", m_cpu.getEIP(),
+                 " AX=", m_cpu.getReg16(AX),
+                 " DX=", m_cpu.getReg16(DX),
+                 " CX=", m_cpu.getReg16(CX),
+                 " BX=", m_cpu.getReg16(BX));
+    }
     // Read the current IVT entry for this vector.
     uint16_t ivtIP = m_memory.read16(vector * 4);
     uint16_t ivtCS = m_memory.read16(vector * 4 + 2);

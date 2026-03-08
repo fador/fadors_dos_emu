@@ -63,6 +63,12 @@ int main(int argc, char *argv[]) {
     bios.initialize();
     dos.initialize();
 
+    // Wire up HIMEM (XMS) driver: BIOS handles detection (INT 2Fh) and dispatch (INT E0h)
+    if (auto* himem = dos.getHIMEM()) {
+        himem->setMemoryBus(&memory);
+        bios.setHIMEM(himem);
+    }
+
     fador::cpu::InstructionDecoder decoder(cpu, memory, iobus, bios, dos);
 
     sb.setIRQCallback([&decoder, &cpu]() {
@@ -193,6 +199,7 @@ int main(int argc, char *argv[]) {
         uint64_t maxCycles = stopAfterCycles > 0 ? stopAfterCycles : 100000;
         for (uint64_t i = 0; i < maxCycles; ++i) {
           decoder.step();
+          pit.addCycles(4);
           if (dos.isTerminated())
             break;
         }
@@ -213,7 +220,7 @@ int main(int argc, char *argv[]) {
 
       bios.setInputPollCallback([&sdlRenderer]() { sdlRenderer.pollInput(); });
       bios.setIdleCallback([&sdlRenderer, &pit, &cpu, &decoder, &kbd]() {
-        pit.update();
+        pit.addCycles(64);
         if ((cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) &&
             pit.checkPendingIRQ0()) {
           decoder.injectHardwareInterrupt(0x08);
@@ -240,6 +247,7 @@ int main(int argc, char *argv[]) {
 
       while (running) {
         decoder.step();
+        pit.addCycles(4);
         instrCount++;
 
         if (stopAfterCycles > 0 && instrCount >= stopAfterCycles) {
@@ -317,7 +325,7 @@ int main(int argc, char *argv[]) {
       input.setBIOS(bios);
       bios.setInputPollCallback([&input]() { input.pollInput(); });
       bios.setIdleCallback([&renderer, &pit, &cpu, &decoder, &kbd]() {
-        pit.update();
+        pit.addCycles(64);
         if ((cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) &&
             pit.checkPendingIRQ0()) {
           decoder.injectHardwareInterrupt(0x08);
@@ -344,6 +352,7 @@ int main(int argc, char *argv[]) {
 
       while (running) {
         decoder.step();
+        pit.addCycles(4);
         instrCount++;
 
         if (stopAfterCycles > 0 && instrCount >= stopAfterCycles) {

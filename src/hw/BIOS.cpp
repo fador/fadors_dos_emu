@@ -2,6 +2,7 @@
 #include "KeyboardController.hpp"
 #include "PIT8254.hpp"
 #include "VideoMode.hpp"
+#include "../memory/himem/HIMEM.hpp"
 #include "../utils/Logger.hpp"
 #include <fstream>
 #include <algorithm>
@@ -65,9 +66,7 @@ bool BIOS::handleInterrupt(uint8_t vector) {
             LOG_DEBUG("BIOS INT 14h: Serial Port (stubbed)");
             return true;
         case 0x15: // System Services
-            m_cpu.setReg8(cpu::AH, 0x86); // Function not supported (default)
-            m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
-            LOG_DEBUG("BIOS INT 15h: System Services (stubbed)");
+            handleSystemService();
             return true;
         case 0x17: // Printer
             m_cpu.setReg8(cpu::AH, 0); // No error
@@ -76,8 +75,28 @@ bool BIOS::handleInterrupt(uint8_t vector) {
             return true;
         case 0x2F: { // Multiplex
             uint16_t ax = m_cpu.getReg16(cpu::AX);
-            LOG_DEBUG("BIOS: INT 2Fh Multiplex (stubbed), AX=0x", std::hex, ax);
-            m_cpu.setReg8(cpu::AL, 0x00); // Not supported
+            if (ax == 0x4300) {
+                // XMS installation check
+                if (m_himem) {
+                    m_cpu.setReg8(cpu::AL, 0x80); // XMS driver installed
+                    LOG_DEBUG("INT 2Fh AX=4300h: XMS installed");
+                } else {
+                    m_cpu.setReg8(cpu::AL, 0x00); // Not installed
+                    LOG_DEBUG("INT 2Fh AX=4300h: XMS not installed");
+                }
+            } else if (ax == 0x4310) {
+                // Get XMS driver entry point
+                if (m_himem) {
+                    m_cpu.setSegReg(cpu::ES, HLE_STUB_SEG);
+                    m_cpu.setReg16(cpu::BX, XMS_ENTRY_OFFSET);
+                    LOG_DEBUG("INT 2Fh AX=4310h: XMS entry at ", std::hex, HLE_STUB_SEG, ":", XMS_ENTRY_OFFSET);
+                } else {
+                    m_cpu.setReg8(cpu::AL, 0x00);
+                }
+            } else {
+                LOG_DEBUG("BIOS: INT 2Fh Multiplex (stubbed), AX=0x", std::hex, ax);
+                m_cpu.setReg8(cpu::AL, 0x00); // Not supported
+            }
             return true;
         }
         case 0x1B: // Ctrl-Break
@@ -91,6 +110,9 @@ bool BIOS::handleInterrupt(uint8_t vector) {
             return true;
         case 0x33: // Mouse driver
             handleMouseService();
+            return true;
+        case 0xE0: // XMS far-call dispatch (our internal HLE vector)
+            handleXMSDispatch();
             return true;
     }
     return false;
@@ -995,6 +1017,16 @@ void BIOS::initialize() {
     m_memory.write16(0x33 * 4, 0x0033);      // INT 33h offset
     m_memory.write16(0x33 * 4 + 2, 0xF000);  // INT 33h segment
     m_originalIVT[0x33] = { 0x0033, 0xF000 };
+
+    // XMS driver entry point stub at F000:XMS_ENTRY_OFFSET.
+    // Programs obtain this address via INT 2Fh AX=4310h, then CALL FAR to it.
+    // The stub does INT E0h (our HLE dispatch vector) followed by RETF.
+    {
+        uint32_t xmsPhys = (static_cast<uint32_t>(HLE_STUB_SEG) << 4) + XMS_ENTRY_OFFSET;
+        m_memory.write8(xmsPhys,     0xCD);  // INT
+        m_memory.write8(xmsPhys + 1, 0xE0);  // E0h
+        m_memory.write8(xmsPhys + 2, 0xCB);  // RETF
+    }
     
     LOG_INFO("BIOS: BDA and IVT initialized.");
 }
@@ -1104,6 +1136,279 @@ void BIOS::handleDiskService() {
             LOG_WARN("BIOS INT 13h: Unknown function AH=0x", std::hex, (int)ah);
             m_cpu.setReg8(cpu::AH, 0x01);
             m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+            break;
+    }
+}
+
+// ── INT 15h — System Services ───────────────────────────────────────────────
+
+void BIOS::handleSystemService() {
+    uint8_t ah = m_cpu.getReg8(cpu::AH);
+    switch (ah) {
+        case 0x24: { // A20 gate support — extended function
+            uint8_t al = m_cpu.getReg8(cpu::AL);
+            switch (al) {
+                case 0x00: // Disable A20
+                    m_memory.setA20(false);
+                    m_cpu.setReg8(cpu::AH, 0);
+                    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+                    break;
+                case 0x01: // Enable A20
+                    m_memory.setA20(true);
+                    m_cpu.setReg8(cpu::AH, 0);
+                    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+                    break;
+                case 0x02: // Query A20 status
+                    m_cpu.setReg8(cpu::AH, 0);
+                    m_cpu.setReg8(cpu::AL, m_memory.isA20Enabled() ? 1 : 0);
+                    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+                    break;
+                case 0x03: // Query A20 support
+                    m_cpu.setReg8(cpu::AH, 0);
+                    m_cpu.setReg16(cpu::BX, 0x03); // Keyboard + port 92h supported
+                    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+                    break;
+                default:
+                    m_cpu.setReg8(cpu::AH, 0x86);
+                    m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+                    break;
+            }
+            LOG_DEBUG("BIOS INT 15h AH=24h AL=", std::hex, (int)al, ": A20 gate control");
+            break;
+        }
+        case 0x87: { // Copy Extended Memory Block
+            // Stub: not implemented, return error
+            m_cpu.setReg8(cpu::AH, 0x86);
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+            LOG_DEBUG("BIOS INT 15h AH=87h: Copy Extended Memory (stubbed)");
+            break;
+        }
+        case 0x88: { // Get Extended Memory Size (above 1MB, in KB)
+            // Report 15MB (15360 KB) of extended memory (our XMS pool).
+            // Real HIMEM.SYS claims this memory, but programs that check
+            // via INT 15h before loading HIMEM also use this value.
+            uint16_t extKB = 15360; // 15MB
+            m_cpu.setReg16(cpu::AX, extKB);
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+            LOG_DEBUG("BIOS INT 15h AH=88h: Extended memory = ", extKB, " KB");
+            break;
+        }
+        case 0xC0: { // Get System Configuration
+            // Stub: return carry=1 (not supported)
+            m_cpu.setReg8(cpu::AH, 0x86);
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+            LOG_DEBUG("BIOS INT 15h AH=C0h: System Config (stubbed)");
+            break;
+        }
+        case 0x86: { // Wait (microseconds in CX:DX)
+            // Programs use this for delays. We just return immediately.
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+            LOG_DEBUG("BIOS INT 15h AH=86h: Wait (stubbed - no delay)");
+            break;
+        }
+        case 0x41: { // Wait on external event (PS/2)
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+            break;
+        }
+        case 0x4F: { // Keyboard intercept
+            // Return carry=1 to indicate key should be processed normally
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+            break;
+        }
+        default:
+            LOG_DEBUG("BIOS INT 15h: Unknown function AH=0x", std::hex, (int)ah);
+            m_cpu.setReg8(cpu::AH, 0x86); // Function not supported
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+            break;
+    }
+}
+
+// ── INT E0h — XMS Driver Dispatch (HLE) ─────────────────────────────────────
+
+void BIOS::handleXMSDispatch() {
+    if (!m_himem) {
+        m_cpu.setReg16(cpu::AX, 0);
+        m_cpu.setReg8(cpu::BL, 0x80); // Not implemented
+        return;
+    }
+
+    uint8_t ah = m_cpu.getReg8(cpu::AH);
+    LOG_DEBUG("XMS dispatch: AH=0x", std::hex, (int)ah);
+
+    switch (ah) {
+        case 0x00: { // Get XMS Version
+            m_cpu.setReg16(cpu::AX, m_himem->getVersion());       // XMS spec version (BCD)
+            m_cpu.setReg16(cpu::BX, m_himem->getDriverVersion()); // Driver internal revision
+            m_cpu.setReg16(cpu::DX, 1);                           // HMA exists
+            LOG_DEBUG("XMS 00h: Version=", std::hex, m_himem->getVersion());
+            break;
+        }
+        case 0x01: { // Request HMA
+            uint16_t size = m_cpu.getReg16(cpu::DX);
+            if (m_himem->requestHMA(size)) {
+                m_cpu.setReg16(cpu::AX, 1);
+            } else {
+                m_cpu.setReg16(cpu::AX, 0);
+                m_cpu.setReg8(cpu::BL, m_himem->lastError());
+            }
+            break;
+        }
+        case 0x02: { // Release HMA
+            if (m_himem->releaseHMA()) {
+                m_cpu.setReg16(cpu::AX, 1);
+            } else {
+                m_cpu.setReg16(cpu::AX, 0);
+                m_cpu.setReg8(cpu::BL, m_himem->lastError());
+            }
+            break;
+        }
+        case 0x03: { // Global Enable A20
+            m_himem->enableA20();
+            m_cpu.setReg16(cpu::AX, 1);
+            break;
+        }
+        case 0x04: { // Global Disable A20
+            m_himem->disableA20();
+            m_cpu.setReg16(cpu::AX, 1);
+            break;
+        }
+        case 0x05: { // Local Enable A20
+            m_himem->enableA20();
+            m_cpu.setReg16(cpu::AX, 1);
+            break;
+        }
+        case 0x06: { // Local Disable A20
+            m_himem->disableA20();
+            m_cpu.setReg16(cpu::AX, 1);
+            break;
+        }
+        case 0x07: { // Query A20 State
+            m_cpu.setReg16(cpu::AX, m_himem->isA20Enabled() ? 1 : 0);
+            break;
+        }
+        case 0x08: { // Query Free Extended Memory
+            uint16_t largestKB = 0;
+            uint16_t totalKB = m_himem->queryFreeKB(largestKB);
+            m_cpu.setReg16(cpu::AX, largestKB); // Largest free block in KB
+            m_cpu.setReg16(cpu::DX, totalKB);   // Total free in KB
+            LOG_DEBUG("XMS 08h: Largest=", largestKB, "KB Total=", totalKB, "KB");
+            break;
+        }
+        case 0x09: { // Allocate Extended Memory Block
+            uint16_t sizeKB = m_cpu.getReg16(cpu::DX);
+            uint16_t handle = m_himem->allocateEMB(sizeKB);
+            if (handle) {
+                m_cpu.setReg16(cpu::AX, 1);
+                m_cpu.setReg16(cpu::DX, handle);
+                LOG_DEBUG("XMS 09h: Allocated ", sizeKB, "KB -> handle ", handle);
+            } else {
+                m_cpu.setReg16(cpu::AX, 0);
+                m_cpu.setReg8(cpu::BL, m_himem->lastError());
+                LOG_WARN("XMS 09h: Failed to allocate ", sizeKB, "KB");
+            }
+            break;
+        }
+        case 0x0A: { // Free Extended Memory Block
+            uint16_t handle = m_cpu.getReg16(cpu::DX);
+            if (m_himem->freeEMB(handle)) {
+                m_cpu.setReg16(cpu::AX, 1);
+            } else {
+                m_cpu.setReg16(cpu::AX, 0);
+                m_cpu.setReg8(cpu::BL, m_himem->lastError());
+            }
+            break;
+        }
+        case 0x0B: { // Move Extended Memory Block
+            // DS:SI points to an XMS move struct:
+            //   DWORD Length, WORD SrcHandle, DWORD SrcOffset, WORD DstHandle, DWORD DstOffset
+            uint16_t ds = m_cpu.getSegReg(cpu::DS);
+            uint16_t si = m_cpu.getReg16(cpu::SI);
+            uint32_t ptr = (static_cast<uint32_t>(ds) << 4) + si;
+
+            uint32_t length     = m_memory.read32(ptr);
+            uint16_t srcHandle  = m_memory.read16(ptr + 4);
+            uint32_t srcOffset  = m_memory.read32(ptr + 6);
+            uint16_t dstHandle  = m_memory.read16(ptr + 10);
+            uint32_t dstOffset  = m_memory.read32(ptr + 12);
+
+            LOG_DEBUG("XMS 0Bh struct at ", std::hex, ds, ":", si, " (flat ", ptr, ") raw[0..19]: ",
+                      (int)m_memory.read8(ptr),   " ", (int)m_memory.read8(ptr+1), " ",
+                      (int)m_memory.read8(ptr+2), " ", (int)m_memory.read8(ptr+3), " ",
+                      (int)m_memory.read8(ptr+4), " ", (int)m_memory.read8(ptr+5), " ",
+                      (int)m_memory.read8(ptr+6), " ", (int)m_memory.read8(ptr+7), " ",
+                      (int)m_memory.read8(ptr+8), " ", (int)m_memory.read8(ptr+9), " ",
+                      (int)m_memory.read8(ptr+10), " ", (int)m_memory.read8(ptr+11), " ",
+                      (int)m_memory.read8(ptr+12), " ", (int)m_memory.read8(ptr+13), " ",
+                      (int)m_memory.read8(ptr+14), " ", (int)m_memory.read8(ptr+15), " ",
+                      (int)m_memory.read8(ptr+16), " ", (int)m_memory.read8(ptr+17), " ",
+                      (int)m_memory.read8(ptr+18), " ", (int)m_memory.read8(ptr+19));
+            LOG_DEBUG("  parsed: len=", std::dec, length, " srcH=", srcHandle, " srcOff=0x", std::hex, srcOffset,
+                      " dstH=", std::dec, dstHandle, " dstOff=0x", std::hex, dstOffset,
+                      " retaddr=", m_memory.read16((m_cpu.getSegReg(cpu::SS)<<4)+m_cpu.getReg16(cpu::SP)+2),
+                      ":", m_memory.read16((m_cpu.getSegReg(cpu::SS)<<4)+m_cpu.getReg16(cpu::SP)));
+
+            if (m_himem->moveEMB(length, srcHandle, srcOffset, dstHandle, dstOffset, m_memory)) {
+                m_cpu.setReg16(cpu::AX, 1);
+                LOG_DEBUG("XMS 0Bh: Move OK len=", length, " src=", srcHandle, ":", std::hex, srcOffset, " dst=", dstHandle, ":", dstOffset);
+            } else {
+                m_cpu.setReg16(cpu::AX, 0);
+                m_cpu.setReg8(cpu::BL, m_himem->lastError());
+                LOG_WARN("XMS 0Bh: Move FAILED len=", length, " src=", srcHandle, ":", std::hex, srcOffset, " dst=", dstHandle, ":", dstOffset, " err=", (int)m_himem->lastError());
+            }
+            break;
+        }
+        case 0x0C: { // Lock Extended Memory Block
+            uint16_t handle = m_cpu.getReg16(cpu::DX);
+            uint32_t linearAddr = 0;
+            if (m_himem->lockEMB(handle, linearAddr)) {
+                m_cpu.setReg16(cpu::AX, 1);
+                m_cpu.setReg16(cpu::DX, static_cast<uint16_t>(linearAddr >> 16));
+                m_cpu.setReg16(cpu::BX, static_cast<uint16_t>(linearAddr & 0xFFFF));
+            } else {
+                m_cpu.setReg16(cpu::AX, 0);
+                m_cpu.setReg8(cpu::BL, m_himem->lastError());
+            }
+            break;
+        }
+        case 0x0D: { // Unlock Extended Memory Block
+            uint16_t handle = m_cpu.getReg16(cpu::DX);
+            if (m_himem->unlockEMB(handle)) {
+                m_cpu.setReg16(cpu::AX, 1);
+            } else {
+                m_cpu.setReg16(cpu::AX, 0);
+                m_cpu.setReg8(cpu::BL, m_himem->lastError());
+            }
+            break;
+        }
+        case 0x0E: { // Get Handle Information
+            uint16_t handle = m_cpu.getReg16(cpu::DX);
+            // Return BH=lock count, BL=free handles, DX=block size in KB
+            // We don't track detailed handle info, so provide reasonable defaults
+            m_cpu.setReg16(cpu::AX, 1);
+            m_cpu.setReg8(cpu::BH, 0);   // Lock count
+            m_cpu.setReg8(cpu::BL, 126); // Free handles remaining
+            m_cpu.setReg16(cpu::DX, 0);  // Block size (would need handle lookup)
+            (void)handle;
+            break;
+        }
+        case 0x0F: { // Reallocate Extended Memory Block
+            uint16_t handle = m_cpu.getReg16(cpu::DX);
+            uint16_t newSizeKB = m_cpu.getReg16(cpu::BX);
+            LOG_DEBUG("XMS 0Fh: Resize handle=", handle, " newSize=", newSizeKB, "KB");
+            if (m_himem->resizeEMB(handle, newSizeKB)) {
+                m_cpu.setReg16(cpu::AX, 1);
+                LOG_DEBUG("XMS 0Fh: Resize OK");
+            } else {
+                m_cpu.setReg16(cpu::AX, 0);
+                m_cpu.setReg8(cpu::BL, m_himem->lastError());
+                LOG_WARN("XMS 0Fh: Resize FAILED err=", (int)m_himem->lastError());
+            }
+            break;
+        }
+        default:
+            LOG_WARN("XMS: Unknown function AH=0x", std::hex, (int)ah);
+            m_cpu.setReg16(cpu::AX, 0);
+            m_cpu.setReg8(cpu::BL, 0x80); // Not implemented
             break;
     }
 }

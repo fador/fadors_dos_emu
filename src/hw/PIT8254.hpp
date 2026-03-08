@@ -1,7 +1,6 @@
 #pragma once
 #include "IODevice.hpp"
 #include <cstdint>
-#include <chrono>
 
 namespace fador::hw {
 
@@ -16,6 +15,9 @@ public:
     void update(); // Called by main loop to process timer ticks
     bool checkPendingIRQ0();
 
+    // Advance virtual clock by one instruction (~4 CPU cycles).
+    void addCycles(uint32_t cycles = 4);
+
 private:
     struct Channel {
         uint16_t reload;
@@ -28,10 +30,17 @@ private:
     };
 
     Channel m_channels[3];
-    std::chrono::steady_clock::time_point m_lastUpdate;
     bool m_irq0Pending;
 
+    // Instruction-based virtual clock
+    uint64_t m_cycleAccum = 0;
+
+    // Assume ~20 MHz 386: 20 MHz / 1.193182 MHz ≈ 16.8 CPU cycles per PIT tick
+    static constexpr uint32_t CYCLES_PER_PIT_TICK = 16;
+
     static constexpr double BASE_FREQ = 1193182.0;
+
+    void advanceTicks(uint32_t ticks);
 };
 
 } // namespace fador::hw

@@ -99,6 +99,8 @@ bool DOS::handleInterrupt(uint8_t vector) {
         }
         case 0x2F: { // Multiplex
             uint16_t ax = m_cpu.getReg16(cpu::AX);
+            // Let XMS calls (AX=4300h/4310h) fall through to BIOS handler
+            if (ax == 0x4300 || ax == 0x4310) return false;
             LOG_DOS("DOS: INT 2Fh Multiplex (stubbed), AX=0x", std::hex, ax);
             m_cpu.setReg8(cpu::AL, 0x00); // Not supported
             return true;

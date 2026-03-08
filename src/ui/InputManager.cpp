@@ -49,6 +49,7 @@ InputManager::~InputManager() {
 }
 
 bool InputManager::pollInput() {
+    releaseTimedOutKeys();
 #ifdef _WIN32
     if (_kbhit()) {
         int ch = _getch();
@@ -271,11 +272,21 @@ void InputManager::handleKey(int key, bool pressed) {
         case 0x186: scancode = 0x58; ascii = 0; break; // F12
     }
 
-    if (scancode != 0) {
-        if (pressed) {
-            m_kbd.pushKeyWithBreak(ascii, scancode);
+    if (scancode != 0 && pressed) {
+        bool extended = (key >= 0x100); // extended keys have 0x100 flag
+        auto it = m_heldKeys.find(scancode);
+        if (it != m_heldKeys.end()) {
+            // Key is already held — just refresh the timestamp.
+            it->second.pressTime = std::chrono::steady_clock::now();
         } else {
-            m_kbd.pushKey(0, scancode | 0x80); // Break code
+            // New key press — push make code.
+            if (extended) {
+                m_kbd.pushMakeKeyExtended(ascii, scancode);
+            } else {
+                m_kbd.pushMakeKey(ascii, scancode);
+            }
+            m_heldKeys[scancode] = { scancode, extended,
+                                     std::chrono::steady_clock::now() };
         }
     }
 }
@@ -328,7 +339,32 @@ void InputManager::handleAltKey(unsigned char ch) {
         scancode = 0x83;
     }
     if (scancode != 0) {
-        m_kbd.pushKeyWithBreak(0, scancode); // Alt keys have ascii=0
+        auto it = m_heldKeys.find(scancode);
+        if (it != m_heldKeys.end()) {
+            it->second.pressTime = std::chrono::steady_clock::now();
+        } else {
+            m_kbd.pushMakeKey(0, scancode);
+            m_heldKeys[scancode] = { scancode, false,
+                                     std::chrono::steady_clock::now() };
+        }
+    }
+}
+
+void InputManager::releaseTimedOutKeys() {
+    auto now = std::chrono::steady_clock::now();
+    for (auto it = m_heldKeys.begin(); it != m_heldKeys.end(); ) {
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - it->second.pressTime).count();
+        if (elapsed >= KEY_HOLD_MS) {
+            if (it->second.extended) {
+                m_kbd.pushBreakKeyExtended(it->second.scancode);
+            } else {
+                m_kbd.pushBreakKey(it->second.scancode);
+            }
+            it = m_heldKeys.erase(it);
+        } else {
+            ++it;
+        }
     }
 }
 

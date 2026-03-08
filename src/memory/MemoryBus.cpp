@@ -1,7 +1,6 @@
 #include "MemoryBus.hpp"
 #include <algorithm>
 #include <iostream>
-#include <iomanip>
 
 namespace fador::memory {
 

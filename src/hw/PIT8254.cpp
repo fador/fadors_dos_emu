@@ -12,7 +12,6 @@ PIT8254::PIT8254() : m_irq0Pending(false) {
         m_channels[i].hiByteNext = false;
         m_channels[i].latched = false;
     }
-    m_lastUpdate = std::chrono::steady_clock::now();
 }
 
 uint8_t PIT8254::read8(uint16_t port) {
@@ -77,24 +76,36 @@ void PIT8254::write8(uint16_t port, uint8_t value) {
     }
 }
 
-void PIT8254::update() {
-    auto now = std::chrono::steady_clock::now();
-    double elapsedSec = std::chrono::duration<double>(now - m_lastUpdate).count();
-    m_lastUpdate = now;
+void PIT8254::addCycles(uint32_t cycles) {
+    m_cycleAccum += cycles;
+    if (m_cycleAccum >= CYCLES_PER_PIT_TICK) {
+        uint32_t pitTicks = m_cycleAccum / CYCLES_PER_PIT_TICK;
+        m_cycleAccum %= CYCLES_PER_PIT_TICK;
+        advanceTicks(pitTicks);
+    }
+}
 
-    uint32_t ticks = static_cast<uint32_t>(elapsedSec * BASE_FREQ);
+void PIT8254::advanceTicks(uint32_t ticks) {
     if (ticks == 0) return;
 
-    auto& ch0 = m_channels[0];
-    uint32_t currentCount = ch0.count;
-    if (currentCount == 0) currentCount = 0x10000;
+    for (int i = 0; i < 3; ++i) {
+        auto& ch = m_channels[i];
+        uint32_t reload = ch.reload ? ch.reload : 0x10000;
+        uint32_t count = ch.count ? ch.count : 0x10000;
 
-    if (ticks >= currentCount) {
-        m_irq0Pending = true;
-        ch0.count = ch0.reload - static_cast<uint16_t>(ticks % (ch0.reload ? ch0.reload : 0x10000));
-    } else {
-        ch0.count -= static_cast<uint16_t>(ticks);
+        if (ticks >= count) {
+            if (i == 0) m_irq0Pending = true;
+            uint32_t remaining = (ticks - count) % reload;
+            ch.count = static_cast<uint16_t>(reload - remaining);
+        } else {
+            ch.count = static_cast<uint16_t>(count - ticks);
+        }
     }
+}
+
+void PIT8254::update() {
+    // This method is kept for backward compatibility but the cycle-based
+    // addCycles() is now the primary timing mechanism.
 }
 
 bool PIT8254::checkPendingIRQ0() {

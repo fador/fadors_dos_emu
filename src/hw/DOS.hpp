@@ -25,6 +25,9 @@ public:
     void setKeyboard(KeyboardController& kbd) { m_kbd = &kbd; }
     void setInputPollCallback(std::function<void()> cb) { m_pollInput = std::move(cb); }
 
+    // Access to HIMEM (XMS) for BIOS dispatch wiring
+    memory::HIMEM* getHIMEM() { return m_himem.get(); }
+
     // Initialization (PSP setup, etc.)
     void initialize();
 

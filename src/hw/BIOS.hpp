@@ -7,6 +7,8 @@
 #include "../cpu/CPU.hpp"
 #include "../memory/MemoryBus.hpp"
 
+namespace fador::memory { class HIMEM; }
+
 namespace fador::hw {
 
 class KeyboardController;
@@ -55,6 +57,13 @@ public:
     // Load a raw disk image for floppy 0 (0x00)
     bool loadDiskImage(const std::string& path);
 
+    // Set HIMEM (XMS) driver for INT 2Fh detection and XMS function dispatch
+    void setHIMEM(memory::HIMEM* himem) { m_himem = himem; }
+
+    // XMS entry point stub location in ROM (F000:XMS_ENTRY_OFFSET)
+    // Code at this address: INT E0h; RETF
+    static constexpr uint16_t XMS_ENTRY_OFFSET = 0x0040;
+
 private:
     // Original IVT entries written during initialize().
     // Indexed by vector number; first = offset, second = segment.
@@ -63,6 +72,7 @@ private:
     memory::MemoryBus& m_memory;
     KeyboardController& m_kbd;
     PIT8254& m_pit;
+
 
     // Simple Floppy emulation (1.44MB)
     std::vector<uint8_t> m_floppyData;
@@ -82,6 +92,10 @@ private:
     void handleMouseService();      // INT 33h
     void handleTimeService();       // INT 1Ah
     void handleDiskService();       // INT 13h
+    void handleSystemService();     // INT 15h
+    void handleXMSDispatch();       // INT E0h (XMS far-call entry)
+
+    memory::HIMEM* m_himem = nullptr;
 };
 
 } // namespace fador::hw
