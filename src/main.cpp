@@ -63,6 +63,8 @@ int main(int argc, char *argv[]) {
     fador::hw::DOS dos(cpu, memory);
     fador::hw::BIOS bios(cpu, memory, kbd, pit);
 
+    joystick.setCPU(&cpu);
+
     bios.initialize();
     dos.initialize();
 
@@ -203,6 +205,7 @@ int main(int argc, char *argv[]) {
         uint64_t maxCycles = stopAfterCycles > 0 ? stopAfterCycles : 100000;
         for (uint64_t i = 0; i < maxCycles; ++i) {
           decoder.step();
+          cpu.addCycles(4);
           pit.addCycles(4);
           if (dos.isTerminated())
             break;
@@ -224,6 +227,7 @@ int main(int argc, char *argv[]) {
 
       bios.setInputPollCallback([&sdlRenderer]() { sdlRenderer.pollInput(); });
       bios.setIdleCallback([&sdlRenderer, &pit, &cpu, &decoder, &kbd]() {
+        cpu.addCycles(64);
         pit.addCycles(64);
         if ((cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) &&
             pit.checkPendingIRQ0()) {
@@ -251,6 +255,7 @@ int main(int argc, char *argv[]) {
 
       while (running) {
         decoder.step();
+        cpu.addCycles(4);
         pit.addCycles(4);
         instrCount++;
 
