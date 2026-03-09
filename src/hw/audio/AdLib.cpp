@@ -279,8 +279,8 @@ void AdLib::generateSamples(float *buffer, size_t numSamples) {
     mix *= 0.1f; // Master volume padding to prevent clipping
 
     // Output as interleaved stereo
-    buffer[i * 2 + 0] = mix;
-    buffer[i * 2 + 1] = mix;
+    buffer[i * 2 + 0] += mix;
+    buffer[i * 2 + 1] += mix;
     m_time += 1.0 / m_sampleRate;
   }
 }

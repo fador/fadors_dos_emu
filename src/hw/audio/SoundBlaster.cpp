@@ -98,6 +98,7 @@ void SoundBlaster::processCommand(uint8_t cmd) {
     uint8_t lenHi = m_writeQueue.front();
     m_writeQueue.pop();
     m_dmaLength = (lenHi << 8) | lenLo;
+    m_dmaBaseLength = m_dmaLength;
     m_autoInitDma = false;
     m_dmaActive = true;
     m_16bit = false;
@@ -124,6 +125,7 @@ void SoundBlaster::processCommand(uint8_t cmd) {
     uint8_t lenHi = m_writeQueue.front();
     m_writeQueue.pop();
     m_dmaLength = (lenHi << 8) | lenLo;
+    m_dmaBaseLength = m_dmaLength;
     break;
   }
   case 0xD1: // Turn on speaker
@@ -158,8 +160,7 @@ void SoundBlaster::triggerIRQ() {
 
 void SoundBlaster::generateSamples(float *buffer, size_t numSamples) {
   if (!m_speakerOn || !m_dmaActive) {
-    // Output silence or hold last sample?
-    // Real SB holds the last written DAC value
+    // Output silence or hold last sample
     for (size_t i = 0; i < numSamples; i++) {
       buffer[i * 2 + 0] += m_lastSample * 0.2f; // Left
       buffer[i * 2 + 1] += m_lastSample * 0.2f; // Right
@@ -174,27 +175,26 @@ void SoundBlaster::generateSamples(float *buffer, size_t numSamples) {
     m_sampleAccumulator += samplesPerSystemSample;
 
     // Fetch new samples from memory if we consumed one DSP sample frame
-    if (m_sampleAccumulator >= 1.0f) {
+    while (m_sampleAccumulator >= 1.0f) {
+      if (!m_dmaActive)
+        break;
+
       int dmaChannel = m_16bit ? 5 : 1;
       uint32_t addr = m_dma.getChannelAddress(dmaChannel);
 
       uint8_t dmaSample = m_memory.read8(addr);
-      m_lastSample = ((float)dmaSample - 128.0f) /
-                     128.0f; // Convert 8-bit unsigned to float -1.0 .. 1.0
+      m_lastSample = ((float)dmaSample - 128.0f) / 128.0f;
 
       bool tc = m_dma.acknowledgeTransfer(dmaChannel, 1);
       if (tc || m_dmaLength == 0) {
-        // Fired IRQ on DMA completion
         triggerIRQ();
-        if (m_autoInitDma) {
-          // It will keep looping because DMA Controller wraps automatically on
-          // Auto-Init
-        } else {
+        if (!m_autoInitDma) {
           m_dmaActive = false;
+        } else {
+          m_dmaLength = m_dmaBaseLength;
         }
       } else {
-        if (m_dmaLength > 0)
-          m_dmaLength--;
+        m_dmaLength--;
       }
 
       m_sampleAccumulator -= 1.0f;

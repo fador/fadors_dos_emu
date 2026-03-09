@@ -63,10 +63,11 @@ int main(int argc, char *argv[]) {
     bios.initialize();
     dos.initialize();
 
-    // Wire up HIMEM (XMS) driver: BIOS handles detection (INT 2Fh) and dispatch (INT E0h)
-    if (auto* himem = dos.getHIMEM()) {
-        himem->setMemoryBus(&memory);
-        bios.setHIMEM(himem);
+    // Wire up HIMEM (XMS) driver: BIOS handles detection (INT 2Fh) and dispatch
+    // (INT E0h)
+    if (auto *himem = dos.getHIMEM()) {
+      himem->setMemoryBus(&memory);
+      bios.setHIMEM(himem);
     }
 
     fador::cpu::InstructionDecoder decoder(cpu, memory, iobus, bios, dos);
@@ -290,12 +291,13 @@ int main(int argc, char *argv[]) {
           static auto lastRender = std::chrono::steady_clock::now();
           auto now = std::chrono::steady_clock::now();
 
-          // Audio generation (keep buffer filled to ~2048 samples = 16384
-          // bytes)
+          // Audio generation
           uint32_t queuedAudio = audio.getQueuedAudioSize();
-          if (queuedAudio < 16384) {
+          const uint32_t targetQueueBytes = 32768; // 4096 samples
+          const uint32_t thresholdBytes = 16384;   // 2048 samples
+          if (queuedAudio < thresholdBytes) {
             size_t samplesNeeded =
-                (16384 - queuedAudio) / 8; // 2 channels * 4 bytes
+                (targetQueueBytes - queuedAudio) / 8; // 2 channels * 4 bytes
             if (samplesNeeded > 0) {
               std::vector<float> audioBuf(samplesNeeded * 2, 0.0f);
               adlib.generateSamples(audioBuf.data(), samplesNeeded);
@@ -389,11 +391,13 @@ int main(int argc, char *argv[]) {
           static auto lastRender = std::chrono::steady_clock::now();
           auto now = std::chrono::steady_clock::now();
 
-          // Audio generation (terminal mode also drains audio if system
-          // supports it)
+          // Audio generation
           uint32_t queuedAudio = audio.getQueuedAudioSize();
-          if (queuedAudio < 16384) {
-            size_t samplesNeeded = (16384 - queuedAudio) / 8;
+          const uint32_t targetQueueBytes = 32768; // 4096 samples
+          const uint32_t thresholdBytes = 16384;   // 2048 samples
+          if (queuedAudio < thresholdBytes) {
+            size_t samplesNeeded =
+                (targetQueueBytes - queuedAudio) / 8; // 2 channels * 4 bytes
             if (samplesNeeded > 0) {
               std::vector<float> audioBuf(samplesNeeded * 2, 0.0f);
               adlib.generateSamples(audioBuf.data(), samplesNeeded);

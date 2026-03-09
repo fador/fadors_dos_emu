@@ -50,6 +50,7 @@ private:
   bool m_dmaActive = false;
   bool m_autoInitDma = false;
   uint16_t m_dmaLength = 0;
+  uint16_t m_dmaBaseLength = 0;
   float m_sampleAccumulator = 0.0f; // Used for sample rate conversion
 
   // High speed / precision modifiers
