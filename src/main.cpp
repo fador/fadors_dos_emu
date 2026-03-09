@@ -4,6 +4,7 @@
 #include "hw/DMA8237.hpp"
 #include "hw/DOS.hpp"
 #include "hw/IOBus.hpp"
+#include "hw/Joystick.hpp"
 #include "hw/KeyboardController.hpp"
 #include "hw/PIC8259.hpp"
 #include "hw/PIT8254.hpp"
@@ -33,6 +34,7 @@ int main(int argc, char *argv[]) {
     fador::hw::IOBus iobus;
     fador::hw::PIC8259 pic(true); // Master
     fador::hw::KeyboardController kbd;
+    fador::hw::Joystick joystick;
     fador::hw::PIT8254 pit;
     fador::hw::VGAController vga(memory);
     fador::hw::DMA8237 dma;
@@ -48,6 +50,7 @@ int main(int argc, char *argv[]) {
     iobus.registerDevice(0x40, 0x43, &pit);
     iobus.registerDevice(0x60, 0x60, &kbd);
     iobus.registerDevice(0x64, 0x64, &kbd);
+    iobus.registerDevice(0x201, 0x201, &joystick);
     iobus.registerDevice(0x3C0, 0x3CF, &vga);
     iobus.registerDevice(0x3D0, 0x3DF, &vga);
     iobus.registerDevice(0x00, 0x0F, &dma);
