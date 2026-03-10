@@ -20,9 +20,9 @@
   - [x] Instruction Fetcher (Prefixes, ModR/M, SIB, Displacement, Immediate)
   - [x] Arithmetic and Logic Unit (ALU) instructions
   - [x] Control flow (JMP, CALL, RET, INT, IRET)
-  - [x] Data transfer (MOV, PUSH, POP)
+  - [x] Data transfer (MOV, PUSH, POP, PUSAD/POPAD, CS/DS offsets)
   - [x] String operations (MOVS, STOS, LODS, SCAS, CMPS)
-  - [ ] Advanced 386 protected mode instructions (later)
+  - [x] Advanced 386 protected mode instructions (LGDT, SGDT, LIDT, SIDT, LMSW, SMSW, MOV CR)
 - [x] **Interrupt Pipeline**
   - [x] CPU exception handling
   - [x] Hardware interrupt pin routing
@@ -46,6 +46,7 @@
 ## Phase 5: DOS Emulation (MS-DOS functionality)
 - [x] COM File Loader
 - [x] EXE File Loader (MZ header parsing, relocation calculation)
+- [x] Native 32-bit DOS/4GW Extender capability 
 - [x] Program Segment Prefix (PSP) construction
 - [x] INT 20h (Terminate Program)
 - [x] INT 21h (DOS Services)
@@ -55,6 +56,7 @@
   - [x] Directory Operations (Ah=39h, 3Ah, 3Bh, 47h)
   - [x] Memory Management (Ah=48h, 49h, 4Ah)
   - [x] Drive Information (Ah=0Eh, 19h, 36h)
+  - [x] System/Country Information (Ah=38h)
 
 ## Phase 6: Front-End UI
 - [x] VRAM-to-Terminal Rendering (Text mode 80x25)
