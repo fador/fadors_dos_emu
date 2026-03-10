@@ -6,6 +6,21 @@
 
 namespace fador::cpu {
 
+struct TraceEntry {
+  uint64_t cyc;
+  uint8_t op;
+  uint16_t cs;
+  uint32_t eip;
+  uint32_t cr0;
+  uint32_t eflags;
+  uint32_t eax;
+  uint32_t esp;
+  uint16_t ss;
+  bool is32;
+};
+static TraceEntry g_ring[5000];
+static size_t g_ringIdx = 0;
+
 InstructionDecoder::InstructionDecoder(CPU &cpu, memory::MemoryBus &memory,
                                        hw::IOBus &iobus, hw::BIOS &bios,
                                        hw::DOS &dos)
@@ -14,28 +29,32 @@ InstructionDecoder::InstructionDecoder(CPU &cpu, memory::MemoryBus &memory,
       m_hasRepnz(false), m_hasRepz(false), m_segmentOverride(0xFF),
       m_currentEA(0), m_currentOffset(0), m_eaResolved(false) {
   m_cpu.setMemoryBus(&m_memory);
+
+  // Initialise segment bases for Real Mode
+  for (int i = 0; i < 6; i++) {
+    m_segBase[i] =
+        static_cast<uint32_t>(m_cpu.getSegReg(static_cast<SegRegIndex>(i)))
+        << 4;
+  }
 }
 
 uint8_t InstructionDecoder::fetch8() {
   uint32_t eip = m_cpu.getEIP();
-  uint32_t csBase = m_cpu.getSegReg(CS) << 4; // Basic Real Mode Calculation
-  uint8_t val = m_memory.read8(csBase + eip);
+  uint8_t val = m_memory.read8(m_segBase[CS] + eip);
   m_cpu.setEIP(eip + 1);
   return val;
 }
 
 uint16_t InstructionDecoder::fetch16() {
   uint32_t eip = m_cpu.getEIP();
-  uint32_t csBase = m_cpu.getSegReg(CS) << 4;
-  uint16_t val = m_memory.read16(csBase + eip);
+  uint16_t val = m_memory.read16(m_segBase[CS] + eip);
   m_cpu.setEIP(eip + 2);
   return val;
 }
 
 uint32_t InstructionDecoder::fetch32() {
   uint32_t eip = m_cpu.getEIP();
-  uint32_t csBase = m_cpu.getSegReg(CS) << 4;
-  uint32_t val = m_memory.read32(csBase + eip);
+  uint32_t val = m_memory.read32(m_segBase[CS] + eip);
   m_cpu.setEIP(eip + 4);
   return val;
 }
@@ -101,8 +120,7 @@ uint32_t InstructionDecoder::getEffectiveAddress16(const ModRM &modrm) {
 
   uint8_t seg = (m_segmentOverride != 0xFF) ? m_segmentOverride : defaultSeg;
   m_currentOffset = addr;
-  m_currentEA =
-      (m_cpu.getSegReg(static_cast<SegRegIndex>(seg)) << 4) + m_currentOffset;
+  m_currentEA = m_segBase[seg] + m_currentOffset;
   m_eaResolved = true;
   return m_currentEA;
 }
@@ -150,8 +168,7 @@ uint32_t InstructionDecoder::getEffectiveAddress32(const ModRM &modrm) {
 
   uint8_t seg = (m_segmentOverride != 0xFF) ? m_segmentOverride : defaultSeg;
   m_currentOffset = addr;
-  m_currentEA =
-      (m_cpu.getSegReg(static_cast<SegRegIndex>(seg)) << 4) + m_currentOffset;
+  m_currentEA = m_segBase[seg] + m_currentOffset;
   m_eaResolved = true;
   return m_currentEA;
 }
@@ -354,18 +371,18 @@ void InstructionDecoder::step() {
       // instruction clears IF before entering the handler, so current
       // EFLAGS has IF=0; we must not overwrite the original IF=1.
       uint16_t sp = m_cpu.getReg16(SP);
-      uint32_t ssBase = static_cast<uint32_t>(m_cpu.getSegReg(SS)) << 4;
-      uint16_t savedFlags = m_memory.read16(ssBase + ((sp + 4) & 0xFFFF));
+      uint16_t savedFlags =
+          m_memory.read16(m_segBase[SS] + ((sp + 4) & 0xFFFF));
       uint16_t curFlags = static_cast<uint16_t>(m_cpu.getEFLAGS() & 0xFFFF);
       // Keep arithmetic/status flags from HLE, preserve IF+TF from caller
       uint16_t patchedFlags = (curFlags & ~0x0300u) | (savedFlags & 0x0300u);
-      m_memory.write16(ssBase + ((sp + 4) & 0xFFFF), patchedFlags);
+      m_memory.write16(m_segBase[SS] + ((sp + 4) & 0xFFFF), patchedFlags);
       // Fall through — the CPU will now execute the IRET at the stub.
     }
   }
 
-  m_hasPrefix66 = false;
-  m_hasPrefix67 = false;
+  m_hasPrefix66 = m_cpu.is32BitCode();
+  m_hasPrefix67 = m_cpu.is32BitCode();
   m_hasRepnz = false;
   m_hasRepz = false;
   m_segmentOverride = 0xFF;
@@ -377,11 +394,11 @@ void InstructionDecoder::step() {
   while (true) {
     switch (opcode) {
     case 0x66:
-      m_hasPrefix66 = true;
+      m_hasPrefix66 = !m_hasPrefix66;
       opcode = fetch8();
       continue;
     case 0x67:
-      m_hasPrefix67 = true;
+      m_hasPrefix67 = !m_hasPrefix67;
       opcode = fetch8();
       continue;
     case 0xF0:
@@ -424,6 +441,18 @@ void InstructionDecoder::step() {
     }
     break;
   }
+
+  m_trace_cs[m_trace_idx % 32] = m_cpu.getSegReg(CS);
+  m_trace_eip[m_trace_idx % 32] = m_cpu.getEIP() - 1;
+  m_trace_op[m_trace_idx % 32] = opcode;
+  m_trace_idx++;
+
+  g_ring[g_ringIdx] = {m_cpu.getCycles(),   opcode,
+                       m_cpu.getSegReg(CS), m_cpu.getEIP() - 1,
+                       m_cpu.getCR(0),      m_cpu.getEFLAGS(),
+                       m_cpu.getReg32(EAX), m_cpu.getReg32(ESP),
+                       m_cpu.getSegReg(SS), m_cpu.is32BitCode()};
+  g_ringIdx = (g_ringIdx + 1) % 5000;
 
   if (opcode == 0x0F) {
     executeOpcode0F(fetch8());
@@ -490,8 +519,6 @@ void InstructionDecoder::step() {
 }
 
 void InstructionDecoder::executeOpcode(uint8_t opcode) {
-  LOG_CPU("Opcode: 0x", std::hex, (int)opcode, " at CS:EIP ",
-          m_cpu.getSegReg(CS), ":", m_cpu.getEIP() - 1);
   switch (opcode) {
   case 0x90: // NOP
     break;
@@ -510,21 +537,48 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     break;
   }
 
-  case 0xCF: { // IRET (Real mode)
+  case 0xCF: { // IRET/IRETD
     if (m_hasPrefix66) {
       uint32_t esp = m_cpu.getReg32(ESP);
-      m_cpu.setEIP(m_memory.read32((m_cpu.getSegReg(SS) << 4) + esp));
-      m_cpu.setSegReg(
-          CS, m_memory.read32((m_cpu.getSegReg(SS) << 4) + esp + 4) & 0xFFFF);
-      m_cpu.setEFLAGS(m_memory.read32((m_cpu.getSegReg(SS) << 4) + esp + 8));
-      m_cpu.setReg32(ESP, esp + 12);
+      uint32_t newEip = m_memory.read32(m_segBase[SS] + esp);
+      uint16_t newCs = m_memory.read32(m_segBase[SS] + esp + 4) & 0xFFFF;
+      uint32_t newEflags = m_memory.read32(m_segBase[SS] + esp + 8);
+
+      bool wasV86 = (m_cpu.getEFLAGS() & 0x00020000) != 0;
+      bool isV86 = (newEflags & 0x00020000) != 0;
+
+      m_cpu.setEFLAGS(newEflags);
+      m_cpu.setEIP(newEip);
+      loadSegment(CS, newCs);
+
+      if (!wasV86 && isV86) {
+        // Entering V86 from PM requires popping more registers
+        uint32_t newEsp = m_memory.read32(m_segBase[SS] + esp + 12);
+        uint16_t newSs = m_memory.read32(m_segBase[SS] + esp + 16) & 0xFFFF;
+        uint16_t newEs = m_memory.read32(m_segBase[SS] + esp + 20) & 0xFFFF;
+        uint16_t newDs = m_memory.read32(m_segBase[SS] + esp + 24) & 0xFFFF;
+        uint16_t newFs = m_memory.read32(m_segBase[SS] + esp + 28) & 0xFFFF;
+        uint16_t newGs = m_memory.read32(m_segBase[SS] + esp + 32) & 0xFFFF;
+
+        m_cpu.setReg32(ESP, newEsp);
+        loadSegment(SS, newSs);
+        loadSegment(ES, newEs);
+        loadSegment(DS, newDs);
+        loadSegment(FS, newFs);
+        loadSegment(GS, newGs);
+      } else {
+        m_cpu.setReg32(ESP, esp + 12);
+      }
     } else {
       uint16_t sp = m_cpu.getReg16(SP);
-      m_cpu.setEIP(m_memory.read16((m_cpu.getSegReg(SS) << 4) + sp));
-      m_cpu.setSegReg(CS, m_memory.read16((m_cpu.getSegReg(SS) << 4) + sp + 2));
+      uint16_t newIp = m_memory.read16(m_segBase[SS] + sp);
+      uint16_t newCs = m_memory.read16(m_segBase[SS] + sp + 2);
       uint32_t flags = m_cpu.getEFLAGS();
       m_cpu.setEFLAGS((flags & 0xFFFF0000) |
-                      m_memory.read16((m_cpu.getSegReg(SS) << 4) + sp + 4));
+                      m_memory.read16(m_segBase[SS] + sp + 4));
+
+      m_cpu.setEIP(newIp);
+      loadSegment(CS, newCs);
       m_cpu.setReg16(SP, sp + 6);
     }
     break;
@@ -681,25 +735,46 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
 
   // Segment Push/Pop
   case 0x06:
-    m_cpu.push16(m_cpu.getSegReg(ES));
+    if (m_hasPrefix66)
+      m_cpu.push32(m_cpu.getSegReg(ES));
+    else
+      m_cpu.push16(m_cpu.getSegReg(ES));
     break;
   case 0x07:
-    m_cpu.setSegReg(ES, m_cpu.pop16());
+    if (m_hasPrefix66)
+      loadSegment(ES, m_cpu.pop32() & 0xFFFF);
+    else
+      loadSegment(ES, m_cpu.pop16());
     break;
   case 0x0E:
-    m_cpu.push16(m_cpu.getSegReg(CS));
+    if (m_hasPrefix66)
+      m_cpu.push32(m_cpu.getSegReg(CS));
+    else
+      m_cpu.push16(m_cpu.getSegReg(CS));
     break;
   case 0x16:
-    m_cpu.push16(m_cpu.getSegReg(SS));
+    if (m_hasPrefix66)
+      m_cpu.push32(m_cpu.getSegReg(SS));
+    else
+      m_cpu.push16(m_cpu.getSegReg(SS));
     break;
   case 0x17:
-    m_cpu.setSegReg(SS, m_cpu.pop16());
+    if (m_hasPrefix66)
+      loadSegment(SS, m_cpu.pop32() & 0xFFFF);
+    else
+      loadSegment(SS, m_cpu.pop16());
     break;
   case 0x1E:
-    m_cpu.push16(m_cpu.getSegReg(DS));
+    if (m_hasPrefix66)
+      m_cpu.push32(m_cpu.getSegReg(DS));
+    else
+      m_cpu.push16(m_cpu.getSegReg(DS));
     break;
   case 0x1F:
-    m_cpu.setSegReg(DS, m_cpu.pop16());
+    if (m_hasPrefix66)
+      loadSegment(DS, m_cpu.pop32() & 0xFFFF);
+    else
+      loadSegment(DS, m_cpu.pop16());
     break;
 
   case 0x9B:
@@ -1097,7 +1172,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
   }
   case 0x8E: {
     ModRM m = decodeModRM(fetch8());
-    m_cpu.setSegReg(static_cast<SegRegIndex>(m.reg), readModRM16(m));
+    loadSegment(static_cast<SegRegIndex>(m.reg), readModRM16(m));
     break;
   }
   case 0x98: { // CBW / CWDE
@@ -1150,10 +1225,10 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                                 : getEffectiveAddress16(modrm);
     if (m_hasPrefix66) {
       m_cpu.setReg32(modrm.reg, m_memory.read32(ea));
-      m_cpu.setSegReg(ES, m_memory.read16(ea + 4));
+      loadSegment(ES, m_memory.read16(ea + 4));
     } else {
       m_cpu.setReg16(modrm.reg, m_memory.read16(ea));
-      m_cpu.setSegReg(ES, m_memory.read16(ea + 2));
+      loadSegment(ES, m_memory.read16(ea + 2));
     }
     break;
   }
@@ -1163,10 +1238,10 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                                 : getEffectiveAddress16(modrm);
     if (m_hasPrefix66) {
       m_cpu.setReg32(modrm.reg, m_memory.read32(ea));
-      m_cpu.setSegReg(DS, m_memory.read16(ea + 4));
+      loadSegment(DS, m_memory.read16(ea + 4));
     } else {
       m_cpu.setReg16(modrm.reg, m_memory.read16(ea));
-      m_cpu.setSegReg(DS, m_memory.read16(ea + 2));
+      loadSegment(DS, m_memory.read16(ea + 2));
     }
     break;
   }
@@ -1486,8 +1561,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
   case 0xA3: { // MOV [imm], AX/EAX
     uint8_t moffsSeg = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
     uint32_t moffsAddr =
-        (m_cpu.getSegReg(static_cast<SegRegIndex>(moffsSeg)) << 4) +
-        (m_hasPrefix67 ? fetch32() : fetch16());
+        m_segBase[moffsSeg] + (m_hasPrefix67 ? fetch32() : fetch16());
     if (opcode == 0xA0)
       m_cpu.setReg8(AL, m_memory.read8(moffsAddr));
     else if (opcode == 0xA1) {
@@ -1508,8 +1582,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
 
   case 0xD7: { // XLAT
     uint8_t xlatSeg = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
-    uint32_t addr = (m_cpu.getSegReg(static_cast<SegRegIndex>(xlatSeg)) << 4) +
-                    m_cpu.getReg16(BX) + m_cpu.getReg8(AL);
+    uint32_t addr = m_segBase[xlatSeg] + m_cpu.getReg16(BX) + m_cpu.getReg8(AL);
     m_cpu.setReg8(AL, m_memory.read8(addr));
     break;
   }
@@ -1521,42 +1594,62 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
   case 0xDD:
   case 0xDE:
   case 0xDF: { // FPU op stubs
-    decodeModRM(fetch8());
-    LOG_CPU("FPU opcode 0x", std::hex, static_cast<int>(opcode),
-            " encountered - stubbed");
+    ModRM modrm = decodeModRM(fetch8());
+    if (modrm.mod != 3) {
+      if (m_hasPrefix67)
+        getEffectiveAddress32(modrm);
+      else
+        getEffectiveAddress16(modrm);
+    }
     break;
   }
   case 0xA4: { // MOVSB
     LOG_CPU("MOVSB");
     uint8_t srcSeg = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
-    m_memory.write8(
-        (m_cpu.getSegReg(ES) << 4) + m_cpu.getReg16(DI),
-        m_memory.read8((m_cpu.getSegReg(srcSeg) << 4) + m_cpu.getReg16(SI)));
-    m_cpu.setReg16(DI, m_cpu.getReg16(DI) +
-                           ((m_cpu.getEFLAGS() & 0x0400) ? -1 : 1));
-    m_cpu.setReg16(SI, m_cpu.getReg16(SI) +
-                           ((m_cpu.getEFLAGS() & 0x0400) ? -1 : 1));
+    uint32_t srcOff = m_hasPrefix67 ? m_cpu.getReg32(ESI) : m_cpu.getReg16(SI);
+    uint32_t dstOff = m_hasPrefix67 ? m_cpu.getReg32(EDI) : m_cpu.getReg16(DI);
+
+    m_memory.write8(m_segBase[ES] + dstOff,
+                    m_memory.read8(m_segBase[srcSeg] + srcOff));
+
+    int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -1 : 1;
+    if (m_hasPrefix67) {
+      m_cpu.setReg32(EDI, dstOff + diff);
+      m_cpu.setReg32(ESI, srcOff + diff);
+    } else {
+      m_cpu.setReg16(DI, static_cast<uint16_t>(dstOff + diff));
+      m_cpu.setReg16(SI, static_cast<uint16_t>(srcOff + diff));
+    }
     break;
   }
   case 0xA5: { // MOVSW/MOVSD
     LOG_CPU("MOVSW/D");
     uint8_t srcSeg = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
+    uint32_t srcOff = m_hasPrefix67 ? m_cpu.getReg32(ESI) : m_cpu.getReg16(SI);
+    uint32_t dstOff = m_hasPrefix67 ? m_cpu.getReg32(EDI) : m_cpu.getReg16(DI);
+
     if (m_hasPrefix66) {
-      m_memory.write32((m_cpu.getSegReg(ES) << 4) + m_cpu.getReg32(EDI),
-                       m_memory.read32((m_cpu.getSegReg(srcSeg) << 4) +
-                                       m_cpu.getReg32(ESI)));
-      m_cpu.setReg32(EDI, m_cpu.getReg32(EDI) +
-                              ((m_cpu.getEFLAGS() & 0x0400) ? -4 : 4));
-      m_cpu.setReg32(ESI, m_cpu.getReg32(ESI) +
-                              ((m_cpu.getEFLAGS() & 0x0400) ? -4 : 4));
+      m_memory.write32(m_segBase[ES] + dstOff,
+                       m_memory.read32(m_segBase[srcSeg] + srcOff));
+      int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -4 : 4;
+      if (m_hasPrefix67) {
+        m_cpu.setReg32(EDI, dstOff + diff);
+        m_cpu.setReg32(ESI, srcOff + diff);
+      } else {
+        m_cpu.setReg16(DI, static_cast<uint16_t>(dstOff + diff));
+        m_cpu.setReg16(SI, static_cast<uint16_t>(srcOff + diff));
+      }
     } else {
-      m_memory.write16(
-          (m_cpu.getSegReg(ES) << 4) + m_cpu.getReg16(DI),
-          m_memory.read16((m_cpu.getSegReg(srcSeg) << 4) + m_cpu.getReg16(SI)));
-      m_cpu.setReg16(DI, m_cpu.getReg16(DI) +
-                             ((m_cpu.getEFLAGS() & 0x0400) ? -2 : 2));
-      m_cpu.setReg16(SI, m_cpu.getReg16(SI) +
-                             ((m_cpu.getEFLAGS() & 0x0400) ? -2 : 2));
+      m_memory.write16(m_segBase[ES] + dstOff,
+                       m_memory.read16(m_segBase[srcSeg] + srcOff));
+      int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -2 : 2;
+      if (m_hasPrefix67) {
+        m_cpu.setReg32(EDI, dstOff + diff);
+        m_cpu.setReg32(ESI, srcOff + diff);
+      } else {
+        m_cpu.setReg16(DI, static_cast<uint16_t>(dstOff + diff));
+        m_cpu.setReg16(SI, static_cast<uint16_t>(srcOff + diff));
+      }
     }
     break;
   }
@@ -1564,11 +1657,11 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     LOG_CPU("CMPSB");
     uint8_t srcSegC8 = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
     uint8_t val1 = m_memory.read8(
-        (m_cpu.getSegReg(srcSegC8) << 4) +
+        m_segBase[srcSegC8] +
         (m_hasPrefix67 ? m_cpu.getReg32(ESI) : m_cpu.getReg16(SI)));
-    uint8_t val2 = m_memory.read8(
-        (m_cpu.getSegReg(ES) << 4) +
-        (m_hasPrefix67 ? m_cpu.getReg32(EDI) : m_cpu.getReg16(DI)));
+    uint8_t val2 =
+        m_memory.read8(m_segBase[ES] + (m_hasPrefix67 ? m_cpu.getReg32(EDI)
+                                                      : m_cpu.getReg16(DI)));
     aluOp(7, val1, val2, 8); // CMP
     int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -1 : 1;
     if (m_hasPrefix67) {
@@ -1584,11 +1677,11 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     uint8_t srcSegCW = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
     if (m_hasPrefix66) {
       uint32_t val1 = m_memory.read32(
-          (m_cpu.getSegReg(srcSegCW) << 4) +
+          m_segBase[srcSegCW] +
           (m_hasPrefix67 ? m_cpu.getReg32(ESI) : m_cpu.getReg16(SI)));
-      uint32_t val2 = m_memory.read32(
-          (m_cpu.getSegReg(ES) << 4) +
-          (m_hasPrefix67 ? m_cpu.getReg32(EDI) : m_cpu.getReg16(DI)));
+      uint32_t val2 =
+          m_memory.read32(m_segBase[ES] + (m_hasPrefix67 ? m_cpu.getReg32(EDI)
+                                                         : m_cpu.getReg16(DI)));
       aluOp(7, val1, val2, 32);
       int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -4 : 4;
       if (m_hasPrefix67) {
@@ -1600,11 +1693,11 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
       }
     } else {
       uint16_t val1 = m_memory.read16(
-          (m_cpu.getSegReg(srcSegCW) << 4) +
+          m_segBase[srcSegCW] +
           (m_hasPrefix67 ? m_cpu.getReg32(ESI) : m_cpu.getReg16(SI)));
-      uint16_t val2 = m_memory.read16(
-          (m_cpu.getSegReg(ES) << 4) +
-          (m_hasPrefix67 ? m_cpu.getReg32(EDI) : m_cpu.getReg16(DI)));
+      uint16_t val2 =
+          m_memory.read16(m_segBase[ES] + (m_hasPrefix67 ? m_cpu.getReg32(EDI)
+                                                         : m_cpu.getReg16(DI)));
       aluOp(7, val1, val2, 16);
       int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -2 : 2;
       if (m_hasPrefix67) {
@@ -1617,57 +1710,75 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     }
     break;
   }
-  case 0xAA: // STOSB
+  case 0xAA: { // STOSB
     LOG_CPU("STOSB");
-    m_memory.write8((m_cpu.getSegReg(ES) << 4) + m_cpu.getReg16(DI),
-                    m_cpu.getReg8(AL));
-    m_cpu.setReg16(DI, m_cpu.getReg16(DI) +
-                           ((m_cpu.getEFLAGS() & 0x0400) ? -1 : 1));
+    uint32_t dstOff = m_hasPrefix67 ? m_cpu.getReg32(EDI) : m_cpu.getReg16(DI);
+    m_memory.write8(m_segBase[ES] + dstOff, m_cpu.getReg8(AL));
+    int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -1 : 1;
+    if (m_hasPrefix67)
+      m_cpu.setReg32(EDI, dstOff + diff);
+    else
+      m_cpu.setReg16(DI, static_cast<uint16_t>(dstOff + diff));
     break;
-  case 0xAB: // STOSW/STOSD
+  }
+  case 0xAB: { // STOSW/STOSD
     LOG_CPU("STOSW/D");
+    uint32_t dstOff = m_hasPrefix67 ? m_cpu.getReg32(EDI) : m_cpu.getReg16(DI);
     if (m_hasPrefix66) {
-      m_memory.write32((m_cpu.getSegReg(ES) << 4) + m_cpu.getReg32(EDI),
-                       m_cpu.getReg32(EAX));
-      m_cpu.setReg32(EDI, m_cpu.getReg32(EDI) +
-                              ((m_cpu.getEFLAGS() & 0x0400) ? -4 : 4));
+      m_memory.write32(m_segBase[ES] + dstOff, m_cpu.getReg32(EAX));
+      int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -4 : 4;
+      if (m_hasPrefix67)
+        m_cpu.setReg32(EDI, dstOff + diff);
+      else
+        m_cpu.setReg16(DI, static_cast<uint16_t>(dstOff + diff));
     } else {
-      m_memory.write16((m_cpu.getSegReg(ES) << 4) + m_cpu.getReg16(DI),
-                       m_cpu.getReg16(AX));
-      m_cpu.setReg16(DI, m_cpu.getReg16(DI) +
-                             ((m_cpu.getEFLAGS() & 0x0400) ? -2 : 2));
+      m_memory.write16(m_segBase[ES] + dstOff, m_cpu.getReg16(AX));
+      int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -2 : 2;
+      if (m_hasPrefix67)
+        m_cpu.setReg32(EDI, dstOff + diff);
+      else
+        m_cpu.setReg16(DI, static_cast<uint16_t>(dstOff + diff));
     }
     break;
+  }
   case 0xAC: { // LODSB
     LOG_CPU("LODSB");
-    uint8_t srcSegLB = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
-    m_cpu.setReg8(AL, m_memory.read8((m_cpu.getSegReg(srcSegLB) << 4) +
-                                     m_cpu.getReg16(SI)));
-    m_cpu.setReg16(SI, m_cpu.getReg16(SI) +
-                           ((m_cpu.getEFLAGS() & 0x0400) ? -1 : 1));
+    uint8_t srcSeg = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
+    uint32_t srcOff = m_hasPrefix67 ? m_cpu.getReg32(ESI) : m_cpu.getReg16(SI);
+    m_cpu.setReg8(AL, m_memory.read8(m_segBase[srcSeg] + srcOff));
+    int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -1 : 1;
+    if (m_hasPrefix67)
+      m_cpu.setReg32(ESI, srcOff + diff);
+    else
+      m_cpu.setReg16(SI, static_cast<uint16_t>(srcOff + diff));
     break;
   }
   case 0xAD: { // LODSW/LODSD
     LOG_CPU("LODSW/D");
-    uint8_t srcSegLW = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
+    uint8_t srcSeg = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
+    uint32_t srcOff = m_hasPrefix67 ? m_cpu.getReg32(ESI) : m_cpu.getReg16(SI);
     if (m_hasPrefix66) {
-      m_cpu.setReg32(EAX, m_memory.read32((m_cpu.getSegReg(srcSegLW) << 4) +
-                                          m_cpu.getReg32(ESI)));
-      m_cpu.setReg32(ESI, m_cpu.getReg32(ESI) +
-                              ((m_cpu.getEFLAGS() & 0x0400) ? -4 : 4));
+      m_cpu.setReg32(EAX, m_memory.read32(m_segBase[srcSeg] + srcOff));
+      int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -4 : 4;
+      if (m_hasPrefix67)
+        m_cpu.setReg32(ESI, srcOff + diff);
+      else
+        m_cpu.setReg16(SI, static_cast<uint16_t>(srcOff + diff));
     } else {
-      m_cpu.setReg16(AX, m_memory.read16((m_cpu.getSegReg(srcSegLW) << 4) +
-                                         m_cpu.getReg16(SI)));
-      m_cpu.setReg16(SI, m_cpu.getReg16(SI) +
-                             ((m_cpu.getEFLAGS() & 0x0400) ? -2 : 2));
+      m_cpu.setReg16(AX, m_memory.read16(m_segBase[srcSeg] + srcOff));
+      int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -2 : 2;
+      if (m_hasPrefix67)
+        m_cpu.setReg32(ESI, srcOff + diff);
+      else
+        m_cpu.setReg16(SI, static_cast<uint16_t>(srcOff + diff));
     }
     break;
   }
   case 0xAE: { // SCASB
     uint8_t val1 = m_cpu.getReg8(AL);
-    uint8_t val2 = m_memory.read8(
-        (m_cpu.getSegReg(ES) << 4) +
-        (m_hasPrefix67 ? m_cpu.getReg32(EDI) : m_cpu.getReg16(DI)));
+    uint8_t val2 =
+        m_memory.read8(m_segBase[ES] + (m_hasPrefix67 ? m_cpu.getReg32(EDI)
+                                                      : m_cpu.getReg16(DI)));
     aluOp(7, val1, val2, 8); // CMP
     int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -1 : 1;
     if (m_hasPrefix67)
@@ -1679,9 +1790,9 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
   case 0xAF: { // SCASW/SCASD
     if (m_hasPrefix66) {
       uint32_t val1 = m_cpu.getReg32(EAX);
-      uint32_t val2 = m_memory.read32(
-          (m_cpu.getSegReg(ES) << 4) +
-          (m_hasPrefix67 ? m_cpu.getReg32(EDI) : m_cpu.getReg16(DI)));
+      uint32_t val2 =
+          m_memory.read32(m_segBase[ES] + (m_hasPrefix67 ? m_cpu.getReg32(EDI)
+                                                         : m_cpu.getReg16(DI)));
       aluOp(7, val1, val2, 32);
       int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -4 : 4;
       if (m_hasPrefix67)
@@ -1690,9 +1801,9 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
         m_cpu.setReg16(DI, static_cast<uint16_t>(m_cpu.getReg16(DI) + diff));
     } else {
       uint16_t val1 = m_cpu.getReg16(AX);
-      uint16_t val2 = m_memory.read16(
-          (m_cpu.getSegReg(ES) << 4) +
-          (m_hasPrefix67 ? m_cpu.getReg32(EDI) : m_cpu.getReg16(DI)));
+      uint16_t val2 =
+          m_memory.read16(m_segBase[ES] + (m_hasPrefix67 ? m_cpu.getReg32(EDI)
+                                                         : m_cpu.getReg16(DI)));
       aluOp(7, val1, val2, 16);
       int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -2 : 2;
       if (m_hasPrefix67)
@@ -1942,9 +2053,9 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                                       : getEffectiveAddress16(modrm);
         uint32_t jumpIP = m_memory.read32(addr);
         uint16_t jumpCS = m_memory.read16(addr + 4);
-        m_cpu.push16(m_cpu.getSegReg(CS));
+        m_cpu.push32(m_cpu.getSegReg(CS));
         m_cpu.push32(m_cpu.getEIP());
-        m_cpu.setSegReg(CS, jumpCS);
+        loadSegment(CS, jumpCS);
         m_cpu.setEIP(jumpIP);
         break;
       }
@@ -1956,7 +2067,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                                       : getEffectiveAddress16(modrm);
         uint32_t jumpIP = m_memory.read32(addr);
         uint16_t jumpCS = m_memory.read16(addr + 4);
-        m_cpu.setSegReg(CS, jumpCS);
+        loadSegment(CS, jumpCS);
         m_cpu.setEIP(jumpIP);
         break;
       }
@@ -1989,7 +2100,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
         uint16_t jumpCS = m_memory.read16(addr + 2);
         m_cpu.push16(m_cpu.getSegReg(CS));
         m_cpu.push16(static_cast<uint16_t>(m_cpu.getEIP()));
-        m_cpu.setSegReg(CS, jumpCS);
+        loadSegment(CS, jumpCS);
         m_cpu.setEIP(jumpIP);
         break;
       }
@@ -2001,7 +2112,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                                       : getEffectiveAddress16(modrm);
         uint16_t jumpIP = m_memory.read16(addr);
         uint16_t jumpCS = m_memory.read16(addr + 2);
-        m_cpu.setSegReg(CS, jumpCS);
+        loadSegment(CS, jumpCS);
         m_cpu.setEIP(jumpIP);
         break;
       }
@@ -2018,61 +2129,61 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
 
   // Return / Branch
   case 0xC3: { // RET Near
-    uint16_t ip;
+    uint32_t eip;
     if (m_hasPrefix66) {
-      ip = m_memory.read16((m_cpu.getSegReg(SS) << 4) + m_cpu.getReg32(ESP));
+      eip = m_memory.read32(m_segBase[SS] + m_cpu.getReg32(ESP));
       m_cpu.setReg32(ESP, m_cpu.getReg32(ESP) + 4);
     } else {
-      ip = m_memory.read16((m_cpu.getSegReg(SS) << 4) + m_cpu.getReg16(SP));
+      eip = m_memory.read16(m_segBase[SS] + m_cpu.getReg16(SP));
       m_cpu.setReg16(SP, m_cpu.getReg16(SP) + 2);
     }
-    m_cpu.setEIP(ip);
+    m_cpu.setEIP(eip);
     break;
   }
   case 0xC2: { // RET imm16 Near
     uint16_t imm = fetch16();
-    uint16_t ip;
+    uint32_t eip;
     if (m_hasPrefix66) {
-      ip = m_memory.read16((m_cpu.getSegReg(SS) << 4) + m_cpu.getReg32(ESP));
+      eip = m_memory.read32(m_segBase[SS] + m_cpu.getReg32(ESP));
       m_cpu.setReg32(ESP, m_cpu.getReg32(ESP) + 4 + imm);
     } else {
-      ip = m_memory.read16((m_cpu.getSegReg(SS) << 4) + m_cpu.getReg16(SP));
+      eip = m_memory.read16(m_segBase[SS] + m_cpu.getReg16(SP));
       m_cpu.setReg16(SP, m_cpu.getReg16(SP) + 2 + imm);
     }
-    m_cpu.setEIP(ip);
+    m_cpu.setEIP(eip);
     break;
   }
   case 0xCB: { // RETF Far
-    uint16_t ip, cs;
+    uint32_t eip;
+    uint16_t cs;
     if (m_hasPrefix66) {
-      ip = m_memory.read16((m_cpu.getSegReg(SS) << 4) + m_cpu.getReg32(ESP));
-      cs =
-          m_memory.read16((m_cpu.getSegReg(SS) << 4) + m_cpu.getReg32(ESP) + 4);
+      eip = m_memory.read32(m_segBase[SS] + m_cpu.getReg32(ESP));
+      cs = m_memory.read32(m_segBase[SS] + m_cpu.getReg32(ESP) + 4) & 0xFFFF;
       m_cpu.setReg32(ESP, m_cpu.getReg32(ESP) + 8);
     } else {
-      ip = m_memory.read16((m_cpu.getSegReg(SS) << 4) + m_cpu.getReg16(SP));
-      cs = m_memory.read16((m_cpu.getSegReg(SS) << 4) + m_cpu.getReg16(SP) + 2);
+      eip = m_memory.read16(m_segBase[SS] + m_cpu.getReg16(SP));
+      cs = m_memory.read16(m_segBase[SS] + m_cpu.getReg16(SP) + 2);
       m_cpu.setReg16(SP, m_cpu.getReg16(SP) + 4);
     }
-    m_cpu.setSegReg(CS, cs);
-    m_cpu.setEIP(ip);
+    loadSegment(CS, cs);
+    m_cpu.setEIP(eip);
     break;
   }
   case 0xCA: { // RETF imm16 Far
     uint16_t imm = fetch16();
-    uint16_t ip, cs;
+    uint32_t eip;
+    uint16_t cs;
     if (m_hasPrefix66) {
-      ip = m_memory.read16((m_cpu.getSegReg(SS) << 4) + m_cpu.getReg32(ESP));
-      cs =
-          m_memory.read16((m_cpu.getSegReg(SS) << 4) + m_cpu.getReg32(ESP) + 4);
+      eip = m_memory.read32(m_segBase[SS] + m_cpu.getReg32(ESP));
+      cs = m_memory.read32(m_segBase[SS] + m_cpu.getReg32(ESP) + 4) & 0xFFFF;
       m_cpu.setReg32(ESP, m_cpu.getReg32(ESP) + 8 + imm);
     } else {
-      ip = m_memory.read16((m_cpu.getSegReg(SS) << 4) + m_cpu.getReg16(SP));
-      cs = m_memory.read16((m_cpu.getSegReg(SS) << 4) + m_cpu.getReg16(SP) + 2);
+      eip = m_memory.read16(m_segBase[SS] + m_cpu.getReg16(SP));
+      cs = m_memory.read16(m_segBase[SS] + m_cpu.getReg16(SP) + 2);
       m_cpu.setReg16(SP, m_cpu.getReg16(SP) + 4 + imm);
     }
-    m_cpu.setSegReg(CS, cs);
-    m_cpu.setEIP(ip);
+    loadSegment(CS, cs);
+    m_cpu.setEIP(eip);
     break;
   }
   case 0xE8: { // CALL rel
@@ -2087,13 +2198,23 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     }
     break;
   }
-  case 0x9A: { // CALL far imm16:imm16
-    uint16_t ip = fetch16();
-    uint16_t cs = fetch16();
-    m_cpu.push16(m_cpu.getSegReg(CS));
-    m_cpu.push16(static_cast<uint16_t>(m_cpu.getEIP()));
-    m_cpu.setSegReg(CS, cs);
-    m_cpu.setEIP(ip);
+  case 0x9A: { // CALL far imm16:imm16/32
+    if (m_hasPrefix66) {
+      uint32_t eip = fetch32();
+      uint16_t cs = fetch16();
+      m_cpu.push32(
+          m_cpu.getSegReg(CS)); // Realistically pushes 16-bit CS padded to 32
+      m_cpu.push32(m_cpu.getEIP());
+      loadSegment(CS, cs);
+      m_cpu.setEIP(eip);
+    } else {
+      uint16_t ip = fetch16();
+      uint16_t cs = fetch16();
+      m_cpu.push16(m_cpu.getSegReg(CS));
+      m_cpu.push16(static_cast<uint16_t>(m_cpu.getEIP()));
+      loadSegment(CS, cs);
+      m_cpu.setEIP(ip);
+    }
     break;
   }
   case 0xE9: { // JMP rel16/32
@@ -2106,11 +2227,18 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     }
     break;
   }
-  case 0xEA: { // JMP far imm16:imm16
-    uint16_t ip = fetch16();
-    uint16_t cs = fetch16();
-    m_cpu.setSegReg(CS, cs);
-    m_cpu.setEIP(ip);
+  case 0xEA: { // JMP far imm16:imm16/32
+    if (m_hasPrefix66) {
+      uint32_t eip = fetch32();
+      uint16_t cs = fetch16();
+      loadSegment(CS, cs);
+      m_cpu.setEIP(eip);
+    } else {
+      uint16_t ip = fetch16();
+      uint16_t cs = fetch16();
+      loadSegment(CS, cs);
+      m_cpu.setEIP(ip);
+    }
     break;
   }
   case 0xEB: { // JMP rel8
@@ -2206,6 +2334,8 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
 }
 
 void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
+  LOG_CPU("Opcode0F: 0x", std::hex, (int)opcode, " at CS:EIP ",
+          m_cpu.getSegReg(CS), ":", m_cpu.getEIP() - 1);
   switch (opcode) {
   case 0x00: { // Group 6
     ModRM modrm = decodeModRM(fetch8());
@@ -2215,6 +2345,14 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
       break;
     case 1: // STR
       writeModRM16(modrm, 0);
+      break;
+    case 2: // LLDT
+      LOG_DEBUG("[CPU] LLDT selector: 0x", std::hex, readModRM16(modrm));
+      // Just a stub for now
+      break;
+    case 3: // LTR
+      LOG_DEBUG("[CPU] LTR selector: 0x", std::hex, readModRM16(modrm));
+      // Just a stub for now
       break;
     default:
       LOG_WARN("Group 6 (0x0F 0x00) sub-opcode ", (int)modrm.reg,
@@ -2227,9 +2365,57 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
   case 0x01: { // Group 7
     ModRM modrm = decodeModRM(fetch8());
     switch (modrm.reg) {
-    case 4:                   // SMSW
-      writeModRM16(modrm, 0); // Correct for real mode (PE=0)
+    case 0: { // SGDT
+      uint32_t addr = m_hasPrefix67 ? getEffectiveAddress32(modrm)
+                                    : getEffectiveAddress16(modrm);
+      m_memory.write16(addr, m_cpu.getGDTR().limit);
+      m_memory.write32(addr + 2, m_cpu.getGDTR().base &
+                                     (m_hasPrefix66 ? 0xFFFFFFFF : 0xFFFFFF));
       break;
+    }
+    case 1: { // SIDT
+      uint32_t addr = m_hasPrefix67 ? getEffectiveAddress32(modrm)
+                                    : getEffectiveAddress16(modrm);
+      m_memory.write16(addr, m_cpu.getIDTR().limit);
+      m_memory.write32(addr + 2, m_cpu.getIDTR().base &
+                                     (m_hasPrefix66 ? 0xFFFFFFFF : 0xFFFFFF));
+      break;
+    }
+    case 2: { // LGDT
+      uint32_t addr = m_hasPrefix67 ? getEffectiveAddress32(modrm)
+                                    : getEffectiveAddress16(modrm);
+      uint16_t limit = m_memory.read16(addr);
+      uint32_t base = m_memory.read32(addr + 2);
+      if (!m_hasPrefix66)
+        base &= 0xFFFFFF;
+      LOG_DEBUG("[CPU] LGDT base=", std::hex, base, " limit=", limit);
+      m_cpu.setGDTR({limit, base});
+      break;
+    }
+    case 3: { // LIDT
+      uint32_t addr = m_hasPrefix67 ? getEffectiveAddress32(modrm)
+                                    : getEffectiveAddress16(modrm);
+      uint16_t limit = m_memory.read16(addr);
+      uint32_t base = m_memory.read32(addr + 2);
+      if (!m_hasPrefix66)
+        base &= 0xFFFFFF;
+      LOG_DEBUG("[CPU] LIDT base=", std::hex, base, " limit=", limit);
+      m_cpu.setIDTR({limit, base});
+      break;
+    }
+    case 4: // SMSW
+      writeModRM16(modrm, m_cpu.getCR(0) & 0xFFFF);
+      break;
+    case 6: { // LMSW
+      uint16_t cur_msw = m_cpu.getCR(0) & 0xFFFF;
+      uint16_t new_msw = readModRM16(modrm);
+      // PE bit (bit 0) cannot be cleared by LMSW once set
+      new_msw = (new_msw & ~1) | (cur_msw & 1) | (new_msw & 1);
+      uint32_t newVal = (m_cpu.getCR(0) & 0xFFFF0000) | new_msw;
+      LOG_DEBUG("[CPU] LMSW = ", std::hex, new_msw);
+      m_cpu.setCR(0, newVal);
+      break;
+    }
     default:
       LOG_WARN("Group 7 (0x0F 0x01) sub-opcode ", (int)modrm.reg,
                " not implemented.");
@@ -2271,6 +2457,28 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
   case 0x11: { // MOVUPS / MOVSS xmm/m, xmm  – SSE stub
     ModRM modrm = decodeModRM(fetch8());
     (void)modrm;
+    break;
+  }
+  case 0x20: { // MOV rd, CRn
+    ModRM modrm = decodeModRM(fetch8());
+    m_cpu.setReg32(modrm.rm, m_cpu.getCR(modrm.reg));
+    break;
+  }
+  case 0x21: { // MOV rd, DRn
+    ModRM modrm = decodeModRM(fetch8());
+    m_cpu.setReg32(modrm.rm, m_cpu.getDR(modrm.reg));
+    break;
+  }
+  case 0x22: { // MOV CRn, rd
+    ModRM modrm = decodeModRM(fetch8());
+    uint32_t val = m_cpu.getReg32(modrm.rm);
+    LOG_DEBUG("[CPU] MOV CR", (int)modrm.reg, " = ", std::hex, val);
+    m_cpu.setCR(modrm.reg, val);
+    break;
+  }
+  case 0x23: { // MOV DRn, rd
+    ModRM modrm = decodeModRM(fetch8());
+    m_cpu.setDR(modrm.reg, m_cpu.getReg32(modrm.rm));
     break;
   }
   case 0x35: // SYSEXIT  – no-op in real mode
@@ -2359,17 +2567,29 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
   }
 
   // PUSH/POP FS (0F A0/A1) and GS (0F A8/A9)
-  case 0xA0:
-    m_cpu.push16(m_cpu.getSegReg(FS));
+  case 0xA0: // PUSH FS
+    if (m_hasPrefix66)
+      m_cpu.push32(m_cpu.getSegReg(FS));
+    else
+      m_cpu.push16(m_cpu.getSegReg(FS));
     break;
-  case 0xA1:
-    m_cpu.setSegReg(FS, m_cpu.pop16());
+  case 0xA1: // POP FS
+    if (m_hasPrefix66)
+      loadSegment(FS, m_cpu.pop32() & 0xFFFF);
+    else
+      loadSegment(FS, m_cpu.pop16());
     break;
-  case 0xA8:
-    m_cpu.push16(m_cpu.getSegReg(GS));
+  case 0xA8: // PUSH GS
+    if (m_hasPrefix66)
+      m_cpu.push32(m_cpu.getSegReg(GS));
+    else
+      m_cpu.push16(m_cpu.getSegReg(GS));
     break;
-  case 0xA9:
-    m_cpu.setSegReg(GS, m_cpu.pop16());
+  case 0xA9: // POP GS
+    if (m_hasPrefix66)
+      loadSegment(GS, m_cpu.pop32() & 0xFFFF);
+    else
+      loadSegment(GS, m_cpu.pop16());
     break;
 
   case 0xA3: { // BT r/m, r
@@ -2712,10 +2932,10 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
                                   : getEffectiveAddress16(modrm);
     if (m_hasPrefix66) {
       m_cpu.setReg32(modrm.reg, m_memory.read32(addr));
-      m_cpu.setSegReg(SS, m_memory.read16(addr + 4));
+      loadSegment(SS, m_memory.read16(addr + 4));
     } else {
       m_cpu.setReg16(modrm.reg, m_memory.read16(addr));
-      m_cpu.setSegReg(SS, m_memory.read16(addr + 2));
+      loadSegment(SS, m_memory.read16(addr + 2));
     }
     break;
   }
@@ -2725,10 +2945,10 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
                                   : getEffectiveAddress16(modrm);
     if (m_hasPrefix66) {
       m_cpu.setReg32(modrm.reg, m_memory.read32(addr));
-      m_cpu.setSegReg(FS, m_memory.read16(addr + 4));
+      loadSegment(FS, m_memory.read16(addr + 4));
     } else {
       m_cpu.setReg16(modrm.reg, m_memory.read16(addr));
-      m_cpu.setSegReg(FS, m_memory.read16(addr + 2));
+      loadSegment(FS, m_memory.read16(addr + 2));
     }
     break;
   }
@@ -2738,10 +2958,10 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
                                   : getEffectiveAddress16(modrm);
     if (m_hasPrefix66) {
       m_cpu.setReg32(modrm.reg, m_memory.read32(addr));
-      m_cpu.setSegReg(GS, m_memory.read16(addr + 4));
+      loadSegment(GS, m_memory.read16(addr + 4));
     } else {
       m_cpu.setReg16(modrm.reg, m_memory.read16(addr));
-      m_cpu.setSegReg(GS, m_memory.read16(addr + 2));
+      loadSegment(GS, m_memory.read16(addr + 2));
     }
     break;
   }
@@ -2814,6 +3034,31 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
 }
 
 void InstructionDecoder::triggerInterrupt(uint8_t vector) {
+  if (vector == 6 || vector == 8 || vector == 13 || vector == 14) {
+    LOG_ERROR("CRITICAL DUMP: INT 0x", std::hex, (int)vector,
+              " at CS:EIP=", m_cpu.getSegReg(CS), ":", m_cpu.getEIP());
+    LOG_ERROR("STATE: CR0:", m_cpu.getCR(0), " EFLAGS:", m_cpu.getEFLAGS(),
+              " EAX:", m_cpu.getReg32(EAX), " EBX:", m_cpu.getReg32(EBX),
+              " ECX:", m_cpu.getReg32(ECX), " EDX:", m_cpu.getReg32(EDX),
+              " ESP:", m_cpu.getReg32(ESP), " EBP:", m_cpu.getReg32(EBP),
+              " ESI:", m_cpu.getReg32(ESI), " EDI:", m_cpu.getReg32(EDI),
+              " CS:", m_cpu.getSegReg(CS), " DS:", m_cpu.getSegReg(DS),
+              " ES:", m_cpu.getSegReg(ES), " SS:", m_cpu.getSegReg(SS),
+              " FS:", m_cpu.getSegReg(FS), " GS:", m_cpu.getSegReg(GS));
+
+    LOG_ERROR("--- LAST 5000 INSTRUCTIONS ---");
+    for (size_t i = 1; i <= 5000; i++) {
+      size_t idx = (g_ringIdx + 5000 - i) % 5000;
+      if (g_ring[idx].cyc == 0)
+        continue;
+      LOG_ERROR("CYC: ", std::dec, g_ring[idx].cyc, " Op: 0x", std::hex,
+                (int)g_ring[idx].op, " CS:EIP ", g_ring[idx].cs, ":",
+                g_ring[idx].eip, " EAX:", g_ring[idx].eax,
+                " ESP:", g_ring[idx].esp, " SS:", g_ring[idx].ss,
+                " is32:", g_ring[idx].is32);
+    }
+    LOG_ERROR("--- END DUMP ---");
+  }
   if (vector == 0) {
     // Log the faulting address from the stack (if pushed) or current CS:IP
     LOG_WARN("INT 0 (DIV exception) at CS:IP=", std::hex, m_cpu.getSegReg(CS),
@@ -2821,52 +3066,143 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
              " DX=", m_cpu.getReg16(DX), " CX=", m_cpu.getReg16(CX),
              " BX=", m_cpu.getReg16(BX));
   }
-  // Read the current IVT entry for this vector.
-  uint16_t ivtIP = m_memory.read16(vector * 4);
-  uint16_t ivtCS = m_memory.read16(vector * 4 + 2);
+  uint16_t cs, ip;
+  uint32_t eip32 = 0;
+  bool use32 = false;
 
-  // If the IVT still points to the BIOS-default handler, use HLE directly
-  // (no stack manipulation needed — the caller's INT opcode is fully emulated
-  // in software without touching the real-mode stack).
-  if (m_bios.isOriginalIVT(vector, ivtCS, ivtIP)) {
-    if (m_dos.handleInterrupt(vector))
-      return;
-    if (m_bios.handleInterrupt(vector))
-      return;
-    // Neither HLE handled it — fall through to execute the IRET stub,
-    // which is harmless (just bounces back).
+  if (m_cpu.getCR(0) & 1) {
+    // Protected Mode IDT lookup
+    uint32_t idtBase = m_cpu.getIDTR().base;
+    uint32_t entryAddr = idtBase + vector * 8;
+    uint32_t low = m_memory.read32(entryAddr);
+    uint32_t high = m_memory.read32(entryAddr + 4);
+    cs = (low >> 16) & 0xFFFF;
+    eip32 = (low & 0xFFFF) | (high & 0xFFFF0000);
+
+    // Check gate type (bit 11 of high word: 1 = 32-bit gate, 0 = 16-bit gate)
+    use32 = (high & 0x0800) != 0;
+
+    LOG_DEBUG("PM INT 0x", std::hex, (int)vector, " selector: 0x", cs,
+              " offset: 0x", eip32, " size: ", use32 ? 32 : 16);
+  } else {
+    // Real Mode IVT lookup
+    ip = m_memory.read16(vector * 4);
+    cs = m_memory.read16(vector * 4 + 2);
+
+    // HLE check (only in Real Mode for now)
+    if (m_bios.isOriginalIVT(vector, cs, ip)) {
+      if (m_dos.handleInterrupt(vector))
+        return;
+      if (m_bios.handleInterrupt(vector))
+        return;
+    }
+    eip32 = ip;
+    use32 = false;
   }
 
-  // The IVT was modified (program installed a hook) or HLE didn't handle the
-  // vector.  Behave like real hardware: push FLAGS/CS/IP, clear IF+TF, and
-  // transfer control to the IVT handler.
-  if (!m_bios.isOriginalIVT(vector, ivtCS, ivtIP)) {
-    LOG_WARN("INT 0x", std::hex, (int)vector, " hooked → ", ivtCS, ":", ivtIP);
+  if (use32) {
+    m_cpu.push32(m_cpu.getEFLAGS());
+    m_cpu.push32(m_cpu.getSegReg(CS));
+    m_cpu.push32(m_cpu.getEIP());
+  } else {
+    m_cpu.push16(static_cast<uint16_t>(m_cpu.getEFLAGS() & 0xFFFF));
+    m_cpu.push16(m_cpu.getSegReg(CS));
+    m_cpu.push16(static_cast<uint16_t>(m_cpu.getEIP() & 0xFFFF));
   }
-  if (m_hasPrefix66)
-    LOG_WARN("32-bit interrupts not fully implemented");
-
-  m_cpu.push16(static_cast<uint16_t>(m_cpu.getEFLAGS() & 0xFFFF));
-  m_cpu.push16(m_cpu.getSegReg(CS));
-  m_cpu.push16(static_cast<uint16_t>(m_cpu.getEIP() & 0xFFFF));
 
   m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~(0x0200 | 0x0100)); // Clear IF and TF
-
-  m_cpu.setSegReg(CS, ivtCS);
-  m_cpu.setEIP(ivtIP);
+  loadSegment(CS, cs);
+  m_cpu.setEIP(eip32);
 }
 
 void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
-  uint16_t ivtIP = m_memory.read16(vector * 4);
-  uint16_t ivtCS = m_memory.read16(vector * 4 + 2);
+  uint16_t cs;
+  uint32_t eip32;
+  bool use32 = false;
 
-  m_cpu.push16(static_cast<uint16_t>(m_cpu.getEFLAGS() & 0xFFFF));
-  m_cpu.push16(m_cpu.getSegReg(CS));
-  m_cpu.push16(static_cast<uint16_t>(m_cpu.getEIP() & 0xFFFF));
+  LOG_ERROR("HW IRQ: Injecting Vector 0x", std::hex, (int)vector,
+            " CR0=", m_cpu.getCR(0));
+
+  if (m_cpu.getCR(0) & 1) {
+    uint32_t idtBase = m_cpu.getIDTR().base;
+    uint32_t entryAddr = idtBase + vector * 8;
+    uint32_t low = m_memory.read32(entryAddr);
+    uint32_t high = m_memory.read32(entryAddr + 4);
+    cs = (low >> 16) & 0xFFFF;
+    eip32 = (low & 0xFFFF) | (high & 0xFFFF0000);
+    // Check gate type
+    use32 = (high & 0x0800) != 0;
+  } else {
+    eip32 = m_memory.read16(vector * 4);
+    cs = m_memory.read16(vector * 4 + 2);
+    use32 = false;
+  }
+
+  if (use32) {
+    m_cpu.push32(m_cpu.getEFLAGS());
+    m_cpu.push32(m_cpu.getSegReg(CS));
+    m_cpu.push32(m_cpu.getEIP());
+  } else {
+    m_cpu.push16(static_cast<uint16_t>(m_cpu.getEFLAGS() & 0xFFFF));
+    m_cpu.push16(m_cpu.getSegReg(CS));
+    m_cpu.push16(static_cast<uint16_t>(m_cpu.getEIP() & 0xFFFF));
+  }
   m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~(0x0200 | 0x0100)); // Clear IF and TF
 
-  m_cpu.setSegReg(CS, ivtCS);
-  m_cpu.setEIP(ivtIP);
+  loadSegment(CS, cs);
+  m_cpu.setEIP(eip32);
+}
+
+void InstructionDecoder::syncSegments() {
+  for (int i = 0; i < 6; ++i) {
+    loadSegment(static_cast<SegRegIndex>(i), m_cpu.getSegReg(i));
+  }
+}
+
+void InstructionDecoder::loadSegment(SegRegIndex seg, uint16_t selector) {
+  m_cpu.setSegReg(seg, selector);
+
+  bool isRealMode = !(m_cpu.getCR(0) & 1) || (m_cpu.getEFLAGS() & 0x00020000);
+
+  if (isRealMode) {
+    // Real Mode or Virtual 8086 Mode
+    m_segBase[seg] = static_cast<uint32_t>(selector) << 4;
+    m_cpu.setSegBase(seg, m_segBase[seg]);
+    if (seg == CS) {
+      m_cpu.setIs32BitCode(false);
+    }
+    if (seg == SS) {
+      m_cpu.setIs32BitStack(false);
+    }
+  } else {
+    // Protected Mode (Simplified)
+    if (selector == 0 && seg != CS && seg != SS) {
+      m_segBase[seg] = 0; // Null segment
+      return;
+    }
+
+    uint32_t gdtBase = m_cpu.getGDTR().base;
+    uint32_t entryAddr = gdtBase + (selector & ~7);
+
+    // Read descriptor (8 bytes)
+    uint32_t low = m_memory.read32(entryAddr);
+    uint32_t high = m_memory.read32(entryAddr + 4);
+
+    uint32_t base =
+        ((low >> 16) & 0xFFFF) | ((high & 0xFF) << 16) | (high & 0xFF000000);
+    m_segBase[seg] = base;
+    m_cpu.setSegBase(seg, base);
+
+    if (seg == CS) {
+      m_cpu.setIs32BitCode((high & 0x400000) != 0);
+    }
+    if (seg == SS) {
+      m_cpu.setIs32BitStack((high & 0x400000) != 0);
+    }
+
+    LOG_DEBUG("PM Load Segment ", (int)seg, " selector: 0x", std::hex, selector,
+              " base: 0x", base);
+  }
 }
 
 } // namespace fador::cpu

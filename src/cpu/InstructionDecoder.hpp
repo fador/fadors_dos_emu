@@ -35,6 +35,8 @@ public:
   // Main execution loop single step
   void step();
 
+  void syncSegments();
+
   // Inject a hardware interrupt (always pushes FLAGS/CS/IP, unlike
   // triggerInterrupt which may take the HLE fast-path).
   void injectHardwareInterrupt(uint8_t vector);
@@ -58,6 +60,12 @@ private:
   bool m_hasRepnz;
   bool m_hasRepz;
   uint8_t m_segmentOverride; // SegRegIndex or 0xFF for none
+  uint32_t m_segBase[6];     // Cached bases for ES, CS, SS, DS, FS, GS
+
+  uint32_t m_trace_eip[32];
+  uint16_t m_trace_cs[32];
+  uint8_t m_trace_op[32];
+  int m_trace_idx = 0;
 
   // Caching for EA to avoid double-fetching displacement in RMW instructions
   uint32_t m_currentEA;
@@ -93,6 +101,9 @@ private:
 
   // Interrupt and Exception handling
   void triggerInterrupt(uint8_t vector);
+
+  // Protected Mode segment loading
+  void loadSegment(SegRegIndex seg, uint16_t selector);
 };
 
 } // namespace fador::cpu

@@ -77,11 +77,7 @@ int main(int argc, char *argv[]) {
 
     fador::cpu::InstructionDecoder decoder(cpu, memory, iobus, bios, dos);
 
-    sb.setIRQCallback([&decoder, &cpu]() {
-      if (cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) {
-        decoder.injectHardwareInterrupt(0x0D); // IRQ5 -> INT 0D
-      }
-    });
+    sb.setIRQCallback([&pic]() { pic.raiseIRQ(5); });
 
     fador::hw::ProgramLoader loader(cpu, memory);
     fador::ui::TerminalRenderer renderer(memory);
@@ -174,6 +170,7 @@ int main(int argc, char *argv[]) {
         return 1;
       }
       dos.setProgramDir(path);
+      decoder.syncSegments();
     } else {
       LOG_WARN(
           "No program specified. Use: fadors_emu [--himem] [--sdl|--no-sdl] "
@@ -201,6 +198,7 @@ int main(int argc, char *argv[]) {
         }
         LOG_INFO("Assembled ", result.bytes.size(), " bytes at ", std::hex,
                  origin);
+        decoder.syncSegments();
 
         uint64_t maxCycles = stopAfterCycles > 0 ? stopAfterCycles : 100000;
         for (uint64_t i = 0; i < maxCycles; ++i) {
@@ -226,16 +224,21 @@ int main(int argc, char *argv[]) {
       sdlRenderer.setBIOS(bios);
 
       bios.setInputPollCallback([&sdlRenderer]() { sdlRenderer.pollInput(); });
-      bios.setIdleCallback([&sdlRenderer, &pit, &cpu, &decoder, &kbd]() {
+      bios.setIdleCallback([&sdlRenderer, &pit, &cpu, &decoder, &kbd, &pic]() {
         cpu.addCycles(64);
         pit.addCycles(64);
-        if ((cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) &&
-            pit.checkPendingIRQ0()) {
-          decoder.injectHardwareInterrupt(0x08);
+        if (pit.checkPendingIRQ0()) {
+          pic.raiseIRQ(0);
         }
-        if ((cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) &&
-            kbd.checkPendingIRQ()) {
-          decoder.injectHardwareInterrupt(0x09);
+        if (kbd.checkPendingIRQ()) {
+          pic.raiseIRQ(1);
+        }
+        if (cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) {
+          int pending = pic.getPendingInterrupt();
+          if (pending != -1) {
+            decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
+            pic.acknowledgeInterrupt();
+          }
         }
         static auto lr = std::chrono::steady_clock::now();
         auto now = std::chrono::steady_clock::now();
@@ -287,13 +290,19 @@ int main(int argc, char *argv[]) {
           sdlRenderer.pollInput();
           pit.update();
 
-          if ((cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) &&
-              pit.checkPendingIRQ0()) {
-            decoder.injectHardwareInterrupt(0x08);
+          if (pit.checkPendingIRQ0()) {
+            pic.raiseIRQ(0);
           }
-          if ((cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) &&
-              kbd.checkPendingIRQ()) {
-            decoder.injectHardwareInterrupt(0x09);
+          if (kbd.checkPendingIRQ()) {
+            pic.raiseIRQ(1);
+          }
+
+          if (cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) {
+            int pending = pic.getPendingInterrupt();
+            if (pending != -1) {
+              decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
+              pic.acknowledgeInterrupt();
+            }
           }
 
           static auto lastRender = std::chrono::steady_clock::now();
@@ -334,15 +343,20 @@ int main(int argc, char *argv[]) {
       fador::ui::InputManager input(kbd);
       input.setBIOS(bios);
       bios.setInputPollCallback([&input]() { input.pollInput(); });
-      bios.setIdleCallback([&renderer, &pit, &cpu, &decoder, &kbd]() {
+      bios.setIdleCallback([&renderer, &pit, &cpu, &decoder, &kbd, &pic]() {
         pit.addCycles(64);
-        if ((cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) &&
-            pit.checkPendingIRQ0()) {
-          decoder.injectHardwareInterrupt(0x08);
+        if (pit.checkPendingIRQ0()) {
+          pic.raiseIRQ(0);
         }
-        if ((cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) &&
-            kbd.checkPendingIRQ()) {
-          decoder.injectHardwareInterrupt(0x09);
+        if (kbd.checkPendingIRQ()) {
+          pic.raiseIRQ(1);
+        }
+        if (cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) {
+          int pending = pic.getPendingInterrupt();
+          if (pending != -1) {
+            decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
+            pic.acknowledgeInterrupt();
+          }
         }
         static auto lr = std::chrono::steady_clock::now();
         auto now = std::chrono::steady_clock::now();
@@ -387,13 +401,18 @@ int main(int argc, char *argv[]) {
           input.pollInput();
           pit.update();
 
-          if ((cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) &&
-              pit.checkPendingIRQ0()) {
-            decoder.injectHardwareInterrupt(0x08);
+          if (pit.checkPendingIRQ0()) {
+            pic.raiseIRQ(0);
           }
-          if ((cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) &&
-              kbd.checkPendingIRQ()) {
-            decoder.injectHardwareInterrupt(0x09);
+          if (kbd.checkPendingIRQ()) {
+            pic.raiseIRQ(1);
+          }
+          if (cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) {
+            int pending = pic.getPendingInterrupt();
+            if (pending != -1) {
+              decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
+              pic.acknowledgeInterrupt();
+            }
           }
 
           static auto lastRender = std::chrono::steady_clock::now();

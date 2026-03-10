@@ -51,6 +51,11 @@ constexpr uint32_t FLAG_INTERRUPT = 1 << 9;
 constexpr uint32_t FLAG_DIRECTION = 1 << 10;
 constexpr uint32_t FLAG_OVERFLOW = 1 << 11;
 
+struct DescriptorRegister {
+  uint16_t limit;
+  uint32_t base;
+};
+
 class CPU {
 public:
   CPU();
@@ -81,8 +86,29 @@ public:
   uint32_t getEFLAGS() const { return m_eflags; }
   void setEFLAGS(uint32_t value) { m_eflags = value; }
 
+  DescriptorRegister getGDTR() const { return m_gdtr; }
+  void setGDTR(const DescriptorRegister &gdtr) { m_gdtr = gdtr; }
+
+  DescriptorRegister getIDTR() const { return m_idtr; }
+  void setIDTR(const DescriptorRegister &idtr) { m_idtr = idtr; }
+
+  uint32_t getCR(uint8_t index) const { return m_cr[index % 8]; }
+  void setCR(uint8_t index, uint32_t value) { m_cr[index % 8] = value; }
+
+  uint32_t getDR(uint8_t index) const { return m_dr[index % 8]; }
+  void setDR(uint8_t index, uint32_t value) { m_dr[index % 8] = value; }
+
   // MemoryBus reference for stack ops
   void setMemoryBus(memory::MemoryBus *memory) { m_memory = memory; }
+
+  uint32_t getSegBase(uint8_t index) const { return m_segBase[index % 6]; }
+  void setSegBase(uint8_t index, uint32_t base) { m_segBase[index % 6] = base; }
+
+  bool is32BitCode() const { return m_is32BitCode; }
+  void setIs32BitCode(bool val) { m_is32BitCode = val; }
+
+  bool is32BitStack() const { return m_is32BitStack; }
+  void setIs32BitStack(bool val) { m_is32BitStack = val; }
 
   // Stack operations
   void push16(uint16_t value);
@@ -98,11 +124,17 @@ private:
   memory::MemoryBus *m_memory{nullptr};
   std::array<uint32_t, 8> m_regs{};    // EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI
   std::array<uint16_t, 6> m_segRegs{}; // ES, CS, SS, DS, FS, GS
+  std::array<uint32_t, 6> m_segBase{}; // Cached bases for PM/RM
+  bool m_is32BitCode{false};           // CS D/B bit status
+  bool m_is32BitStack{false};          // SS B bit status
   uint32_t m_eip{0};
   uint32_t m_eflags{0x00000002}; // bit 1 is always reserved as 1
 
   std::array<uint32_t, 8> m_cr{};
   std::array<uint32_t, 8> m_dr{};
+
+  DescriptorRegister m_gdtr{0xFFFF, 0};
+  DescriptorRegister m_idtr{0xFFFF, 0};
 };
 
 } // namespace fador::cpu

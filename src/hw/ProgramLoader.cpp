@@ -475,8 +475,8 @@ void ProgramLoader::createPSP(uint16_t segment, const std::string &args,
   envStr += '\0';
   envStr += "BLASTER=A220 I5 D1 T3";
   envStr += '\0';
-  envStr += '\0';       // End of variables
-  envStr += "\x01\x00"; // Signature for program name follows
+  envStr += '\0';               // End of variables
+  envStr.append("\x01\x00", 2); // Signature for program name follows
   envStr += dosFullPath;
   envStr += '\0';
 
