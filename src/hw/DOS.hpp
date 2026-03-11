@@ -12,6 +12,7 @@
 namespace fador::hw {
 
 class KeyboardController;
+class DPMI;
 
 class DOS {
 public:
@@ -26,6 +27,9 @@ public:
   void setInputPollCallback(std::function<void()> cb) {
     m_pollInput = std::move(cb);
   }
+
+  // DPMI host wiring
+  void setDPMI(DPMI *dpmi) { m_dpmi = dpmi; }
 
   // Access to HIMEM (XMS) for BIOS dispatch wiring
   memory::HIMEM *getHIMEM() { return m_himem.get(); }
@@ -55,6 +59,7 @@ public:
 private:
   // HIMEM (XMS) support
   std::unique_ptr<memory::HIMEM> m_himem;
+  DPMI *m_dpmi = nullptr;
   cpu::CPU &m_cpu;
   memory::MemoryBus &m_memory;
   std::string m_currentDir = "."; // Host filesystem working directory
@@ -63,7 +68,7 @@ private:
   std::string m_dosCurrentDir; // DOS-style current dir relative to drive root
                                // (no leading \)
   uint8_t m_currentDrive = 2;  // 0=A, 1=B, 2=C... default to C:
-  uint64_t m_dtaPtr = 0;       // Pointer to DTA (selector:32, offset:32)
+  uint32_t m_dtaPtr = 0x00000000; // Pointer to DTA (segmented)
   bool m_terminated = false;
   uint8_t m_exitCode = 0;
   bool m_ctrlBreakCheck = false;
@@ -116,8 +121,6 @@ private:
   MCB readMCB(uint16_t segment);
   void writeMCB(uint16_t segment, const MCB &mcb);
   void dumpMCBChain();
-
-  uint32_t getOffset(cpu::RegIndex reg);
 
   std::string readDOSString(uint32_t address); // Read '$' terminated string
   std::string readFilename(uint32_t address);  // Read null-terminated string

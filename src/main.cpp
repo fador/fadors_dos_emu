@@ -3,6 +3,7 @@
 #include "hw/BIOS.hpp"
 #include "hw/DMA8237.hpp"
 #include "hw/DOS.hpp"
+#include "hw/DPMI.hpp"
 #include "hw/IOBus.hpp"
 #include "hw/Joystick.hpp"
 #include "hw/KeyboardController.hpp"
@@ -74,6 +75,14 @@ int main(int argc, char *argv[]) {
       himem->setMemoryBus(&memory);
       bios.setHIMEM(himem);
     }
+
+    // DPMI host: provides protected-mode services for DOS extenders (DOS/4GW)
+    fador::hw::DPMI dpmi(cpu, memory);
+    dpmi.setDOS(&dos);
+    dpmi.setBIOS(&bios);
+    if (auto *himem = dos.getHIMEM())
+      dpmi.setHIMEM(himem);
+    dos.setDPMI(&dpmi);
 
     fador::cpu::InstructionDecoder decoder(cpu, memory, iobus, bios, dos);
 

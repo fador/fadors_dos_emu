@@ -7,6 +7,7 @@ memory::HIMEM *g_himem = nullptr;
 } // namespace fador
 #include "../utils/Logger.hpp"
 #include "DOS.hpp"
+#include "DPMI.hpp"
 #include "KeyboardController.hpp"
 #include <algorithm>
 #include <filesystem>
@@ -16,7 +17,6 @@ memory::HIMEM *g_himem = nullptr;
 #include <thread>
 
 extern "C" void dumpTraceRing();
-
 namespace fs = std::filesystem;
 
 namespace fador::hw {
@@ -27,34 +27,6 @@ DOS::DOS(cpu::CPU &cpu, memory::MemoryBus &memory)
   fador::hw::g_himem = m_himem.get();
 }
 
-uint32_t DOS::getOffset(cpu::RegIndex reg) {
-  if (m_cpu.getCR(0) & 1) {
-    return m_cpu.getReg32(reg);
-  } else {
-    // In Real Mode, only use 16-bit offset
-    switch (reg) {
-    case cpu::EAX:
-      return m_cpu.getReg16(cpu::AX);
-    case cpu::EBX:
-      return m_cpu.getReg16(cpu::BX);
-    case cpu::ECX:
-      return m_cpu.getReg16(cpu::CX);
-    case cpu::EDX:
-      return m_cpu.getReg16(cpu::DX);
-    case cpu::ESP:
-      return m_cpu.getReg16(cpu::SP);
-    case cpu::EBP:
-      return m_cpu.getReg16(cpu::BP);
-    case cpu::ESI:
-      return m_cpu.getReg16(cpu::SI);
-    case cpu::EDI:
-      return m_cpu.getReg16(cpu::DI);
-    default:
-      return m_cpu.getReg32(reg);
-    }
-  }
-}
-
 void DOS::initialize() {
   LOG_INFO("DOS: Kernel initialized.");
 
@@ -62,23 +34,16 @@ void DOS::initialize() {
   // Block 1: PSP starting at FIRST_MCB_SEGMENT + 1 (0x801)
   m_pspSegment = FIRST_MCB_SEGMENT + 1;
 
+  // Real DOS allocates ALL available conventional memory to the loaded
+  // program (respecting MZ maxAlloc=0xFFFF).  The program then shrinks its
+  // block with INT 21h AH=4Ah to release memory for other uses.
   MCB psp;
-  psp.type = 'M';
+  psp.type = 'Z'; // Only block — last in chain
   psp.owner = m_pspSegment;
-  // Size enough for initial DOOM stub (approx 128KB max)
-  psp.size = 0x2000; // 128KB
+  psp.size = LAST_PARA - m_pspSegment; // All memory up to 640K
   for (int i = 0; i < 8; ++i)
     psp.name[i] = 0;
   writeMCB(FIRST_MCB_SEGMENT, psp);
-
-  MCB freeBlock;
-  freeBlock.type = 'Z';
-  freeBlock.owner = 0x0000;
-  // Remaining memory from 0x2801 to 0x9FFF
-  freeBlock.size = (LAST_PARA - (m_pspSegment + psp.size + 1));
-  for (int i = 0; i < 8; ++i)
-    freeBlock.name[i] = 0;
-  writeMCB(static_cast<uint16_t>(m_pspSegment + psp.size), freeBlock);
 
   // Initialize List of Lists pointer
   // LoL is at 0070:0000 (0x0700). MCB pointer is at LoL-2 (0x06FE)
@@ -148,8 +113,13 @@ bool DOS::handleInterrupt(uint8_t vector) {
     if (ax == 0x4300 || ax == 0x4310)
       return false;
     if (ax == 0x1687) {
-      LOG_DEBUG("DOS: INT 2Fh AX=1687h (DPMI query) returning NOT SUPPORTED");
-      m_cpu.setReg8(cpu::AL, 0x00);
+      if (m_dpmi) {
+        m_dpmi->handleDetect();
+        LOG_DEBUG("DOS: INT 2Fh AX=1687h (DPMI query) → DPMI available");
+      } else {
+        LOG_DEBUG("DOS: INT 2Fh AX=1687h (DPMI query) returning NOT SUPPORTED");
+        m_cpu.setReg8(cpu::AL, 0x00);
+      }
     } else if (ax == 0x1686) {
       uint16_t mode = (m_cpu.getCR(0) & 1) ? 0x0001 : 0x0000;
       LOG_DEBUG("DOS: INT 2Fh AX=1686h (Get CPU Mode) -> ",
@@ -167,7 +137,14 @@ bool DOS::handleInterrupt(uint8_t vector) {
   case 0x31: { // DPMI
     uint16_t ax = m_cpu.getReg16(cpu::AX);
     LOG_DEBUG("[DPMI] INT 31h AX=0x", std::hex, ax);
-    return false; // Guest handles DPMI
+    if (m_dpmi)
+      return m_dpmi->handleInt31();
+    return false;
+  }
+  case 0xE1: { // DPMI entry point (triggered by 0F FF E1 at F000:0050)
+    if (m_dpmi)
+      return m_dpmi->handleEntry();
+    return false;
   }
   }
   return false;
@@ -236,8 +213,8 @@ void DOS::handleDOSService() {
     }
     break;
   }
-  case 0x09: { // Print String
-    uint32_t dx = getOffset(cpu::EDX);
+  case 0x09: {                              // Print String
+    uint32_t dx = m_cpu.getReg32(cpu::EDX); // Supports 32-bit offset
     uint32_t addr = m_cpu.getSegBase(cpu::DS) + dx;
 
     std::string str = readDOSString(addr);
@@ -246,7 +223,7 @@ void DOS::handleDOSService() {
     break;
   }
   case 0x0A: { // Buffered Keyboard Input
-    uint32_t dx = getOffset(cpu::EDX);
+    uint32_t dx = m_cpu.getReg32(cpu::EDX);
     uint32_t bufAddr = m_cpu.getSegBase(cpu::DS) + dx;
     uint8_t maxLen = m_memory.read8(bufAddr); // First byte = max chars
     // For now, store empty input (0 chars read, CR terminated)
@@ -276,8 +253,8 @@ void DOS::handleDOSService() {
   }
   case 0x1A: { // Set DTA
     uint16_t ds = m_cpu.getSegReg(cpu::DS);
-    uint32_t dx = m_cpu.getReg32(cpu::EDX);
-    m_dtaPtr = (static_cast<uint64_t>(ds) << 32) | dx; // Store selector/off
+    uint16_t dx = m_cpu.getReg16(cpu::DX);
+    m_dtaPtr = (static_cast<uint32_t>(ds) << 16) | dx;
     LOG_DOS("DOS: Set DTA to ", std::hex, ds, ":", dx);
     break;
   }
@@ -306,10 +283,10 @@ void DOS::handleDOSService() {
     break;
   }
   case 0x2F: { // Get DTA Address
-    uint16_t ds = static_cast<uint16_t>(m_dtaPtr >> 32);
-    uint32_t bx = static_cast<uint32_t>(m_dtaPtr & 0xFFFFFFFF);
+    uint16_t ds = static_cast<uint16_t>(m_dtaPtr >> 16);
+    uint16_t bx = static_cast<uint16_t>(m_dtaPtr & 0xFFFF);
     m_cpu.setSegReg(cpu::ES, ds);
-    m_cpu.setReg32(cpu::EBX, bx);
+    m_cpu.setReg16(cpu::BX, bx);
     LOG_DOS("DOS: Get DTA -> ", std::hex, ds, ":", bx);
     break;
   }
@@ -470,7 +447,7 @@ void DOS::handleDOSService() {
     break;
   case 0x4B: { // Exec
     uint8_t mode = m_cpu.getReg8(cpu::AL);
-    uint32_t dx = getOffset(cpu::EDX);
+    uint32_t dx = m_cpu.getReg32(cpu::EDX);
     std::string filename =
         resolvePath(readFilename(m_cpu.getSegBase(cpu::DS) + dx));
     LOG_DOS("DOS: Exec '", filename, "' mode ", (int)mode);
@@ -521,7 +498,7 @@ void DOS::handleDOSService() {
     m_cpu.setSegReg(cpu::ES, lolSeg);
     m_cpu.setReg16(cpu::BX, lolOff);
 
-    uint32_t lolPhys = (static_cast<uint32_t>(lolSeg) << 4) + lolOff;
+    uint32_t lolPhys = (lolSeg << 4) + lolOff;
     // Set first MCB segment at [LoL-2]
     m_memory.write16(lolPhys - 2, FIRST_MCB_SEGMENT);
     // Other fields (mostly dummy for now)
@@ -839,16 +816,34 @@ void DOS::handleMemoryManagement() {
 
     if (mcb.size >= requested) { // Shrink
       if (mcb.size > requested + 1) {
+        // Compute the size of the new free block
+        uint16_t freeSize = mcb.size - requested - 1;
+        uint8_t  freeType = mcb.type; // inherit 'M' or 'Z'
+
+        // Merge with the following block if it is also free
+        uint16_t newFreeSeg = static_cast<uint16_t>(mcbSeg + requested + 1);
+        if (freeType == 'M') {
+          uint16_t afterSeg = static_cast<uint16_t>(newFreeSeg + freeSize + 1);
+          if (afterSeg <= LAST_PARA) {
+            MCB afterMcb = readMCB(afterSeg);
+            if (afterMcb.owner == 0) {
+              // Merge: absorb the next free block
+              freeSize = static_cast<uint16_t>(freeSize + 1 + afterMcb.size);
+              freeType = afterMcb.type; // inherit 'Z' if it was last
+            }
+          }
+        }
+
         MCB next;
-        next.type = mcb.type;
+        next.type = freeType;
         next.owner = 0;
-        next.size = mcb.size - requested - 1;
+        next.size = freeSize;
 
         mcb.type = 'M';
         mcb.size = requested;
 
         writeMCB(mcbSeg, mcb);
-        writeMCB(static_cast<uint16_t>(mcbSeg + requested + 1), next);
+        writeMCB(newFreeSeg, next);
       }
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
       LOG_DEBUG("DOS: Shrunk segment ", std::hex, segment, " to ", requested,
@@ -1051,16 +1046,11 @@ void DOS::handleDirectorySearch() {
   uint8_t ah = m_cpu.getReg8(cpu::AH);
   // DTA pointer is stored as a segmented address. In PM, its interpretation
   // is tricky. For now, we assume it's a RM pointer or a legacy PM pointer.
-  // DTA pointer is stored as a selector (upper 32) and offset (lower 32).
-  uint16_t dtaSeg = static_cast<uint16_t>(m_dtaPtr >> 32);
-  uint32_t dtaOff = static_cast<uint32_t>(m_dtaPtr & 0xFFFFFFFF);
-  uint32_t dtaAddr = m_cpu.getSegBase(cpu::DS); // Dummy init
-  // If the segment matches current DS, use its base. Otherwise assume it's a
-  // RM segment.
-  if (dtaSeg == m_cpu.getSegReg(cpu::DS))
-    dtaAddr = m_cpu.getSegBase(cpu::DS) + dtaOff;
-  else
-    dtaAddr = (static_cast<uint32_t>(dtaSeg) << 4) + dtaOff;
+  uint16_t dtaSeg = m_dtaPtr >> 16;
+  uint32_t dtaOff = m_dtaPtr & 0xFFFFFFFF;
+  // If in PM, we might need more complex logic, but usually DTA is RM-segment
+  // compatible in early DOS/4GW.
+  uint32_t dtaAddr = (static_cast<uint32_t>(dtaSeg) << 4) + dtaOff;
 
   auto fillDTA = [&](const fs::path &fullPath, const std::string &dosName) {
     // Byte 0x15: file attributes
@@ -1101,8 +1091,9 @@ void DOS::handleDirectorySearch() {
   };
 
   if (ah == 0x4E) { // Find First
-    uint32_t dx = m_cpu.getReg32(cpu::EDX);
-    uint32_t nameAddr = m_cpu.getSegBase(cpu::DS) + dx;
+    uint16_t ds = m_cpu.getSegReg(cpu::DS);
+    uint16_t dx = m_cpu.getReg16(cpu::DX);
+    uint32_t nameAddr = (ds << 4) + dx;
     std::string rawPattern = readFilename(nameAddr);
     uint8_t attr = m_cpu.getReg8(cpu::CL);
 
@@ -1392,8 +1383,9 @@ uint16_t DOS::loadOverlaySegment(uint16_t segIndex) {
 void DOS::handleFileService() {
   uint8_t ah = m_cpu.getReg8(cpu::AH);
   if (ah == 0x3C) { // Create or Truncate File
-    uint32_t dx = getOffset(cpu::EDX);
-    uint32_t nameAddr = m_cpu.getSegBase(cpu::DS) + dx;
+    uint16_t ds = m_cpu.getSegReg(cpu::DS);
+    uint16_t dx = m_cpu.getReg16(cpu::DX);
+    uint32_t nameAddr = (ds << 4) + dx;
     std::string filename = readFilename(nameAddr);
     std::string hostPath = resolvePath(filename);
 
@@ -1415,10 +1407,11 @@ void DOS::handleFileService() {
       LOG_ERROR("DOS: Failed to create file '", hostPath, "'");
     }
   } else if (ah == 0x3D) { // Open Existing File
-    uint32_t dx = getOffset(cpu::EDX);
+    uint16_t ds = m_cpu.getSegReg(cpu::DS);
+    uint16_t dx = m_cpu.getReg16(cpu::DX);
     uint8_t accessMode =
         m_cpu.getReg8(cpu::AL) & 0x03; // 0=Read, 1=Write, 2=Read/Write
-    uint32_t nameAddr = m_cpu.getSegBase(cpu::DS) + dx;
+    uint32_t nameAddr = (ds << 4) + dx;
     std::string filename = readFilename(nameAddr);
     std::string hostPath = resolvePath(filename);
 
@@ -1464,8 +1457,9 @@ void DOS::handleFileService() {
   } else if (ah == 0x3F) { // Read from File or Device
     uint16_t handle = m_cpu.getReg16(cpu::BX);
     uint16_t bytesToRead = m_cpu.getReg16(cpu::CX);
-    uint32_t dx = getOffset(cpu::EDX);
-    uint32_t bufAddr = m_cpu.getSegBase(cpu::DS) + dx;
+    uint16_t ds = m_cpu.getSegReg(cpu::DS);
+    uint16_t dx = m_cpu.getReg16(cpu::DX);
+    uint32_t bufAddr = (ds << 4) + dx;
 
     if (handle >= 5 && handle - 5 < m_fileHandles.size() &&
         m_fileHandles[handle - 5]) {
@@ -1491,8 +1485,9 @@ void DOS::handleFileService() {
   } else if (ah == 0x40) { // Write to File or Device
     uint16_t handle = m_cpu.getReg16(cpu::BX);
     uint16_t bytesToWrite = m_cpu.getReg16(cpu::CX);
-    uint32_t dx = getOffset(cpu::EDX);
-    uint32_t bufAddr = m_cpu.getSegBase(cpu::DS) + dx;
+    uint16_t ds = m_cpu.getSegReg(cpu::DS);
+    uint16_t dx = m_cpu.getReg16(cpu::DX);
+    uint32_t bufAddr = (ds << 4) + dx;
 
     if (handle == 1 || handle == 2) { // STDOUT / STDERR
       for (uint16_t i = 0; i < bytesToWrite; ++i) {
@@ -1558,9 +1553,10 @@ void DOS::handleFileService() {
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
     }
   } else if (ah == 0x43) { // Get/Set File Attributes
-    uint32_t dx = getOffset(cpu::EDX);
+    uint16_t ds = m_cpu.getSegReg(cpu::DS);
+    uint16_t dx = m_cpu.getReg16(cpu::DX);
     uint8_t al = m_cpu.getReg8(cpu::AL);
-    uint32_t nameAddr = m_cpu.getSegBase(cpu::DS) + dx;
+    uint32_t nameAddr = (ds << 4) + dx;
     std::string filename = readFilename(nameAddr);
     std::string hostPath = resolvePath(filename);
 

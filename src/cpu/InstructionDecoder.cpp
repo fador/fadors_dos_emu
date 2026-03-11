@@ -442,7 +442,6 @@ void InstructionDecoder::step() {
                        static_cast<uint16_t>(m_cpu.getSegReg(SS)),
                        m_cpu.is32BitCode()};
   g_ringIdx = (g_ringIdx + 1) % 5000;
-
   if (opcode == 0x0F) {
     executeOpcode0F(fetch8());
   } else {
@@ -3127,6 +3126,19 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
       handled = true;
 
     if (handled) {
+      // Vector 0xE1 = DPMI entry point (reached via CALL FAR, not INT).
+      // handleEntry() already set CS:EIP and PM state — no IRET simulation.
+      // Sync InstructionDecoder's segment base cache with PM descriptors.
+      if (vector == 0xE1) {
+        loadSegment(CS, m_cpu.getSegReg(CS));
+        loadSegment(SS, m_cpu.getSegReg(SS));
+        loadSegment(DS, m_cpu.getSegReg(DS));
+        loadSegment(ES, m_cpu.getSegReg(ES));
+        loadSegment(FS, m_cpu.getSegReg(FS));
+        loadSegment(GS, m_cpu.getSegReg(GS));
+        break;
+      }
+
       // The HLE code was executed successfully. Now simulate an IRET
       // to return to the caller, but merge the emulation status flags
       // back onto the stack so conditions (CF, ZF) survive the return!
@@ -3300,11 +3312,15 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
 
     // HLE check (only handled if it points to our stub, avoiding hooks)
     if (!(m_cpu.getEFLAGS() & 0x00020000)) {
-      if (m_bios.isOriginalIVT(vector, cs, static_cast<uint16_t>(eip32))) {
-        if (m_dos.handleInterrupt(vector))
+      if (m_bios.isOriginalIVT(vector, cs, eip32)) {
+        if (m_dos.handleInterrupt(vector)) {
+          m_cpu.popHLEFrame();
           return;
-        if (m_bios.handleInterrupt(vector))
+        }
+        if (m_bios.handleInterrupt(vector)) {
+          m_cpu.popHLEFrame();
           return;
+        }
       }
     }
 

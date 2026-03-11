@@ -1138,12 +1138,31 @@ void BIOS::initialize() {
     m_memory.write8(xmsPhys + 2, 0xCB); // RETF
   }
 
+  // DPMI entry point stub at F000:0050.
+  // Programs obtain this address via INT 2Fh AX=1687h, then CALL FAR to it.
+  // The 0F FF E1 HLE trap triggers the DPMI mode switch handler.
+  {
+    uint32_t dpmiPhys =
+        (static_cast<uint32_t>(HLE_STUB_SEG) << 4) + 0x0050;
+    m_memory.write8(dpmiPhys, 0x0F);     // HLE trap prefix
+    m_memory.write8(dpmiPhys + 1, 0xFF); // HLE trap opcode
+    m_memory.write8(dpmiPhys + 2, 0xE1); // Vector E1h (DPMI entry)
+  }
+
   LOG_INFO("BIOS: BDA and IVT initialized.");
 }
 
-bool BIOS::isOriginalIVT(uint8_t vector, uint16_t cs, uint16_t ip) const {
+bool BIOS::isOriginalIVT(uint8_t vector, uint16_t cs, uint32_t eip) const {
   auto &orig = m_originalIVT[vector];
-  return (ip == orig.first && cs == orig.second);
+  // Real mode match: CS=F000, IP=stub offset
+  if (static_cast<uint16_t>(eip) == orig.first && cs == orig.second)
+    return true;
+  // Protected mode match: flat code selector (base=0), physical offset matches
+  // Our PM IDT points to selector 0x08 (flat) at offset F0000h + stub_offset
+  uint32_t stubPhys = 0xF0000 + orig.first;
+  if (eip == stubPhys)
+    return true;
+  return false;
 }
 
 void BIOS::handleTimeService() {

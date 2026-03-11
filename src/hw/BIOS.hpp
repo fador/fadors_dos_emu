@@ -47,7 +47,7 @@ public:
 
     // Check if an IVT entry still points to the BIOS-default handler.
     // Returns false when a program has hooked the vector via INT 21h/AH=25h.
-    bool isOriginalIVT(uint8_t vector, uint16_t cs, uint16_t ip) const;
+    bool isOriginalIVT(uint8_t vector, uint16_t cs, uint32_t eip) const;
 
     // HLE callback stub constants – each vector gets a unique IRET stub
     // at F000:(HLE_STUB_BASE + vector) so we can detect program hooks.
