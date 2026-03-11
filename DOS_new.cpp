@@ -15,8 +15,6 @@ memory::HIMEM *g_himem = nullptr;
 #include <iostream>
 #include <thread>
 
-extern "C" void dumpTraceRing();
-
 namespace fs = std::filesystem;
 
 namespace fador::hw {
@@ -27,68 +25,38 @@ DOS::DOS(cpu::CPU &cpu, memory::MemoryBus &memory)
   fador::hw::g_himem = m_himem.get();
 }
 
-uint32_t DOS::getOffset(cpu::RegIndex reg) {
-  if (m_cpu.getCR(0) & 1) {
-    return m_cpu.getReg32(reg);
-  } else {
-    // In Real Mode, only use 16-bit offset
-    switch (reg) {
-    case cpu::EAX:
-      return m_cpu.getReg16(cpu::AX);
-    case cpu::EBX:
-      return m_cpu.getReg16(cpu::BX);
-    case cpu::ECX:
-      return m_cpu.getReg16(cpu::CX);
-    case cpu::EDX:
-      return m_cpu.getReg16(cpu::DX);
-    case cpu::ESP:
-      return m_cpu.getReg16(cpu::SP);
-    case cpu::EBP:
-      return m_cpu.getReg16(cpu::BP);
-    case cpu::ESI:
-      return m_cpu.getReg16(cpu::SI);
-    case cpu::EDI:
-      return m_cpu.getReg16(cpu::DI);
-    default:
-      return m_cpu.getReg32(reg);
-    }
-  }
-}
-
 void DOS::initialize() {
   LOG_INFO("DOS: Kernel initialized.");
 
   // Setup initial MCB chain
-  // Block 1: PSP starting at FIRST_MCB_SEGMENT + 1 (0x801)
-  m_pspSegment = FIRST_MCB_SEGMENT + 1;
+  // Block 1: 0x0800 to 0x0FFE (free for DOS structures/boot)
+  MCB first;
+  first.type = 'M';
+  first.owner = 0x0000;
+  first.size = (0x0FFF - FIRST_MCB_SEGMENT - 1);
+  for (int i = 0; i < 8; ++i)
+    first.name[i] = 0;
+  writeMCB(FIRST_MCB_SEGMENT, first);
+  m_pspSegment = 0x1000;
 
+  // Block 2: 0x0FFF (for block at 0x1000) — give program ALL remaining memory
   MCB psp;
-  psp.type = 'M';
+  psp.type = 'Z';
   psp.owner = m_pspSegment;
-  // Size enough for initial DOOM stub (approx 128KB max)
-  psp.size = 0x2000; // 128KB
+  psp.size = LAST_PARA - m_pspSegment;
   for (int i = 0; i < 8; ++i)
     psp.name[i] = 0;
-  writeMCB(FIRST_MCB_SEGMENT, psp);
-
-  MCB freeBlock;
-  freeBlock.type = 'Z';
-  freeBlock.owner = 0x0000;
-  // Remaining memory from 0x2801 to 0x9FFF
-  freeBlock.size = (LAST_PARA - (m_pspSegment + psp.size + 1));
-  for (int i = 0; i < 8; ++i)
-    freeBlock.name[i] = 0;
-  writeMCB(static_cast<uint16_t>(m_pspSegment + psp.size), freeBlock);
+  writeMCB(static_cast<uint16_t>(m_pspSegment - 1), psp);
 
   // Initialize List of Lists pointer
   // LoL is at 0070:0000 (0x0700). MCB pointer is at LoL-2 (0x06FE)
   m_memory.write16(0x06FE, FIRST_MCB_SEGMENT);
 
-  LOG_INFO("DOS: Initial MCB chain setup. PSP block at 0x", std::hex,
-           m_pspSegment, " size 0x", std::hex, psp.size);
+  LOG_INFO("DOS: Initial MCB chain setup. PSP block at 0x1000 size 0x",
+           std::hex, psp.size);
 
   // Default DTA is at offset 0x80 of the initial PSP
-  m_dtaPtr = (static_cast<uint32_t>(m_pspSegment) << 16) | 0x0080;
+  m_dtaPtr = (0x1000 << 16) | 0x0080;
 }
 
 bool DOS::handleInterrupt(uint8_t vector) {
@@ -102,7 +70,7 @@ bool DOS::handleInterrupt(uint8_t vector) {
   case 0x3F: { // Overlay Manager / Generic Proxy (VROOMM)
     uint16_t cs = m_cpu.getSegReg(cpu::CS);
     uint32_t eip = m_cpu.getEIP();
-    uint32_t addr = m_cpu.getSegBase(cpu::CS) + eip;
+    uint32_t addr = (cs << 4) + eip;
 
     // Metadata follows INT 3F: [uint16_t offset, uint16_t segmentIndex]
     uint16_t targetOffset = m_memory.read16(addr);
@@ -130,7 +98,7 @@ bool DOS::handleInterrupt(uint8_t vector) {
     }
 
     // Patch the thunk at [CS:EIP-2] with a JMP FAR (EA OO OO SS SS)
-    uint32_t thunkStart = m_cpu.getSegBase(cpu::CS) + (eip - 2);
+    uint32_t thunkStart = (cs << 4) + (eip - 2);
     m_memory.write8(thunkStart, 0xEA); // JMP far
     m_memory.write16(thunkStart + 1, targetOffset);
     m_memory.write16(thunkStart + 3, loadedSeg);
@@ -147,27 +115,9 @@ bool DOS::handleInterrupt(uint8_t vector) {
     // Let XMS calls (AX=4300h/4310h) fall through to BIOS handler
     if (ax == 0x4300 || ax == 0x4310)
       return false;
-    if (ax == 0x1687) {
-      LOG_DEBUG("DOS: INT 2Fh AX=1687h (DPMI query) returning NOT SUPPORTED");
-      m_cpu.setReg8(cpu::AL, 0x00);
-    } else if (ax == 0x1686) {
-      uint16_t mode = (m_cpu.getCR(0) & 1) ? 0x0001 : 0x0000;
-      LOG_DEBUG("DOS: INT 2Fh AX=1686h (Get CPU Mode) -> ",
-                (mode == 1 ? "Protected Mode" : "Real Mode"));
-      m_cpu.setReg16(cpu::AX, mode);
-    } else if (ax == 0x1680) {
-      // Release time slice (no-op)
-      m_cpu.setReg8(cpu::AL, 0x00);
-    } else {
-      LOG_DOS("DOS: INT 2Fh Multiplex (stubbed), AX=0x", std::hex, ax);
-      m_cpu.setReg8(cpu::AL, 0x01);
-    }
+    LOG_DOS("DOS: INT 2Fh Multiplex (stubbed), AX=0x", std::hex, ax);
+    m_cpu.setReg8(cpu::AL, 0x00); // Not supported
     return true;
-  }
-  case 0x31: { // DPMI
-    uint16_t ax = m_cpu.getReg16(cpu::AX);
-    LOG_DEBUG("[DPMI] INT 31h AX=0x", std::hex, ax);
-    return false; // Guest handles DPMI
   }
   }
   return false;
@@ -237,8 +187,9 @@ void DOS::handleDOSService() {
     break;
   }
   case 0x09: { // Print String
-    uint32_t dx = getOffset(cpu::EDX);
-    uint32_t addr = m_cpu.getSegBase(cpu::DS) + dx;
+    uint16_t ds = m_cpu.getSegReg(cpu::DS);
+    uint16_t dx = m_cpu.getReg16(cpu::DX);
+    uint32_t addr = (ds << 4) + dx;
 
     std::string str = readDOSString(addr);
     for (uint8_t c : str)
@@ -246,8 +197,9 @@ void DOS::handleDOSService() {
     break;
   }
   case 0x0A: { // Buffered Keyboard Input
-    uint32_t dx = getOffset(cpu::EDX);
-    uint32_t bufAddr = m_cpu.getSegBase(cpu::DS) + dx;
+    uint16_t ds = m_cpu.getSegReg(cpu::DS);
+    uint16_t dx = m_cpu.getReg16(cpu::DX);
+    uint32_t bufAddr = (ds << 4) + dx;
     uint8_t maxLen = m_memory.read8(bufAddr); // First byte = max chars
     // For now, store empty input (0 chars read, CR terminated)
     m_memory.write8(bufAddr + 1, 0);    // Actual chars read = 0
@@ -276,8 +228,8 @@ void DOS::handleDOSService() {
   }
   case 0x1A: { // Set DTA
     uint16_t ds = m_cpu.getSegReg(cpu::DS);
-    uint32_t dx = m_cpu.getReg32(cpu::EDX);
-    m_dtaPtr = (static_cast<uint64_t>(ds) << 32) | dx; // Store selector/off
+    uint16_t dx = m_cpu.getReg16(cpu::DX);
+    m_dtaPtr = (static_cast<uint32_t>(ds) << 16) | dx;
     LOG_DOS("DOS: Set DTA to ", std::hex, ds, ":", dx);
     break;
   }
@@ -306,10 +258,10 @@ void DOS::handleDOSService() {
     break;
   }
   case 0x2F: { // Get DTA Address
-    uint16_t ds = static_cast<uint16_t>(m_dtaPtr >> 32);
-    uint32_t bx = static_cast<uint32_t>(m_dtaPtr & 0xFFFFFFFF);
+    uint16_t ds = static_cast<uint16_t>(m_dtaPtr >> 16);
+    uint16_t bx = static_cast<uint16_t>(m_dtaPtr & 0xFFFF);
     m_cpu.setSegReg(cpu::ES, ds);
-    m_cpu.setReg32(cpu::EBX, bx);
+    m_cpu.setReg16(cpu::BX, bx);
     LOG_DOS("DOS: Get DTA -> ", std::hex, ds, ":", bx);
     break;
   }
@@ -430,6 +382,273 @@ void DOS::handleDOSService() {
     m_cpu.setReg16(cpu::CX, 0x0000);
     break;
   }
+  case 0x3C: { // Create File
+    uint16_t ds = m_cpu.getSegReg(cpu::DS);
+    uint16_t dx = m_cpu.getReg16(cpu::DX);
+    uint32_t nameAddr = (ds << 4) + dx;
+    std::string filename = resolvePath(readFilename(nameAddr));
+
+    LOG_DOS("DOS: Create file '", filename, "'");
+
+    auto handle = std::make_unique<FileHandle>();
+    handle->path = filename;
+    // Create/truncate the file for read+write
+    handle->stream.open(filename, std::ios::binary | std::ios::in |
+                                      std::ios::out | std::ios::trunc);
+    if (!handle->stream.is_open()) {
+      // File may not exist yet; create it then reopen for r/w
+      {
+        std::ofstream touch(filename, std::ios::binary);
+      }
+      handle->stream.open(filename, std::ios::binary | std::ios::in |
+                                        std::ios::out | std::ios::trunc);
+    }
+
+    if (handle->stream.is_open()) {
+      m_fileHandles.push_back(std::move(handle));
+      uint16_t h = static_cast<uint16_t>(m_fileHandles.size() + 4);
+      m_cpu.setReg16(cpu::AX, h);
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      LOG_DOS("DOS: Created '", filename, "' as handle ", h);
+    } else {
+      m_cpu.setReg16(cpu::AX, 0x03); // Path not found
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      LOG_WARN("DOS: Failed to create '", filename, "'");
+    }
+    break;
+  }
+  case 0x3D: { // Open File
+    uint16_t ds = m_cpu.getSegReg(cpu::DS);
+    uint16_t dx = m_cpu.getReg16(cpu::DX);
+    uint32_t nameAddr = (ds << 4) + dx;
+    std::string rawName = readFilename(nameAddr);
+    std::string filename = resolvePath(rawName);
+    uint8_t mode = m_cpu.getReg8(cpu::AL);
+
+    LOG_DOS("DOS: Open raw='", rawName, "' resolved='", filename, "' at 0x",
+            std::hex, nameAddr, " mode ", (int)mode);
+
+    // Reject directories — DOS cannot open directories as files
+    if (fs::is_directory(filename)) {
+      m_cpu.setReg16(cpu::AX, 0x05); // Access Denied
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      LOG_DOS("DOS: Rejected directory open '", filename, "'");
+      break;
+    }
+
+    std::ios_base::openmode openmode = std::ios::binary | std::ios::in;
+    if ((mode & 0x03) == 1)
+      openmode = std::ios::binary | std::ios::out;
+    if ((mode & 0x03) == 2)
+      openmode = std::ios::binary | std::ios::in | std::ios::out;
+
+    auto handle = std::make_unique<FileHandle>();
+    handle->path = filename;
+    handle->stream.open(filename, openmode);
+
+    if (handle->stream.is_open()) {
+      m_fileHandles.push_back(std::move(handle));
+      uint16_t h = static_cast<uint16_t>(m_fileHandles.size() + 4);
+      m_cpu.setReg16(cpu::AX, h); // Start handles at 5
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      LOG_DOS("DOS: Opened '", filename, "' as handle ", h);
+    } else {
+      m_cpu.setReg16(cpu::AX, 0x02); // File not found
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      LOG_WARN("DOS: Failed to open '", filename, "'");
+    }
+    break;
+  }
+  case 0x3E: { // Close File
+    uint16_t h = m_cpu.getReg16(cpu::BX);
+    LOG_DOS("DOS: Close handle ", h);
+    if (h >= 5 && (h - 5) < static_cast<int>(m_fileHandles.size())) {
+      LOG_DOS("DOS: Closing file '", m_fileHandles[h - 5]->path, "'");
+      m_fileHandles[h - 5]->stream.close();
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    } else {
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+    }
+    break;
+  }
+  case 0x3F: { // Read from File or Device
+    uint16_t h = m_cpu.getReg16(cpu::BX);
+    uint16_t cx = m_cpu.getReg16(cpu::CX); // Count
+    uint16_t ds = m_cpu.getSegReg(cpu::DS);
+    uint16_t dx = m_cpu.getReg16(cpu::DX);
+
+    // 1. Handle STDIN (Handle 0)
+    if (h == 0) {
+      // TODO: Wire this to your emulator's keyboard/input buffer.
+      // For now, returning 0 bytes read (EOF) or blocking.
+      m_cpu.setReg16(cpu::AX, 0);
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      break;
+    }
+
+    // Fail on other reserved handles (STDOUT, STDERR) since they are
+    // write-only, or unhandled ones.
+    if (h > 0 && h < 5) {
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      m_cpu.setReg16(cpu::AX, 0x05); // Error 5: Access Denied
+      break;
+    }
+
+    // 2. Handle User Files (>= 5)
+    int fd_index = h - 5;
+    if (fd_index >= 0 && fd_index < static_cast<int>(m_fileHandles.size()) &&
+        m_fileHandles[fd_index]) {
+      if (cx > 0) {
+        std::vector<char> buffer(
+            cx); // Consider a chunked read to avoid large allocs
+        m_fileHandles[fd_index]->stream.read(buffer.data(), cx);
+        std::streamsize read = m_fileHandles[fd_index]->stream.gcount();
+
+        LOG_DEBUG("[DOS] AH=3Fh Read handle=", h, " cx=", cx,
+                  " read=", (int)read, " dest=", std::hex, ds, ":", dx,
+                  " (flat 0x", ((ds << 4) + dx), ")");
+
+        // 3. Emulate proper 16-bit segment offset wrap-around
+        for (int i = 0; i < read; ++i) {
+          uint16_t offset = dx + i;
+          uint32_t addr = (ds << 4) + offset;
+          m_memory.write8(addr, static_cast<uint8_t>(buffer[i]));
+        }
+
+        m_cpu.setReg16(cpu::AX, static_cast<uint16_t>(read));
+      } else {
+        m_cpu.setReg16(cpu::AX, 0); // Requested 0 bytes
+      }
+
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY); // Success
+    } else {
+      // 4. Proper error reporting for invalid handles
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      m_cpu.setReg16(cpu::AX, 0x06); // Error 6: Invalid Handle
+    }
+    break;
+  }
+  case 0x40: { // Write to File
+    uint16_t h = m_cpu.getReg16(cpu::BX);
+    uint16_t cx = m_cpu.getReg16(cpu::CX);
+    uint16_t ds = m_cpu.getSegReg(cpu::DS);
+    uint16_t dx = m_cpu.getReg16(cpu::DX);
+    uint32_t addr = (ds << 4) + dx;
+
+    if (h == 1 || h == 2) { // Stdout/Stderr
+      for (int i = 0; i < cx; ++i) {
+        uint8_t c = m_memory.read8(addr + i);
+        writeCharToVRAM(c);
+      }
+      LOG_DOS("DOS: Write to ", (h == 1 ? "stdout" : "stderr"), " ", cx,
+              " bytes");
+      m_cpu.setReg16(cpu::AX, cx);
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    } else if (h >= 5 && (h - 5) < static_cast<int>(m_fileHandles.size())) {
+      std::vector<char> buffer(cx);
+      for (int i = 0; i < cx; ++i)
+        buffer[i] = m_memory.read8(addr + i);
+      m_fileHandles[h - 5]->stream.write(buffer.data(), cx);
+      m_cpu.setReg16(cpu::AX, cx);
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    } else {
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+    }
+    break;
+  }
+  case 0x42: { // Lseek
+    uint16_t h = m_cpu.getReg16(cpu::BX);
+    uint8_t origin = m_cpu.getReg8(cpu::AL);
+    int32_t offset = (static_cast<int32_t>(m_cpu.getReg16(cpu::CX)) << 16) |
+                     m_cpu.getReg16(cpu::DX);
+
+    LOG_DEBUG("[DOS] Seek handle=", h, " origin=", (int)origin,
+              " offset=", offset, " CX=", std::hex, m_cpu.getReg16(cpu::CX),
+              " DX=", m_cpu.getReg16(cpu::DX));
+
+    if (h >= 5 && (h - 5) < static_cast<int>(m_fileHandles.size())) {
+      std::ios_base::seekdir dir;
+      if (origin == 0)
+        dir = std::ios::beg;
+      else if (origin == 1)
+        dir = std::ios::cur;
+      else
+        dir = std::ios::end;
+
+      m_fileHandles[h - 5]->stream.clear();
+      m_fileHandles[h - 5]->stream.seekg(offset, dir);
+      m_fileHandles[h - 5]->stream.seekp(offset, dir);
+
+      uint32_t pos =
+          static_cast<uint32_t>(m_fileHandles[h - 5]->stream.tellg());
+      m_cpu.setReg16(cpu::DX, static_cast<uint16_t>(pos >> 16));
+      m_cpu.setReg16(cpu::AX, static_cast<uint16_t>(pos & 0xFFFF));
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    } else {
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+    }
+    break;
+  }
+  case 0x39: // MKDIR
+  case 0x3A: // RMDIR
+  case 0x3B: // CHDIR
+  case 0x47: // GETCWD
+    handleDirectoryService();
+    break;
+
+  case 0x43: { // Get/Set File Attributes (CHMOD)
+    uint8_t al = m_cpu.getReg8(cpu::AL);
+    uint16_t ds = m_cpu.getSegReg(cpu::DS);
+    uint16_t dx = m_cpu.getReg16(cpu::DX);
+    std::string filename =
+        resolvePath(readFilename((static_cast<uint32_t>(ds) << 4) + dx));
+    LOG_DOS("DOS: Get/Set Attributes AL=", (int)al, " file='", filename, "'");
+
+    if (al == 0x00) { // Get attributes
+      std::error_code ec;
+      bool exists = fs::exists(filename, ec);
+      if (!exists || ec) {
+        m_cpu.setReg16(cpu::AX, 0x02); // File not found
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      } else {
+        uint16_t attr = 0x20; // Archive bit
+        if (fs::is_directory(filename, ec))
+          attr = 0x10;
+        auto perms = fs::status(filename, ec).permissions();
+        using p = fs::perms;
+        if ((perms & p::owner_write) == p::none)
+          attr |= 0x01; // Read-only
+        m_cpu.setReg16(cpu::CX, attr);
+        m_cpu.setReg16(cpu::AX, attr); // Some programs check AX too
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+        LOG_DOS("DOS: Attributes for '", filename, "' = 0x", std::hex, attr);
+      }
+    } else if (al == 0x01) { // Set attributes
+      uint16_t cx = m_cpu.getReg16(cpu::CX);
+      std::error_code ec;
+      if (!fs::exists(filename, ec)) {
+        m_cpu.setReg16(cpu::AX, 0x02);
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      } else {
+        // Only honour read-only bit mapping
+        auto perms = fs::status(filename, ec).permissions();
+        using p = fs::perms;
+        if (cx & 0x01) { // Read-only: remove write permission
+          fs::permissions(
+              filename,
+              perms & ~(p::owner_write | p::group_write | p::others_write), ec);
+        } else { // Writable: restore owner write
+          fs::permissions(filename, perms | p::owner_write, ec);
+        }
+        m_cpu.setReg16(cpu::AX, 0);
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      }
+    } else {
+      m_cpu.setReg16(cpu::AX, 0x01); // Invalid function
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+    }
+    break;
+  }
   case 0x44: { // IOCTL
     uint8_t al = m_cpu.getReg8(cpu::AL);
     uint16_t bx = m_cpu.getReg16(cpu::BX);
@@ -457,22 +676,11 @@ void DOS::handleDOSService() {
     }
     break;
   }
-  case 0x3C: // Create File
-  case 0x3D: // Open File
-  case 0x3E: // Close File
-  case 0x3F: // Read File/Device
-  case 0x40: // Write File/Device
-  case 0x42: // Move File Pointer
-  case 0x43: // Get/Set File Attributes
-  case 0x56: // Rename File
-  case 0x57: // Get/Set File Date and Time
-    handleFileService();
-    break;
   case 0x4B: { // Exec
     uint8_t mode = m_cpu.getReg8(cpu::AL);
-    uint32_t dx = getOffset(cpu::EDX);
-    std::string filename =
-        resolvePath(readFilename(m_cpu.getSegBase(cpu::DS) + dx));
+    uint16_t ds = m_cpu.getSegReg(cpu::DS);
+    uint16_t dx = m_cpu.getReg16(cpu::DX);
+    std::string filename = resolvePath(readFilename((ds << 4) + dx));
     LOG_DOS("DOS: Exec '", filename, "' mode ", (int)mode);
     m_cpu.setReg16(cpu::AX, 0x02); // File not found (simplified stub)
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
@@ -504,6 +712,28 @@ void DOS::handleDOSService() {
   case 0x4F: // Find Next
     handleDirectorySearch();
     break;
+  case 0x57: { // Get/Set File Date and Time
+    uint8_t al = m_cpu.getReg8(cpu::AL);
+    uint16_t bx = m_cpu.getReg16(cpu::BX);
+    if (al == 0x00) { // Get
+      // Return a plausible DOS timestamp (2026-03-02 12:00:00)
+      // Date: (year-1980)<<9 | month<<5 | day
+      // Time: hour<<11 | min<<5 | (sec/2)
+      uint16_t date = ((2026 - 1980) << 9) | (3 << 5) | 2;
+      uint16_t time = (12 << 11) | (0 << 5) | 0;
+      m_cpu.setReg16(cpu::CX, time);
+      m_cpu.setReg16(cpu::DX, date);
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      LOG_DOS("DOS: Get File Date/Time handle=", bx);
+    } else if (al == 0x01) { // Set (ignore, just confirm)
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      LOG_DOS("DOS: Set File Date/Time handle=", bx, " (ignored)");
+    } else {
+      m_cpu.setReg16(cpu::AX, 0x01);
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+    }
+    break;
+  }
   case 0x34: { // Get InDOS flag address
     // Return ES:BX pointing to the InDOS flag (1 byte)
     // We'll put it at a static location in the BIOS data area or similar.
@@ -521,7 +751,7 @@ void DOS::handleDOSService() {
     m_cpu.setSegReg(cpu::ES, lolSeg);
     m_cpu.setReg16(cpu::BX, lolOff);
 
-    uint32_t lolPhys = (static_cast<uint32_t>(lolSeg) << 4) + lolOff;
+    uint32_t lolPhys = (lolSeg << 4) + lolOff;
     // Set first MCB segment at [LoL-2]
     m_memory.write16(lolPhys - 2, FIRST_MCB_SEGMENT);
     // Other fields (mostly dummy for now)
@@ -536,11 +766,7 @@ void DOS::handleDOSService() {
   }
 }
 void DOS::terminateProcess(uint8_t exitCode) {
-  LOG_INFO("DOS: Process terminated with exit code ", (int)exitCode);
-
-  // Diagnostic: Dump last 100 instructions on exit
-  dumpTraceRing();
-
+  LOG_DOS("DOS: Process terminated with exit code ", (int)exitCode);
   m_terminated = true;
   m_exitCode = exitCode;
 }
@@ -729,7 +955,6 @@ void DOS::writeMCB(uint16_t segment, const MCB &mcb) {
 
 void DOS::handleMemoryManagement() {
   uint8_t ah = m_cpu.getReg8(cpu::AH);
-  dumpMCBChain();
   if (ah == 0x48) { // Allocate
     uint16_t requested = m_cpu.getReg16(cpu::BX);
     uint16_t current = FIRST_MCB_SEGMENT;
@@ -804,7 +1029,6 @@ void DOS::handleMemoryManagement() {
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
       LOG_WARN("DOS: Failed to allocate ", std::hex, requested,
                " paras (largest free: 0x", largestFree, ")");
-      dumpMCBChain();
     }
   } else if (ah == 0x49) { // Free
     uint16_t segment = m_cpu.getSegReg(cpu::ES);
@@ -882,39 +1106,9 @@ void DOS::handleMemoryManagement() {
         }
       }
       m_cpu.setReg16(cpu::AX, 0x08); // Insufficient memory
-      uint16_t nextSeg = mcbSeg + mcb.size + 1;
-      MCB next = readMCB(nextSeg);
-      uint16_t maxPossible = mcb.size;
-      if (next.owner == 0)
-        maxPossible += 1 + next.size;
-      m_cpu.setReg16(cpu::BX, maxPossible);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
       LOG_WARN("DOS: Failed to expand segment ", std::hex, segment, " to ",
-               requested, " paras (max: 0x", maxPossible, ")");
-      dumpMCBChain();
-    }
-  } else if (ah == 0x58) { // Get/Set Allocation Strategy
-    uint8_t al = m_cpu.getReg8(cpu::AL);
-    if (al == 0x00) { // Get strategy
-      m_cpu.setReg16(cpu::AX, m_allocationStrategy);
-      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-      LOG_DEBUG("DOS: Get Allocation Strategy -> ", m_allocationStrategy);
-    } else if (al == 0x01) { // Set strategy
-      m_allocationStrategy = m_cpu.getReg16(cpu::BX);
-      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-      LOG_DEBUG("DOS: Set Allocation Strategy to ", m_allocationStrategy);
-    } else if (al == 0x02) { // Get UMB link state
-      m_cpu.setReg8(cpu::AL, m_umbLinked ? 1 : 0);
-      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-      LOG_DEBUG("DOS: Get UMB Link State -> ", (int)m_umbLinked);
-    } else if (al == 0x03) { // Set UMB link state
-      m_umbLinked = (m_cpu.getReg8(cpu::BX) != 0);
-      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-      LOG_DEBUG("DOS: Set UMB Link State to ", (int)m_umbLinked);
-    } else {
-      m_cpu.setReg16(cpu::AX, 0x0001); // Invalid function
-      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
-      LOG_WARN("DOS: Unknown AH=58h AL=", std::hex, (int)al);
+               requested, " paras");
     }
   }
 }
@@ -1049,18 +1243,7 @@ static bool dosWildcardMatch(const std::string &pattern,
 
 void DOS::handleDirectorySearch() {
   uint8_t ah = m_cpu.getReg8(cpu::AH);
-  // DTA pointer is stored as a segmented address. In PM, its interpretation
-  // is tricky. For now, we assume it's a RM pointer or a legacy PM pointer.
-  // DTA pointer is stored as a selector (upper 32) and offset (lower 32).
-  uint16_t dtaSeg = static_cast<uint16_t>(m_dtaPtr >> 32);
-  uint32_t dtaOff = static_cast<uint32_t>(m_dtaPtr & 0xFFFFFFFF);
-  uint32_t dtaAddr = m_cpu.getSegBase(cpu::DS); // Dummy init
-  // If the segment matches current DS, use its base. Otherwise assume it's a
-  // RM segment.
-  if (dtaSeg == m_cpu.getSegReg(cpu::DS))
-    dtaAddr = m_cpu.getSegBase(cpu::DS) + dtaOff;
-  else
-    dtaAddr = (static_cast<uint32_t>(dtaSeg) << 4) + dtaOff;
+  uint32_t dtaAddr = ((m_dtaPtr >> 16) << 4) + (m_dtaPtr & 0xFFFF);
 
   auto fillDTA = [&](const fs::path &fullPath, const std::string &dosName) {
     // Byte 0x15: file attributes
@@ -1101,8 +1284,9 @@ void DOS::handleDirectorySearch() {
   };
 
   if (ah == 0x4E) { // Find First
-    uint32_t dx = m_cpu.getReg32(cpu::EDX);
-    uint32_t nameAddr = m_cpu.getSegBase(cpu::DS) + dx;
+    uint16_t ds = m_cpu.getSegReg(cpu::DS);
+    uint16_t dx = m_cpu.getReg16(cpu::DX);
+    uint32_t nameAddr = (ds << 4) + dx;
     std::string rawPattern = readFilename(nameAddr);
     uint8_t attr = m_cpu.getReg8(cpu::CL);
 
@@ -1389,58 +1573,53 @@ uint16_t DOS::loadOverlaySegment(uint16_t segIndex) {
   return targetSegment;
 }
 
+} // namespace fador::hw
 void DOS::handleFileService() {
   uint8_t ah = m_cpu.getReg8(cpu::AH);
   if (ah == 0x3C) { // Create or Truncate File
-    uint32_t dx = getOffset(cpu::EDX);
-    uint32_t nameAddr = m_cpu.getSegBase(cpu::DS) + dx;
+    uint16_t ds = m_cpu.getSegReg(cpu::DS);
+    uint16_t dx = m_cpu.getReg16(cpu::DX);
+    uint32_t nameAddr = (ds << 4) + dx;
     std::string filename = readFilename(nameAddr);
     std::string hostPath = resolvePath(filename);
 
     auto fh = std::make_unique<FileHandle>();
     fh->path = hostPath;
-    fh->stream.open(hostPath, std::ios::out | std::ios::binary |
-                                  std::ios::trunc | std::ios::in);
-
+    fh->stream.open(hostPath, std::ios::out | std::ios::binary | std::ios::trunc | std::ios::in);
+    
     if (fh->stream.is_open()) {
       m_fileHandles.push_back(std::move(fh));
-      m_cpu.setReg16(cpu::AX,
-                     m_fileHandles.size() - 1 + 5); // DOS handles start at 5
+      m_cpu.setReg16(cpu::AX, m_fileHandles.size() - 1 + 5); // DOS handles start at 5
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-      LOG_DOS("DOS: Created file '", hostPath,
-              "' handle=", m_fileHandles.size() - 1 + 5);
+      LOG_DOS("DOS: Created file '", hostPath, "' handle=", m_fileHandles.size() - 1 + 5);
     } else {
       m_cpu.setReg16(cpu::AX, 0x03); // Path not found
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
       LOG_ERROR("DOS: Failed to create file '", hostPath, "'");
     }
   } else if (ah == 0x3D) { // Open Existing File
-    uint32_t dx = getOffset(cpu::EDX);
-    uint8_t accessMode =
-        m_cpu.getReg8(cpu::AL) & 0x03; // 0=Read, 1=Write, 2=Read/Write
-    uint32_t nameAddr = m_cpu.getSegBase(cpu::DS) + dx;
+    uint16_t ds = m_cpu.getSegReg(cpu::DS);
+    uint16_t dx = m_cpu.getReg16(cpu::DX);
+    uint8_t accessMode = m_cpu.getReg8(cpu::AL) & 0x03; // 0=Read, 1=Write, 2=Read/Write
+    uint32_t nameAddr = (ds << 4) + dx;
     std::string filename = readFilename(nameAddr);
     std::string hostPath = resolvePath(filename);
 
     auto fh = std::make_unique<FileHandle>();
     fh->path = hostPath;
-
+    
     std::ios::openmode mode = std::ios::binary;
-    if (accessMode == 0)
-      mode |= std::ios::in;
-    else if (accessMode == 1)
-      mode |= std::ios::out | std::ios::app;
-    else
-      mode |= std::ios::in | std::ios::out;
-
+    if (accessMode == 0) mode |= std::ios::in;
+    else if (accessMode == 1) mode |= std::ios::out | std::ios::app;
+    else mode |= std::ios::in | std::ios::out;
+    
     fh->stream.open(hostPath, mode);
-
+    
     if (fh->stream.is_open()) {
       m_fileHandles.push_back(std::move(fh));
-      m_cpu.setReg16(cpu::AX, m_fileHandles.size() - 1 + 5);
+      m_cpu.setReg16(cpu::AX, m_fileHandles.size() - 1 + 5); 
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-      LOG_DOS("DOS: Opened file '", hostPath,
-              "' handle=", m_fileHandles.size() - 1 + 5);
+      LOG_DOS("DOS: Opened file '", hostPath, "' handle=", m_fileHandles.size() - 1 + 5);
     } else {
       m_cpu.setReg16(cpu::AX, 0x02); // File not found
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
@@ -1448,8 +1627,7 @@ void DOS::handleFileService() {
     }
   } else if (ah == 0x3E) { // Close File
     uint16_t handle = m_cpu.getReg16(cpu::BX);
-    if (handle >= 5 && handle - 5 < m_fileHandles.size() &&
-        m_fileHandles[handle - 5]) {
+    if (handle >= 5 && handle - 5 < m_fileHandles.size() && m_fileHandles[handle - 5]) {
       m_fileHandles[handle - 5]->stream.close();
       m_fileHandles[handle - 5].reset(); // Free slot
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
@@ -1464,24 +1642,24 @@ void DOS::handleFileService() {
   } else if (ah == 0x3F) { // Read from File or Device
     uint16_t handle = m_cpu.getReg16(cpu::BX);
     uint16_t bytesToRead = m_cpu.getReg16(cpu::CX);
-    uint32_t dx = getOffset(cpu::EDX);
-    uint32_t bufAddr = m_cpu.getSegBase(cpu::DS) + dx;
+    uint16_t ds = m_cpu.getSegReg(cpu::DS);
+    uint16_t dx = m_cpu.getReg16(cpu::DX);
+    uint32_t bufAddr = (ds << 4) + dx;
 
-    if (handle >= 5 && handle - 5 < m_fileHandles.size() &&
-        m_fileHandles[handle - 5]) {
-      auto &fh = m_fileHandles[handle - 5];
+    if (handle >= 5 && handle - 5 < m_fileHandles.size() && m_fileHandles[handle - 5]) {
+      auto& fh = m_fileHandles[handle - 5];
       std::vector<char> buf(bytesToRead);
       fh->stream.read(buf.data(), bytesToRead);
       std::streamsize bytesRead = fh->stream.gcount();
-
+      
       for (std::streamsize i = 0; i < bytesRead; ++i) {
         m_memory.write8(bufAddr + i, buf[i]);
       }
-
+      
       m_cpu.setReg16(cpu::AX, static_cast<uint16_t>(bytesRead));
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
       LOG_DOS("DOS: Read ", bytesRead, " bytes from handle=", handle);
-    } else if (handle == 0) {     // STDIN
+    } else if (handle == 0) { // STDIN
       m_cpu.setReg16(cpu::AX, 0); // Not fully implemented
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
     } else {
@@ -1491,8 +1669,9 @@ void DOS::handleFileService() {
   } else if (ah == 0x40) { // Write to File or Device
     uint16_t handle = m_cpu.getReg16(cpu::BX);
     uint16_t bytesToWrite = m_cpu.getReg16(cpu::CX);
-    uint32_t dx = getOffset(cpu::EDX);
-    uint32_t bufAddr = m_cpu.getSegBase(cpu::DS) + dx;
+    uint16_t ds = m_cpu.getSegReg(cpu::DS);
+    uint16_t dx = m_cpu.getReg16(cpu::DX);
+    uint32_t bufAddr = (ds << 4) + dx;
 
     if (handle == 1 || handle == 2) { // STDOUT / STDERR
       for (uint16_t i = 0; i < bytesToWrite; ++i) {
@@ -1500,15 +1679,14 @@ void DOS::handleFileService() {
       }
       m_cpu.setReg16(cpu::AX, bytesToWrite);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-    } else if (handle >= 5 && handle - 5 < m_fileHandles.size() &&
-               m_fileHandles[handle - 5]) {
-      auto &fh = m_fileHandles[handle - 5];
+    } else if (handle >= 5 && handle - 5 < m_fileHandles.size() && m_fileHandles[handle - 5]) {
+      auto& fh = m_fileHandles[handle - 5];
       std::vector<char> buf(bytesToWrite);
       for (uint16_t i = 0; i < bytesToWrite; ++i) {
         buf[i] = m_memory.read8(bufAddr + i);
       }
       fh->stream.write(buf.data(), bytesToWrite);
-
+      
       if (fh->stream.good()) {
         m_cpu.setReg16(cpu::AX, bytesToWrite);
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
@@ -1528,26 +1706,22 @@ void DOS::handleFileService() {
     uint16_t dx = m_cpu.getReg16(cpu::DX); // Low word of offset
     int32_t offset = (cx << 16) | dx;
 
-    if (handle >= 5 && handle - 5 < m_fileHandles.size() &&
-        m_fileHandles[handle - 5]) {
-      auto &fh = m_fileHandles[handle - 5];
+    if (handle >= 5 && handle - 5 < m_fileHandles.size() && m_fileHandles[handle - 5]) {
+      auto& fh = m_fileHandles[handle - 5];
       std::ios_base::seekdir dir;
-      if (method == 0)
-        dir = std::ios::beg;
-      else if (method == 1)
-        dir = std::ios::cur;
-      else if (method == 2)
-        dir = std::ios::end;
+      if (method == 0) dir = std::ios::beg;
+      else if (method == 1) dir = std::ios::cur;
+      else if (method == 2) dir = std::ios::end;
       else {
         m_cpu.setReg16(cpu::AX, 0x01); // Invalid function
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
         return;
       }
-
+      
       fh->stream.clear(); // Clear EOF flags
       fh->stream.seekg(offset, dir);
       fh->stream.seekp(offset, dir);
-
+      
       uint32_t newPos = fh->stream.tellg();
       m_cpu.setReg16(cpu::DX, newPos >> 16);
       m_cpu.setReg16(cpu::AX, newPos & 0xFFFF);
@@ -1558,18 +1732,18 @@ void DOS::handleFileService() {
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
     }
   } else if (ah == 0x43) { // Get/Set File Attributes
-    uint32_t dx = getOffset(cpu::EDX);
+    uint16_t ds = m_cpu.getSegReg(cpu::DS);
+    uint16_t dx = m_cpu.getReg16(cpu::DX);
     uint8_t al = m_cpu.getReg8(cpu::AL);
-    uint32_t nameAddr = m_cpu.getSegBase(cpu::DS) + dx;
+    uint32_t nameAddr = (ds << 4) + dx;
     std::string filename = readFilename(nameAddr);
     std::string hostPath = resolvePath(filename);
-
+    
     std::error_code ec;
     if (al == 0x00) { // Get
       if (fs::exists(hostPath, ec)) {
         uint16_t attr = 0x20; // Archive
-        if (fs::is_directory(hostPath, ec))
-          attr = 0x10;
+        if (fs::is_directory(hostPath, ec)) attr = 0x10;
         m_cpu.setReg16(cpu::CX, attr);
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
         LOG_DOS("DOS: Get attributes for '", hostPath, "'");
@@ -1586,5 +1760,3 @@ void DOS::handleFileService() {
     }
   }
 }
-
-} // namespace fador::hw

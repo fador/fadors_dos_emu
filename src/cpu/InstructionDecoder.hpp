@@ -62,9 +62,9 @@ private:
   uint8_t m_segmentOverride; // SegRegIndex or 0xFF for none
   uint32_t m_segBase[6];     // Cached bases for ES, CS, SS, DS, FS, GS
 
-  uint32_t m_trace_eip[32];
-  uint16_t m_trace_cs[32];
-  uint8_t m_trace_op[32];
+  uint32_t m_trace_eip[128];
+  uint16_t m_trace_cs[128];
+  uint8_t m_trace_op[128];
   int m_trace_idx = 0;
 
   // Caching for EA to avoid double-fetching displacement in RMW instructions
@@ -101,6 +101,18 @@ private:
 
   // Interrupt and Exception handling
   void triggerInterrupt(uint8_t vector);
+
+  struct Descriptor {
+    uint32_t base;
+    uint32_t limit;
+    bool is32Bit;
+    bool isPresent;
+    uint8_t dpl;
+    uint8_t type;
+    bool isSystem;
+  };
+
+  Descriptor decodeDescriptor(uint32_t low, uint32_t high);
 
   // Protected Mode segment loading
   void loadSegment(SegRegIndex seg, uint16_t selector);

@@ -4,8 +4,6 @@
 #include "../hw/IOBus.hpp"
 #include "../utils/Logger.hpp"
 
-namespace fador::cpu {
-
 struct TraceEntry {
   uint64_t cyc;
   uint8_t op;
@@ -20,6 +18,22 @@ struct TraceEntry {
 };
 static TraceEntry g_ring[5000];
 static size_t g_ringIdx = 0;
+
+extern "C" void dumpTraceRing() {
+  LOG_INFO("--- CPU TRACE (Last 500 instructions) ---");
+  for (int i = 0; i < 500; i++) {
+    int idx = (g_ringIdx + 4500 + i) % 5000;
+    if (g_ring[idx].cyc == 0)
+      continue;
+    LOG_INFO("  ", std::hex, g_ring[idx].cs, ":", g_ring[idx].eip, "  op=0x",
+             (int)g_ring[idx].op, " EAX=", g_ring[idx].eax,
+             " ESP=", g_ring[idx].esp, " CR0=", g_ring[idx].cr0,
+             " PM=", g_ring[idx].is32);
+  }
+  LOG_INFO("--- END TRACE ---");
+}
+
+namespace fador::cpu {
 
 InstructionDecoder::InstructionDecoder(CPU &cpu, memory::MemoryBus &memory,
                                        hw::IOBus &iobus, hw::BIOS &bios,
@@ -351,36 +365,6 @@ bool InstructionDecoder::checkCondition(uint8_t cond) {
 void InstructionDecoder::step() {
   m_stepCount++;
 
-  // --- HLE callback stub detection ---
-  // When a program hooks an interrupt, triggerInterrupt() pushes FLAGS/CS/IP
-  // and jumps to the program's handler.  The handler eventually chains to
-  // the BIOS-default stub (F000:01XX) which contains just IRET.  Before
-  // that IRET executes, we run the HLE service so the interrupt is actually
-  // handled —  then the IRET naturally pops FLAGS/CS/IP from the stack.
-  {
-    uint16_t cs = m_cpu.getSegReg(CS);
-    uint32_t eip = m_cpu.getEIP();
-    if (cs == hw::BIOS::HLE_STUB_SEG && eip >= hw::BIOS::HLE_STUB_BASE &&
-        eip < hw::BIOS::HLE_STUB_BASE + 256) {
-      uint8_t vector = static_cast<uint8_t>(eip - hw::BIOS::HLE_STUB_BASE);
-      m_dos.handleInterrupt(vector);
-      m_bios.handleInterrupt(vector);
-      // Patch the saved-FLAGS copy on the stack so that IRET restores
-      // the flags set by the HLE handler (e.g. carry flag for errors).
-      // Preserve IF and TF from the original saved flags — the INT
-      // instruction clears IF before entering the handler, so current
-      // EFLAGS has IF=0; we must not overwrite the original IF=1.
-      uint16_t sp = m_cpu.getReg16(SP);
-      uint16_t savedFlags =
-          m_memory.read16(m_segBase[SS] + ((sp + 4) & 0xFFFF));
-      uint16_t curFlags = static_cast<uint16_t>(m_cpu.getEFLAGS() & 0xFFFF);
-      // Keep arithmetic/status flags from HLE, preserve IF+TF from caller
-      uint16_t patchedFlags = (curFlags & ~0x0300u) | (savedFlags & 0x0300u);
-      m_memory.write16(m_segBase[SS] + ((sp + 4) & 0xFFFF), patchedFlags);
-      // Fall through — the CPU will now execute the IRET at the stub.
-    }
-  }
-
   m_hasPrefix66 = m_cpu.is32BitCode();
   m_hasPrefix67 = m_cpu.is32BitCode();
   m_hasRepnz = false;
@@ -447,11 +431,16 @@ void InstructionDecoder::step() {
   m_trace_op[m_trace_idx % 32] = opcode;
   m_trace_idx++;
 
-  g_ring[g_ringIdx] = {m_cpu.getCycles(),   opcode,
-                       m_cpu.getSegReg(CS), m_cpu.getEIP() - 1,
-                       m_cpu.getCR(0),      m_cpu.getEFLAGS(),
-                       m_cpu.getReg32(EAX), m_cpu.getReg32(ESP),
-                       m_cpu.getSegReg(SS), m_cpu.is32BitCode()};
+  g_ring[g_ringIdx] = {static_cast<uint64_t>(m_cpu.getCycles()),
+                       static_cast<uint8_t>(opcode),
+                       static_cast<uint16_t>(m_cpu.getSegReg(CS)),
+                       static_cast<uint32_t>(m_cpu.getEIP() - 1),
+                       static_cast<uint32_t>(m_cpu.getCR(0)),
+                       static_cast<uint32_t>(m_cpu.getEFLAGS()),
+                       static_cast<uint32_t>(m_cpu.getReg32(EAX)),
+                       static_cast<uint32_t>(m_cpu.getReg32(ESP)),
+                       static_cast<uint16_t>(m_cpu.getSegReg(SS)),
+                       m_cpu.is32BitCode()};
   g_ringIdx = (g_ringIdx + 1) % 5000;
 
   if (opcode == 0x0F) {
@@ -543,16 +532,14 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
       uint32_t newEip = m_memory.read32(m_segBase[SS] + esp);
       uint16_t newCs = m_memory.read32(m_segBase[SS] + esp + 4) & 0xFFFF;
       uint32_t newEflags = m_memory.read32(m_segBase[SS] + esp + 8);
-
+      uint8_t oldCpl = m_cpu.getSegReg(CS) & 3;
+      uint8_t newCpl = newCs & 3;
       bool wasV86 = (m_cpu.getEFLAGS() & 0x00020000) != 0;
       bool isV86 = (newEflags & 0x00020000) != 0;
 
-      m_cpu.setEFLAGS(newEflags);
-      m_cpu.setEIP(newEip);
-      loadSegment(CS, newCs);
-
       if (!wasV86 && isV86) {
-        // Entering V86 from PM requires popping more registers
+        // Entering V86 from PM requires popping more registers (SS, ESP, ES,
+        // DS, FS, GS)
         uint32_t newEsp = m_memory.read32(m_segBase[SS] + esp + 12);
         uint16_t newSs = m_memory.read32(m_segBase[SS] + esp + 16) & 0xFFFF;
         uint16_t newEs = m_memory.read32(m_segBase[SS] + esp + 20) & 0xFFFF;
@@ -560,6 +547,9 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
         uint16_t newFs = m_memory.read32(m_segBase[SS] + esp + 28) & 0xFFFF;
         uint16_t newGs = m_memory.read32(m_segBase[SS] + esp + 32) & 0xFFFF;
 
+        m_cpu.setEFLAGS(newEflags);
+        m_cpu.setEIP(newEip);
+        loadSegment(CS, newCs);
         m_cpu.setReg32(ESP, newEsp);
         loadSegment(SS, newSs);
         loadSegment(ES, newEs);
@@ -567,20 +557,41 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
         loadSegment(FS, newFs);
         loadSegment(GS, newGs);
       } else {
-        m_cpu.setReg32(ESP, esp + 12);
+        m_cpu.setEFLAGS(newEflags);
+        m_cpu.setEIP(newEip);
+        loadSegment(CS, newCs);
+        if (newCpl > oldCpl && (m_cpu.getCR(0) & 1)) {
+          // PM privilege change (lower privilege)
+          uint32_t newEsp = m_memory.read32(m_segBase[SS] + esp + 12);
+          uint16_t newSs = m_memory.read32(m_segBase[SS] + esp + 16) & 0xFFFF;
+          m_cpu.setReg32(ESP, newEsp);
+          loadSegment(SS, newSs);
+        } else {
+          m_cpu.setReg32(ESP, esp + 12);
+        }
       }
     } else {
       uint16_t sp = m_cpu.getReg16(SP);
       uint16_t newIp = m_memory.read16(m_segBase[SS] + sp);
       uint16_t newCs = m_memory.read16(m_segBase[SS] + sp + 2);
-      uint32_t flags = m_cpu.getEFLAGS();
-      m_cpu.setEFLAGS((flags & 0xFFFF0000) |
-                      m_memory.read16(m_segBase[SS] + sp + 4));
+      uint16_t newFlags = m_memory.read16(m_segBase[SS] + sp + 4);
+      uint8_t oldCpl = m_cpu.getSegReg(CS) & 3;
+      uint8_t newCpl = newCs & 3;
 
+      m_cpu.setEFLAGS((m_cpu.getEFLAGS() & 0xFFFF0000) | newFlags);
       m_cpu.setEIP(newIp);
       loadSegment(CS, newCs);
-      m_cpu.setReg16(SP, sp + 6);
+
+      if (newCpl > oldCpl && (m_cpu.getCR(0) & 1)) {
+        uint16_t newSp = m_memory.read16(m_segBase[SS] + sp + 6);
+        uint16_t newSs = m_memory.read16(m_segBase[SS] + sp + 8);
+        m_cpu.setReg16(SP, newSp);
+        loadSegment(SS, newSs);
+      } else {
+        m_cpu.setReg16(SP, (sp + 6) & 0xFFFF);
+      }
     }
+    m_cpu.popHLEFrame();
     break;
   }
 
@@ -997,10 +1008,19 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     }
     break;
   }
-  case 0x63:
-    decodeModRM(fetch8());
-    LOG_CPU("ARPL - stubbed");
+  case 0x63: { // ARPL r/m16, r16
+    ModRM modrm = decodeModRM(fetch8());
+    uint16_t src = m_cpu.getReg16(modrm.reg);
+    uint16_t dest = readModRM16(modrm);
+    if ((dest & 3) < (src & 3)) {
+      dest = (dest & ~3) | (src & 3);
+      writeModRM16(modrm, dest);
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | FLAG_ZERO);
+    } else {
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~FLAG_ZERO);
+    }
     break;
+  }
 
   case 0x69: { // IMUL r, r/m, imm16/32
     ModRM modrm = decodeModRM(fetch8());
@@ -2341,19 +2361,47 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
     ModRM modrm = decodeModRM(fetch8());
     switch (modrm.reg) {
     case 0: // SLDT
-      writeModRM16(modrm, 0);
+      writeModRM16(modrm, m_cpu.getLDTRSelector());
       break;
     case 1: // STR
-      writeModRM16(modrm, 0);
+      writeModRM16(modrm, m_cpu.getTRSelector());
       break;
-    case 2: // LLDT
-      LOG_DEBUG("[CPU] LLDT selector: 0x", std::hex, readModRM16(modrm));
-      // Just a stub for now
+    case 2: { // LLDT
+      uint16_t selector = readModRM16(modrm);
+      LOG_DEBUG("[CPU] LLDT selector: 0x", std::hex, selector);
+      m_cpu.setLDTRSelector(selector);
+      if (selector == 0) {
+        m_cpu.setLDTR({0, 0});
+      } else {
+        uint32_t gdtBase = m_cpu.getGDTR().base;
+        uint32_t entryAddr = gdtBase + (selector & ~7);
+        uint32_t low = m_memory.read32(entryAddr);
+        uint32_t high = m_memory.read32(entryAddr + 4);
+        Descriptor desc = decodeDescriptor(low, high);
+        m_cpu.setLDTR({static_cast<uint16_t>(desc.limit & 0xFFFF), desc.base});
+        LOG_DEBUG("  LDT base: 0x", std::hex, desc.base, " limit: 0x",
+                  desc.limit);
+      }
       break;
-    case 3: // LTR
-      LOG_DEBUG("[CPU] LTR selector: 0x", std::hex, readModRM16(modrm));
-      // Just a stub for now
+    }
+    case 3: { // LTR
+      uint16_t selector = readModRM16(modrm);
+      LOG_DEBUG("[CPU] LTR selector: 0x", std::hex, selector);
+      m_cpu.setTRSelector(selector);
+      if (selector == 0) {
+        m_cpu.setTR({0, 0});
+      } else {
+        uint32_t gdtBase = m_cpu.getGDTR().base;
+        uint32_t entryAddr = gdtBase + (selector & ~7);
+        uint32_t low = m_memory.read32(entryAddr);
+        uint32_t high = m_memory.read32(entryAddr + 4);
+        Descriptor desc = decodeDescriptor(low, high);
+        m_cpu.setTR({static_cast<uint16_t>(desc.limit & 0xFFFF), desc.base});
+        LOG_DEBUG("  Task Register base: 0x", std::hex, desc.base, " limit: 0x",
+                  desc.limit);
+      }
       break;
+    }
     default:
       LOG_WARN("Group 6 (0x0F 0x00) sub-opcode ", (int)modrm.reg,
                " not implemented.");
@@ -2369,6 +2417,9 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
       uint32_t addr = m_hasPrefix67 ? getEffectiveAddress32(modrm)
                                     : getEffectiveAddress16(modrm);
       m_memory.write16(addr, m_cpu.getGDTR().limit);
+      // SGDT/SIDT always store 24 bits in 16-bit mode, 32 bits in 32-bit mode
+      // Actually, Intel says: "size of the operand is always 6 bytes"
+      // "In 16-bit mode, only 24 bits are stored. In 32-bit mode, 32 bits."
       m_memory.write32(addr + 2, m_cpu.getGDTR().base &
                                      (m_hasPrefix66 ? 0xFFFFFFFF : 0xFFFFFF));
       break;
@@ -2424,18 +2475,61 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
     }
     break;
   }
-  case 0x02: { // LAR r, r/m  – Load Access Rights
+  case 0x02: { // LAR r, r/m
     ModRM modrm = decodeModRM(fetch8());
-    (void)readModRM16(modrm); // consume operand
-    m_cpu.setEFLAGS(m_cpu.getEFLAGS() &
-                    ~FLAG_ZERO); // ZF=0: not valid in real mode
+    uint16_t selector = readModRM16(modrm);
+    bool isRealMode = !(m_cpu.getCR(0) & 1) || (m_cpu.getEFLAGS() & 0x00020000);
+    if (isRealMode || selector == 0) {
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~FLAG_ZERO);
+    } else {
+      uint32_t tableBase =
+          (selector & 0x04) ? m_cpu.getLDTR().base : m_cpu.getGDTR().base;
+      uint16_t tableLimit =
+          (selector & 0x04) ? m_cpu.getLDTR().limit : m_cpu.getGDTR().limit;
+      uint16_t index = selector & ~7;
+      if (index > tableLimit) {
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~FLAG_ZERO);
+      } else {
+        uint32_t entryAddr = tableBase + index;
+        uint32_t high = m_memory.read32(entryAddr + 4);
+        uint32_t ar = high & 0x00FFFF00;
+        if (m_hasPrefix66)
+          m_cpu.setReg32(modrm.reg, ar);
+        else
+          m_cpu.setReg16(modrm.reg, static_cast<uint16_t>(ar >> 8));
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | FLAG_ZERO);
+      }
+    }
     break;
   }
-  case 0x03: { // LSL r, r/m  – Load Segment Limit
+  case 0x03: { // LSL r, r/m
     ModRM modrm = decodeModRM(fetch8());
-    (void)readModRM16(modrm); // consume operand
-    m_cpu.setEFLAGS(m_cpu.getEFLAGS() &
-                    ~FLAG_ZERO); // ZF=0: not valid in real mode
+    uint16_t selector = readModRM16(modrm);
+    bool isRealMode = !(m_cpu.getCR(0) & 1) || (m_cpu.getEFLAGS() & 0x00020000);
+    if (isRealMode || selector == 0) {
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~FLAG_ZERO);
+    } else {
+      uint32_t tableBase =
+          (selector & 0x04) ? m_cpu.getLDTR().base : m_cpu.getGDTR().base;
+      uint16_t tableLimit =
+          (selector & 0x04) ? m_cpu.getLDTR().limit : m_cpu.getGDTR().limit;
+      uint16_t index = selector & ~7;
+      if (index > tableLimit) {
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~FLAG_ZERO);
+      } else {
+        uint32_t entryAddr = tableBase + index;
+        uint32_t low = m_memory.read32(entryAddr);
+        uint32_t high = m_memory.read32(entryAddr + 4);
+        uint32_t limit = (low & 0xFFFF) | (high & 0x000F0000);
+        if (high & 0x00800000)
+          limit = (limit << 12) | 0xFFF;
+        if (m_hasPrefix66)
+          m_cpu.setReg32(modrm.reg, limit);
+        else
+          m_cpu.setReg16(modrm.reg, static_cast<uint16_t>(limit));
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | FLAG_ZERO);
+      }
+    }
     break;
   }
   case 0x08: // INVD  – Invalidate Cache (no-op)
@@ -3021,6 +3115,103 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
     break;
   }
 
+  case 0xFF: { // HLE Interrupt Trap (0x0F 0xFF <vector>)
+    uint8_t vector = fetch8();
+    LOG_DEBUG("HLE Intercept: INT 0x", std::hex, (int)vector);
+    bool handled = false;
+
+    // First try DOS, then BIOS
+    if (m_dos.handleInterrupt(vector))
+      handled = true;
+    else if (m_bios.handleInterrupt(vector))
+      handled = true;
+
+    if (handled) {
+      // The HLE code was executed successfully. Now simulate an IRET
+      // to return to the caller, but merge the emulation status flags
+      // back onto the stack so conditions (CF, ZF) survive the return!
+      uint32_t currentFlags = m_cpu.getEFLAGS();
+
+      if (m_cpu.isLastInt32()) { // 32-bit IRET (IRETD) frame
+        uint32_t esp = m_cpu.getReg32(ESP);
+        uint32_t newEip = m_memory.read32(m_segBase[SS] + esp);
+        uint16_t newCs = m_memory.read32(m_segBase[SS] + esp + 4) & 0xFFFF;
+        uint32_t popFlags = m_memory.read32(m_segBase[SS] + esp + 8);
+
+        uint32_t mask = FLAG_CARRY | FLAG_ZERO | FLAG_SIGN | FLAG_OVERFLOW |
+                        FLAG_AUX | FLAG_PARITY;
+        popFlags = (popFlags & ~mask) | (currentFlags & mask);
+
+        m_cpu.setEFLAGS(popFlags);
+        m_cpu.setEIP(newEip);
+        loadSegment(CS, newCs);
+        m_cpu.setReg32(ESP, esp + 12);
+      } else { // 16-bit IRET frame
+        uint16_t sp = m_cpu.getReg16(SP);
+        uint16_t newIp = m_memory.read16(m_segBase[SS] + sp);
+        uint16_t newCs = m_memory.read16(m_segBase[SS] + sp + 2);
+        uint16_t popFlags = m_memory.read16(m_segBase[SS] + sp + 4);
+
+        uint16_t mask = FLAG_CARRY | FLAG_ZERO | FLAG_SIGN | FLAG_OVERFLOW |
+                        FLAG_AUX | FLAG_PARITY;
+        popFlags = (popFlags & ~mask) | (currentFlags & mask);
+
+        m_cpu.setEFLAGS((currentFlags & 0xFFFF0000) | popFlags);
+        m_cpu.setEIP(newIp);
+        loadSegment(CS, newCs);
+        m_cpu.setReg16(SP, sp + 6);
+      }
+      m_cpu.popHLEFrame();
+    } else {
+      LOG_WARN("HLE Intercept: Unhandled INT 0x", std::hex, (int)vector);
+      // Fallback: If not handled by HLE (should never happen for 0xFF stubs),
+      bool handled_fallback = false;
+      if (m_dos.handleInterrupt(vector))
+        handled_fallback = true;
+      if (!handled_fallback && m_bios.handleInterrupt(vector))
+        handled_fallback = true;
+
+      if (handled_fallback) {
+        bool is32 = m_cpu.isLastInt32();
+        if (is32) {
+          uint32_t esp = m_cpu.getReg32(ESP);
+          // Preserve CF from current EFLAGS into the saved flags on stack
+          uint32_t currentFlags = m_cpu.getEFLAGS();
+          uint32_t savedFlags = m_memory.read32(m_segBase[SS] + esp + 8);
+          uint32_t patchedFlags =
+              (savedFlags & ~0xFD5) | (currentFlags & 0xFD5);
+          m_memory.write32(m_segBase[SS] + esp + 8, patchedFlags);
+
+          m_cpu.setEIP(m_memory.read32(m_segBase[SS] + esp));
+          loadSegment(CS, m_memory.read32(m_segBase[SS] + esp + 4) & 0xFFFF);
+          m_cpu.setEFLAGS(m_memory.read32(m_segBase[SS] + esp + 8));
+          m_cpu.setReg32(ESP, esp + 12);
+        } else {
+          uint16_t sp = m_cpu.getReg16(SP);
+          // Preserve CF into saved flags
+          uint16_t currentFlags = static_cast<uint16_t>(m_cpu.getEFLAGS());
+          uint16_t savedFlags =
+              m_memory.read16(m_segBase[SS] + ((sp + 4) & 0xFFFF));
+          uint16_t patchedFlags =
+              (savedFlags & ~0xFD5) | (currentFlags & 0xFD5);
+          m_memory.write16(m_segBase[SS] + ((sp + 4) & 0xFFFF), patchedFlags);
+
+          m_cpu.setEIP(m_memory.read16(m_segBase[SS] + (sp & 0xFFFF)));
+          loadSegment(CS, m_memory.read16(m_segBase[SS] + ((sp + 2) & 0xFFFF)));
+          m_cpu.setEFLAGS((m_cpu.getEFLAGS() & 0xFFFF0000) |
+                          m_memory.read16(m_segBase[SS] + ((sp + 4) & 0xFFFF)));
+          m_cpu.setReg16(SP, (sp + 6) & 0xFFFF);
+        }
+        m_cpu.popHLEFrame();
+      } else {
+        LOG_WARN("HLE Intercept: Unhandled INT 0x", std::hex, (int)vector);
+        // Do NOT pop stack; let the fallback IRET in stub execute
+        m_cpu.popHLEFrame();
+      }
+    }
+    break;
+  }
+
   default:
     LOG_WARN("0x0F 0x", std::hex, static_cast<int>(opcode),
              " not implemented. Generating #UD INT 6.");
@@ -3034,6 +3225,10 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
 }
 
 void InstructionDecoder::triggerInterrupt(uint8_t vector) {
+  LOG_DEBUG("[CPU] INT 0x", std::hex, (int)vector,
+            " CS:EIP=", m_cpu.getSegReg(CS), ":", m_cpu.getEIP(),
+            " AX=", m_cpu.getReg16(EAX), " BX=", m_cpu.getReg16(EBX),
+            " CX=", m_cpu.getReg16(ECX), " DX=", m_cpu.getReg16(EDX));
   if (vector == 6 || vector == 8 || vector == 13 || vector == 14) {
     LOG_ERROR("CRITICAL DUMP: INT 0x", std::hex, (int)vector,
               " at CS:EIP=", m_cpu.getSegReg(CS), ":", m_cpu.getEIP());
@@ -3070,6 +3265,11 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
   uint32_t eip32 = 0;
   bool use32 = false;
 
+  uint16_t oldCs = m_cpu.getSegReg(CS);
+  uint16_t oldSs = m_cpu.getSegReg(SS);
+  uint32_t oldEsp = m_cpu.getReg32(ESP);
+  uint8_t oldCpl = oldCs & 3;
+
   if (m_cpu.getCR(0) & 1) {
     // Protected Mode IDT lookup
     uint32_t idtBase = m_cpu.getIDTR().base;
@@ -3079,34 +3279,66 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
     cs = (low >> 16) & 0xFFFF;
     eip32 = (low & 0xFFFF) | (high & 0xFFFF0000);
 
-    // Check gate type (bit 11 of high word: 1 = 32-bit gate, 0 = 16-bit gate)
-    use32 = (high & 0x0800) != 0;
+    // Gate type: bits 8-11 of high dword
+    uint8_t type = (high >> 8) & 0x0F;
+    use32 = (type & 0x08) != 0;
+    bool isInterruptGate = (type & 0x01) == 0;
+    uint8_t newCpl = cs & 3;
 
     LOG_DEBUG("PM INT 0x", std::hex, (int)vector, " selector: 0x", cs,
-              " offset: 0x", eip32, " size: ", use32 ? 32 : 16);
+              " offset: 0x", eip32, " size: ", use32 ? 32 : 16, " type: 0x",
+              (int)type, " CPL:", (int)oldCpl, "->", (int)newCpl);
+
+    if (isInterruptGate) {
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~fador::cpu::FLAG_INTERRUPT);
+    }
+
+    // Privilege change check
+    bool privChange = (newCpl < oldCpl) || (m_cpu.getEFLAGS() & 0x00020000);
+
+    m_cpu.pushHLEFrame(use32);
+
+    // HLE check (only handled if it points to our stub, avoiding hooks)
+    if (!(m_cpu.getEFLAGS() & 0x00020000)) {
+      if (m_bios.isOriginalIVT(vector, cs, static_cast<uint16_t>(eip32))) {
+        if (m_dos.handleInterrupt(vector))
+          return;
+        if (m_bios.handleInterrupt(vector))
+          return;
+      }
+    }
+
+    if (privChange) {
+      // In a real CPU, we would look up the new SS/ESP in the TSS.
+      // For fadors, we'll assume Ring 0 stack is already set up or just push
+      // them. Most DPMI clients/servers in Ring 3 -> Ring 0 will need this.
+      if (use32) {
+        m_cpu.push32(oldSs);
+        m_cpu.push32(oldEsp);
+      } else {
+        m_cpu.push16(oldSs);
+        m_cpu.push16(static_cast<uint16_t>(oldEsp & 0xFFFF));
+      }
+    }
+
+    if (use32) {
+      m_cpu.push32(m_cpu.getEFLAGS());
+      m_cpu.push32(oldCs);
+      m_cpu.push32(m_cpu.getEIP());
+    } else {
+      m_cpu.push16(static_cast<uint16_t>(m_cpu.getEFLAGS() & 0xFFFF));
+      m_cpu.push16(oldCs);
+      m_cpu.push16(static_cast<uint16_t>(m_cpu.getEIP() & 0xFFFF));
+    }
   } else {
     // Real Mode IVT lookup
     ip = m_memory.read16(vector * 4);
     cs = m_memory.read16(vector * 4 + 2);
-
-    // HLE check (only in Real Mode for now)
-    if (m_bios.isOriginalIVT(vector, cs, ip)) {
-      if (m_dos.handleInterrupt(vector))
-        return;
-      if (m_bios.handleInterrupt(vector))
-        return;
-    }
     eip32 = ip;
     use32 = false;
-  }
-
-  if (use32) {
-    m_cpu.push32(m_cpu.getEFLAGS());
-    m_cpu.push32(m_cpu.getSegReg(CS));
-    m_cpu.push32(m_cpu.getEIP());
-  } else {
+    m_cpu.pushHLEFrame(use32);
     m_cpu.push16(static_cast<uint16_t>(m_cpu.getEFLAGS() & 0xFFFF));
-    m_cpu.push16(m_cpu.getSegReg(CS));
+    m_cpu.push16(oldCs);
     m_cpu.push16(static_cast<uint16_t>(m_cpu.getEIP() & 0xFFFF));
   }
 
@@ -3123,6 +3355,11 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
   LOG_ERROR("HW IRQ: Injecting Vector 0x", std::hex, (int)vector,
             " CR0=", m_cpu.getCR(0));
 
+  uint16_t oldCs = m_cpu.getSegReg(CS);
+  uint16_t oldSs = m_cpu.getSegReg(SS);
+  uint32_t oldEsp = m_cpu.getReg32(ESP);
+  uint8_t oldCpl = oldCs & 3;
+
   if (m_cpu.getCR(0) & 1) {
     uint32_t idtBase = m_cpu.getIDTR().base;
     uint32_t entryAddr = idtBase + vector * 8;
@@ -3130,25 +3367,54 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
     uint32_t high = m_memory.read32(entryAddr + 4);
     cs = (low >> 16) & 0xFFFF;
     eip32 = (low & 0xFFFF) | (high & 0xFFFF0000);
-    // Check gate type
-    use32 = (high & 0x0800) != 0;
+
+    // Gate type: bits 8-11 of high dword
+    uint8_t type = (high >> 8) & 0x0F;
+    use32 = (type & 0x08) != 0;
+    bool isInterruptGate = (type & 0x01) == 0;
+    uint8_t newCpl = cs & 3;
+
+    LOG_DEBUG("HW IRQ PM 0x", std::hex, (int)vector, " selector: 0x", cs,
+              " offset: 0x", eip32, " size: ", use32 ? 32 : 16, " type: 0x",
+              (int)type, " CPL:", (int)oldCpl, "->", (int)newCpl);
+
+    if (isInterruptGate) {
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~fador::cpu::FLAG_INTERRUPT);
+    }
+
+    bool privChange = (newCpl < oldCpl) || (m_cpu.getEFLAGS() & 0x00020000);
+    m_cpu.pushHLEFrame(use32);
+
+    if (privChange) {
+      if (use32) {
+        m_cpu.push32(oldSs);
+        m_cpu.push32(oldEsp);
+      } else {
+        m_cpu.push16(oldSs);
+        m_cpu.push16(static_cast<uint16_t>(oldEsp & 0xFFFF));
+      }
+    }
+
+    if (use32) {
+      m_cpu.push32(m_cpu.getEFLAGS());
+      m_cpu.push32(oldCs);
+      m_cpu.push32(m_cpu.getEIP());
+    } else {
+      m_cpu.push16(static_cast<uint16_t>(m_cpu.getEFLAGS() & 0xFFFF));
+      m_cpu.push16(oldCs);
+      m_cpu.push16(static_cast<uint16_t>(m_cpu.getEIP() & 0xFFFF));
+    }
   } else {
     eip32 = m_memory.read16(vector * 4);
     cs = m_memory.read16(vector * 4 + 2);
     use32 = false;
-  }
-
-  if (use32) {
-    m_cpu.push32(m_cpu.getEFLAGS());
-    m_cpu.push32(m_cpu.getSegReg(CS));
-    m_cpu.push32(m_cpu.getEIP());
-  } else {
+    m_cpu.pushHLEFrame(use32);
     m_cpu.push16(static_cast<uint16_t>(m_cpu.getEFLAGS() & 0xFFFF));
-    m_cpu.push16(m_cpu.getSegReg(CS));
+    m_cpu.push16(oldCs);
     m_cpu.push16(static_cast<uint16_t>(m_cpu.getEIP() & 0xFFFF));
   }
-  m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~(0x0200 | 0x0100)); // Clear IF and TF
 
+  m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~(0x0200 | 0x0100)); // Clear IF and TF
   loadSegment(CS, cs);
   m_cpu.setEIP(eip32);
 }
@@ -3157,6 +3423,31 @@ void InstructionDecoder::syncSegments() {
   for (int i = 0; i < 6; ++i) {
     loadSegment(static_cast<SegRegIndex>(i), m_cpu.getSegReg(i));
   }
+}
+
+InstructionDecoder::Descriptor
+InstructionDecoder::decodeDescriptor(uint32_t low, uint32_t high) {
+  Descriptor desc;
+  // Base address: low bits 16-31, high bits 0-7 and 24-31
+  desc.base = ((low >> 16) & 0xFFFF) | ((high & 0x000000FF) << 16) |
+              (high & 0xFF000000);
+
+  // Segment Limit: low bits 0-15, high bits 16-19
+  uint32_t limit = (low & 0xFFFF) | (high & 0x000F0000);
+  if (high & 0x00800000) { // Granularity (G) bit (bit 23 of high dword)
+    desc.limit = (limit << 12) | 0xFFF;
+  } else {
+    desc.limit = limit;
+  }
+
+  desc.is32Bit = (high & 0x00400000) != 0;   // D/B bit (bit 22 of high dword)
+  desc.isPresent = (high & 0x00008000) != 0; // P bit (bit 15 of high dword)
+  desc.dpl = (high >> 13) & 3; // DPL bits (bits 13-14 of high dword)
+  desc.isSystem = (high & 0x00001000) ==
+                  0; // S bit (bit 12 of high dword): 0=Sys, 1=Code/Data
+  desc.type = (high >> 8) & 0x0F; // Type bits (bits 8-11 of high dword)
+
+  return desc;
 }
 
 void InstructionDecoder::loadSegment(SegRegIndex seg, uint16_t selector) {
@@ -3178,30 +3469,32 @@ void InstructionDecoder::loadSegment(SegRegIndex seg, uint16_t selector) {
     // Protected Mode (Simplified)
     if (selector == 0 && seg != CS && seg != SS) {
       m_segBase[seg] = 0; // Null segment
+      m_cpu.setSegBase(seg, 0);
       return;
     }
 
-    uint32_t gdtBase = m_cpu.getGDTR().base;
-    uint32_t entryAddr = gdtBase + (selector & ~7);
+    uint32_t tableBase =
+        (selector & 0x04) ? m_cpu.getLDTR().base : m_cpu.getGDTR().base;
+    uint32_t entryAddr = tableBase + (selector & ~7);
 
     // Read descriptor (8 bytes)
     uint32_t low = m_memory.read32(entryAddr);
     uint32_t high = m_memory.read32(entryAddr + 4);
 
-    uint32_t base =
-        ((low >> 16) & 0xFFFF) | ((high & 0xFF) << 16) | (high & 0xFF000000);
-    m_segBase[seg] = base;
-    m_cpu.setSegBase(seg, base);
+    Descriptor desc = decodeDescriptor(low, high);
+    m_segBase[seg] = desc.base;
+    m_cpu.setSegBase(seg, desc.base);
 
     if (seg == CS) {
-      m_cpu.setIs32BitCode((high & 0x400000) != 0);
+      m_cpu.setIs32BitCode(desc.is32Bit);
     }
     if (seg == SS) {
-      m_cpu.setIs32BitStack((high & 0x400000) != 0);
+      m_cpu.setIs32BitStack(desc.is32Bit);
     }
 
     LOG_DEBUG("PM Load Segment ", (int)seg, " selector: 0x", std::hex, selector,
-              " base: 0x", base);
+              " base: 0x", desc.base, " limit: 0x", desc.limit,
+              " 32bit:", desc.is32Bit);
   }
 }
 

@@ -229,34 +229,29 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
     }
   }
 
-  // Load actual program image
-  uint32_t imageOffset = header.headerSize * 16;
-  file.seekg(0, std::ios::end);
-  uint32_t fileSize = file.tellg();
-  file.seekg(imageOffset, std::ios::beg);
-  uint32_t imageSize = fileSize - imageOffset;
+  // Load only the MZ image portion of the file. MS-DOS executables often have
+  // extra data appended (overlays, LE/LX headers, debug info) which must NOT
+  // be loaded into conventional memory, as it would overflow into VRAM/BIOS.
+  uint32_t imageOffset = static_cast<uint32_t>(header.headerSize) * 16;
+  uint32_t mzImageBytes =
+      (static_cast<uint32_t>(header.numPages) - 1) * 512 +
+      (header.lastPageSize == 0 ? 512 : header.lastPageSize);
 
-  // For NE (VROOMM) executables, load only the MZ stub portion.
-  // All NE overlay segments live at file offsets beyond the MZ image and are
-  // loaded on demand by loadOverlaySegment().  Loading the entire file would
-  // fill conventional memory, leaving no free MCB space for overlay allocation.
+  if (mzImageBytes < imageOffset) {
+    LOG_ERROR("ProgramLoader: Invalid MZ header (image size < header size)");
+    return false;
+  }
+  uint32_t imageSize = mzImageBytes - imageOffset;
+
   bool isNEExe = false;
-  uint32_t mzStubSize = imageSize; // default: plain MZ, load everything
   if (neOffset > 0) {
     file.seekg(neOffset, std::ios::beg);
     uint16_t neSig2 = 0;
     file.read(reinterpret_cast<char *>(&neSig2), sizeof(neSig2));
     if (neSig2 == 0x454E) {
       isNEExe = true;
-      // Use the MZ-reported image size (the VROOMM stub) rather than the full
-      // file.
-      uint32_t mzImageBytes =
-          (static_cast<uint32_t>(header.numPages) - 1) * 512 +
-          (header.lastPageSize == 0 ? 512 : header.lastPageSize);
-      mzStubSize = mzImageBytes - imageOffset; // bytes of the stub itself
-      imageSize = mzStubSize;
       LOG_INFO("ProgramLoader: NE exe: loading only MZ stub (0x", std::hex,
-               mzStubSize, " bytes); overlay segments loaded on demand");
+               imageSize, " bytes); overlay segments loaded on demand");
     }
   }
 
@@ -329,7 +324,7 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
     // is available as a free block for overlay segment allocations.
     if (isNEExe) {
       // PSP (16 para) + MZ stub (rounded up to paragraph boundary)
-      uint16_t stubParas = static_cast<uint16_t>((mzStubSize + 15u) / 16u);
+      uint16_t stubParas = static_cast<uint16_t>((imageSize + 15u) / 16u);
       uint16_t loadedParas = 0x10u + stubParas;                // PSP + stub
       uint16_t pspMcbSeg = static_cast<uint16_t>(segment - 1); // 0x0FFF
 

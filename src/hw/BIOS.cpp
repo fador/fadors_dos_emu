@@ -91,6 +91,18 @@ bool BIOS::handleInterrupt(uint8_t vector) {
       } else {
         m_cpu.setReg8(cpu::AL, 0x00);
       }
+    } else if (ax == 0x1600) {
+      // Enhanced Windows installation check
+      m_cpu.setReg8(cpu::AL, 0x00); // Neither Windows 3.x nor Windows 9x
+      LOG_DEBUG("INT 2Fh AX=1600h: Windows check (stubbed)");
+    } else if (ax == 0x1680) {
+      // Release time slice
+      m_cpu.setReg8(cpu::AL, 0x00);
+      LOG_DEBUG("INT 2Fh AX=1680h: Release time slice");
+    } else if (ax == 0x1686) {
+      // Get CPU mode
+      m_cpu.setReg16(cpu::AX, 0x0000); // Real mode
+      LOG_DEBUG("INT 2Fh AX=1686h: Get CPU Mode -> Real Mode");
     } else {
       LOG_DEBUG("BIOS: INT 2Fh Multiplex (stubbed), AX=0x", std::hex, ax);
       m_cpu.setReg8(cpu::AL, 0x00); // Not supported
@@ -111,6 +123,9 @@ bool BIOS::handleInterrupt(uint8_t vector) {
     return true;
   case 0xE0: // XMS far-call dispatch (our internal HLE vector)
     handleXMSDispatch();
+    return true;
+  case 0x67:                      // EMS (Stub)
+    m_cpu.setReg8(cpu::AH, 0x80); // EMS not installed / internal error
     return true;
   }
   return false;
@@ -1055,13 +1070,16 @@ void BIOS::initialize() {
   }
 
   // 2. Setup IVT (Interrupt Vector Table) vectors
-  // Each vector gets a unique IRET callback stub at F000:(0x100 + vector).
-  // When a program hooks an interrupt (via INT 21h/AH=25h), the emulator can
-  // detect the modification and let the hook run before falling through to HLE.
+  // Each vector gets a unique HLE intercept stub at F000:(0x100 + vector * 4).
+  // We write the custom invalid opcode `0x0F 0xFF <vector>` so the CPU traps
+  // directly to our HLE handlers instead of silently returning on an IRET.
   for (int v = 0; v < 256; ++v) {
-    uint16_t stubOff = HLE_STUB_BASE + static_cast<uint16_t>(v);
+    uint16_t stubOff = HLE_STUB_BASE + static_cast<uint16_t>(v * 4);
     uint32_t stubPhys = (static_cast<uint32_t>(HLE_STUB_SEG) << 4) + stubOff;
-    m_memory.write8(stubPhys, 0xCF); // IRET at the stub
+    m_memory.write8(stubPhys, 0x0F);                        // Custom HLE Trap
+    m_memory.write8(stubPhys + 1, 0xFF);                    // Opcode Extension
+    m_memory.write8(stubPhys + 2, static_cast<uint8_t>(v)); // Vector Num
+    m_memory.write8(stubPhys + 3, 0xCF); // IRET fallback just in case
 
     m_memory.write16(v * 4, stubOff);
     m_memory.write16(v * 4 + 2, HLE_STUB_SEG);
@@ -1270,27 +1288,89 @@ void BIOS::handleSystemService() {
     break;
   }
   case 0x87: { // Copy Extended Memory Block
-    // Stub: not implemented, return error
-    m_cpu.setReg8(cpu::AH, 0x86);
-    m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
-    LOG_DEBUG("BIOS INT 15h AH=87h: Copy Extended Memory (stubbed)");
+    uint16_t count = m_cpu.getReg16(cpu::CX);
+    uint32_t len = static_cast<uint32_t>(count) * 2;
+    uint16_t es = m_cpu.getSegReg(cpu::ES);
+    uint16_t si = m_cpu.getReg16(cpu::SI);
+    uint32_t gdtAddr = (static_cast<uint32_t>(es) << 4) + si;
+
+    // Descriptors at 0x10 (source) and 0x18 (dest)
+    auto readPhysAddr = [&](uint32_t descAddr) {
+      uint32_t base = m_memory.read16(descAddr + 2);
+      base |= (static_cast<uint32_t>(m_memory.read8(descAddr + 4)) << 16);
+      base |= (static_cast<uint32_t>(m_memory.read8(descAddr + 7)) << 24);
+      return base;
+    };
+
+    uint32_t srcPhys = readPhysAddr(gdtAddr + 0x10);
+    uint32_t dstPhys = readPhysAddr(gdtAddr + 0x18);
+
+    LOG_DEBUG("BIOS INT 15h AH=87h: Copy ", len, " bytes from 0x", std::hex,
+              srcPhys, " to 0x", dstPhys);
+
+    for (uint32_t i = 0; i < len; ++i) {
+      m_memory.write8(dstPhys + i, m_memory.read8(srcPhys + i));
+    }
+
+    m_cpu.setReg8(cpu::AH, 0);
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
     break;
   }
   case 0x88: { // Get Extended Memory Size (above 1MB, in KB)
-    // Calculate extended memory from total system memory
-    // (Total memory in KB) - (1024 KB base/reserved memory)
-    uint16_t extKB =
-        static_cast<uint16_t>((memory::MemoryBus::MEMORY_SIZE / 1024) - 1024);
+    // If an XMS driver is installed, it should "claim" all INT 15h memory.
+    // Return 0 if HIMEM is present, otherwise return total.
+    uint16_t extKB = 0;
+    if (!m_himem) {
+      extKB =
+          static_cast<uint16_t>((memory::MemoryBus::MEMORY_SIZE / 1024) - 1024);
+    }
     m_cpu.setReg16(cpu::AX, extKB);
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-    LOG_DEBUG("BIOS INT 15h AH=88h: Extended memory = ", extKB, " KB");
+    LOG_DEBUG("BIOS INT 15h AH=88h: Extended memory = ", extKB,
+              " KB (XMS active: ", m_himem ? "yes" : "no", ")");
+    break;
+  }
+  case 0xE8: {
+    uint8_t al = m_cpu.getReg8(cpu::AL);
+    if (al == 0x01) { // Get memory size for >64M configurations
+      // AX/CX = configured memory 1M to 16M, in K
+      // BX/DX = configured memory above 16M, in 64K blocks
+      uint16_t mem1to16 = 15 * 1024;          // 15MB
+      uint16_t memAbove16 = (48 * 1024) / 64; // 48MB / 64K = 768
+
+      m_cpu.setReg16(cpu::AX, mem1to16);
+      m_cpu.setReg16(cpu::CX, mem1to16);
+      m_cpu.setReg16(cpu::BX, memAbove16);
+      m_cpu.setReg16(cpu::DX, memAbove16);
+
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      LOG_DEBUG(
+          "BIOS INT 15h AH=E801h: Reported 15MB (AX/CX) and 48MB (BX/DX)");
+    } else {
+      m_cpu.setReg8(cpu::AH, 0x86);
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+    }
     break;
   }
   case 0xC0: { // Get System Configuration
-    // Stub: return carry=1 (not supported)
-    m_cpu.setReg8(cpu::AH, 0x86);
-    m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
-    LOG_DEBUG("BIOS INT 15h AH=C0h: System Config (stubbed)");
+    // BIOS Configuration Table at F000:FFD0
+    uint32_t tableAddr = 0xFFFD0;
+    m_memory.write16(tableAddr, 8);       // Length
+    m_memory.write8(tableAddr + 2, 0xFC); // Model: AT
+    m_memory.write8(tableAddr + 3, 0x01); // Submodel
+    m_memory.write8(tableAddr + 4, 0x00); // Revision
+    m_memory.write8(tableAddr + 5,
+                    0x70); // Feature 1: EBDA, RTC, Keyboard intercept
+    m_memory.write8(tableAddr + 6, 0x00); // Feature 2
+    m_memory.write8(tableAddr + 7, 0x00); // Feature 3
+    m_memory.write8(tableAddr + 8, 0x00); // Feature 4
+    m_memory.write8(tableAddr + 9, 0x00); // Feature 5
+
+    m_cpu.setSegReg(cpu::ES, 0xF000);
+    m_cpu.setReg16(cpu::BX, 0xFFD0);
+    m_cpu.setReg8(cpu::AH, 0);
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    LOG_DEBUG("BIOS INT 15h AH=C0h: Return System Config at F000:FFD0");
     break;
   }
   case 0x86: { // Wait (microseconds in CX:DX)
@@ -1487,13 +1567,14 @@ void BIOS::handleXMSDispatch() {
   }
   case 0x0E: { // Get Handle Information
     uint16_t handle = m_cpu.getReg16(cpu::DX);
-    // Return BH=lock count, BL=free handles, DX=block size in KB
-    // We don't track detailed handle info, so provide reasonable defaults
     m_cpu.setReg16(cpu::AX, 1);
-    m_cpu.setReg8(cpu::BH, 0);   // Lock count
-    m_cpu.setReg8(cpu::BL, 126); // Free handles remaining
-    m_cpu.setReg16(cpu::DX, 0);  // Block size (would need handle lookup)
-    (void)handle;
+    m_cpu.setReg8(cpu::BH, m_himem->getLockCount(handle));
+    m_cpu.setReg8(cpu::BL, m_himem->getFreeHandles());
+    m_cpu.setReg16(cpu::DX,
+                   static_cast<uint16_t>(m_himem->getHandleSizeKB(handle)));
+    LOG_DEBUG("XMS 0Eh: Info handle=", handle,
+              " size=", m_cpu.getReg16(cpu::DX),
+              "KB lock=", (int)m_cpu.getReg8(cpu::BH));
     break;
   }
   case 0x0F: { // Reallocate Extended Memory Block

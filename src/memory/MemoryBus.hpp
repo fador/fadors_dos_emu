@@ -26,10 +26,13 @@ public:
   // address or video
   uint8_t *directAccess(uint32_t address);
 
-  void setA20(bool enabled) { m_a20Enabled = enabled; }
+  void setA20(bool enabled) {
+    m_a20Enabled = enabled;
+    LOG_DEBUG("Memory: A20 Gate ", enabled ? "Enabled" : "Disabled");
+  }
   bool isA20Enabled() const { return m_a20Enabled; }
 
-  static constexpr uint32_t MEMORY_SIZE = 32 * 1024 * 1024; // 32MB
+  static constexpr uint32_t MEMORY_SIZE = 64 * 1024 * 1024; // 64MB
 
 private:
   std::vector<uint8_t> m_ram;

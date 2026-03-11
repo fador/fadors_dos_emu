@@ -136,8 +136,18 @@ int main(int argc, char *argv[]) {
 #endif
       } else if (arg == "--no-sdl") {
         useSDL = false;
+      } else if (arg.find("--trace=") == 0) {
+        fador::utils::currentLevel = fador::utils::LogLevel::Trace;
+        const std::string cats = arg.substr(8);
+        if (cats.find("cpu") != std::string::npos)
+          fador::utils::enabledCategories |= fador::utils::CAT_CPU;
+        if (cats.find("video") != std::string::npos)
+          fador::utils::enabledCategories |= fador::utils::CAT_VIDEO;
+        if (cats.find("dos") != std::string::npos)
+          fador::utils::enabledCategories |= fador::utils::CAT_DOS;
       } else if (arg.find("--debug=") == 0) {
-        fador::utils::currentLevel = fador::utils::LogLevel::Debug;
+        if (fador::utils::currentLevel > fador::utils::LogLevel::Debug)
+          fador::utils::currentLevel = fador::utils::LogLevel::Debug;
         const std::string cats = arg.substr(8);
         if (cats.find("cpu") != std::string::npos)
           fador::utils::enabledCategories |= fador::utils::CAT_CPU;
@@ -161,9 +171,9 @@ int main(int argc, char *argv[]) {
       bool loaded = false;
       if (path.find(".com") != std::string::npos ||
           path.find(".COM") != std::string::npos) {
-        loaded = loader.loadCOM(path, 0x1000, args);
+        loaded = loader.loadCOM(path, dos.getPSPSegment(), args);
       } else {
-        loaded = loader.loadEXE(path, 0x1000, dos, args, useHimem);
+        loaded = loader.loadEXE(path, dos.getPSPSegment(), dos, args, useHimem);
       }
       if (!loaded) {
         LOG_ERROR("Failed to load program: ", path);
