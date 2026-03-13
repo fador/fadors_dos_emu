@@ -40,6 +40,7 @@ public:
   bool isTerminated() const { return m_terminated; }
   uint8_t getExitCode() const { return m_exitCode; }
   uint16_t getPSPSegment() const { return m_pspSegment; }
+  void setPSPSegment(uint16_t seg) { m_pspSegment = seg; }
 
   // VROOMM Overlay Support
   struct NESegment {

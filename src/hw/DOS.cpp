@@ -130,7 +130,7 @@ bool DOS::handleInterrupt(uint8_t vector) {
       m_cpu.setReg8(cpu::AL, 0x00);
     } else {
       LOG_DOS("DOS: INT 2Fh Multiplex (stubbed), AX=0x", std::hex, ax);
-      m_cpu.setReg8(cpu::AL, 0x01);
+      m_cpu.setReg8(cpu::AL, 0x00);
     }
     return true;
   }
@@ -484,31 +484,6 @@ void DOS::handleDOSService() {
 
   case 0x4C: { // Terminate with return code
     uint8_t al = m_cpu.getReg8(cpu::AL);
-    // TEMPORARY: dump memory for DOOM.EXE error 1005 debugging
-    if (al == 0xED) {
-      // Dump 007F:5370-53C0 (function at 53A1)
-      fprintf(stderr, "EXIT 0xED: 007F:5370-53C0 (phys 0x105450-0x1054A0):\n");
-      for (uint32_t a = 0x105450; a < 0x1054A0; a++) {
-        if ((a & 0xF) == 0) fprintf(stderr, "%05X: ", a);
-        fprintf(stderr, "%02X ", m_memory.read8(a));
-        if ((a & 0xF) == 0xF) fprintf(stderr, "\n");
-      }
-      // Dump 0087:2560-25F0 (caller/init function)
-      fprintf(stderr, "\n0087:2560-25F0 (phys 0x108480-0x108510):\n");
-      for (uint32_t a = 0x108480; a < 0x108510; a++) {
-        if ((a & 0xF) == 0) fprintf(stderr, "%05X: ", a);
-        fprintf(stderr, "%02X ", m_memory.read8(a));
-        if ((a & 0xF) == 0xF) fprintf(stderr, "\n");
-      }
-      // Dump 007F:4B40-4BA8 (the INT 21h call area)
-      fprintf(stderr, "\n007F:4B40-4BA8 (phys 0x104C20-0x104C88):\n");
-      for (uint32_t a = 0x104C20; a < 0x104C88; a++) {
-        if ((a & 0xF) == 0) fprintf(stderr, "%05X: ", a);
-        fprintf(stderr, "%02X ", m_memory.read8(a));
-        if ((a & 0xF) == 0xF) fprintf(stderr, "\n");
-      }
-      fprintf(stderr, "\n");
-    }
     terminateProcess(al);
     break;
   }

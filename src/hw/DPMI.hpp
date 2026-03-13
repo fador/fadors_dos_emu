@@ -79,6 +79,7 @@ private:
 
   // DPMI memory block allocations (INT 31h AX=0501h)
   struct MemBlock {
+    uint32_t handle;     // DPMI block handle (SI:DI)
     uint32_t linearAddr;
     uint32_t size;
     uint16_t xmsHandle; // 0 = conventional

@@ -39,12 +39,20 @@ struct IntTestEnv {
     {
         bios.initialize();
         dos.initialize();
-        cpu.setSegReg(cpu::CS, CODE_SEG);
-        cpu.setSegReg(cpu::DS, CODE_SEG);
-        cpu.setSegReg(cpu::ES, CODE_SEG);
-        cpu.setSegReg(cpu::SS, 0x0000);
+        // Set PSP to match test CODE_SEG
+        dos.setPSPSegment(CODE_SEG);
+        // Use decoder.loadSegment() so the decoder's cached m_segBase[]
+        // stays in sync with the CPU segment registers.
+        decoder.loadSegment(cpu::CS, CODE_SEG);
+        decoder.loadSegment(cpu::DS, CODE_SEG);
+        decoder.loadSegment(cpu::ES, CODE_SEG);
+        decoder.loadSegment(cpu::SS, 0x0000);
         cpu.setReg16(cpu::SP, 0xFFFE);
         cpu.setEIP(CODE_OFF);
+        // Shrink PSP block to free memory for allocation tests.
+        // The MCB at FIRST_MCB_SEGMENT (0x0800) owns all conventional memory;
+        // resize it to just cover CODE_SEG area and create a free block after.
+        shrinkPSPBlock();
     }
 
     // Assemble block, write to CS:IP, return number of bytes
@@ -77,6 +85,28 @@ struct IntTestEnv {
         for (size_t i = 0; i < s.size(); ++i)
             mem.write8(base + static_cast<uint32_t>(i), static_cast<uint8_t>(s[i]));
         mem.write8(base + static_cast<uint32_t>(s.size()), '$');
+    }
+
+private:
+    // Shrink the PSP MCB so there's free memory for allocation tests.
+    // MCB at FIRST_MCB_SEGMENT(0x0800): owner=CODE_SEG, size=PSP_SIZE, type='M'
+    // MCB at (0x0800 + 1 + PSP_SIZE): owner=0, size=remaining, type='Z' (free)
+    void shrinkPSPBlock() {
+        static constexpr uint16_t FIRST_MCB = 0x0800;
+        static constexpr uint16_t LAST_PARA = 0x9FFF;
+        // Give the PSP block enough room for CODE_SEG + 0x1000 paragraphs
+        uint16_t pspSize = (CODE_SEG + 0x1000) - (FIRST_MCB + 1);
+        uint16_t freeSeg = FIRST_MCB + 1 + pspSize;
+        uint16_t freeSize = LAST_PARA - freeSeg;
+
+        auto writeMCB = [&](uint16_t seg, uint8_t type, uint16_t owner, uint16_t size) {
+            uint32_t addr = static_cast<uint32_t>(seg) << 4;
+            mem.write8(addr, type);
+            mem.write16(addr + 1, owner);
+            mem.write16(addr + 3, size);
+        };
+        writeMCB(FIRST_MCB, 'M', CODE_SEG, pspSize);
+        writeMCB(freeSeg, 'Z', 0x0000, freeSize);
     }
 };
 
@@ -711,7 +741,7 @@ TEST_CASE("INT 21h AH=48h/49h Alloc and Free Memory via asm", "[int][asm][dos][m
 
     // Free it: ES = allocated segment
     e.cpu.setEIP(IntTestEnv::CODE_OFF);
-    e.cpu.setSegReg(cpu::ES, allocSeg);
+    e.decoder.loadSegment(cpu::ES, allocSeg);
     e.assemble("MOV AH, 49h\nINT 21h");
     e.run(2);
     REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
@@ -727,7 +757,7 @@ TEST_CASE("INT 21h AH=4Ah Resize Memory via asm", "[int][asm][dos][mem]") {
 
     // Resize to 32 paragraphs
     e.cpu.setEIP(IntTestEnv::CODE_OFF);
-    e.cpu.setSegReg(cpu::ES, allocSeg);
+    e.decoder.loadSegment(cpu::ES, allocSeg);
     e.assemble("MOV AH, 4Ah\nMOV BX, 20h\nINT 21h");
     e.run(3);
     REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));

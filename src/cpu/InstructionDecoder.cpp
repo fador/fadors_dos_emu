@@ -403,44 +403,7 @@ void InstructionDecoder::step() {
   m_trace_op[m_trace_idx % 32] = opcode;
   m_trace_idx++;
 
-  // TEMPORARY: dump per-instruction trace for debugging DOS/4GW error 1005
-  if (m_cpu.getCR(0) & 1) {
-    // TEMP: dump memory bytes at 007F:5368 function when we first enter it
-    if (m_cpu.getSegReg(CS) == 0x007F && (m_cpu.getEIP() - 1) == 0x5368) {
-      uint32_t csBase = m_cpu.getSegBase(CS);
-      fprintf(stderr, "MEMDUMP CS=007F base=0x%08X at 5368:\n", csBase);
-      for (int i = 0; i < 48; i++) {
-        fprintf(stderr, "%02X ", m_memory.read8(csBase + 0x5368 + i));
-        if ((i & 15) == 15) fprintf(stderr, "\n");
-      }
-      fprintf(stderr, "\n");
-    }
-    // TEMP: dump caller code at 0087:2565
-    if (m_cpu.getSegReg(CS) == 0x0087 && (m_cpu.getEIP() - 1) == 0x2565) {
-      uint32_t csBase = m_cpu.getSegBase(CS);
-      fprintf(stderr, "MEMDUMP CS=0087 base=0x%08X at 2555:\n", csBase);
-      for (int i = 0; i < 32; i++) {
-        fprintf(stderr, "%02X ", m_memory.read8(csBase + 0x2555 + i));
-        if ((i & 15) == 15) fprintf(stderr, "\n");
-      }
-      // Also dump SS:[BP+xx] values
-      uint32_t ssBase = m_cpu.getSegBase(cpu::SS);
-      uint32_t bp = m_cpu.getReg16(cpu::BP);
-      fprintf(stderr, "Caller BP=0x%04X SS:base=0x%08X\n", (uint16_t)bp, ssBase);
-      for (int ofs = -8; ofs <= 16; ofs += 2) {
-        uint16_t val = m_memory.read16(ssBase + bp + ofs);
-        fprintf(stderr, "  [BP%+d] = 0x%04X\n", ofs, val);
-      }
-    }
-    fprintf(stderr, "T[%llu] %04X:%08X op=%02X EAX=%08X EBX=%08X ECX=%08X EDX=%08X ESI=%08X EDI=%08X EBP=%08X ESP=%08X FL=%08X DS=%04X SS=%04X PM\n",
-            (unsigned long long)m_stepCount,
-            m_cpu.getSegReg(CS), m_cpu.getEIP() - 1, opcode,
-            m_cpu.getReg32(cpu::EAX), m_cpu.getReg32(cpu::EBX),
-            m_cpu.getReg32(cpu::ECX), m_cpu.getReg32(cpu::EDX),
-            m_cpu.getReg32(cpu::ESI), m_cpu.getReg32(cpu::EDI),
-            m_cpu.getReg32(cpu::EBP), m_cpu.getReg32(cpu::ESP),
-            m_cpu.getEFLAGS(), m_cpu.getSegReg(cpu::DS), m_cpu.getSegReg(cpu::SS));
-  }
+
 
   if (opcode == 0x0F) {
     executeOpcode0F(fetch8());
@@ -517,12 +480,6 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
 
   case 0xCD: { // INT imm8
     uint8_t vec = fetch8();
-    if (vec == 0x31) {
-      uint16_t ax = m_cpu.getReg16(EAX);
-      fprintf(stderr, "INT31: AX=0x%04X BX=0x%04X CX=0x%04X DX=0x%04X CS=0x%04X EIP=0x%08X\n",
-              ax, m_cpu.getReg16(EBX), m_cpu.getReg16(ECX), m_cpu.getReg16(EDX),
-              m_cpu.getSegReg(CS), m_cpu.getEIP());
-    }
     triggerInterrupt(vec);
     break;
   }
@@ -3404,6 +3361,21 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
     eip32 = ip;
     use32 = false;
     m_cpu.pushHLEFrame(use32);
+
+    // HLE shortcut: if the IVT still points to our original HLE stubs,
+    // handle the interrupt directly without pushing an IRET frame.
+    bool isOrig = m_bios.isOriginalIVT(vector, cs, eip32);
+    if (isOrig) {
+      if (m_dos.handleInterrupt(vector)) {
+        m_cpu.popHLEFrame();
+        return;
+      }
+      if (m_bios.handleInterrupt(vector)) {
+        m_cpu.popHLEFrame();
+        return;
+      }
+    }
+
     m_cpu.push16(static_cast<uint16_t>(m_cpu.getEFLAGS() & 0xFFFF));
     m_cpu.push16(oldCs);
     m_cpu.push16(static_cast<uint16_t>(m_cpu.getEIP() & 0xFFFF));

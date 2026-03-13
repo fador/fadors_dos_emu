@@ -74,8 +74,6 @@ bool BIOS::handleInterrupt(uint8_t vector) {
     uint16_t ax = m_cpu.getReg16(cpu::AX);
     if (ax == 0x4300) {
       // XMS installation check
-      // TEMPORARY: trace for DOOM debugging
-      fprintf(stderr, "INT 2Fh AX=4300h: XMS %s\n", m_himem ? "installed" : "not installed");
       if (m_himem) {
         m_cpu.setReg8(cpu::AL, 0x80); // XMS driver installed
         LOG_DEBUG("INT 2Fh AX=4300h: XMS installed");
@@ -1377,9 +1375,6 @@ void BIOS::handleSystemService() {
     }
     m_cpu.setReg16(cpu::AX, extKB);
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-    // TEMPORARY: trace INT 15h AH=88h for DOOM debugging
-    fprintf(stderr, "BIOS INT15h AH=88h: extKB=%u, XMS=%s\n",
-            extKB, m_himem ? "yes" : "no");
     break;
   }
   case 0xE8: {

@@ -354,8 +354,6 @@ void DPMI::handleDescriptorMgmt() {
     uint16_t sel = m_cpu.getReg16(cpu::BX);
     uint16_t rights = m_cpu.getReg16(cpu::CX);
     int idx = selectorToIndex(sel);
-    fprintf(stderr, "DPMI 0009: sel=0x%04X rights=0x%04X ECX=0x%08X idx=%d CS=0x%04X\n",
-            sel, rights, m_cpu.getReg32(cpu::ECX), idx, m_cpu.getSegReg(cpu::CS));
     if (idx > 0 && idx < MAX_LDT && m_ldtUsed[idx]) {
       auto &d = m_ldt[idx];
       // CL = access byte (bits 8-15 of high dword)
@@ -403,9 +401,15 @@ void DPMI::handleDescriptorMgmt() {
   case 0x000B: { // Get Descriptor
     uint16_t sel = m_cpu.getReg16(cpu::BX);
     int idx = selectorToIndex(sel);
-    // Reject null selector (idx 0) and GDT selectors (TI bit clear).
-    // DPMI only manages LDT descriptors; selector 0 is the GDT null descriptor.
-    if (idx > 0 && idx < MAX_LDT && m_ldtUsed[idx]) {
+    if (idx == 0) {
+      // Null selector (GDT[0]): return 8 zero bytes (the null descriptor).
+      // DOS/4GW queries selector 0 during dispatcher init and expects
+      // CF=0 with an all-zero descriptor (access byte 0 = "not present").
+      uint32_t addr = getLinearAddr(cpu::ES, cpu::DI);
+      m_memory.write32(addr, 0);
+      m_memory.write32(addr + 4, 0);
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    } else if (idx < MAX_LDT && m_ldtUsed[idx]) {
       uint32_t addr = getLinearAddr(cpu::ES, cpu::DI);
       m_memory.write32(addr, m_ldt[idx].low);
       m_memory.write32(addr + 4, m_ldt[idx].high);
@@ -860,7 +864,7 @@ void DPMI::handleMemoryInfo() {
                        static_cast<uint16_t>(blockHandle >> 16));
         m_cpu.setReg16(cpu::DI,
                        static_cast<uint16_t>(blockHandle & 0xFFFF));
-        m_memBlocks.push_back({linearAddr, size, handle});
+        m_memBlocks.push_back({blockHandle, linearAddr, size, handle});
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
         LOG_INFO("DPMI 0501h: Alloc ", size, " bytes -> linear=0x", std::hex,
                   linearAddr, " handle=0x", blockHandle);
@@ -884,9 +888,7 @@ void DPMI::handleMemoryInfo() {
         m_cpu.getReg16(cpu::DI);
     bool found = false;
     for (auto it = m_memBlocks.begin(); it != m_memBlocks.end(); ++it) {
-      uint32_t thisHandle =
-          static_cast<uint32_t>(it - m_memBlocks.begin()) + 1;
-      if (thisHandle == blockHandle) {
+      if (it->handle == blockHandle) {
         if (m_himem && it->xmsHandle) {
           m_himem->unlockEMB(it->xmsHandle);
           m_himem->freeEMB(it->xmsHandle);
