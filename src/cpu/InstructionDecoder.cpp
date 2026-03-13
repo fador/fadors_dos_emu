@@ -3,35 +3,7 @@
 #include "../hw/DOS.hpp"
 #include "../hw/IOBus.hpp"
 #include "../utils/Logger.hpp"
-
-struct TraceEntry {
-  uint64_t cyc;
-  uint8_t op;
-  uint16_t cs;
-  uint32_t eip;
-  uint32_t cr0;
-  uint32_t eflags;
-  uint32_t eax;
-  uint32_t esp;
-  uint16_t ss;
-  bool is32;
-};
-static TraceEntry g_ring[5000];
-static size_t g_ringIdx = 0;
-
-extern "C" void dumpTraceRing() {
-  LOG_INFO("--- CPU TRACE (Last 500 instructions) ---");
-  for (int i = 0; i < 500; i++) {
-    int idx = (g_ringIdx + 4500 + i) % 5000;
-    if (g_ring[idx].cyc == 0)
-      continue;
-    LOG_INFO("  ", std::hex, g_ring[idx].cs, ":", g_ring[idx].eip, "  op=0x",
-             (int)g_ring[idx].op, " EAX=", g_ring[idx].eax,
-             " ESP=", g_ring[idx].esp, " CR0=", g_ring[idx].cr0,
-             " PM=", g_ring[idx].is32);
-  }
-  LOG_INFO("--- END TRACE ---");
-}
+#include <cstdio>
 
 namespace fador::cpu {
 
@@ -431,17 +403,45 @@ void InstructionDecoder::step() {
   m_trace_op[m_trace_idx % 32] = opcode;
   m_trace_idx++;
 
-  g_ring[g_ringIdx] = {static_cast<uint64_t>(m_cpu.getCycles()),
-                       static_cast<uint8_t>(opcode),
-                       static_cast<uint16_t>(m_cpu.getSegReg(CS)),
-                       static_cast<uint32_t>(m_cpu.getEIP() - 1),
-                       static_cast<uint32_t>(m_cpu.getCR(0)),
-                       static_cast<uint32_t>(m_cpu.getEFLAGS()),
-                       static_cast<uint32_t>(m_cpu.getReg32(EAX)),
-                       static_cast<uint32_t>(m_cpu.getReg32(ESP)),
-                       static_cast<uint16_t>(m_cpu.getSegReg(SS)),
-                       m_cpu.is32BitCode()};
-  g_ringIdx = (g_ringIdx + 1) % 5000;
+  // TEMPORARY: dump per-instruction trace for debugging DOS/4GW error 1005
+  if (m_cpu.getCR(0) & 1) {
+    // TEMP: dump memory bytes at 007F:5368 function when we first enter it
+    if (m_cpu.getSegReg(CS) == 0x007F && (m_cpu.getEIP() - 1) == 0x5368) {
+      uint32_t csBase = m_cpu.getSegBase(CS);
+      fprintf(stderr, "MEMDUMP CS=007F base=0x%08X at 5368:\n", csBase);
+      for (int i = 0; i < 48; i++) {
+        fprintf(stderr, "%02X ", m_memory.read8(csBase + 0x5368 + i));
+        if ((i & 15) == 15) fprintf(stderr, "\n");
+      }
+      fprintf(stderr, "\n");
+    }
+    // TEMP: dump caller code at 0087:2565
+    if (m_cpu.getSegReg(CS) == 0x0087 && (m_cpu.getEIP() - 1) == 0x2565) {
+      uint32_t csBase = m_cpu.getSegBase(CS);
+      fprintf(stderr, "MEMDUMP CS=0087 base=0x%08X at 2555:\n", csBase);
+      for (int i = 0; i < 32; i++) {
+        fprintf(stderr, "%02X ", m_memory.read8(csBase + 0x2555 + i));
+        if ((i & 15) == 15) fprintf(stderr, "\n");
+      }
+      // Also dump SS:[BP+xx] values
+      uint32_t ssBase = m_cpu.getSegBase(cpu::SS);
+      uint32_t bp = m_cpu.getReg16(cpu::BP);
+      fprintf(stderr, "Caller BP=0x%04X SS:base=0x%08X\n", (uint16_t)bp, ssBase);
+      for (int ofs = -8; ofs <= 16; ofs += 2) {
+        uint16_t val = m_memory.read16(ssBase + bp + ofs);
+        fprintf(stderr, "  [BP%+d] = 0x%04X\n", ofs, val);
+      }
+    }
+    fprintf(stderr, "T[%llu] %04X:%08X op=%02X EAX=%08X EBX=%08X ECX=%08X EDX=%08X ESI=%08X EDI=%08X EBP=%08X ESP=%08X FL=%08X DS=%04X SS=%04X PM\n",
+            (unsigned long long)m_stepCount,
+            m_cpu.getSegReg(CS), m_cpu.getEIP() - 1, opcode,
+            m_cpu.getReg32(cpu::EAX), m_cpu.getReg32(cpu::EBX),
+            m_cpu.getReg32(cpu::ECX), m_cpu.getReg32(cpu::EDX),
+            m_cpu.getReg32(cpu::ESI), m_cpu.getReg32(cpu::EDI),
+            m_cpu.getReg32(cpu::EBP), m_cpu.getReg32(cpu::ESP),
+            m_cpu.getEFLAGS(), m_cpu.getSegReg(cpu::DS), m_cpu.getSegReg(cpu::SS));
+  }
+
   if (opcode == 0x0F) {
     executeOpcode0F(fetch8());
   } else {
@@ -516,7 +516,14 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     break;
 
   case 0xCD: { // INT imm8
-    triggerInterrupt(fetch8());
+    uint8_t vec = fetch8();
+    if (vec == 0x31) {
+      uint16_t ax = m_cpu.getReg16(EAX);
+      fprintf(stderr, "INT31: AX=0x%04X BX=0x%04X CX=0x%04X DX=0x%04X CS=0x%04X EIP=0x%08X\n",
+              ax, m_cpu.getReg16(EBX), m_cpu.getReg16(ECX), m_cpu.getReg16(EDX),
+              m_cpu.getSegReg(CS), m_cpu.getEIP());
+    }
+    triggerInterrupt(vec);
     break;
   }
   case 0xCE: { // INTO
@@ -757,9 +764,9 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
       loadSegment(ES, m_cpu.pop16());
     break;
   case 0x0E:
-    if (m_hasPrefix66)
+    if (m_hasPrefix66) {
       m_cpu.push32(m_cpu.getSegReg(CS));
-    else
+    } else
       m_cpu.push16(m_cpu.getSegReg(CS));
     break;
   case 0x16:
@@ -1191,7 +1198,9 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
   }
   case 0x8E: {
     ModRM m = decodeModRM(fetch8());
-    loadSegment(static_cast<SegRegIndex>(m.reg), readModRM16(m));
+    uint16_t segVal = readModRM16(m);
+    auto segIdx = static_cast<SegRegIndex>(m.reg);
+    loadSegment(segIdx, segVal);
     break;
   }
   case 0x98: { // CBW / CWDE
@@ -1841,6 +1850,15 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
   case 0xD2:
   case 0xD3: {
     ModRM modrm = decodeModRM(fetch8());
+    // For C0/C1: displacement bytes (if any) come before the immediate count
+    // in the instruction stream.  Resolve the EA now so fetch8() below reads
+    // the immediate, not the displacement.
+    if ((opcode == 0xC0 || opcode == 0xC1) && modrm.mod != 3) {
+      if (m_hasPrefix67)
+        getEffectiveAddress32(modrm);
+      else
+        getEffectiveAddress16(modrm);
+    }
     uint8_t count =
         (opcode == 0xC0 || opcode == 0xC1)
             ? fetch8()
@@ -2212,8 +2230,10 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
       m_cpu.setEIP(m_cpu.getEIP() + rel);
     } else {
       int16_t rel = static_cast<int16_t>(fetch16());
-      m_cpu.push16(static_cast<uint16_t>(m_cpu.getEIP()));
-      m_cpu.setEIP(static_cast<uint16_t>(m_cpu.getEIP() + rel));
+      uint16_t retAddr = static_cast<uint16_t>(m_cpu.getEIP());
+      uint16_t target = static_cast<uint16_t>(retAddr + rel);
+      m_cpu.push16(retAddr);
+      m_cpu.setEIP(target);
     }
     break;
   }
@@ -2335,10 +2355,17 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     break;
   }
 
-  case 0xF1: // INT1 / ICEBP – treat as debug breakpoint (no-op)
-    LOG_INFO("INT1/ICEBP at ", std::hex, m_cpu.getSegReg(CS), ":",
-             m_cpu.getEIP() - 1);
+  case 0xF1: { // INT1 / ICEBP – treat as debug breakpoint (no-op)
+    static int f1_count = 0;
+    if (f1_count == 0) {
+      LOG_ERROR("FIRST INT1/ICEBP at ", std::hex, m_cpu.getSegReg(CS), ":",
+                m_cpu.getEIP() - 1, " csBase=", m_segBase[CS],
+                " cpuCsBase=", m_cpu.getSegBase(CS),
+                " cr0=", m_cpu.getCR(0), " d32=", m_cpu.is32BitCode());
+    }
+    f1_count++;
     break;
+  }
   case 0xF4:
     LOG_INFO("HLT encountered at ", std::hex, m_cpu.getSegReg(CS), ":",
              m_cpu.getEIP() - 1);
@@ -2491,12 +2518,32 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
       } else {
         uint32_t entryAddr = tableBase + index;
         uint32_t high = m_memory.read32(entryAddr + 4);
-        uint32_t ar = high & 0x00FFFF00;
-        if (m_hasPrefix66)
-          m_cpu.setReg32(modrm.reg, ar);
-        else
-          m_cpu.setReg16(modrm.reg, static_cast<uint16_t>(ar >> 8));
-        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | FLAG_ZERO);
+        uint8_t access = (high >> 8) & 0xFF;
+        // Check descriptor type validity per Intel spec:
+        // For non-system descriptors (S=1, bit 12 of access): always valid
+        // For system descriptors (S=0): only LDT(2), TSS(1,3,9,11),
+        //   call gate(4,12), task gate(5) are valid
+        // Also check DPL >= max(CPL, RPL)
+        bool sysFlag = (access & 0x10) != 0; // S bit
+        uint8_t type4 = access & 0x0F;
+        bool typeOk = sysFlag; // Non-system (code/data) always ok
+        if (!sysFlag) {
+          // System descriptor — only certain types valid for LAR
+          typeOk = (type4 == 1 || type4 == 2 || type4 == 3 ||
+                    type4 == 4 || type4 == 5 || type4 == 9 ||
+                    type4 == 11 || type4 == 12);
+        }
+        if (access == 0 || !typeOk) {
+          // Zero access = empty descriptor slot, or invalid system type
+          m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~FLAG_ZERO);
+        } else {
+          uint32_t ar = high & 0x00FFFF00;
+          if (m_hasPrefix66)
+            m_cpu.setReg32(modrm.reg, ar);
+          else
+            m_cpu.setReg16(modrm.reg, static_cast<uint16_t>(ar >> 8));
+          m_cpu.setEFLAGS(m_cpu.getEFLAGS() | FLAG_ZERO);
+        }
       }
     }
     break;
@@ -2519,14 +2566,26 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
         uint32_t entryAddr = tableBase + index;
         uint32_t low = m_memory.read32(entryAddr);
         uint32_t high = m_memory.read32(entryAddr + 4);
-        uint32_t limit = (low & 0xFFFF) | (high & 0x000F0000);
-        if (high & 0x00800000)
-          limit = (limit << 12) | 0xFFF;
-        if (m_hasPrefix66)
-          m_cpu.setReg32(modrm.reg, limit);
-        else
-          m_cpu.setReg16(modrm.reg, static_cast<uint16_t>(limit));
-        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | FLAG_ZERO);
+        uint8_t access = (high >> 8) & 0xFF;
+        bool sysFlag = (access & 0x10) != 0;
+        uint8_t type4 = access & 0x0F;
+        bool typeOk = sysFlag;
+        if (!sysFlag) {
+          typeOk = (type4 == 1 || type4 == 2 || type4 == 3 ||
+                    type4 == 9 || type4 == 11);
+        }
+        if (access == 0 || !typeOk) {
+          m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~FLAG_ZERO);
+        } else {
+          uint32_t limit = (low & 0xFFFF) | (high & 0x000F0000);
+          if (high & 0x00800000)
+            limit = (limit << 12) | 0xFFF;
+          if (m_hasPrefix66)
+            m_cpu.setReg32(modrm.reg, limit);
+          else
+            m_cpu.setReg16(modrm.reg, static_cast<uint16_t>(limit));
+          m_cpu.setEFLAGS(m_cpu.getEFLAGS() | FLAG_ZERO);
+        }
       }
     }
     break;
@@ -3127,9 +3186,11 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
 
     if (handled) {
       // Vector 0xE1 = DPMI entry point (reached via CALL FAR, not INT).
-      // handleEntry() already set CS:EIP and PM state — no IRET simulation.
-      // Sync InstructionDecoder's segment base cache with PM descriptors.
-      if (vector == 0xE1) {
+      // Vector 0xE2 = DPMI raw switch PM→RM (reached via JMP FAR).
+      // Vector 0xE3 = DPMI raw switch RM→PM (reached via JMP FAR).
+      // Handlers already set CS:EIP and mode state — no IRET simulation.
+      // Sync InstructionDecoder's segment base cache.
+      if (vector == 0xE1 || vector == 0xE2 || vector == 0xE3) {
         loadSegment(CS, m_cpu.getSegReg(CS));
         loadSegment(SS, m_cpu.getSegReg(SS));
         loadSegment(DS, m_cpu.getSegReg(DS));
@@ -3252,19 +3313,6 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
               " CS:", m_cpu.getSegReg(CS), " DS:", m_cpu.getSegReg(DS),
               " ES:", m_cpu.getSegReg(ES), " SS:", m_cpu.getSegReg(SS),
               " FS:", m_cpu.getSegReg(FS), " GS:", m_cpu.getSegReg(GS));
-
-    LOG_ERROR("--- LAST 5000 INSTRUCTIONS ---");
-    for (size_t i = 1; i <= 5000; i++) {
-      size_t idx = (g_ringIdx + 5000 - i) % 5000;
-      if (g_ring[idx].cyc == 0)
-        continue;
-      LOG_ERROR("CYC: ", std::dec, g_ring[idx].cyc, " Op: 0x", std::hex,
-                (int)g_ring[idx].op, " CS:EIP ", g_ring[idx].cs, ":",
-                g_ring[idx].eip, " EAX:", g_ring[idx].eax,
-                " ESP:", g_ring[idx].esp, " SS:", g_ring[idx].ss,
-                " is32:", g_ring[idx].is32);
-    }
-    LOG_ERROR("--- END DUMP ---");
   }
   if (vector == 0) {
     // Log the faulting address from the stack (if pushed) or current CS:IP
@@ -3301,10 +3349,6 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
               " offset: 0x", eip32, " size: ", use32 ? 32 : 16, " type: 0x",
               (int)type, " CPL:", (int)oldCpl, "->", (int)newCpl);
 
-    if (isInterruptGate) {
-      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~fador::cpu::FLAG_INTERRUPT);
-    }
-
     // Privilege change check
     bool privChange = (newCpl < oldCpl) || (m_cpu.getEFLAGS() & 0x00020000);
 
@@ -3312,7 +3356,8 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
 
     // HLE check (only handled if it points to our stub, avoiding hooks)
     if (!(m_cpu.getEFLAGS() & 0x00020000)) {
-      if (m_bios.isOriginalIVT(vector, cs, eip32)) {
+      bool isOrig = m_bios.isOriginalIVT(vector, cs, eip32);
+      if (isOrig) {
         if (m_dos.handleInterrupt(vector)) {
           m_cpu.popHLEFrame();
           return;
@@ -3322,6 +3367,12 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
           return;
         }
       }
+    }
+
+    // Only clear IF after HLE check — HLE handlers return directly
+    // to the caller without an IRET to restore it.
+    if (isInterruptGate) {
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~fador::cpu::FLAG_INTERRUPT);
     }
 
     if (privChange) {

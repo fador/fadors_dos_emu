@@ -74,6 +74,8 @@ bool BIOS::handleInterrupt(uint8_t vector) {
     uint16_t ax = m_cpu.getReg16(cpu::AX);
     if (ax == 0x4300) {
       // XMS installation check
+      // TEMPORARY: trace for DOOM debugging
+      fprintf(stderr, "INT 2Fh AX=4300h: XMS %s\n", m_himem ? "installed" : "not installed");
       if (m_himem) {
         m_cpu.setReg8(cpu::AL, 0x80); // XMS driver installed
         LOG_DEBUG("INT 2Fh AX=4300h: XMS installed");
@@ -1149,6 +1151,36 @@ void BIOS::initialize() {
     m_memory.write8(dpmiPhys + 2, 0xE1); // Vector E1h (DPMI entry)
   }
 
+  // DPMI raw mode switch: PM→RM at F000:005A (flat PM: 0x08:0xF005A)
+  {
+    uint32_t phys = 0xF005A;
+    m_memory.write8(phys, 0x0F);
+    m_memory.write8(phys + 1, 0xFF);
+    m_memory.write8(phys + 2, 0xE2); // Vector E2h (PM→RM switch)
+  }
+
+  // Low-address copy of PM→RM stub at physical 0x500 (reachable as 0x08:0x0500)
+  // DOS/4GW uses 16-bit JMP FAR in D=0 code segments; offset must fit in 16 bits.
+  {
+    m_memory.write8(0x500, 0x0F);
+    m_memory.write8(0x501, 0xFF);
+    m_memory.write8(0x502, 0xE2); // Vector E2h (PM→RM switch)
+  }
+
+  // DPMI raw mode switch: RM→PM at F000:005D
+  {
+    uint32_t phys = 0xF005D;
+    m_memory.write8(phys, 0x0F);
+    m_memory.write8(phys + 1, 0xFF);
+    m_memory.write8(phys + 2, 0xE3); // Vector E3h (RM→PM switch)
+  }
+
+  // DPMI state save/restore stub at F000:0063 (no-op RETF)
+  {
+    uint32_t phys = 0xF0063;
+    m_memory.write8(phys, 0xCB); // RETF (no state to save/restore)
+  }
+
   LOG_INFO("BIOS: BDA and IVT initialized.");
 }
 
@@ -1345,8 +1377,9 @@ void BIOS::handleSystemService() {
     }
     m_cpu.setReg16(cpu::AX, extKB);
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-    LOG_DEBUG("BIOS INT 15h AH=88h: Extended memory = ", extKB,
-              " KB (XMS active: ", m_himem ? "yes" : "no", ")");
+    // TEMPORARY: trace INT 15h AH=88h for DOOM debugging
+    fprintf(stderr, "BIOS INT15h AH=88h: extKB=%u, XMS=%s\n",
+            extKB, m_himem ? "yes" : "no");
     break;
   }
   case 0xE8: {

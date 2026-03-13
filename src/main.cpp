@@ -86,6 +86,11 @@ int main(int argc, char *argv[]) {
 
     fador::cpu::InstructionDecoder decoder(cpu, memory, iobus, bios, dos);
 
+    dpmi.setSegReloadCallback(
+        [&decoder](uint8_t seg, uint16_t sel) {
+          decoder.loadSegment(static_cast<fador::cpu::SegRegIndex>(seg), sel);
+        });
+
     sb.setIRQCallback([&pic]() { pic.raiseIRQ(5); });
 
     fador::hw::ProgramLoader loader(cpu, memory);
@@ -292,6 +297,19 @@ int main(int argc, char *argv[]) {
           LOG_INFO("Program terminated normally with exit code ",
                    (int)dos.getExitCode(), " after ", instrCount,
                    " instructions");
+          {
+            for (int row = 0; row < 25; ++row) {
+              std::string vramText;
+              for (int col = 0; col < 80; ++col) {
+                uint8_t ch = memory.read8(0xB8000 + (row * 80 + col) * 2);
+                vramText += (ch >= 0x20 && ch < 0x7F) ? static_cast<char>(ch) : ' ';
+              }
+              while (!vramText.empty() && vramText.back() == ' ')
+                vramText.pop_back();
+              if (!vramText.empty())
+                LOG_INFO("VRAM[", row, "]: ", vramText);
+            }
+          }
           if (dumpOnExit) {
             debugger.dumpState();
           }
@@ -395,6 +413,7 @@ int main(int argc, char *argv[]) {
 
       while (running) {
         decoder.step();
+        cpu.addCycles(4);
         pit.addCycles(4);
         instrCount++;
 
@@ -409,6 +428,20 @@ int main(int argc, char *argv[]) {
           LOG_INFO("Program terminated normally with exit code ",
                    (int)dos.getExitCode(), " after ", instrCount,
                    " instructions");
+          // Dump text-mode VGA VRAM to see any error messages
+          {
+            for (int row = 0; row < 25; ++row) {
+              std::string vramText;
+              for (int col = 0; col < 80; ++col) {
+                uint8_t ch = memory.read8(0xB8000 + (row * 80 + col) * 2);
+                vramText += (ch >= 0x20 && ch < 0x7F) ? static_cast<char>(ch) : ' ';
+              }
+              while (!vramText.empty() && vramText.back() == ' ')
+                vramText.pop_back();
+              if (!vramText.empty())
+                LOG_INFO("VRAM[", row, "]: ", vramText);
+            }
+          }
           if (dumpOnExit) {
             debugger.dumpState();
           }

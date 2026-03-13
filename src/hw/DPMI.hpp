@@ -4,6 +4,7 @@
 #include "../memory/himem/HIMEM.hpp"
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 namespace fador::hw {
@@ -20,6 +21,11 @@ public:
   void setBIOS(BIOS *bios) { m_bios = bios; }
   void setHIMEM(memory::HIMEM *himem) { m_himem = himem; }
 
+  // Callback to reload segment register caches when a descriptor is modified.
+  // Signature: void(uint8_t segIndex, uint16_t selector)
+  using SegReloadFn = std::function<void(uint8_t, uint16_t)>;
+  void setSegReloadCallback(SegReloadFn fn) { m_segReloadFn = std::move(fn); }
+
   bool isActive() const { return m_active; }
 
   // Called from INT 2Fh AX=1687h — fill registers for DPMI detection
@@ -31,6 +37,11 @@ public:
 
   // Handle INT 31h DPMI function calls. Returns true if handled.
   bool handleInt31();
+
+  // Raw mode switch: PM → RM (vector 0xE2)
+  void handleRawSwitchPMtoRM();
+  // Raw mode switch: RM → PM (vector 0xE3)
+  void handleRawSwitchRMtoPM();
 
   // DPMI entry point location in BIOS ROM area
   static constexpr uint16_t DPMI_ENTRY_SEG = 0xF000;
@@ -82,11 +93,15 @@ private:
   };
   std::array<PMVector, 256> m_pmVectors{};
 
+  // Processor exception handler vectors (INT 31h AX=0202h/0203h)
+  std::array<PMVector, 32> m_excVectors{};
+
   // Virtual interrupt flag
   bool m_virtualIF = true;
 
   // State
   bool m_active = false;
+  bool m_is32BitClient = false; // Set from AX bit 0 at DPMI entry
   std::vector<RawDescriptor> m_ldt;
   std::vector<bool> m_ldtUsed;
 
@@ -102,6 +117,11 @@ private:
   DOS *m_dos = nullptr;
   BIOS *m_bios = nullptr;
   memory::HIMEM *m_himem = nullptr;
+  SegReloadFn m_segReloadFn;
+
+  // Reload segment register caches if the modified selector matches any
+  // currently-loaded segment register.
+  void reloadAffectedSegments(uint16_t sel);
 
   // INT 31h sub-handlers
   void handleDescriptorMgmt();   // AX=0000h..000Ch
@@ -110,7 +130,7 @@ private:
   void handleTranslation();      // AX=0300h..0304h
   void handleVersion();          // AX=0400h
   void handleMemoryInfo();       // AX=0500h..0503h
-  void handlePageSize();         // AX=0604h
+  void handlePageLocking();       // AX=0600h-0604h
   void handleVirtualInterrupt(); // AX=0900h..0902h
 };
 

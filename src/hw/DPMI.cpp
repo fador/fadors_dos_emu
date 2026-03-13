@@ -60,6 +60,7 @@ bool DPMI::handleEntry() {
 
   uint16_t flags = m_cpu.getReg16(cpu::AX); // bit 0 = 32-bit if set
   bool is32 = (flags & 1) != 0;
+  m_is32BitClient = is32;
 
   LOG_INFO("DPMI: Entry from RM CS=0x", std::hex, callerCS_RM, " DS=0x",
            callerDS, " SS=0x", callerSS, " IP=0x", callerIP,
@@ -72,9 +73,12 @@ bool DPMI::handleEntry() {
                            0x00); // Byte gran, 16-bit
   };
   auto makeCodeDesc = [&](uint16_t seg) -> RawDescriptor {
+    // Initial CS is always 16-bit (D=0) regardless of client's 32-bit flag.
+    // The caller's code at the return address is 16-bit real-mode code;
+    // the client will allocate its own 32-bit CS and switch to it.
     return buildDescriptor(static_cast<uint32_t>(seg) << 4, 0xFFFF,
                            0xFA, // Present, DPL=3, Code, R/X
-                           is32 ? 0x04 : 0x00); // D bit for 32-bit
+                           0x00); // D=0: 16-bit code segment
   };
 
   m_clientCS = allocateDescriptors(1);
@@ -150,6 +154,12 @@ bool DPMI::handleEntry() {
     uint32_t high = (stubPhysAddr & 0xFFFF0000) | 0x0000EE00;
     m_memory.write32(IDT_PM_PHYS + v * 8, low);
     m_memory.write32(IDT_PM_PHYS + v * 8 + 4, high);
+
+    // Initialize PM vector table to match the IDT HLE stubs.
+    // When clients read vectors via 0x0204, they get valid "old" handler
+    // addresses they can chain to.
+    m_pmVectors[v].selector = 0x0008;
+    m_pmVectors[v].offset = stubPhysAddr;
   }
 
   // --- Load system registers ---
@@ -198,6 +208,11 @@ bool DPMI::handleInt31() {
   uint16_t ax = m_cpu.getReg16(cpu::AX);
   uint8_t ah = ax >> 8;
 
+  LOG_INFO("DPMI INT31h AX=0x", std::hex, ax,
+           " BX=", m_cpu.getReg16(cpu::BX),
+           " CX=", m_cpu.getReg16(cpu::CX),
+           " EDX=", m_cpu.getReg32(cpu::EDX));
+
   switch (ah) {
   case 0x00:
     handleDescriptorMgmt();
@@ -218,10 +233,19 @@ bool DPMI::handleInt31() {
     handleMemoryInfo();
     return true;
   case 0x06:
-    handlePageSize();
+    handlePageLocking();
+    return true;
+  case 0x07:
+    // Page demand paging candidates / discard — no-op success
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
     return true;
   case 0x09:
     handleVirtualInterrupt();
+    return true;
+  case 0x0A:
+    // Vendor specific API — not supported
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+    m_cpu.setReg16(cpu::AX, 0x8001);
     return true;
   default:
     LOG_WARN("DPMI: Unhandled INT 31h AX=0x", std::hex, ax);
@@ -301,6 +325,7 @@ void DPMI::handleDescriptorMgmt() {
     if (idx > 0 && idx < MAX_LDT && m_ldtUsed[idx]) {
       setDescBase(m_ldt[idx], base);
       flushLDTEntry(idx);
+      reloadAffectedSegments(sel);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
       LOG_DEBUG("DPMI 0007h: Set sel 0x", std::hex, sel, " base=0x", base);
     } else {
@@ -317,6 +342,7 @@ void DPMI::handleDescriptorMgmt() {
     if (idx > 0 && idx < MAX_LDT && m_ldtUsed[idx]) {
       setDescLimit(m_ldt[idx], limit);
       flushLDTEntry(idx);
+      reloadAffectedSegments(sel);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
     } else {
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
@@ -328,6 +354,8 @@ void DPMI::handleDescriptorMgmt() {
     uint16_t sel = m_cpu.getReg16(cpu::BX);
     uint16_t rights = m_cpu.getReg16(cpu::CX);
     int idx = selectorToIndex(sel);
+    fprintf(stderr, "DPMI 0009: sel=0x%04X rights=0x%04X ECX=0x%08X idx=%d CS=0x%04X\n",
+            sel, rights, m_cpu.getReg32(cpu::ECX), idx, m_cpu.getSegReg(cpu::CS));
     if (idx > 0 && idx < MAX_LDT && m_ldtUsed[idx]) {
       auto &d = m_ldt[idx];
       // CL = access byte (bits 8-15 of high dword)
@@ -339,6 +367,7 @@ void DPMI::handleDescriptorMgmt() {
                (static_cast<uint32_t>(accessByte) << 8) |
                (static_cast<uint32_t>(extNibble) << 20);
       flushLDTEntry(idx);
+      reloadAffectedSegments(sel);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
     } else {
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
@@ -374,6 +403,8 @@ void DPMI::handleDescriptorMgmt() {
   case 0x000B: { // Get Descriptor
     uint16_t sel = m_cpu.getReg16(cpu::BX);
     int idx = selectorToIndex(sel);
+    // Reject null selector (idx 0) and GDT selectors (TI bit clear).
+    // DPMI only manages LDT descriptors; selector 0 is the GDT null descriptor.
     if (idx > 0 && idx < MAX_LDT && m_ldtUsed[idx]) {
       uint32_t addr = getLinearAddr(cpu::ES, cpu::DI);
       m_memory.write32(addr, m_ldt[idx].low);
@@ -390,9 +421,29 @@ void DPMI::handleDescriptorMgmt() {
     int idx = selectorToIndex(sel);
     if (idx > 0 && idx < MAX_LDT && m_ldtUsed[idx]) {
       uint32_t addr = getLinearAddr(cpu::ES, cpu::DI);
-      m_ldt[idx].low = m_memory.read32(addr);
-      m_ldt[idx].high = m_memory.read32(addr + 4);
+      uint32_t oldBase = extractBase(m_ldt[idx]);
+      uint32_t newLow = m_memory.read32(addr);
+      uint32_t newHigh = m_memory.read32(addr + 4);
+      // If incoming descriptor has access byte = 0 (Not Present, no type),
+      // preserve existing access byte from current descriptor.
+      // DOS/4GW sets base+limit via 0x000C with zero access, expecting
+      // existing access rights to persist.
+      uint8_t incomingAccess = (newHigh >> 8) & 0xFF;
+      if (incomingAccess == 0) {
+        newHigh = (newHigh & ~0x0000FF00U) |
+                  (m_ldt[idx].high & 0x0000FF00U);
+      }
+      m_ldt[idx].low = newLow;
+      m_ldt[idx].high = newHigh;
+      uint32_t newBase = extractBase(m_ldt[idx]);
+      LOG_INFO("DPMI 000Ch: Set Descriptor sel=0x", std::hex, sel,
+               " base 0x", oldBase, "->0x", newBase,
+               " CS=0x", m_cpu.getSegReg(cpu::CS),
+               " SS=0x", m_cpu.getSegReg(cpu::SS),
+               " DS=0x", m_cpu.getSegReg(cpu::DS),
+               " ES=0x", m_cpu.getSegReg(cpu::ES));
       flushLDTEntry(idx);
+      reloadAffectedSegments(sel);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
     } else {
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
@@ -498,9 +549,31 @@ void DPMI::handleInterruptVectors() {
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
     break;
   }
+  case 0x0202: { // Get Processor Exception Handler Vector
+    if (vec < 32) {
+      m_cpu.setReg16(cpu::CX, m_excVectors[vec].selector);
+      m_cpu.setReg32(cpu::EDX, m_excVectors[vec].offset);
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    } else {
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      m_cpu.setReg16(cpu::AX, 0x8021);
+    }
+    break;
+  }
+  case 0x0203: { // Set Processor Exception Handler Vector
+    if (vec < 32) {
+      m_excVectors[vec].selector = m_cpu.getReg16(cpu::CX);
+      m_excVectors[vec].offset = m_cpu.getReg32(cpu::EDX);
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    } else {
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      m_cpu.setReg16(cpu::AX, 0x8021);
+    }
+    break;
+  }
   case 0x0204: { // Get Protected Mode Interrupt Vector
     m_cpu.setReg16(cpu::CX, m_pmVectors[vec].selector);
-    if (m_cpu.is32BitCode())
+    if (m_is32BitClient)
       m_cpu.setReg32(cpu::EDX, m_pmVectors[vec].offset);
     else
       m_cpu.setReg16(cpu::DX,
@@ -510,12 +583,27 @@ void DPMI::handleInterruptVectors() {
   }
   case 0x0205: { // Set Protected Mode Interrupt Vector
     m_pmVectors[vec].selector = m_cpu.getReg16(cpu::CX);
-    if (m_cpu.is32BitCode())
+    if (m_is32BitClient)
       m_pmVectors[vec].offset = m_cpu.getReg32(cpu::EDX);
     else
       m_pmVectors[vec].offset = m_cpu.getReg16(cpu::DX);
+
+    // Update the PM IDT so future interrupts dispatch to the client's handler.
+    // When isOriginalIVT() sees a non-HLE address, it skips HLE and dispatches
+    // normally (push frame, jump to handler).
+    {
+      uint32_t idtAddr = IDT_PM_PHYS + vec * 8;
+      uint32_t offset = m_pmVectors[vec].offset;
+      uint16_t selector = m_pmVectors[vec].selector;
+      uint32_t low =
+          (static_cast<uint32_t>(selector) << 16) | (offset & 0xFFFF);
+      uint32_t high = (offset & 0xFFFF0000) | 0x0000EE00;
+      m_memory.write32(idtAddr, low);
+      m_memory.write32(idtAddr + 4, high);
+    }
+
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-    LOG_DEBUG("DPMI 0205h: Set PM INT 0x", std::hex, (int)vec, " -> sel=0x",
+    LOG_INFO("DPMI 0205h: Set PM INT 0x", std::hex, (int)vec, " -> sel=0x",
               m_pmVectors[vec].selector, " off=0x", m_pmVectors[vec].offset);
     break;
   }
@@ -533,6 +621,7 @@ void DPMI::handleTranslation() {
   switch (func) {
   case 0x0300: // Simulate Real Mode Interrupt
   case 0x0301: // Call Real Mode Procedure With Far Return Frame
+  case 0x0302: // Call Real Mode Procedure With IRET Frame
   {
     uint8_t intNo = m_cpu.getReg8(cpu::BL);
     uint32_t structAddr = getLinearAddr(cpu::ES, cpu::EDI);
@@ -587,10 +676,56 @@ void DPMI::handleTranslation() {
         handled = true;
       if (!handled)
         LOG_WARN("DPMI 0300h: INT 0x", std::hex, (int)intNo, " not handled");
+    } else {
+      // func == 0x0301/0x0302: Call RM procedure at CS:IP from the structure
+      uint16_t rmIP = m_memory.read16(structAddr + 0x2A);
+      uint16_t rmCS = m_memory.read16(structAddr + 0x2C);
+      {
+        uint32_t rmEAX = m_memory.read32(structAddr + 0x1C);
+        uint32_t rmEBX = m_memory.read32(structAddr + 0x10);
+        uint32_t rmEDX = m_memory.read32(structAddr + 0x14);
+        LOG_INFO("DPMI 030", (int)(func & 0xF),
+                 "h: Call RM proc at ", std::hex, rmCS, ":", rmIP,
+                 " AX=", rmEAX & 0xFFFF,
+                 " BX=", rmEBX & 0xFFFF,
+                 " DX=", rmEDX & 0xFFFF,
+                 " structAddr=", structAddr);
+      }
+      // Try HLE at the target address
+      bool handled = false;
+      uint32_t targetAddr = (static_cast<uint32_t>(rmCS) << 4) + rmIP;
+      // Check if the target is one of our HLE stubs (matching IVT entry)
+      if (m_bios) {
+        for (int v = 0; v < 256; v++) {
+          uint16_t ivtIP = m_memory.read16(v * 4);
+          uint16_t ivtCS = m_memory.read16(v * 4 + 2);
+          if (ivtCS == rmCS && ivtIP == rmIP) {
+            if (m_dos && m_dos->handleInterrupt(v)) {
+              handled = true;
+              break;
+            }
+            if (m_bios->handleInterrupt(v)) {
+              handled = true;
+              break;
+            }
+          }
+        }
+      }
+      if (!handled)
+        LOG_WARN("DPMI 030", (int)(func & 0xF),
+                 "h: RM proc at ", std::hex, rmCS, ":", rmIP, " not handled");
     }
-    // func == 0x0301: call procedure — not commonly used, stub for now
 
     // Write back modified registers to the call structure
+    {
+      uint16_t retFlags = static_cast<uint16_t>(m_cpu.getEFLAGS() & 0xFFFF);
+      bool retCF = !!(retFlags & cpu::FLAG_CARRY);
+      LOG_INFO("DPMI 030xh result: AX=", std::hex,
+                m_cpu.getReg16(cpu::AX),
+                " BX=", m_cpu.getReg16(cpu::BX),
+                " CF=", retCF ? 1 : 0,
+                " ES=", m_cpu.getSegReg(cpu::ES));
+    }
     m_memory.write32(structAddr + 0x00, m_cpu.getReg32(cpu::EDI));
     m_memory.write32(structAddr + 0x04, m_cpu.getReg32(cpu::ESI));
     m_memory.write32(structAddr + 0x08, m_cpu.getReg32(cpu::EBP));
@@ -631,6 +766,27 @@ void DPMI::handleTranslation() {
     break;
   }
   case 0x0304: { // Free Real Mode Callback Address
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    break;
+  }
+  case 0x0305: { // Get State Save/Restore Addresses
+    // Return size=0 (no state to save) and dummy addresses
+    m_cpu.setReg16(cpu::AX, 0); // Buffer size = 0
+    m_cpu.setReg16(cpu::BX, 0xF000);
+    m_cpu.setReg16(cpu::CX, 0x0063); // RM procedure at F000:0063
+    m_cpu.setReg16(cpu::SI, 0x0008); // PM selector (flat code)
+    m_cpu.setReg32(cpu::EDI, 0xF0063); // PM offset (same phys addr)
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    break;
+  }
+  case 0x0306: { // Get Raw Mode Switch Addresses
+    // PM→RM switch: PM JMP FAR to selector 0x08 : 0x0500
+    // Stub at physical 0x500 (low address reachable with 16-bit offset)
+    m_cpu.setReg16(cpu::SI, 0x0008); // PM selector (flat code)
+    m_cpu.setReg32(cpu::EDI, 0x0500); // PM offset (fits in 16 bits)
+    // RM→PM switch: RM CALL FAR to F000:005D
+    m_cpu.setReg16(cpu::BX, 0xF000);
+    m_cpu.setReg16(cpu::CX, 0x005D);
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
     break;
   }
@@ -679,6 +835,7 @@ void DPMI::handleMemoryInfo() {
     m_memory.write32(addr + 0x20, 0xFFFFFFFF);    // Swap file size
     for (int i = 0x24; i < 0x30; i += 4)
       m_memory.write32(addr + i, 0);
+    LOG_INFO("DPMI 0500h: Free memory = ", freeBytes, " bytes (", freeBytes / 1024, " KB)");
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
     break;
   }
@@ -705,15 +862,17 @@ void DPMI::handleMemoryInfo() {
                        static_cast<uint16_t>(blockHandle & 0xFFFF));
         m_memBlocks.push_back({linearAddr, size, handle});
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-        LOG_DEBUG("DPMI 0501h: Alloc ", size, " bytes -> linear=0x", std::hex,
+        LOG_INFO("DPMI 0501h: Alloc ", size, " bytes -> linear=0x", std::hex,
                   linearAddr, " handle=0x", blockHandle);
       } else {
         if (handle)
           m_himem->freeEMB(handle);
+        LOG_WARN("DPMI 0501h: FAILED alloc ", size, " bytes (handle=", handle, ")");
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
         m_cpu.setReg16(cpu::AX, 0x8012);
       }
     } else {
+      LOG_WARN("DPMI 0501h: FAILED alloc ", size, " bytes (no HIMEM)");
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
       m_cpu.setReg16(cpu::AX, 0x8012);
     }
@@ -758,10 +917,24 @@ void DPMI::handleMemoryInfo() {
 }
 
 // ── Page size (AX=0604h) ────────────────────────────────────────────────────
-void DPMI::handlePageSize() {
-  m_cpu.setReg16(cpu::BX, 0);
-  m_cpu.setReg16(cpu::CX, 4096);
-  m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+void DPMI::handlePageLocking() {
+  uint16_t func = m_cpu.getReg16(cpu::AX);
+  switch (func) {
+  case 0x0600: // Lock Linear Region — no-op success
+  case 0x0601: // Unlock Linear Region — no-op success
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    break;
+  case 0x0604: // Get Page Size
+    m_cpu.setReg16(cpu::BX, 0);
+    m_cpu.setReg16(cpu::CX, 4096);
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    break;
+  default:
+    LOG_WARN("DPMI: Unhandled page function 0x", std::hex, func);
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+    m_cpu.setReg16(cpu::AX, 0x8001);
+    break;
+  }
 }
 
 // ── Virtual interrupt state (AX=0900h..0902h) ───────────────────────────────
@@ -802,8 +975,13 @@ uint16_t DPMI::allocateDescriptors(uint16_t count) {
       }
     }
     if (ok) {
-      for (int j = 0; j < count; ++j)
+      for (int j = 0; j < count; ++j) {
         m_ldtUsed[i + j] = true;
+        // DPMI spec: newly allocated descriptors have Present bit set,
+        // type = data R/W, DPL = 3, base = 0, limit = 0.
+        m_ldt[i + j] = buildDescriptor(0, 0, 0xF2, 0x00);
+        flushLDTEntry(i + j);
+      }
       return makeSelector(i);
     }
   }
@@ -867,11 +1045,104 @@ void DPMI::flushLDTEntry(int index) {
   m_memory.write32(addr + 4, m_ldt[index].high);
 }
 
+void DPMI::reloadAffectedSegments(uint16_t sel) {
+  if (!m_segReloadFn)
+    return;
+  // Check each segment register; if it holds the modified selector, reload it.
+  static constexpr uint8_t segs[] = {cpu::ES, cpu::CS, cpu::SS,
+                                     cpu::DS, cpu::FS, cpu::GS};
+  static constexpr const char *segNames[] = {"ES", "CS", "SS", "DS", "FS", "GS"};
+  for (uint8_t s : segs) {
+    if (m_cpu.getSegReg(s) == sel) {
+      uint32_t oldBase = m_cpu.getSegBase(s);
+      m_segReloadFn(s, sel);
+      uint32_t newBase = m_cpu.getSegBase(s);
+      if (oldBase != newBase) {
+        LOG_INFO("DPMI: Reloaded ", segNames[s], " sel=0x", std::hex, sel,
+                 " base 0x", oldBase, " -> 0x", newBase);
+      }
+    }
+  }
+}
+
 uint32_t DPMI::getLinearAddr(uint8_t segReg, uint8_t reg) const {
   uint32_t base = m_cpu.getSegBase(segReg);
-  uint32_t offset = m_cpu.is32BitCode() ? m_cpu.getReg32(reg)
-                                        : m_cpu.getReg16(reg);
+  uint32_t offset = m_is32BitClient ? m_cpu.getReg32(reg)
+                                    : m_cpu.getReg16(reg);
   return base + offset;
+}
+
+// ── Raw mode switch: PM → RM (vector 0xE2) ──────────────────────────────────
+// Called via JMP FAR to 0x08:0xF005A (flat PM address).
+// Registers: AX=new DS seg, CX=new CS seg, DX=new SS seg,
+//            BX=new SP, SI=new IP, EDI preserved.
+void DPMI::handleRawSwitchPMtoRM() {
+  uint16_t newDS = m_cpu.getReg16(cpu::AX);
+  uint16_t newCS = m_cpu.getReg16(cpu::CX);
+  uint16_t newSS = m_cpu.getReg16(cpu::DX);
+  uint16_t newSP = m_cpu.getReg16(cpu::BX);
+  uint16_t newIP = m_cpu.getReg16(cpu::SI);
+
+  LOG_DEBUG("DPMI: Raw switch PM→RM CS=", std::hex, newCS, " IP=", newIP,
+            " DS=", newDS, " SS:SP=", newSS, ":", newSP);
+
+  // Switch to real mode
+  m_cpu.setCR(0, m_cpu.getCR(0) & ~1u);
+
+  // Set real-mode segments
+  m_cpu.setSegReg(cpu::CS, newCS);
+  m_cpu.setSegReg(cpu::DS, newDS);
+  m_cpu.setSegReg(cpu::SS, newSS);
+  m_cpu.setSegReg(cpu::ES, newDS); // ES defaults to DS per convention
+  m_cpu.setSegReg(cpu::FS, 0);
+  m_cpu.setSegReg(cpu::GS, 0);
+
+  m_cpu.setReg16(cpu::SP, newSP);
+  m_cpu.setEIP(newIP);
+
+  m_cpu.setIs32BitCode(false);
+  m_cpu.setIs32BitStack(false);
+}
+
+// ── Raw mode switch: RM → PM (vector 0xE3) ──────────────────────────────────
+// Called via JMP FAR to F000:005D (real-mode address).
+// Registers: AX=new DS sel, CX=new CS sel, DX=new SS sel,
+//            (E)BX=new ESP, SI=new EIP, EDI preserved.
+void DPMI::handleRawSwitchRMtoPM() {
+  uint16_t newDS = m_cpu.getReg16(cpu::AX);
+  uint16_t newCS = m_cpu.getReg16(cpu::CX);
+  uint16_t newSS = m_cpu.getReg16(cpu::DX);
+  uint32_t newESP = m_cpu.getReg32(cpu::EBX);
+  uint32_t newEIP = m_cpu.getReg32(cpu::ESI);
+
+  LOG_DEBUG("DPMI: Raw switch RM→PM CS=", std::hex, newCS, " EIP=", newEIP,
+            " DS=", newDS, " SS:ESP=", newSS, ":", newESP);
+
+  // Switch to protected mode
+  m_cpu.setCR(0, m_cpu.getCR(0) | 1);
+
+  // Set PM selectors
+  m_cpu.setSegReg(cpu::CS, newCS);
+  m_cpu.setSegReg(cpu::DS, newDS);
+  m_cpu.setSegReg(cpu::SS, newSS);
+  m_cpu.setSegReg(cpu::ES, newDS);
+  m_cpu.setSegReg(cpu::FS, 0);
+  m_cpu.setSegReg(cpu::GS, 0);
+
+  m_cpu.setReg32(cpu::ESP, newESP);
+  m_cpu.setEIP(newEIP);
+
+  // Determine 32-bit mode from the CS descriptor's D bit
+  int csIdx = selectorToIndex(newCS);
+  if (csIdx > 0 && csIdx < MAX_LDT && m_ldtUsed[csIdx]) {
+    bool d = (m_ldt[csIdx].high & 0x00400000) != 0;
+    m_cpu.setIs32BitCode(d);
+  }
+  int ssIdx = selectorToIndex(newSS);
+  if (ssIdx > 0 && ssIdx < MAX_LDT && m_ldtUsed[ssIdx]) {
+    bool b = (m_ldt[ssIdx].high & 0x00400000) != 0;
+    m_cpu.setIs32BitStack(b);
+  }
 }
 
 } // namespace fador::hw

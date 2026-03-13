@@ -271,4 +271,70 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
         REQUIRE(cpu.getReg16(cpu::Reg16Index::CX) == 0x0001);
         REQUIRE((cpu.getEFLAGS() & cpu::FLAG_CARRY) != 0); // CF=1 (bit 0 of 0x0003)
     }
+
+    SECTION("SHR word [BP+disp8], imm8 uses correct displacement and count (0xC1)") {
+        // Regression test: opcodes 0xC0/0xC1 with memory operands must
+        // resolve the effective address (consuming the displacement byte)
+        // before fetching the immediate count byte.
+        //
+        // Instruction: SHR word [BP+0x0A], 3
+        // Encoding:    C1 6E 0A 03
+        //   C1    = shift/rotate r/m16, imm8
+        //   6E    = ModRM: mod=01 (disp8), reg=5 (SHR), rm=6 (BP)
+        //   0A    = displacement (+10)
+        //   03    = immediate count (3)
+        //
+        // SS:BP+10 should contain the value to shift.
+        // Without the fix, displacement 0x0A was consumed as count and
+        // 0x03 as displacement, corrupting a wrong memory location.
+
+        cpu.setSegReg(cpu::SegRegIndex::SS, 0x0800);
+        cpu.setReg16(cpu::Reg16Index::BP, 0x0100);
+        cpu.setReg16(cpu::Reg16Index::SP, 0x0200);
+
+        // Target: SS:BP+0x0A = 0x8000 + 0x0100 + 0x0A = 0x810A
+        uint32_t targetAddr = 0x8000 + 0x0100 + 0x0A; // 0x810A
+        mem.write16(targetAddr, 0x0080); // value to shift: 0x0080 >> 3 = 0x0010
+
+        // Also write a sentinel at the wrong address (SS:BP+0x03 = 0x8103)
+        uint32_t wrongAddr = 0x8000 + 0x0100 + 0x03; // 0x8103
+        mem.write16(wrongAddr, 0xBEEF);
+
+        // Write instruction: C1 6E 0A 03
+        mem.write8(0x100, 0xC1);
+        mem.write8(0x101, 0x6E); // mod=01, reg=5(SHR), rm=6(BP)
+        mem.write8(0x102, 0x0A); // disp8 = +10
+        mem.write8(0x103, 0x03); // imm8 = 3
+        decoder.step();
+
+        REQUIRE(cpu.getEIP() == 0x104);
+        REQUIRE(mem.read16(targetAddr) == 0x0010); // 0x0080 >> 3 = 0x0010
+        REQUIRE(mem.read16(wrongAddr) == 0xBEEF);  // sentinel untouched
+    }
+
+    SECTION("SHR byte [BP+disp8], imm8 uses correct displacement and count (0xC0)") {
+        // Same regression test for 8-bit variant (opcode 0xC0).
+        // Instruction: SHR byte [BP+0x06], 2
+        // Encoding:    C0 6E 06 02
+
+        cpu.setSegReg(cpu::SegRegIndex::SS, 0x0800);
+        cpu.setReg16(cpu::Reg16Index::BP, 0x0100);
+        cpu.setReg16(cpu::Reg16Index::SP, 0x0200);
+
+        uint32_t targetAddr = 0x8000 + 0x0100 + 0x06; // 0x8106
+        mem.write8(targetAddr, 0x40); // 0x40 >> 2 = 0x10
+
+        uint32_t wrongAddr = 0x8000 + 0x0100 + 0x02; // 0x8102
+        mem.write8(wrongAddr, 0xAA);
+
+        mem.write8(0x100, 0xC0);
+        mem.write8(0x101, 0x6E); // mod=01, reg=5(SHR), rm=6(BP)
+        mem.write8(0x102, 0x06); // disp8 = +6
+        mem.write8(0x103, 0x02); // imm8 = 2
+        decoder.step();
+
+        REQUIRE(cpu.getEIP() == 0x104);
+        REQUIRE(mem.read8(targetAddr) == 0x10); // 0x40 >> 2 = 0x10
+        REQUIRE(mem.read8(wrongAddr) == 0xAA);  // sentinel untouched
+    }
 }

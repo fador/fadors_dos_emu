@@ -82,13 +82,15 @@ void CPU::push32(uint32_t value) {
   if (m_is32BitStack) {
     uint32_t esp = getReg32(ESP) - 4;
     setReg32(ESP, esp);
-    if (m_memory)
+    if (m_memory) {
       m_memory->write32(m_segBase[SS] + esp, value);
+    }
   } else {
     uint16_t sp = getReg16(SP) - 4;
     setReg16(SP, sp);
-    if (m_memory)
+    if (m_memory) {
       m_memory->write32(m_segBase[SS] + sp, value);
+    }
   }
 }
 

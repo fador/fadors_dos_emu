@@ -45,6 +45,9 @@ public:
   uint32_t getEffectiveAddress16(const ModRM &modrm);
   uint32_t getEffectiveAddress32(const ModRM &modrm);
 
+  // Protected Mode segment loading (public for DPMI segment cache reload)
+  void loadSegment(SegRegIndex seg, uint16_t selector);
+
 private:
   CPU &m_cpu;
   memory::MemoryBus &m_memory;
@@ -113,9 +116,6 @@ private:
   };
 
   Descriptor decodeDescriptor(uint32_t low, uint32_t high);
-
-  // Protected Mode segment loading
-  void loadSegment(SegRegIndex seg, uint16_t selector);
 };
 
 } // namespace fador::cpu

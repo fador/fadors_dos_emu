@@ -1,4 +1,5 @@
 #include "../memory/himem/HIMEM.hpp"
+#include <cstdio> // TEMPORARY
 
 namespace fador {
 namespace hw {
@@ -16,7 +17,6 @@ memory::HIMEM *g_himem = nullptr;
 #include <iostream>
 #include <thread>
 
-extern "C" void dumpTraceRing();
 namespace fs = std::filesystem;
 
 namespace fador::hw {
@@ -144,6 +144,20 @@ bool DOS::handleInterrupt(uint8_t vector) {
   case 0xE1: { // DPMI entry point (triggered by 0F FF E1 at F000:0050)
     if (m_dpmi)
       return m_dpmi->handleEntry();
+    return false;
+  }
+  case 0xE2: { // DPMI raw mode switch PM→RM
+    if (m_dpmi) {
+      m_dpmi->handleRawSwitchPMtoRM();
+      return true;
+    }
+    return false;
+  }
+  case 0xE3: { // DPMI raw mode switch RM→PM
+    if (m_dpmi) {
+      m_dpmi->handleRawSwitchRMtoPM();
+      return true;
+    }
     return false;
   }
   }
@@ -321,6 +335,10 @@ void DOS::handleDOSService() {
     LOG_DOS("DOS: Set/Reset Verify Flag (AH=2Eh) - Not implemented");
     break;
   }
+  case 0x0D: { // Disk Reset (Flush Buffers)
+    // No-op: emulator has no disk cache to flush
+    break;
+  }
   case 0x0E: // Select Default Drive
   case 0x19: // Get Current Default Drive
   case 0x36: // Get Free Disk Space
@@ -466,6 +484,31 @@ void DOS::handleDOSService() {
 
   case 0x4C: { // Terminate with return code
     uint8_t al = m_cpu.getReg8(cpu::AL);
+    // TEMPORARY: dump memory for DOOM.EXE error 1005 debugging
+    if (al == 0xED) {
+      // Dump 007F:5370-53C0 (function at 53A1)
+      fprintf(stderr, "EXIT 0xED: 007F:5370-53C0 (phys 0x105450-0x1054A0):\n");
+      for (uint32_t a = 0x105450; a < 0x1054A0; a++) {
+        if ((a & 0xF) == 0) fprintf(stderr, "%05X: ", a);
+        fprintf(stderr, "%02X ", m_memory.read8(a));
+        if ((a & 0xF) == 0xF) fprintf(stderr, "\n");
+      }
+      // Dump 0087:2560-25F0 (caller/init function)
+      fprintf(stderr, "\n0087:2560-25F0 (phys 0x108480-0x108510):\n");
+      for (uint32_t a = 0x108480; a < 0x108510; a++) {
+        if ((a & 0xF) == 0) fprintf(stderr, "%05X: ", a);
+        fprintf(stderr, "%02X ", m_memory.read8(a));
+        if ((a & 0xF) == 0xF) fprintf(stderr, "\n");
+      }
+      // Dump 007F:4B40-4BA8 (the INT 21h call area)
+      fprintf(stderr, "\n007F:4B40-4BA8 (phys 0x104C20-0x104C88):\n");
+      for (uint32_t a = 0x104C20; a < 0x104C88; a++) {
+        if ((a & 0xF) == 0) fprintf(stderr, "%05X: ", a);
+        fprintf(stderr, "%02X ", m_memory.read8(a));
+        if ((a & 0xF) == 0xF) fprintf(stderr, "\n");
+      }
+      fprintf(stderr, "\n");
+    }
     terminateProcess(al);
     break;
   }
@@ -514,9 +557,6 @@ void DOS::handleDOSService() {
 }
 void DOS::terminateProcess(uint8_t exitCode) {
   LOG_INFO("DOS: Process terminated with exit code ", (int)exitCode);
-
-  // Diagnostic: Dump last 100 instructions on exit
-  dumpTraceRing();
 
   m_terminated = true;
   m_exitCode = exitCode;
@@ -735,10 +775,6 @@ void DOS::handleMemoryManagement() {
       }
       if (mcb.type == 'Z')
         break;
-      if (mcb.size == 0 && mcb.type != 'Z') {
-        LOG_ERROR("DOS: Corrupted MCB with size 0 at 0x", std::hex, current);
-        break;
-      }
       uint32_t next = (uint32_t)current + mcb.size + 1;
       if (next > 0xFFFF || next > LAST_PARA) {
         LOG_DEBUG("DOS: MCB chain ends/wraps at 0x", std::hex, current,
