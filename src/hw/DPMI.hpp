@@ -105,6 +105,7 @@ private:
   bool m_is32BitClient = false; // Set from AX bit 0 at DPMI entry
   std::vector<RawDescriptor> m_ldt;
   std::vector<bool> m_ldtUsed;
+  std::vector<bool> m_ldtBatchAlloc; // true if allocated via batch (count > 1)
 
   // Initial selectors given to client at entry
   uint16_t m_clientCS = 0;

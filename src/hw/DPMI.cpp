@@ -11,13 +11,14 @@ namespace fador::hw {
 static constexpr uint32_t GDT_PHYS = 0xF1000; // 5 entries (40 bytes)
 static constexpr uint32_t IDT_PM_PHYS = 0xF0800; // 256 entries (2048 bytes)
 static constexpr uint32_t TSS_PHYS = 0xF3000; // 104 bytes
-static constexpr uint32_t LDT_PHYS = 0xC0000; // Up to 64KB for 8192 entries
+static constexpr uint32_t LDT_PHYS = 0x1F00000; // 31MB — safe from conventional/UMA
 
 // ── Constructor ──────────────────────────────────────────────────────────────
 DPMI::DPMI(cpu::CPU &cpu, memory::MemoryBus &memory)
     : m_cpu(cpu), m_memory(memory) {
   m_ldt.resize(MAX_LDT);
   m_ldtUsed.resize(MAX_LDT, false);
+  m_ldtBatchAlloc.resize(MAX_LDT, false);
   m_ldtUsed[0] = true; // Index 0 = null descriptor (never allocate)
 }
 
@@ -102,6 +103,9 @@ bool DPMI::handleEntry() {
   uint16_t pspSeg = m_dos ? m_dos->getPSPSegment() : 0x0801;
   m_ldt[selectorToIndex(m_clientPSPSel)] = makeDataDesc(pspSeg);
 
+  // Enable A20 before writing system tables to high memory (LDT_PHYS > 1MB)
+  m_memory.setA20(true);
+
   // --- Write LDT to physical memory ---
   for (int i = 0; i < MAX_LDT; ++i) {
     uint32_t addr = LDT_PHYS + i * 8;
@@ -172,7 +176,6 @@ bool DPMI::handleEntry() {
 
   // --- Enter protected mode ---
   m_cpu.setCR(0, m_cpu.getCR(0) | 1);
-  m_memory.setA20(true);
 
   // --- Set client selectors ---
   // The 0F FF handler will call loadSegment() to sync InstructionDecoder caches
@@ -211,7 +214,8 @@ bool DPMI::handleInt31() {
   LOG_INFO("DPMI INT31h AX=0x", std::hex, ax,
            " BX=", m_cpu.getReg16(cpu::BX),
            " CX=", m_cpu.getReg16(cpu::CX),
-           " EDX=", m_cpu.getReg32(cpu::EDX));
+           " EDX=", m_cpu.getReg32(cpu::EDX),
+           " from=", m_cpu.getSegReg(cpu::CS), ":", m_cpu.getEIP());
 
   switch (ah) {
   case 0x00:
@@ -356,14 +360,54 @@ void DPMI::handleDescriptorMgmt() {
     int idx = selectorToIndex(sel);
     if (idx > 0 && idx < MAX_LDT && m_ldtUsed[idx]) {
       auto &d = m_ldt[idx];
+      uint8_t accessByte = rights & 0xFF;
+      // TEMP: dump code bytes before INT 31h for 0009h
+      {
+        static int dump0009count = 0;
+        if (dump0009count < 5) {
+          dump0009count++;
+          // EIP points AFTER the INT 31h (return address)
+          uint32_t csBase = extractBase(m_ldt[selectorToIndex(m_cpu.getSegReg(cpu::CS))]);
+          uint32_t retEIP = m_cpu.getEIP();
+          uint32_t intAddr = csBase + retEIP - 2; // INT 31h is 2 bytes (CD 31)
+          // Dump 80 bytes before the INT 31h instruction
+          std::string hex;
+          for (int i = -80; i < 2; i++) {
+            char buf[4];
+            snprintf(buf, sizeof(buf), "%02X ", m_memory.read8(intAddr + i));
+            hex += buf;
+            if ((i + 80) % 16 == 15) hex += "\n";
+          }
+          LOG_WARN("DPMI 0009h #", dump0009count, " code dump before INT 31h at phys=0x", std::hex, intAddr,
+                   " (CS:EIP=", m_cpu.getSegReg(cpu::CS), ":", retEIP,
+                   ") sel=0x", sel, " CX=0x", rights, ":\n", hex);
+        }
+      }
+      // DPMI spec: Present bit (bit 7) must be set and DPL must match CPL.
+      // If invalid, reject the call without modifying the descriptor.
+      uint8_t present = (accessByte >> 7) & 1;
+      uint8_t dpl = (accessByte >> 5) & 3;
+      if (!present || dpl != 3) {
+        LOG_DEBUG("DPMI 0009h: Rejected sel=0x", std::hex, sel,
+                  " CX=0x", rights, " (P=", (int)present, " DPL=", (int)dpl, ")");
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+        m_cpu.setReg16(cpu::AX, 0x8021);
+        break;
+      }
       // CL = access byte (bits 8-15 of high dword)
       // CH bits 4-7 = G/D/L/AVL (bits 20-23 of high dword)
-      uint8_t accessByte = rights & 0xFF;
       uint8_t extNibble = (rights >> 12) & 0x0F;
-      d.high = (d.high & 0xFF0F00FF) | // Keep base[23:16], limit[19:16],
-                                        // base[31:24]
-               (static_cast<uint32_t>(accessByte) << 8) |
-               (static_cast<uint32_t>(extNibble) << 20);
+      // Always update the access byte. For the flags nibble (G/D/L/AVL),
+      // only update when the caller provides non-zero extended type.
+      // 16-bit LAR (used by DOS/4GW's 16-bit stub code) can't capture
+      // the flags nibble; passing CH=0 should not clear D/G on
+      // descriptors that already have them set.
+      d.high = (d.high & ~0x0000FF00U) |
+               (static_cast<uint32_t>(accessByte) << 8);
+      if (extNibble != 0) {
+        d.high = (d.high & ~0x00F00000U) |
+                 (static_cast<uint32_t>(extNibble) << 20);
+      }
       flushLDTEntry(idx);
       reloadAffectedSegments(sel);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
@@ -428,14 +472,30 @@ void DPMI::handleDescriptorMgmt() {
       uint32_t oldBase = extractBase(m_ldt[idx]);
       uint32_t newLow = m_memory.read32(addr);
       uint32_t newHigh = m_memory.read32(addr + 4);
+      // Read the CURRENT descriptor from physical LDT memory, as the
+      // program may have written directly to it via the flat data segment.
+      uint32_t ldtAddr = LDT_PHYS + idx * 8;
+      uint32_t physLow = m_memory.read32(ldtAddr);
+      uint32_t physHigh = m_memory.read32(ldtAddr + 4);
+      // Sync m_ldt from physical memory in case it was modified externally
+      m_ldt[idx].low = physLow;
+      m_ldt[idx].high = physHigh;
+      // TEMP: log incoming descriptor bytes
+      LOG_WARN("DPMI 000Ch: sel=0x", std::hex, sel,
+               " addr=0x", addr,
+               " incoming low=0x", newLow, " high=0x", newHigh,
+               " phys low=0x", physLow, " high=0x", physHigh);
       // If incoming descriptor has access byte = 0 (Not Present, no type),
-      // preserve existing access byte from current descriptor.
+      // preserve existing access byte and flags from current descriptor.
       // DOS/4GW sets base+limit via 0x000C with zero access, expecting
       // existing access rights to persist.
       uint8_t incomingAccess = (newHigh >> 8) & 0xFF;
       if (incomingAccess == 0) {
-        newHigh = (newHigh & ~0x0000FF00U) |
-                  (m_ldt[idx].high & 0x0000FF00U);
+        // Preserve both access byte and flags nibble when access is 0.
+        // DOS/4GW sets base+limit via 0x000C with zero access, expecting
+        // existing access rights to persist.
+        newHigh = (newHigh & ~0x00F0FF00U) |
+                  (m_ldt[idx].high & 0x00F0FF00U);
       }
       m_ldt[idx].low = newLow;
       m_ldt[idx].high = newHigh;
@@ -979,6 +1039,7 @@ uint16_t DPMI::allocateDescriptors(uint16_t count) {
     if (ok) {
       for (int j = 0; j < count; ++j) {
         m_ldtUsed[i + j] = true;
+        m_ldtBatchAlloc[i + j] = (count > 1);
         // DPMI spec: newly allocated descriptors have Present bit set,
         // type = data R/W, DPL = 3, base = 0, limit = 0.
         m_ldt[i + j] = buildDescriptor(0, 0, 0xF2, 0x00);

@@ -80,13 +80,44 @@ public:
   bool is32BitStack() const { return m_is32BitStack; }
   void setIs32BitStack(bool val) { m_is32BitStack = val; }
 
+  // HLE frame tracking for interrupt dispatch.
+  // Stores the IRET frame location so the 0F FF handler can find it
+  // even if client thunks modify ESP between the push and the handler.
+  struct HLEFrame {
+    bool is32;
+    uint32_t framePhysAddr; // Physical address of IRET frame in memory
+    uint32_t frameSP;       // SP/ESP value at push time (for restoring)
+    bool stackIs32;         // Whether stack was 32-bit at push time
+    uint8_t vector;         // Interrupt vector that created this frame
+  };
+
   bool isLastInt32() const {
-    return m_hleStack.empty() ? false : m_hleStack.back();
+    return m_hleStack.empty() ? false : m_hleStack.back().is32;
   }
-  void pushHLEFrame(bool is32) { m_hleStack.push_back(is32); }
+  const HLEFrame &lastHLEFrame() const { return m_hleStack.back(); }
+  HLEFrame &lastHLEFrameMut() { return m_hleStack.back(); }
+  void pushHLEFrame(bool is32, uint8_t vector = 0xFF) {
+    m_hleStack.push_back({is32, 0, 0, false, vector});
+  }
   void popHLEFrame() {
     if (!m_hleStack.empty())
       m_hleStack.pop_back();
+  }
+  size_t hleStackSize() const { return m_hleStack.size(); }
+
+  // Find and remove the most recent HLE frame for the given vector.
+  // Returns a copy of the frame, or a default frame if not found.
+  HLEFrame popHLEFrameForVector(uint8_t vector) {
+    for (auto it = m_hleStack.rbegin(); it != m_hleStack.rend(); ++it) {
+      if (it->vector == vector) {
+        HLEFrame result = *it;
+        // Erase all frames from this one to the end (orphans above it)
+        m_hleStack.erase(std::prev(it.base()), m_hleStack.end());
+        return result;
+      }
+    }
+    // Not found — return default
+    return {false, 0, 0, false, vector};
   }
 
   // Stack operations
@@ -146,7 +177,7 @@ private:
   uint16_t m_ldtrSelector{0};
   uint16_t m_trSelector{0};
 
-  std::vector<bool> m_hleStack;
+  std::vector<HLEFrame> m_hleStack;
 };
 
 } // namespace fador::cpu
