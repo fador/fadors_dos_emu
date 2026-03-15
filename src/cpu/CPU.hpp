@@ -105,6 +105,20 @@ public:
   }
   size_t hleStackSize() const { return m_hleStack.size(); }
 
+  // Pop an HLE frame whose framePhysAddr matches the given address.
+  // Used by IRET to clean up frames for interrupts handled entirely
+  // by thunks (no forwarding to the 0F FF stub).
+  // Returns true if a frame was found and popped.
+  bool popHLEFrameByPhysAddr(uint32_t physAddr) {
+    for (auto it = m_hleStack.rbegin(); it != m_hleStack.rend(); ++it) {
+      if (it->framePhysAddr == physAddr) {
+        m_hleStack.erase(std::prev(it.base()));
+        return true;
+      }
+    }
+    return false;
+  }
+
   // Find and remove the most recent HLE frame for the given vector.
   // Returns a copy of the frame, or a default frame if not found.
   HLEFrame popHLEFrameForVector(uint8_t vector) {

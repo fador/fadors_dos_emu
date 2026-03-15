@@ -76,12 +76,6 @@ void MemoryBus::write8(uint32_t address, uint8_t value) {
       LOG_DEBUG("IVT WRITE8 at 0x", std::hex, effectiveAddress, " val: 0x",
                 static_cast<int>(value));
     }
-    // TEMP: watchpoint on LE target address
-    if (effectiveAddress == 0x10A913 && m_ram[effectiveAddress] == 0) {
-      LOG_WARN("WATCHPOINT write8 0x10A913 val=0x", std::hex,
-               static_cast<int>(value), " A20=", m_a20Enabled,
-               " raw_addr=0x", address);
-    }
     m_ram[effectiveAddress] = value;
     // Simple hook for CGA/VGA text mode (0xB8000 - 0xBFFFF)
     if (effectiveAddress >= 0xB8000 && effectiveAddress < 0xBFFFF) {
@@ -104,10 +98,6 @@ void MemoryBus::write16(uint32_t address, uint16_t value) {
       LOG_DEBUG("IVT WRITE16 at 0x", std::hex, effectiveAddress, " val: 0x",
                 static_cast<int>(value));
     }
-    // TEMP: watchpoint
-    if (effectiveAddress <= 0x10A913 && effectiveAddress + 1 >= 0x10A913 && m_ram[0x10A913] == 0) {
-      LOG_WARN("WATCHPOINT write16 0x10A913 from addr=0x", std::hex, address, " val=0x", value, " A20=", m_a20Enabled);
-    }
     m_ram[effectiveAddress] = value & 0xFF;
     m_ram[effectiveAddress + 1] = (value >> 8) & 0xFF;
     if (effectiveAddress >= 0xB8000 && effectiveAddress < 0xBFFFF) {
@@ -124,10 +114,6 @@ void MemoryBus::write16(uint32_t address, uint16_t value) {
 void MemoryBus::write32(uint32_t address, uint32_t value) {
   uint32_t effectiveAddress = m_a20Enabled ? address : (address & 0xFFFFF);
   if (effectiveAddress + 3 < MEMORY_SIZE) {
-    // TEMP: watchpoint
-    if (effectiveAddress <= 0x10A913 && effectiveAddress + 3 >= 0x10A913 && m_ram[0x10A913] == 0) {
-      LOG_WARN("WATCHPOINT write32 0x10A913 from addr=0x", std::hex, address, " val=0x", value, " A20=", m_a20Enabled);
-    }
     m_ram[effectiveAddress] = value & 0xFF;
     m_ram[effectiveAddress + 1] = (value >> 8) & 0xFF;
     m_ram[effectiveAddress + 2] = (value >> 16) & 0xFF;

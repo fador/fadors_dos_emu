@@ -103,6 +103,20 @@ bool DPMI::handleEntry() {
   uint16_t pspSeg = m_dos ? m_dos->getPSPSegment() : 0x0801;
   m_ldt[selectorToIndex(m_clientPSPSel)] = makeDataDesc(pspSeg);
 
+  // Environment selector — the environment block is at pspSeg - 0x20.
+  // Create a PM selector for it and patch PSP:0x2C so PM clients can
+  // access the environment through the PSP selector chain.
+  {
+    uint16_t envSeg = pspSeg - 0x20;
+    uint16_t envSel = allocateDescriptors(1);
+    if (envSel) {
+      m_ldt[selectorToIndex(envSel)] = makeDataDesc(envSeg);
+      // Overwrite PSP:0x2C with the PM environment selector
+      uint32_t pspPhys = static_cast<uint32_t>(pspSeg) << 4;
+      m_memory.write16(pspPhys + 0x2C, envSel);
+    }
+  }
+
   // Enable A20 before writing system tables to high memory (LDT_PHYS > 1MB)
   m_memory.setA20(true);
 
@@ -289,6 +303,8 @@ void DPMI::handleDescriptorMgmt() {
   }
   case 0x0002: { // Segment to Descriptor
     uint16_t seg = m_cpu.getReg16(cpu::BX);
+    LOG_WARN("DPMI 0002h: Seg-to-Desc seg=0x", std::hex, seg,
+             " base=0x", static_cast<uint32_t>(seg) << 4);
     uint16_t sel = allocateDescriptors(1);
     if (sel) {
       m_ldt[selectorToIndex(sel)] =
@@ -361,28 +377,6 @@ void DPMI::handleDescriptorMgmt() {
     if (idx > 0 && idx < MAX_LDT && m_ldtUsed[idx]) {
       auto &d = m_ldt[idx];
       uint8_t accessByte = rights & 0xFF;
-      // TEMP: dump code bytes before INT 31h for 0009h
-      {
-        static int dump0009count = 0;
-        if (dump0009count < 5) {
-          dump0009count++;
-          // EIP points AFTER the INT 31h (return address)
-          uint32_t csBase = extractBase(m_ldt[selectorToIndex(m_cpu.getSegReg(cpu::CS))]);
-          uint32_t retEIP = m_cpu.getEIP();
-          uint32_t intAddr = csBase + retEIP - 2; // INT 31h is 2 bytes (CD 31)
-          // Dump 80 bytes before the INT 31h instruction
-          std::string hex;
-          for (int i = -80; i < 2; i++) {
-            char buf[4];
-            snprintf(buf, sizeof(buf), "%02X ", m_memory.read8(intAddr + i));
-            hex += buf;
-            if ((i + 80) % 16 == 15) hex += "\n";
-          }
-          LOG_WARN("DPMI 0009h #", dump0009count, " code dump before INT 31h at phys=0x", std::hex, intAddr,
-                   " (CS:EIP=", m_cpu.getSegReg(cpu::CS), ":", retEIP,
-                   ") sel=0x", sel, " CX=0x", rights, ":\n", hex);
-        }
-      }
       // DPMI spec: Present bit (bit 7) must be set and DPL must match CPL.
       // If invalid, reject the call without modifying the descriptor.
       uint8_t present = (accessByte >> 7) & 1;
@@ -480,11 +474,6 @@ void DPMI::handleDescriptorMgmt() {
       // Sync m_ldt from physical memory in case it was modified externally
       m_ldt[idx].low = physLow;
       m_ldt[idx].high = physHigh;
-      // TEMP: log incoming descriptor bytes
-      LOG_WARN("DPMI 000Ch: sel=0x", std::hex, sel,
-               " addr=0x", addr,
-               " incoming low=0x", newLow, " high=0x", newHigh,
-               " phys low=0x", physLow, " high=0x", physHigh);
       // If incoming descriptor has access byte = 0 (Not Present, no type),
       // preserve existing access byte and flags from current descriptor.
       // DOS/4GW sets base+limit via 0x000C with zero access, expecting

@@ -1,5 +1,4 @@
 #include "../memory/himem/HIMEM.hpp"
-#include <cstdio> // TEMPORARY
 
 namespace fador {
 namespace hw {
@@ -169,6 +168,9 @@ void DOS::handleDOSService() {
   LOG_DEBUG("[DOS] INT 21h AH=0x", std::hex, (int)ah, " AL=0x",
             (int)m_cpu.getReg8(cpu::AL));
   switch (ah) {
+  case 0x00: // Terminate Program (same as INT 20h)
+    terminateProcess(0);
+    return;
   case 0x01: { // Read Character with Echo (blocking)
     if (!m_kbd || !m_kbd->hasKey()) {
       if (m_pollInput)
@@ -291,9 +293,17 @@ void DOS::handleDOSService() {
   }
   case 0x51:   // Get Current PSP (undocumented)
   case 0x62: { // Get Current PSP
-    m_cpu.setReg16(cpu::BX, m_pspSegment);
+    // In PM, return the PSP selector (not the RM segment).
+    // DPMI spec requires INT 21h results to use PM selectors.
+    if (m_dpmi && m_dpmi->isActive()) {
+      uint16_t pspSel = m_dpmi->getPSPSelector();
+      m_cpu.setReg16(cpu::BX, pspSel);
+      LOG_DOS("DOS: Get Current PSP (PM) -> sel 0x", std::hex, pspSel);
+    } else {
+      m_cpu.setReg16(cpu::BX, m_pspSegment);
+      LOG_DOS("DOS: Get Current PSP -> 0x", std::hex, m_pspSegment);
+    }
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-    LOG_DOS("DOS: Get Current PSP -> 0x", std::hex, m_pspSegment);
     break;
   }
   case 0x2F: { // Get DTA Address
@@ -561,6 +571,7 @@ std::string DOS::readFilename(uint32_t address) {
 
 void DOS::setProgramDir(const std::string &programPath) {
   fs::path p = fs::absolute(programPath);
+  m_programPath = p.string();
   m_currentDir = p.parent_path().string();
   // Drive root = parent of program directory, DOS current dir = program dir
   // name
@@ -927,9 +938,8 @@ void DOS::handleMemoryManagement() {
 
 void DOS::handleDirectoryService() {
   uint8_t ah = m_cpu.getReg8(cpu::AH);
-  uint16_t ds = m_cpu.getSegReg(cpu::DS);
   uint16_t dx = m_cpu.getReg16(cpu::DX);
-  uint32_t addr = (ds << 4) + dx;
+  uint32_t addr = m_cpu.getSegBase(cpu::DS) + dx;
 
   try {
     if (ah == 0x39) { // MKDIR
@@ -968,9 +978,8 @@ void DOS::handleDirectoryService() {
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
       }
     } else if (ah == 0x47) { // GETCWD
-      uint16_t ds_si = m_cpu.getSegReg(cpu::DS);
       uint16_t si = m_cpu.getReg16(cpu::SI);
-      uint32_t outAddr = (ds_si << 4) + si;
+      uint32_t outAddr = m_cpu.getSegBase(cpu::DS) + si;
 
       // DOS returns path relative to drive root (no leading backslash, no drive
       // letter)
@@ -1102,9 +1111,8 @@ void DOS::handleDirectorySearch() {
   };
 
   if (ah == 0x4E) { // Find First
-    uint16_t ds = m_cpu.getSegReg(cpu::DS);
     uint16_t dx = m_cpu.getReg16(cpu::DX);
-    uint32_t nameAddr = (ds << 4) + dx;
+    uint32_t nameAddr = m_cpu.getSegBase(cpu::DS) + dx;
     std::string rawPattern = readFilename(nameAddr);
     uint8_t attr = m_cpu.getReg8(cpu::CL);
 
@@ -1394,9 +1402,8 @@ uint16_t DOS::loadOverlaySegment(uint16_t segIndex) {
 void DOS::handleFileService() {
   uint8_t ah = m_cpu.getReg8(cpu::AH);
   if (ah == 0x3C) { // Create or Truncate File
-    uint16_t ds = m_cpu.getSegReg(cpu::DS);
     uint16_t dx = m_cpu.getReg16(cpu::DX);
-    uint32_t nameAddr = (ds << 4) + dx;
+    uint32_t nameAddr = m_cpu.getSegBase(cpu::DS) + dx;
     std::string filename = readFilename(nameAddr);
     std::string hostPath = resolvePath(filename);
 
@@ -1418,16 +1425,30 @@ void DOS::handleFileService() {
       LOG_ERROR("DOS: Failed to create file '", hostPath, "'");
     }
   } else if (ah == 0x3D) { // Open Existing File
-    uint16_t ds = m_cpu.getSegReg(cpu::DS);
     uint16_t dx = m_cpu.getReg16(cpu::DX);
     uint8_t accessMode =
         m_cpu.getReg8(cpu::AL) & 0x03; // 0=Read, 1=Write, 2=Read/Write
-    uint32_t nameAddr = (ds << 4) + dx;
+    uint32_t nameAddr = m_cpu.getSegBase(cpu::DS) + dx;
     std::string filename = readFilename(nameAddr);
     std::string hostPath = resolvePath(filename);
 
     auto fh = std::make_unique<FileHandle>();
     fh->path = hostPath;
+
+    // DOS extenders (e.g., DOS/4GW) may reopen their own EXE by a truncated
+    // name (like ".EXE") when they can't find the program name from PM.
+    // Fall back to the loaded program's host path if the name looks like
+    // just an extension and the file doesn't exist.
+    if (!fs::exists(hostPath) && !m_programPath.empty()) {
+      fs::path fn = fs::path(filename).filename();
+      std::string fnStr = fn.string();
+      if (!fnStr.empty() && fnStr[0] == '.') {
+        hostPath = m_programPath;
+        fh->path = hostPath;
+        LOG_INFO("DOS: Filename fallback: '", filename, "' -> '",
+                 hostPath, "'");
+      }
+    }
 
     std::ios::openmode mode = std::ios::binary;
     if (accessMode == 0)
@@ -1468,9 +1489,8 @@ void DOS::handleFileService() {
   } else if (ah == 0x3F) { // Read from File or Device
     uint16_t handle = m_cpu.getReg16(cpu::BX);
     uint16_t bytesToRead = m_cpu.getReg16(cpu::CX);
-    uint16_t ds = m_cpu.getSegReg(cpu::DS);
     uint16_t dx = m_cpu.getReg16(cpu::DX);
-    uint32_t bufAddr = (ds << 4) + dx;
+    uint32_t bufAddr = m_cpu.getSegBase(cpu::DS) + dx;
 
     if (handle >= 5 && handle - 5 < m_fileHandles.size() &&
         m_fileHandles[handle - 5]) {
@@ -1496,9 +1516,8 @@ void DOS::handleFileService() {
   } else if (ah == 0x40) { // Write to File or Device
     uint16_t handle = m_cpu.getReg16(cpu::BX);
     uint16_t bytesToWrite = m_cpu.getReg16(cpu::CX);
-    uint16_t ds = m_cpu.getSegReg(cpu::DS);
     uint16_t dx = m_cpu.getReg16(cpu::DX);
-    uint32_t bufAddr = (ds << 4) + dx;
+    uint32_t bufAddr = m_cpu.getSegBase(cpu::DS) + dx;
 
     if (handle == 1 || handle == 2) { // STDOUT / STDERR
       for (uint16_t i = 0; i < bytesToWrite; ++i) {
@@ -1564,10 +1583,9 @@ void DOS::handleFileService() {
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
     }
   } else if (ah == 0x43) { // Get/Set File Attributes
-    uint16_t ds = m_cpu.getSegReg(cpu::DS);
     uint16_t dx = m_cpu.getReg16(cpu::DX);
     uint8_t al = m_cpu.getReg8(cpu::AL);
-    uint32_t nameAddr = (ds << 4) + dx;
+    uint32_t nameAddr = m_cpu.getSegBase(cpu::DS) + dx;
     std::string filename = readFilename(nameAddr);
     std::string hostPath = resolvePath(filename);
 

@@ -27,6 +27,7 @@ public:
   void setSegReloadCallback(SegReloadFn fn) { m_segReloadFn = std::move(fn); }
 
   bool isActive() const { return m_active; }
+  uint16_t getPSPSelector() const { return m_clientPSPSel; }
 
   // Called from INT 2Fh AX=1687h — fill registers for DPMI detection
   void handleDetect();
