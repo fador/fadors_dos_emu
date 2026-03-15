@@ -3264,10 +3264,48 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
         }
         // Frame already popped by popHLEFrameForVector above
       } else {
-        LOG_WARN("HLE Intercept: Unhandled INT 0x", std::hex, (int)vector);
-        // Pop the frame; the stub's IRET (CF) will handle the stack return
-        // but no longer pops HLE frames.
-        m_cpu.popHLEFrameForVector(vector);
+        LOG_WARN("HLE Intercept: Unhandled INT 0x", std::hex, (int)vector,
+                 " — simulating same-privilege IRET");
+        auto hf = m_cpu.popHLEFrameForVector(vector);
+        // No matching HLE frame (framePhysAddr == 0) means the stub was
+        // reached by a direct jump/call from a thunk, NOT through
+        // triggerInterrupt. The thunk pushed a same-privilege IRET frame
+        // (EIP, CS, EFLAGS only — no SS:ESP), so we must simulate the
+        // IRET ourselves rather than letting the stub's CF byte execute,
+        // because the standard IRET handler would look up the target CS
+        // RPL and might detect a spurious privilege change (our emulator
+        // stores selectors with the original RPL which may differ from
+        // the DPL-derived CPL on real hardware).
+        //
+        // When there IS a real HLE frame, the same reasoning applies:
+        // the thunk chained to the old handler with a same-privilege
+        // frame, so do same-privilege IRET simulation and skip the CF.
+        {
+          uint32_t ssb = m_segBase[SS];
+          bool use32bit = m_cpu.is32BitCode();
+          if (use32bit) {
+            uint32_t esp = m_cpu.getReg32(ESP);
+            uint32_t newEip = m_memory.read32(ssb + esp);
+            uint16_t newCs = m_memory.read32(ssb + esp + 4) & 0xFFFF;
+            uint32_t newEflags = m_memory.read32(ssb + esp + 8);
+            m_cpu.setEFLAGS(newEflags);
+            m_cpu.setEIP(newEip);
+            loadSegment(CS, newCs);
+            if (m_cpu.is32BitStack())
+              m_cpu.setReg32(ESP, esp + 12);
+            else
+              m_cpu.setReg16(SP, static_cast<uint16_t>((esp + 12) & 0xFFFF));
+          } else {
+            uint16_t sp = m_cpu.getReg16(SP);
+            uint16_t newIp = m_memory.read16(ssb + sp);
+            uint16_t newCs = m_memory.read16(ssb + sp + 2);
+            uint16_t newFlags = m_memory.read16(ssb + sp + 4);
+            m_cpu.setEFLAGS((m_cpu.getEFLAGS() & 0xFFFF0000) | newFlags);
+            m_cpu.setEIP(newIp);
+            loadSegment(CS, newCs);
+            m_cpu.setReg16(SP, (sp + 6) & 0xFFFF);
+          }
+        }
       }
     }
     break;
