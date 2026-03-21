@@ -919,6 +919,19 @@ void BIOS::handleVideoService() {
     LOG_DEBUG("BIOS INT 10h AH=6Fh: Borland video extension (not supported)");
     break;
   }
+  case 0xFA: {
+    // Some software issues this undocumented/extended BIOS video function.
+    // Stub it as no-op to avoid unhandled interrupt behavior.
+    LOG_DEBUG("BIOS INT 10h AH=FAh: Reserved/unknown function (stubbed)");
+    break;
+  }
+  case 0xEF: {
+    // Some programs may call AH=EFh as undocumented extension; treat as NOP.
+    m_cpu.setReg8(cpu::AL, 0x00);
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    LOG_DEBUG("BIOS INT 10h AH=EFh: Unknown function stubbed");
+    break;
+  }
   default:
     LOG_WARN("BIOS INT 10h: Unknown function AH=0x", std::hex, (int)ah);
     break;
@@ -987,6 +1000,12 @@ void BIOS::handleKeyboardService() {
   case 0x12: { // Get Extended Shift Flags
     m_cpu.setReg8(cpu::AL, m_memory.read8(0x417));
     m_cpu.setReg8(cpu::AH, m_memory.read8(0x418));
+    break;
+  }
+  case 0x55: { // Unknown/unused function (stubbed)
+    m_cpu.setReg8(cpu::AL, 0x00);
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    LOG_DEBUG("BIOS INT 16h AH=55h: Unknown function (stubbed)");
     break;
   }
   default:

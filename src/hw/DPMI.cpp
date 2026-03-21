@@ -225,11 +225,13 @@ bool DPMI::handleInt31() {
   uint16_t ax = m_cpu.getReg16(cpu::AX);
   uint8_t ah = ax >> 8;
 
+  /*
   LOG_INFO("DPMI INT31h AX=0x", std::hex, ax,
            " BX=", m_cpu.getReg16(cpu::BX),
            " CX=", m_cpu.getReg16(cpu::CX),
            " EDX=", m_cpu.getReg32(cpu::EDX),
            " from=", m_cpu.getSegReg(cpu::CS), ":", m_cpu.getEIP());
+  */
 
   switch (ah) {
   case 0x00:
@@ -656,8 +658,10 @@ void DPMI::handleInterruptVectors() {
     }
 
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    /*
     LOG_INFO("DPMI 0205h: Set PM INT 0x", std::hex, (int)vec, " -> sel=0x",
               m_pmVectors[vec].selector, " off=0x", m_pmVectors[vec].offset);
+    */
     break;
   }
   default:

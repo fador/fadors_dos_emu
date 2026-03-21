@@ -51,6 +51,66 @@ TEST_CASE("BIOS Emulation Services", "[BIOS]") {
         REQUIRE(mem.read8(0x451) == 0); // Row same
     }
 
+    SECTION("INT 10h: AH=FA (Unknown/Stub)") {
+        cpu.setSegReg(cpu::SegRegIndex::CS, 0x0000);
+        cpu.setReg8(cpu::AH, 0xFA);
+
+        mem.write8(0x100, 0xCD);
+        mem.write8(0x101, 0x10);
+        cpu.setEIP(0x100);
+
+        decoder.step();
+
+        // EIP should advance past INT instruction to show service executed
+        REQUIRE(cpu.getEIP() == 0x102);
+    }
+
+    SECTION("INT 10h: AH=EF (Unknown/Stub)") {
+        cpu.setSegReg(cpu::SegRegIndex::CS, 0x0000);
+        cpu.setReg8(cpu::AH, 0xEF);
+
+        mem.write8(0x100, 0xCD);
+        mem.write8(0x101, 0x10);
+        cpu.setEIP(0x100);
+
+        decoder.step();
+        REQUIRE(cpu.getReg8(cpu::AL) == 0x00);
+        REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    }
+
+    SECTION("DOS INT 21h: AH=47 (Get Current Directory)") {
+        cpu.setSegReg(cpu::SegRegIndex::CS, 0x0000);
+        cpu.setSegReg(cpu::DS, 0x2000);
+        cpu.setReg8(cpu::AH, 0x47);
+        cpu.setReg8(cpu::DL, 2); // C: drive
+        cpu.setReg16(cpu::SI, 0x0100);
+
+        // Set known current directory
+        dos.setProgramDir("./");
+
+        mem.write8(0x100, 0xCD);
+        mem.write8(0x101, 0x21);
+        cpu.setEIP(0x100);
+
+        decoder.step();
+        REQUIRE(mem.read8((0x2000 << 4) + 0x0100) != 0);
+        REQUIRE(cpu.getReg16(cpu::AX) == 0x0100);
+        REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    }
+
+    SECTION("DOS INT 21h: AH=45 (Unknown function stub)") {
+        cpu.setSegReg(cpu::SegRegIndex::CS, 0x0000);
+        cpu.setReg8(cpu::AH, 0x45);
+
+        mem.write8(0x100, 0xCD);
+        mem.write8(0x101, 0x21);
+        cpu.setEIP(0x100);
+
+        decoder.step();
+        REQUIRE(cpu.getReg16(cpu::AX) == 0x0000);
+        REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    }
+
     SECTION("INT 16h: AH=01h (Keyboard Status)") {
         cpu.setSegReg(cpu::SegRegIndex::CS, 0x0000);
         cpu.setReg8(cpu::AH, 0x01);

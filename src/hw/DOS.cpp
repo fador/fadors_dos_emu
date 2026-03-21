@@ -492,6 +492,14 @@ void DOS::handleDOSService() {
     break;
   }
 
+  case 0x45: { // Unknown function - stub
+    // For compatibility with apps probing this function, return success
+    m_cpu.setReg16(cpu::AX, 0x0000);
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    LOG_DOS("DOS: INT 21h AH=45h: Unknown function stubbed");
+    break;
+  }
+
   case 0x4C: { // Terminate with return code
     uint8_t al = m_cpu.getReg8(cpu::AL);
     terminateProcess(al);
@@ -505,6 +513,9 @@ void DOS::handleDOSService() {
     handleMemoryManagement();
     break;
 
+  case 0x47: // Get Current Directory
+    handleDirectoryService();
+    break;
   case 0x4E: // Find First
   case 0x4F: // Find Next
     handleDirectorySearch();
