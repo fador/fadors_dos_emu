@@ -513,6 +513,9 @@ void DOS::handleDOSService() {
     handleMemoryManagement();
     break;
 
+  case 0x39: // Create Directory (mkdir)
+  case 0x3A: // Remove Directory (rmdir)
+  case 0x3B: // Change Directory (chdir)
   case 0x47: // Get Current Directory
     handleDirectoryService();
     break;

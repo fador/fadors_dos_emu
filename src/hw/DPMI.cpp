@@ -629,31 +629,30 @@ void DPMI::handleInterruptVectors() {
     break;
   }
   case 0x0205: { // Set Protected Mode Interrupt Vector
-    m_pmVectors[vec].selector = m_cpu.getReg16(cpu::CX);
-    if (m_is32BitClient)
-      m_pmVectors[vec].offset = m_cpu.getReg32(cpu::EDX);
-    else
-      m_pmVectors[vec].offset = m_cpu.getReg16(cpu::DX);
+    uint16_t newSel = m_cpu.getReg16(cpu::CX);
+    uint32_t newOff = m_is32BitClient ? m_cpu.getReg32(cpu::EDX)
+                                      : m_cpu.getReg16(cpu::DX);
+    m_pmVectors[vec].selector = newSel;
+    m_pmVectors[vec].offset = newOff;
 
-    // Update the PM IDT so future interrupts dispatch to the client's handler.
-    // When isOriginalIVT() sees a non-HLE address, it skips HLE and dispatches
-    // normally (push frame, jump to handler).
-    {
+    // Only write to the physical IDT when we are the sole DPMI host
+    // (INT 31h still points to our original HLE stub). Once DOS/4GW
+    // hooks INT 31h, its thunk intercepts all 0205h calls and writes
+    // its own wrapper entries to the IDT directly (via executed code).
+    // If we also write from HLE, we clobber the wrapper with the raw
+    // client handler and DOS/4GW detects the mismatch → error 1001.
+    bool weAreOnlyHost =
+        (m_pmVectors[0x31].selector == 0x08) || (vec == 0x31);
+    if (weAreOnlyHost) {
       uint32_t idtAddr = IDT_PM_PHYS + vec * 8;
-      uint32_t offset = m_pmVectors[vec].offset;
-      uint16_t selector = m_pmVectors[vec].selector;
       uint32_t low =
-          (static_cast<uint32_t>(selector) << 16) | (offset & 0xFFFF);
-      uint32_t high = (offset & 0xFFFF0000) | 0x0000EE00;
+          (static_cast<uint32_t>(newSel) << 16) | (newOff & 0xFFFF);
+      uint32_t high = (newOff & 0xFFFF0000) | 0x0000EE00;
       m_memory.write32(idtAddr, low);
       m_memory.write32(idtAddr + 4, high);
     }
 
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-    /*
-    LOG_INFO("DPMI 0205h: Set PM INT 0x", std::hex, (int)vec, " -> sel=0x",
-              m_pmVectors[vec].selector, " off=0x", m_pmVectors[vec].offset);
-    */
     break;
   }
   default:

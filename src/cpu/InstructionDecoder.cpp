@@ -3182,49 +3182,138 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
       }
 
       // The HLE code was executed successfully. Now simulate an IRET
-      // to return to the original caller using the stored HLE frame
-      // (pushed by triggerInterrupt), merging the emulation status flags
-      // so conditions (CF, ZF) survive.
+      // to return to the caller.
       //
-      // We always return via the triggerInterrupt frame, even for chain
-      // calls (where a hooked handler chained to us via PUSHF+CALL FAR).
-      // This bypasses the hooked handler's continuation code, which is
-      // correct because: (a) the HLE handler already did all the work,
-      // and (b) the hooked handler's continuation may trigger additional
-      // interrupts that the emulator can't fully service.
-      uint32_t currentFlags = m_cpu.getEFLAGS();
-      auto hf = m_cpu.popHLEFrameForVector(vector);
-      uint32_t frameAddr = hf.framePhysAddr;
+      // Two cases:
+      // (A) Direct dispatch — triggerInterrupt dispatched directly to our
+      //     stub. Current SP matches the stored HLE frame. Pop the frame
+      //     and IRET to the original caller, merging status flags.
+      // (B) Chain call — a hooked handler (e.g. DOS/4GW thunk) chained
+      //     to our stub via PUSHF+CALL FAR. Current SP does NOT match
+      //     the stored HLE frame. Do inline IRET from the current stack
+      //     to return to the chain caller (thunk), letting it clean up
+      //     its transfer stack and eventually IRET through the original
+      //     frame. The HLE frame is left in place for cleanup by the
+      //     0xCF IRET handler's popHLEFrameByPhysAddr.
+      auto hfPeek = m_cpu.peekHLEFrameForVector(vector);
+      bool isChainCall = false;
+      if (hfPeek.framePhysAddr != 0) {
+        m_segBase[SS] = m_cpu.getSegBase(SS);
+        uint32_t ssBase = m_segBase[SS];
+        uint32_t curSP = m_cpu.is32BitStack()
+                             ? m_cpu.getReg32(ESP)
+                             : static_cast<uint32_t>(m_cpu.getReg16(SP));
+        uint32_t curPhys = ssBase + curSP;
+        isChainCall = (curPhys != hfPeek.framePhysAddr);
+      }
 
-      if (hf.is32) { // 32-bit IRET (IRETD) frame
-        uint32_t newEip = m_memory.read32(frameAddr);
-        uint16_t newCs = m_memory.read32(frameAddr + 4) & 0xFFFF;
-        uint32_t popFlags = m_memory.read32(frameAddr + 8);
+      if (isChainCall) {
+        // Chain call: inline IRET back to the chain caller.
+        // Merge HLE status flags into the chain caller's flags frame.
+        uint32_t currentFlags = m_cpu.getEFLAGS();
+        m_segBase[SS] = m_cpu.getSegBase(SS);
+        uint32_t ssBase = m_segBase[SS];
+
+        // Determine chain frame width using peekCS heuristic.
+        uint16_t sp16 = m_cpu.getReg16(SP);
+        bool chainIs32 = false;
+        if (m_cpu.getCR(0) & 1) {
+          bool found = false;
+          uint16_t peekCS = m_memory.read16(ssBase + sp16 + 2);
+          if ((peekCS & ~7) != 0) {
+            uint32_t tbl = (peekCS & 0x04) ? m_cpu.getLDTR().base
+                                           : m_cpu.getGDTR().base;
+            uint32_t dLow = m_memory.read32(tbl + (peekCS & ~7));
+            uint32_t dHigh = m_memory.read32(tbl + (peekCS & ~7) + 4);
+            Descriptor d = decodeDescriptor(dLow, dHigh);
+            if (!d.isSystem && (d.type & 0x08) && d.isPresent) {
+              chainIs32 = d.is32Bit;
+              found = true;
+            }
+          }
+          if (!found) {
+            uint32_t esp32 = m_cpu.getReg32(ESP);
+            peekCS = m_memory.read16(ssBase + esp32 + 4);
+            if ((peekCS & ~7) != 0) {
+              uint32_t tbl = (peekCS & 0x04) ? m_cpu.getLDTR().base
+                                             : m_cpu.getGDTR().base;
+              uint32_t dLow = m_memory.read32(tbl + (peekCS & ~7));
+              uint32_t dHigh = m_memory.read32(tbl + (peekCS & ~7) + 4);
+              Descriptor d = decodeDescriptor(dLow, dHigh);
+              if (!d.isSystem && (d.type & 0x08) && d.isPresent)
+                chainIs32 = true;
+            }
+          }
+        }
 
         uint32_t mask = FLAG_CARRY | FLAG_ZERO | FLAG_SIGN | FLAG_OVERFLOW |
                         FLAG_AUX | FLAG_PARITY;
-        popFlags = (popFlags & ~mask) | (currentFlags & mask);
+        if (chainIs32) {
+          uint32_t esp = m_cpu.getReg32(ESP);
+          uint32_t newEip = m_memory.read32(ssBase + esp);
+          uint16_t newCs = m_memory.read32(ssBase + esp + 4) & 0xFFFF;
+          uint32_t popFlags = m_memory.read32(ssBase + esp + 8);
+          LOG_ERROR("CHAIN32 vec=0x", std::hex, (int)vector,
+                    " -> CS:", newCs, " EIP:", newEip,
+                    " FL:", popFlags, " ssBase:", ssBase, " esp:", esp);
+          popFlags = (popFlags & ~mask) | (currentFlags & mask);
+          m_cpu.setEFLAGS(popFlags);
+          m_cpu.setEIP(newEip);
+          loadSegment(CS, newCs);
+          if (m_cpu.is32BitStack())
+            m_cpu.setReg32(ESP, esp + 12);
+          else
+            m_cpu.setReg16(SP, static_cast<uint16_t>(esp + 12));
+        } else {
+          uint16_t newIp = m_memory.read16(ssBase + sp16);
+          uint16_t newCs = m_memory.read16(ssBase + sp16 + 2);
+          uint16_t popFlags16 = m_memory.read16(ssBase + sp16 + 4);
+          LOG_ERROR("CHAIN16 vec=0x", std::hex, (int)vector,
+                    " -> CS:", newCs, " IP:", newIp,
+                    " FL:", popFlags16, " ssBase:", ssBase, " sp16:", sp16);
+          uint16_t mask16 = static_cast<uint16_t>(mask);
+          popFlags16 = (popFlags16 & ~mask16) | (currentFlags & mask16);
+          m_cpu.setEFLAGS((currentFlags & 0xFFFF0000) | popFlags16);
+          m_cpu.setEIP(newIp);
+          loadSegment(CS, newCs);
+          m_cpu.setReg16(SP, (sp16 + 6) & 0xFFFF);
+        }
+      } else {
+        // Direct dispatch: pop HLE frame and IRET to original caller.
+        uint32_t currentFlags = m_cpu.getEFLAGS();
+        auto hf = m_cpu.popHLEFrameForVector(vector);
+        uint32_t frameAddr = hf.framePhysAddr;
 
-        m_cpu.setEFLAGS(popFlags);
-        m_cpu.setEIP(newEip);
-        loadSegment(CS, newCs);
-        if (hf.stackIs32)
-          m_cpu.setReg32(ESP, hf.frameSP + 12);
-        else
-          m_cpu.setReg16(SP, static_cast<uint16_t>(hf.frameSP + 12));
-      } else { // 16-bit IRET frame
-        uint16_t newIp = m_memory.read16(frameAddr);
-        uint16_t newCs = m_memory.read16(frameAddr + 2);
-        uint16_t popFlags = m_memory.read16(frameAddr + 4);
+        if (hf.is32) { // 32-bit IRET (IRETD) frame
+          uint32_t newEip = m_memory.read32(frameAddr);
+          uint16_t newCs = m_memory.read32(frameAddr + 4) & 0xFFFF;
+          uint32_t popFlags = m_memory.read32(frameAddr + 8);
 
-        uint16_t mask = FLAG_CARRY | FLAG_ZERO | FLAG_SIGN | FLAG_OVERFLOW |
-                        FLAG_AUX | FLAG_PARITY;
-        popFlags = (popFlags & ~mask) | (currentFlags & mask);
+          uint32_t mask = FLAG_CARRY | FLAG_ZERO | FLAG_SIGN | FLAG_OVERFLOW |
+                          FLAG_AUX | FLAG_PARITY;
+          popFlags = (popFlags & ~mask) | (currentFlags & mask);
 
-        m_cpu.setEFLAGS((currentFlags & 0xFFFF0000) | popFlags);
-        m_cpu.setEIP(newIp);
-        loadSegment(CS, newCs);
-        m_cpu.setReg16(SP, static_cast<uint16_t>(hf.frameSP + 6));
+          m_cpu.setEFLAGS(popFlags);
+          m_cpu.setEIP(newEip);
+          loadSegment(CS, newCs);
+          if (hf.stackIs32)
+            m_cpu.setReg32(ESP, hf.frameSP + 12);
+          else
+            m_cpu.setReg16(SP, static_cast<uint16_t>(hf.frameSP + 12));
+        } else { // 16-bit IRET frame
+          uint16_t newIp = m_memory.read16(frameAddr);
+          uint16_t newCs = m_memory.read16(frameAddr + 2);
+          uint16_t popFlags = m_memory.read16(frameAddr + 4);
+
+          uint16_t mask = FLAG_CARRY | FLAG_ZERO | FLAG_SIGN | FLAG_OVERFLOW |
+                          FLAG_AUX | FLAG_PARITY;
+          popFlags = (popFlags & ~mask) | (currentFlags & mask);
+
+          m_cpu.setEFLAGS((currentFlags & 0xFFFF0000) | popFlags);
+          m_cpu.setEIP(newIp);
+          loadSegment(CS, newCs);
+          m_cpu.setReg16(SP, static_cast<uint16_t>(hf.frameSP + 6));
+        }
       }
     } else {
       // Interrupt not handled by any HLE handler.
@@ -3235,8 +3324,6 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
       // the original handler is a no-op, so the IRET returns immediately.
       auto hf_uh = m_cpu.popHLEFrameForVector(vector);
       if (hf_uh.framePhysAddr != 0) {
-        // Direct dispatch with a stored frame — simulate IRET from
-        // the triggerInterrupt frame (same as old unhandled path).
         uint32_t frameAddr = hf_uh.framePhysAddr;
         if (hf_uh.is32) {
           uint32_t newEip = m_memory.read32(frameAddr);
@@ -3248,7 +3335,8 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
           if (hf_uh.stackIs32)
             m_cpu.setReg32(ESP, hf_uh.frameSP + 12);
           else
-            m_cpu.setReg16(SP, static_cast<uint16_t>(hf_uh.frameSP + 12));
+            m_cpu.setReg16(SP,
+                           static_cast<uint16_t>(hf_uh.frameSP + 12));
         } else {
           uint16_t newIp = m_memory.read16(frameAddr);
           uint16_t newCs = m_memory.read16(frameAddr + 2);
@@ -3257,7 +3345,8 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
               (m_cpu.getEFLAGS() & 0xFFFF0000) | popFlags);
           m_cpu.setEIP(newIp);
           loadSegment(CS, newCs);
-          m_cpu.setReg16(SP, static_cast<uint16_t>(hf_uh.frameSP + 6));
+          m_cpu.setReg16(SP,
+                         static_cast<uint16_t>(hf_uh.frameSP + 6));
         }
       } else {
         // No HLE frame for this vector — reached via chain call
@@ -3396,11 +3485,12 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
     uint8_t type = (high >> 8) & 0x0F;
     use32 = (type & 0x08) != 0;
     bool isInterruptGate = (type & 0x01) == 0;
-    uint8_t newCpl = cs & 3;
 
-    LOG_DEBUG("PM INT 0x", std::hex, (int)vector, " selector: 0x", cs,
-              " offset: 0x", eip32, " size: ", use32 ? 32 : 16, " type: 0x",
-              (int)type, " CPL:", (int)oldCpl, "->", (int)newCpl);
+    LOG_DEBUG("PM INT 0x", std::hex, (int)vector, " IDT sel: 0x", cs,
+              " off: 0x", eip32, " size: ", use32 ? 32 : 16, " type: 0x",
+              (int)type);
+
+    uint8_t newCpl = cs & 3;
 
     // Privilege change check
     bool privChange = (newCpl < oldCpl) || (m_cpu.getEFLAGS() & 0x00020000);
@@ -3412,13 +3502,12 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
     // pushing onto its internal transfer stack, which would never get
     // popped because 0F FF IRET simulation bypasses the thunk's exit.
     //
-    // For INT 31h (DPMI) we ALWAYS try HLE first — we fully handle all
-    // DPMI calls and the thunk is just a pass-through. For other vectors,
-    // try HLE only if the IDT entry is unhooked (our original stub).
+    // Try HLE only if the IDT entry is unhooked (our original stub).
+    // When DOS/4GW hooks vectors, it becomes the dispatcher and will
+    // chain to our stubs when needed.
     if (!(m_cpu.getEFLAGS() & 0x00020000)) {
       bool isOrig = m_bios.isOriginalIVT(vector, cs, eip32);
-      bool alwaysHLE = (vector == 0x31);
-      if (isOrig || alwaysHLE) {
+      if (isOrig) {
         if (m_dos.handleInterrupt(vector)) {
           m_cpu.popHLEFrame();
           return;
@@ -3430,8 +3519,9 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
       }
     }
 
-    // Only clear IF after HLE check — HLE handlers return directly
-    // to the caller without an IRET to restore it.
+    // Clear IF for interrupt gates before pushing the IRET frame.
+    // NOTE: This differs from real hardware (which pushes EFLAGS then
+    // clears IF), but matches behavior existing code relied on.
     if (isInterruptGate) {
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~fador::cpu::FLAG_INTERRUPT);
     }
@@ -3639,15 +3729,6 @@ InstructionDecoder::decodeDescriptor(uint32_t low, uint32_t high) {
 }
 
 void InstructionDecoder::loadSegment(SegRegIndex seg, uint16_t selector) {
-  // TEMP DIAG: catch CS loaded with suspicious selector in PM
-  if (seg == CS && (m_cpu.getCR(0) & 1) && !(m_cpu.getEFLAGS() & 0x00020000)) {
-    if (selector == 0 || selector == 0x6ED7 || (selector & 0xFF00) != 0) {
-      LOG_ERROR("DIAG: loadSegment(CS, 0x", std::hex, selector,
-                ") in PM at prev CS:EIP=", m_cpu.getSegReg(CS), ":",
-                m_cpu.getEIP(), " ESP=", m_cpu.getReg32(ESP),
-                " SS=", m_cpu.getSegReg(SS), " ssBase=", m_segBase[SS]);
-    }
-  }
   m_cpu.setSegReg(seg, selector);
 
   bool isRealMode = !(m_cpu.getCR(0) & 1) || (m_cpu.getEFLAGS() & 0x00020000);

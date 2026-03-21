@@ -134,6 +134,15 @@ public:
     return {false, 0, 0, false, vector};
   }
 
+  // Peek at the most recent HLE frame for a given vector (non-destructive).
+  HLEFrame peekHLEFrameForVector(uint8_t vector) const {
+    for (auto it = m_hleStack.rbegin(); it != m_hleStack.rend(); ++it) {
+      if (it->vector == vector)
+        return *it;
+    }
+    return {false, 0, 0, false, vector};
+  }
+
   // Stack operations
   void push16(uint16_t value);
   void push32(uint32_t value);
