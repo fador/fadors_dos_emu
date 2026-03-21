@@ -4,3 +4,4 @@
 *.txt
 *.py
 *.log
+/use-cases
