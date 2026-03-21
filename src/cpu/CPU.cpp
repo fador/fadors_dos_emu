@@ -65,7 +65,29 @@ void CPU::setReg8(uint8_t index, uint8_t value) {
 }
 
 void CPU::push16(uint16_t value) {
-  if (m_is32BitStack) {
+  bool use32Stack = m_is32BitStack;
+  if ((m_cr[0] & 1) && !(m_eflags & 0x00020000) && m_memory) {
+    uint16_t ss = m_segRegs[SS];
+    if (ss != 0) {
+      const auto &table = (ss & 0x04) ? m_ldtr : m_gdtr;
+      uint32_t index = static_cast<uint32_t>(ss & ~7);
+      if (table.base != 0 && index + 7 <= table.limit) {
+        uint32_t entry = table.base + index;
+        uint32_t high = m_memory->read32(entry + 4);
+        bool present = (high & 0x00008000u) != 0;
+        bool codeOrData = (high & 0x00001000u) != 0;
+        if (present && codeOrData)
+          use32Stack = (high & 0x00400000u) != 0;
+        else
+          use32Stack = false;
+      } else {
+        use32Stack = false;
+      }
+    } else {
+      use32Stack = false;
+    }
+  }
+  if (use32Stack) {
     uint32_t esp = getReg32(ESP) - 2;
     setReg32(ESP, esp);
     if (m_memory)
@@ -79,7 +101,29 @@ void CPU::push16(uint16_t value) {
 }
 
 void CPU::push32(uint32_t value) {
-  if (m_is32BitStack) {
+  bool use32Stack = m_is32BitStack;
+  if ((m_cr[0] & 1) && !(m_eflags & 0x00020000) && m_memory) {
+    uint16_t ss = m_segRegs[SS];
+    if (ss != 0) {
+      const auto &table = (ss & 0x04) ? m_ldtr : m_gdtr;
+      uint32_t index = static_cast<uint32_t>(ss & ~7);
+      if (table.base != 0 && index + 7 <= table.limit) {
+        uint32_t entry = table.base + index;
+        uint32_t high = m_memory->read32(entry + 4);
+        bool present = (high & 0x00008000u) != 0;
+        bool codeOrData = (high & 0x00001000u) != 0;
+        if (present && codeOrData)
+          use32Stack = (high & 0x00400000u) != 0;
+        else
+          use32Stack = false;
+      } else {
+        use32Stack = false;
+      }
+    } else {
+      use32Stack = false;
+    }
+  }
+  if (use32Stack) {
     uint32_t esp = getReg32(ESP) - 4;
     setReg32(ESP, esp);
     if (m_memory) {
@@ -96,7 +140,29 @@ void CPU::push32(uint32_t value) {
 
 uint16_t CPU::pop16() {
   uint16_t value = 0;
-  if (m_is32BitStack) {
+  bool use32Stack = m_is32BitStack;
+  if ((m_cr[0] & 1) && !(m_eflags & 0x00020000) && m_memory) {
+    uint16_t ss = m_segRegs[SS];
+    if (ss != 0) {
+      const auto &table = (ss & 0x04) ? m_ldtr : m_gdtr;
+      uint32_t index = static_cast<uint32_t>(ss & ~7);
+      if (table.base != 0 && index + 7 <= table.limit) {
+        uint32_t entry = table.base + index;
+        uint32_t high = m_memory->read32(entry + 4);
+        bool present = (high & 0x00008000u) != 0;
+        bool codeOrData = (high & 0x00001000u) != 0;
+        if (present && codeOrData)
+          use32Stack = (high & 0x00400000u) != 0;
+        else
+          use32Stack = false;
+      } else {
+        use32Stack = false;
+      }
+    } else {
+      use32Stack = false;
+    }
+  }
+  if (use32Stack) {
     uint32_t esp = getReg32(ESP);
     if (m_memory)
       value = m_memory->read16(m_segBase[SS] + esp);
@@ -112,7 +178,29 @@ uint16_t CPU::pop16() {
 
 uint32_t CPU::pop32() {
   uint32_t value = 0;
-  if (m_is32BitStack) {
+  bool use32Stack = m_is32BitStack;
+  if ((m_cr[0] & 1) && !(m_eflags & 0x00020000) && m_memory) {
+    uint16_t ss = m_segRegs[SS];
+    if (ss != 0) {
+      const auto &table = (ss & 0x04) ? m_ldtr : m_gdtr;
+      uint32_t index = static_cast<uint32_t>(ss & ~7);
+      if (table.base != 0 && index + 7 <= table.limit) {
+        uint32_t entry = table.base + index;
+        uint32_t high = m_memory->read32(entry + 4);
+        bool present = (high & 0x00008000u) != 0;
+        bool codeOrData = (high & 0x00001000u) != 0;
+        if (present && codeOrData)
+          use32Stack = (high & 0x00400000u) != 0;
+        else
+          use32Stack = false;
+      } else {
+        use32Stack = false;
+      }
+    } else {
+      use32Stack = false;
+    }
+  }
+  if (use32Stack) {
     uint32_t esp = getReg32(ESP);
     if (m_memory)
       value = m_memory->read32(m_segBase[SS] + esp);
