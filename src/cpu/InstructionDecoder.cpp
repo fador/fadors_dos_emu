@@ -3253,9 +3253,6 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
           uint32_t newEip = m_memory.read32(ssBase + esp);
           uint16_t newCs = m_memory.read32(ssBase + esp + 4) & 0xFFFF;
           uint32_t popFlags = m_memory.read32(ssBase + esp + 8);
-          LOG_ERROR("CHAIN32 vec=0x", std::hex, (int)vector,
-                    " -> CS:", newCs, " EIP:", newEip,
-                    " FL:", popFlags, " ssBase:", ssBase, " esp:", esp);
           popFlags = (popFlags & ~mask) | (currentFlags & mask);
           m_cpu.setEFLAGS(popFlags);
           m_cpu.setEIP(newEip);
@@ -3268,9 +3265,6 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
           uint16_t newIp = m_memory.read16(ssBase + sp16);
           uint16_t newCs = m_memory.read16(ssBase + sp16 + 2);
           uint16_t popFlags16 = m_memory.read16(ssBase + sp16 + 4);
-          LOG_ERROR("CHAIN16 vec=0x", std::hex, (int)vector,
-                    " -> CS:", newCs, " IP:", newIp,
-                    " FL:", popFlags16, " ssBase:", ssBase, " sp16:", sp16);
           uint16_t mask16 = static_cast<uint16_t>(mask);
           popFlags16 = (popFlags16 & ~mask16) | (currentFlags & mask16);
           m_cpu.setEFLAGS((currentFlags & 0xFFFF0000) | popFlags16);

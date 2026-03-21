@@ -448,9 +448,18 @@ void DOS::handleDOSService() {
         info = 0x80 | 0x02; // STDOUT - char device
       else if (bx == 2)
         info = 0x80 | 0x02; // STDERR - char device
-      else
-        info = 0x0002; // Disk file (bit 1=non-removable)
+      else if (bx >= 5 && bx - 5 < m_fileHandles.size() &&
+               m_fileHandles[bx - 5])
+        // Disk file: bit7=0 (file), bit11=1 (media not removable),
+        // bits 5-0 = drive number (0=A:,2=C:).
+        info = 0x0802;
+      else {
+        m_cpu.setReg16(cpu::AX, 0x06); // Invalid handle
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+        break;
+      }
       m_cpu.setReg16(cpu::DX, info);
+      m_cpu.setReg16(cpu::AX, 0x0000); // AX destroyed on success
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
       LOG_DOS("DOS: IOCTL Get Device Info handle=", bx, " info=0x", std::hex,
               info);

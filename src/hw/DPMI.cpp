@@ -702,6 +702,10 @@ void DPMI::handleTranslation() {
     uint16_t rmFlags = m_memory.read16(structAddr + 0x20);
     uint16_t rmES = m_memory.read16(structAddr + 0x22);
     uint16_t rmDS = m_memory.read16(structAddr + 0x24);
+    uint16_t rmFS = m_memory.read16(structAddr + 0x26);
+    uint16_t rmGS = m_memory.read16(structAddr + 0x28);
+    uint16_t rmSP = m_memory.read16(structAddr + 0x2E);
+    uint16_t rmSS = m_memory.read16(structAddr + 0x30);
 
     // Temporarily set RM state for the call
     m_cpu.setEFLAGS((m_cpu.getEFLAGS() & 0xFFFF0000) | rmFlags);
@@ -713,6 +717,13 @@ void DPMI::handleTranslation() {
     m_cpu.setSegBase(cpu::ES, static_cast<uint32_t>(rmES) << 4);
     m_cpu.setSegReg(cpu::DS, rmDS);
     m_cpu.setSegBase(cpu::DS, static_cast<uint32_t>(rmDS) << 4);
+    m_cpu.setSegReg(cpu::FS, rmFS);
+    m_cpu.setSegBase(cpu::FS, static_cast<uint32_t>(rmFS) << 4);
+    m_cpu.setSegReg(cpu::GS, rmGS);
+    m_cpu.setSegBase(cpu::GS, static_cast<uint32_t>(rmGS) << 4);
+    m_cpu.setSegReg(cpu::SS, rmSS);
+    m_cpu.setSegBase(cpu::SS, static_cast<uint32_t>(rmSS) << 4);
+    m_cpu.setReg16(cpu::SP, rmSP);
 
     if (func == 0x0300) {
       LOG_DEBUG("DPMI 0300h: Simulate RM INT 0x", std::hex, (int)intNo);
@@ -774,31 +785,78 @@ void DPMI::handleTranslation() {
                 " CF=", retCF ? 1 : 0,
                 " ES=", m_cpu.getSegReg(cpu::ES));
     }
-    m_memory.write32(structAddr + 0x00, m_cpu.getReg32(cpu::EDI));
-    m_memory.write32(structAddr + 0x04, m_cpu.getReg32(cpu::ESI));
-    m_memory.write32(structAddr + 0x08, m_cpu.getReg32(cpu::EBP));
-    m_memory.write32(structAddr + 0x10, m_cpu.getReg32(cpu::EBX));
-    m_memory.write32(structAddr + 0x14, m_cpu.getReg32(cpu::EDX));
-    m_memory.write32(structAddr + 0x18, m_cpu.getReg32(cpu::ECX));
-    m_memory.write32(structAddr + 0x1C, m_cpu.getReg32(cpu::EAX));
+    if (m_is32BitClient) {
+      m_memory.write32(structAddr + 0x00, m_cpu.getReg32(cpu::EDI));
+      m_memory.write32(structAddr + 0x04, m_cpu.getReg32(cpu::ESI));
+      m_memory.write32(structAddr + 0x08, m_cpu.getReg32(cpu::EBP));
+      m_memory.write32(structAddr + 0x10, m_cpu.getReg32(cpu::EBX));
+      m_memory.write32(structAddr + 0x14, m_cpu.getReg32(cpu::EDX));
+      m_memory.write32(structAddr + 0x18, m_cpu.getReg32(cpu::ECX));
+      m_memory.write32(structAddr + 0x1C, m_cpu.getReg32(cpu::EAX));
+    } else {
+      // 16-bit clients use only low halves; preserve incoming high words.
+      uint32_t inEdi = m_memory.read32(structAddr + 0x00) & 0xFFFF0000;
+      uint32_t inEsi = m_memory.read32(structAddr + 0x04) & 0xFFFF0000;
+      uint32_t inEbp = m_memory.read32(structAddr + 0x08) & 0xFFFF0000;
+      uint32_t inEbx = m_memory.read32(structAddr + 0x10) & 0xFFFF0000;
+      uint32_t inEdx = m_memory.read32(structAddr + 0x14) & 0xFFFF0000;
+      uint32_t inEcx = m_memory.read32(structAddr + 0x18) & 0xFFFF0000;
+      uint32_t inEax = m_memory.read32(structAddr + 0x1C) & 0xFFFF0000;
+      m_memory.write32(structAddr + 0x00,
+                       inEdi | static_cast<uint32_t>(m_cpu.getReg16(cpu::DI)));
+      m_memory.write32(structAddr + 0x04,
+                       inEsi | static_cast<uint32_t>(m_cpu.getReg16(cpu::SI)));
+      m_memory.write32(structAddr + 0x08,
+                       inEbp | static_cast<uint32_t>(m_cpu.getReg16(cpu::BP)));
+      m_memory.write32(structAddr + 0x10,
+                       inEbx | static_cast<uint32_t>(m_cpu.getReg16(cpu::BX)));
+      m_memory.write32(structAddr + 0x14,
+                       inEdx | static_cast<uint32_t>(m_cpu.getReg16(cpu::DX)));
+      m_memory.write32(structAddr + 0x18,
+                       inEcx | static_cast<uint32_t>(m_cpu.getReg16(cpu::CX)));
+      m_memory.write32(structAddr + 0x1C,
+                       inEax | static_cast<uint32_t>(m_cpu.getReg16(cpu::AX)));
+    }
     m_memory.write16(structAddr + 0x20,
                      static_cast<uint16_t>(m_cpu.getEFLAGS() & 0xFFFF));
     m_memory.write16(structAddr + 0x22, m_cpu.getSegReg(cpu::ES));
     m_memory.write16(structAddr + 0x24, m_cpu.getSegReg(cpu::DS));
+    m_memory.write16(structAddr + 0x26, m_cpu.getSegReg(cpu::FS));
+    m_memory.write16(structAddr + 0x28, m_cpu.getSegReg(cpu::GS));
+    m_memory.write16(structAddr + 0x2A,
+             static_cast<uint16_t>(m_cpu.getEIP() & 0xFFFF));
+    m_memory.write16(structAddr + 0x2C, m_cpu.getSegReg(cpu::CS));
+    m_memory.write16(structAddr + 0x2E, m_cpu.getReg16(cpu::SP));
+    m_memory.write16(structAddr + 0x30, m_cpu.getSegReg(cpu::SS));
 
     // Restore PM state
     for (int i = 0; i < 8; i++)
       m_cpu.setReg32(i, savedRegs[i]);
     for (int i = 0; i < 6; i++) {
       m_cpu.setSegReg(i, savedSegs[i]);
-      // Restore segment bases from our LDT
       uint16_t sel = savedSegs[i];
+      if (sel == 0) {
+        m_cpu.setSegBase(i, 0);
+        continue;
+      }
+
+      // Restore base for selectors from either LDT or GDT so cached
+      // segment bases don't remain stale after temporary RM state.
       if (sel & LDT_TI_BIT) {
         int idx = selectorToIndex(sel);
-        if (idx > 0 && idx < MAX_LDT && m_ldtUsed[idx])
+        if (idx > 0 && idx < MAX_LDT && m_ldtUsed[idx]) {
           m_cpu.setSegBase(i, extractBase(m_ldt[idx]));
-      } else if (sel == 0) {
-        m_cpu.setSegBase(i, 0);
+        } else {
+          // Invalid/unused LDT selector: keep base deterministic.
+          m_cpu.setSegBase(i, 0);
+        }
+      } else {
+        uint32_t entryAddr = m_cpu.getGDTR().base + (sel & ~7);
+        uint32_t low = m_memory.read32(entryAddr);
+        uint32_t high = m_memory.read32(entryAddr + 4);
+        uint32_t base = ((low >> 16) & 0xFFFF) | ((high & 0xFF) << 16) |
+                        (high & 0xFF000000);
+        m_cpu.setSegBase(i, base);
       }
     }
     m_cpu.setEIP(savedEIP);
