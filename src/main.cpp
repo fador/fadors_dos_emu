@@ -289,6 +289,17 @@ int main(int argc, char *argv[]) {
         if (stopAfterCycles > 0 && instrCount >= stopAfterCycles) {
           LOG_INFO("Stopped after ", instrCount, " cycles (--stop-after)");
           debugger.dumpState();
+          for (int row = 0; row < 25; ++row) {
+            std::string vramText;
+            for (int col = 0; col < 80; ++col) {
+              uint8_t ch = memory.read8(0xB8000 + (row * 80 + col) * 2);
+              vramText += (ch >= 0x20 && ch < 0x7F) ? static_cast<char>(ch) : '.';
+            }
+            while (!vramText.empty() && vramText.back() == '.')
+              vramText.pop_back();
+            if (!vramText.empty())
+              LOG_INFO("VRAM[", row, "]: ", vramText);
+          }
           running = false;
           break;
         }
@@ -420,6 +431,17 @@ int main(int argc, char *argv[]) {
         if (stopAfterCycles > 0 && instrCount >= stopAfterCycles) {
           LOG_INFO("Stopped after ", instrCount, " cycles (--stop-after)");
           debugger.dumpState();
+          for (int row = 0; row < 25; ++row) {
+            std::string vramText;
+            for (int col = 0; col < 80; ++col) {
+              uint8_t ch = memory.read8(0xB8000 + (row * 80 + col) * 2);
+              vramText += (ch >= 0x20 && ch < 0x7F) ? static_cast<char>(ch) : '.';
+            }
+            while (!vramText.empty() && vramText.back() == '.')
+              vramText.pop_back();
+            if (!vramText.empty())
+              LOG_INFO("VRAM[", row, "]: ", vramText);
+          }
           running = false;
           break;
         }

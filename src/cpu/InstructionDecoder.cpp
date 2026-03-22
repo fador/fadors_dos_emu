@@ -574,7 +574,37 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                                     : static_cast<uint32_t>(m_cpu.getReg16(SP));
     uint32_t iretPhysAddr = m_segBase[SS] + iretSP;
 
-    if (m_hasPrefix66) {
+    bool useIretd = m_hasPrefix66;
+    if (!m_hasPrefix66 && (m_cpu.getCR(0) & 1) && m_cpu.getSegReg(CS) == 0x0008) {
+      // In HLE stub context (CS=0x8), infer frame width from the return CS
+      // descriptor. The caller may have built a 16-bit chain frame even though
+      // the stub itself is USE32.
+      uint32_t ssBaseProbe = m_cpu.getSegBase(SS);
+      uint16_t sp16Probe = m_cpu.getReg16(SP);
+      bool found = false;
+
+      auto inferFromSelector = [&](uint16_t sel) {
+        if ((sel & ~7) == 0)
+          return;
+        uint32_t tableBase = (sel & 0x04) ? m_cpu.getLDTR().base : m_cpu.getGDTR().base;
+        uint32_t dLow = m_memory.read32(tableBase + (sel & ~7));
+        uint32_t dHigh = m_memory.read32(tableBase + (sel & ~7) + 4);
+        Descriptor d = decodeDescriptor(dLow, dHigh);
+        bool isCode = !d.isSystem && (d.type & 0x08);
+        if (isCode && d.isPresent) {
+          useIretd = d.is32Bit;
+          found = true;
+        }
+      };
+
+      inferFromSelector(m_memory.read16(ssBaseProbe + sp16Probe + 2));
+      if (!found) {
+        uint32_t esp32Probe = m_cpu.getReg32(ESP);
+        inferFromSelector(m_memory.read16(ssBaseProbe + esp32Probe + 4));
+      }
+    }
+
+    if (useIretd) {
       // IRETD — pops 32-bit EIP, CS (zero-ext), EFLAGS
       uint32_t esp = m_cpu.getReg32(ESP);
       uint32_t newEip = m_memory.read32(m_segBase[SS] + esp);
@@ -3687,6 +3717,8 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
   uint16_t oldSs = m_cpu.getSegReg(SS);
   uint32_t oldEsp = m_cpu.getReg32(ESP);
   uint8_t oldCpl = oldCs & 3;
+  bool clearIFOnEntry = true;
+  constexpr uint32_t clearTFMask = ~fador::cpu::FLAG_TRAP;
 
   if (m_cpu.getCR(0) & 1) {
     // Protected Mode IDT lookup
@@ -3735,12 +3767,9 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
       }
     }
 
-    // Clear IF for interrupt gates before pushing the IRET frame.
-    // NOTE: This differs from real hardware (which pushes EFLAGS then
-    // clears IF), but matches behavior existing code relied on.
-    if (isInterruptGate) {
-      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~fador::cpu::FLAG_INTERRUPT);
-    }
+    // Hardware-compatible entry order: push original EFLAGS first,
+    // then update IF/TF for the handler context.
+    clearIFOnEntry = isInterruptGate;
 
     if (privChange) {
       // In a real CPU, we would look up the new SS/ESP in the TSS.
@@ -3814,7 +3843,11 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
     }
   }
 
-  m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~(0x0200 | 0x0100)); // Clear IF and TF
+  uint32_t entryFlags = m_cpu.getEFLAGS() & clearTFMask;
+  if (clearIFOnEntry) {
+    entryFlags &= ~fador::cpu::FLAG_INTERRUPT;
+  }
+  m_cpu.setEFLAGS(entryFlags);
   loadSegment(CS, cs);
   if (cs == 0x16F && eip32 < 0x1000) {
     LOG_INFO("INT dispatch low target: vec=0x", std::hex, (int)vector,
@@ -3838,6 +3871,8 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
   uint16_t oldSs = m_cpu.getSegReg(SS);
   uint32_t oldEsp = m_cpu.getReg32(ESP);
   uint8_t oldCpl = oldCs & 3;
+  bool clearIFOnEntry = true;
+  constexpr uint32_t clearTFMask = ~fador::cpu::FLAG_TRAP;
 
   if (m_cpu.getCR(0) & 1) {
     uint32_t idtBase = m_cpu.getIDTR().base;
@@ -3857,9 +3892,7 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
               " offset: 0x", eip32, " size: ", use32 ? 32 : 16, " type: 0x",
               (int)type, " CPL:", (int)oldCpl, "->", (int)newCpl);
 
-    if (isInterruptGate) {
-      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~fador::cpu::FLAG_INTERRUPT);
-    }
+    clearIFOnEntry = isInterruptGate;
 
     bool privChange = (newCpl < oldCpl) || (m_cpu.getEFLAGS() & 0x00020000);
     m_cpu.pushHLEFrame(use32, vector);
@@ -3915,7 +3948,11 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
     }
   }
 
-  m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~(0x0200 | 0x0100)); // Clear IF and TF
+  uint32_t entryFlags = m_cpu.getEFLAGS() & clearTFMask;
+  if (clearIFOnEntry) {
+    entryFlags &= ~fador::cpu::FLAG_INTERRUPT;
+  }
+  m_cpu.setEFLAGS(entryFlags);
   loadSegment(CS, cs);
   if (cs == 0x16F && eip32 < 0x1000) {
     LOG_INFO("HW IRQ dispatch low target: vec=0x", std::hex, (int)vector,

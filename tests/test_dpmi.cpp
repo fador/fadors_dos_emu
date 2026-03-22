@@ -1155,3 +1155,380 @@ TEST_CASE("DPMI multiple memory allocations", "[dpmi][memory][stress]") {
         REQUIRE(!env.carrySet());
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// IDT write semantics for INT 31h AX=0205h  (suspected error-1001 root causes)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Physical addresses used by DPMI internals (mirrors DPMI.cpp constants)
+static constexpr uint32_t IDT_PM_PHYS = 0xF0800;
+// HLE stub for vector V lives at physical 0xF0000 + 0x0100 + V*4
+static constexpr uint32_t hleStubPhys(uint8_t v) {
+    return 0xF0000u + 0x0100u + static_cast<uint32_t>(v) * 4u;
+}
+// Encode a 32-bit interrupt-gate IDT entry (type EE = 32-bit, DPL=3)
+static uint32_t idtLow (uint16_t sel, uint32_t off) {
+    return (static_cast<uint32_t>(sel) << 16) | (off & 0xFFFF);
+}
+static uint32_t idtHigh(uint32_t off) {
+    return (off & 0xFFFF0000u) | 0x0000EE00u;
+}
+
+TEST_CASE("DPMI 0205h writes physical IDT when we are the sole DPMI host", "[dpmi][int][idt]") {
+    DPMITestEnv env;
+    constexpr uint8_t vec = 0x42;
+
+    // After entry, INT 31h vector still points to our HLE stub → sole host
+    env.cpu.setReg16(cpu::AX, 0x0205);
+    env.cpu.setReg8(cpu::BL, vec);
+    env.cpu.setReg16(cpu::CX, 0x0077);       // custom selector
+    env.cpu.setReg32(cpu::EDX, 0x00012345);  // custom offset
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+
+    // Physical IDT entry must have been updated
+    REQUIRE(env.mem.read32(IDT_PM_PHYS + vec * 8)     == idtLow(0x0077, 0x00012345));
+    REQUIRE(env.mem.read32(IDT_PM_PHYS + vec * 8 + 4) == idtHigh(0x00012345));
+}
+
+TEST_CASE("DPMI 0205h does NOT overwrite IDT when INT 31h is hooked", "[dpmi][int][idt]") {
+    DPMITestEnv env;
+    constexpr uint8_t vecClient = 0x43;
+
+    // Step 1: hook INT 31h itself (simulating DOS/4GW installing its dispatcher)
+    env.cpu.setReg16(cpu::AX, 0x0205);
+    env.cpu.setReg8(cpu::BL, 0x31);
+    env.cpu.setReg16(cpu::CX, 0x0057); // DOS/4GW selector
+    env.cpu.setReg32(cpu::EDX, 0x00009000);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+
+    // Record the IDT entry for vecClient (should still be original HLE stub)
+    uint32_t beforeLow  = env.mem.read32(IDT_PM_PHYS + vecClient * 8);
+    uint32_t beforeHigh = env.mem.read32(IDT_PM_PHYS + vecClient * 8 + 4);
+    // Verify this actually matches the expected HLE stub
+    REQUIRE(beforeLow  == idtLow(0x0008, hleStubPhys(vecClient)));
+    REQUIRE(beforeHigh == idtHigh(hleStubPhys(vecClient)));
+
+    // Step 2: hook vecClient (simulating client program calling 0x0205h)
+    env.cpu.setReg16(cpu::AX, 0x0205);
+    env.cpu.setReg8(cpu::BL, vecClient);
+    env.cpu.setReg16(cpu::CX, 0x008F); // client selector
+    env.cpu.setReg32(cpu::EDX, 0x0001ABCD);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+
+    // IDT entry for vecClient must be UNCHANGED — DOS/4GW's wrapper stays in place
+    REQUIRE(env.mem.read32(IDT_PM_PHYS + vecClient * 8)     == beforeLow);
+    REQUIRE(env.mem.read32(IDT_PM_PHYS + vecClient * 8 + 4) == beforeHigh);
+
+    // But m_pmVectors[vecClient] must be updated (readable via 0x0204h)
+    env.cpu.setReg16(cpu::AX, 0x0204);
+    env.cpu.setReg8(cpu::BL, vecClient);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+    REQUIRE(env.cpu.getReg16(cpu::CX)  == 0x008F);
+    REQUIRE(env.cpu.getReg32(cpu::EDX) == 0x0001ABCD);
+}
+
+TEST_CASE("DPMI 0205h always writes IDT when setting INT 31h itself", "[dpmi][int][idt]") {
+    DPMITestEnv env;
+
+    // Hook INT 31h a first time (DOS/4GW first layer)
+    env.cpu.setReg16(cpu::AX, 0x0205);
+    env.cpu.setReg8(cpu::BL, 0x31);
+    env.cpu.setReg16(cpu::CX, 0x0057);
+    env.cpu.setReg32(cpu::EDX, 0x00009000);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+    REQUIRE(env.mem.read32(IDT_PM_PHYS + 0x31 * 8)     == idtLow(0x0057, 0x00009000));
+    REQUIRE(env.mem.read32(IDT_PM_PHYS + 0x31 * 8 + 4) == idtHigh(0x00009000));
+
+    // Hook INT 31h again with a different selector (second layer hooker)
+    env.cpu.setReg16(cpu::AX, 0x0205);
+    env.cpu.setReg8(cpu::BL, 0x31);
+    env.cpu.setReg16(cpu::CX, 0x008F);
+    env.cpu.setReg32(cpu::EDX, 0x00020000);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+
+    // IDT[0x31] must reflect the newest hook
+    REQUIRE(env.mem.read32(IDT_PM_PHYS + 0x31 * 8)     == idtLow(0x008F, 0x00020000));
+    REQUIRE(env.mem.read32(IDT_PM_PHYS + 0x31 * 8 + 4) == idtHigh(0x00020000));
+}
+
+TEST_CASE("DPMI 0204h returns m_pmVectors even when IDT was not written", "[dpmi][int][idt]") {
+    DPMITestEnv env;
+
+    // Hook INT 31h so subsequent 0x0205h calls skip IDT writes
+    env.cpu.setReg16(cpu::AX, 0x0205);
+    env.cpu.setReg8(cpu::BL, 0x31);
+    env.cpu.setReg16(cpu::CX, 0x0057);
+    env.cpu.setReg32(cpu::EDX, 0x00009000);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+
+    // Set three different vectors
+    for (uint8_t vec : {uint8_t(0x08), uint8_t(0x09), uint8_t(0x0D)}) {
+        env.cpu.setReg16(cpu::AX, 0x0205);
+        env.cpu.setReg8(cpu::BL, vec);
+        env.cpu.setReg16(cpu::CX, 0x008F);
+        env.cpu.setReg32(cpu::EDX, 0x00100000u + vec);
+        env.clearCarry();
+        env.dpmi.handleInt31();
+        REQUIRE(!env.carrySet());
+    }
+
+    // Each 0x0204h query must return exactly what was set via 0x0205h
+    for (uint8_t vec : {uint8_t(0x08), uint8_t(0x09), uint8_t(0x0D)}) {
+        env.cpu.setReg16(cpu::AX, 0x0204);
+        env.cpu.setReg8(cpu::BL, vec);
+        env.clearCarry();
+        env.dpmi.handleInt31();
+        REQUIRE(!env.carrySet());
+        REQUIRE(env.cpu.getReg16(cpu::CX)  == 0x008F);
+        REQUIRE(env.cpu.getReg32(cpu::EDX) == 0x00100000u + vec);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// isOriginalIVT PM path — controls HLE shortcut in InstructionDecoder
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("isOriginalIVT returns true only for original HLE stub addresses", "[bios][ivt]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::BIOS bios(cpu, mem, kbd, pit);
+    bios.initialize();
+
+    constexpr uint8_t vec = 0x21;
+    const uint32_t origStubPhys = 0xF0000u + 0x0100u + vec * 4u;
+
+    SECTION("PM: selector 0x08 + orig offset → true") {
+        REQUIRE(bios.isOriginalIVT(vec, 0x0008, origStubPhys));
+    }
+
+    SECTION("PM: any selector + orig offset → true (offset-only check)") {
+        // isOriginalIVT only compares the physical offset in PM, not the selector
+        REQUIRE(bios.isOriginalIVT(vec, 0x0077, origStubPhys));
+    }
+
+    SECTION("PM: correct selector but wrong offset → false") {
+        REQUIRE(!bios.isOriginalIVT(vec, 0x0008, 0x00012345));
+    }
+
+    SECTION("PM: DOS/4GW thunk in extended memory → false") {
+        // Real DOS/4GW handlers live above 1MB; none coincide with stub area
+        REQUIRE(!bios.isOriginalIVT(vec, 0x0057, 0x00100000));
+        REQUIRE(!bios.isOriginalIVT(vec, 0x008F, 0x001ABCDE));
+    }
+
+    SECTION("RM: F000:stub_offset → true") {
+        uint16_t stubOff = static_cast<uint16_t>(0x0100u + vec * 4u);
+        REQUIRE(bios.isOriginalIVT(vec, 0xF000, stubOff));
+    }
+
+    SECTION("RM: program-hooked vector → false") {
+        REQUIRE(!bios.isOriginalIVT(vec, 0x1234, 0x0200));
+    }
+}
+
+TEST_CASE("isOriginalIVT returns false after 0x0205h changes the IDT entry", "[dpmi][int][idt]") {
+    DPMITestEnv env;
+    constexpr uint8_t vec = 0x2C;
+    const uint32_t origStubPhys = 0xF0000u + 0x0100u + vec * 4u;
+
+    // Sanity: before any hook, the original address is recognised
+    REQUIRE(env.bios.isOriginalIVT(vec, 0x0008, origStubPhys));
+
+    // Hook vector via 0x0205h (sole host → IDT written)
+    env.cpu.setReg16(cpu::AX, 0x0205);
+    env.cpu.setReg8(cpu::BL, vec);
+    env.cpu.setReg16(cpu::CX, 0x0077);
+    env.cpu.setReg32(cpu::EDX, 0x00098765);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+
+    // New address (different offset) is NOT recognised as original
+    REQUIRE(!env.bios.isOriginalIVT(vec, 0x0077, 0x00098765));
+    // The original address is still recognised by isOriginalIVT  
+    // (it records the fixed BIOS-time value, not the current IDT)
+    REQUIRE(env.bios.isOriginalIVT(vec, 0x0008, origStubPhys));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// popHLEFrameByPhysAddr — nested frame matching correctness
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("popHLEFrameByPhysAddr removes only the matching frame", "[cpu][hle]") {
+    cpu::CPU cpu;
+
+    // Push three frames with distinct physical addresses
+    cpu.pushHLEFrame(false, 0x21);
+    cpu.lastHLEFrameMut().framePhysAddr = 0x1000;
+
+    cpu.pushHLEFrame(false, 0x10);
+    cpu.lastHLEFrameMut().framePhysAddr = 0x2000;
+
+    cpu.pushHLEFrame(false, 0x0D);
+    cpu.lastHLEFrameMut().framePhysAddr = 0x3000;
+
+    REQUIRE(cpu.hleStackSize() == 3);
+
+    SECTION("pop middle frame by address") {
+        bool found = cpu.popHLEFrameByPhysAddr(0x2000);
+        REQUIRE(found);
+        REQUIRE(cpu.hleStackSize() == 2);
+        // Remaining frames: 0x1000 (bottom) and 0x3000 (top)
+        // Top frame must still be the innermost (0x3000)
+        REQUIRE(cpu.lastHLEFrame().framePhysAddr == 0x3000);
+    }
+
+    SECTION("pop innermost frame by address") {
+        bool found = cpu.popHLEFrameByPhysAddr(0x3000);
+        REQUIRE(found);
+        REQUIRE(cpu.hleStackSize() == 2);
+        REQUIRE(cpu.lastHLEFrame().framePhysAddr == 0x2000);
+    }
+
+    SECTION("pop non-existent address returns false and stack unchanged") {
+        bool found = cpu.popHLEFrameByPhysAddr(0xDEAD);
+        REQUIRE(!found);
+        REQUIRE(cpu.hleStackSize() == 3);
+    }
+
+    SECTION("pop outermost frame by address") {
+        bool found = cpu.popHLEFrameByPhysAddr(0x1000);
+        REQUIRE(found);
+        REQUIRE(cpu.hleStackSize() == 2);
+    }
+}
+
+TEST_CASE("popHLEFrameByPhysAddr on empty stack returns false", "[cpu][hle]") {
+    cpu::CPU cpu;
+    REQUIRE(!cpu.popHLEFrameByPhysAddr(0x1000));
+}
+
+TEST_CASE("popHLEFrameByPhysAddr does not disturb overlapping vector frames", "[cpu][hle]") {
+    cpu::CPU cpu;
+
+    // Simulate two nested INT 0x21 dispatches (e.g., reentrant DPMI calls)
+    cpu.pushHLEFrame(false, 0x21);
+    cpu.lastHLEFrameMut().framePhysAddr = 0x0FF0;
+
+    cpu.pushHLEFrame(false, 0x21);
+    cpu.lastHLEFrameMut().framePhysAddr = 0x0FE0;
+
+    // IRET for the inner frame (0x0FE0) should leave the outer one intact
+    bool found = cpu.popHLEFrameByPhysAddr(0x0FE0);
+    REQUIRE(found);
+    REQUIRE(cpu.hleStackSize() == 1);
+    REQUIRE(cpu.lastHLEFrame().framePhysAddr == 0x0FF0);
+    REQUIRE(cpu.lastHLEFrame().vector == 0x21);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DPMI 0302h state restoration — PM registers must survive an RM round-trip
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("DPMI 0302h fully restores PM CPU state after RM round-trip", "[dpmi][translation][stack]") {
+    DPMITestEnv env;
+
+    // Record PM state before the translation call
+    uint32_t espBefore = env.cpu.getReg32(cpu::ESP);
+    uint32_t ebxBefore = env.cpu.getReg32(cpu::EBX);
+    uint16_t csBefore  = env.cpu.getSegReg(cpu::CS);
+    uint16_t ssBefore  = env.cpu.getSegReg(cpu::SS);
+    uint32_t eipBefore = env.cpu.getEIP();
+
+    // Build a DPMI RM call structure in scratch memory (50 bytes, zeroed)
+    uint32_t structAddr = DPMITestEnv::SCRATCH_ADDR;
+    for (int i = 0; i < 50; ++i)
+        env.mem.write8(structAddr + i, 0);
+
+    // Simulate calling INT 21h AH=2Ch (get time) — a benign, always-handled RM call
+    env.mem.write32(structAddr + 0x1C, 0x002C0000u); // EAX: AH=2Ch
+
+    env.cpu.setReg16(cpu::AX, 0x0302); // Call RM Proc with IRET frame
+    env.cpu.setReg8(cpu::BL, 0x21);    // INT 21h
+    env.cpu.setReg8(cpu::BH, 0x00);
+    env.cpu.setReg16(cpu::CX, 0);
+    env.cpu.setSegBase(cpu::ES, 0);
+    env.cpu.setReg32(cpu::EDI, structAddr);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+
+    // PM state must be fully restored
+    REQUIRE(env.cpu.getReg32(cpu::ESP) == espBefore);
+    REQUIRE(env.cpu.getSegReg(cpu::CS)  == csBefore);
+    REQUIRE(env.cpu.getSegReg(cpu::SS)  == ssBefore);
+    REQUIRE(env.cpu.getEIP()            == eipBefore);
+}
+
+TEST_CASE("DPMI 0302h INT 21h AH=44h IOCTL does not corrupt PM stack pointer", "[dpmi][translation][stack]") {
+    DPMITestEnv env;
+
+    uint32_t espBefore = env.cpu.getReg32(cpu::ESP);
+
+    uint32_t structAddr = DPMITestEnv::SCRATCH_ADDR;
+
+    // Two consecutive 0x0302 calls with AX=4400h (IOCTL Get Device Info)
+    // using different file handles — reproduces the deterministic OOB pattern
+    for (uint16_t bx : {uint16_t(5), uint16_t(5)}) {
+        for (int i = 0; i < 50; ++i)
+            env.mem.write8(structAddr + i, 0);
+        env.mem.write32(structAddr + 0x1C, 0x44000000u); // EAX: AH=44h AL=00h
+        env.mem.write32(structAddr + 0x10, bx);           // EBX: file handle
+
+        env.cpu.setReg16(cpu::AX, 0x0302);
+        env.cpu.setReg8(cpu::BL, 0x21);
+        env.cpu.setReg8(cpu::BH, 0x00);
+        env.cpu.setReg16(cpu::CX, 0);
+        env.cpu.setSegBase(cpu::ES, 0);
+        env.cpu.setReg32(cpu::EDI, structAddr);
+        env.clearCarry();
+        env.dpmi.handleInt31();
+        // CF may be set (invalid file handle) — that's fine
+    }
+
+    // PM ESP must be unchanged: no stack underflow / wrap-around occurred
+    REQUIRE(env.cpu.getReg32(cpu::ESP) == espBefore);
+
+    // ESP must not have wrapped to near-zero then to 0xFFFFFFFC
+    REQUIRE(env.cpu.getReg32(cpu::ESP) < 0xFFF00000u);
+}
+
+TEST_CASE("DPMI 0302h HLE frame stack is clean after RM round-trip", "[dpmi][translation][stack]") {
+    DPMITestEnv env;
+
+    size_t hleSizeBefore = env.cpu.hleStackSize();
+
+    uint32_t structAddr = DPMITestEnv::SCRATCH_ADDR;
+    for (int i = 0; i < 50; ++i)
+        env.mem.write8(structAddr + i, 0);
+    env.mem.write32(structAddr + 0x1C, 0x002C0000u); // INT 21h AH=2Ch
+
+    env.cpu.setReg16(cpu::AX, 0x0302);
+    env.cpu.setReg8(cpu::BL, 0x21);
+    env.cpu.setReg8(cpu::BH, 0x00);
+    env.cpu.setReg16(cpu::CX, 0);
+    env.cpu.setSegBase(cpu::ES, 0);
+    env.cpu.setReg32(cpu::EDI, structAddr);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+
+    // 0302h is pure HLE; it must not leave orphaned frames on the HLE stack
+    REQUIRE(env.cpu.hleStackSize() == hleSizeBefore);
+}
