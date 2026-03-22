@@ -575,7 +575,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     uint32_t iretPhysAddr = m_segBase[SS] + iretSP;
 
     bool useIretd = m_hasPrefix66;
-    if (!m_hasPrefix66 && (m_cpu.getCR(0) & 1) && m_cpu.getSegReg(CS) == 0x0008) {
+    if ((m_cpu.getCR(0) & 1) && m_cpu.getSegReg(CS) == 0x0008) {
       // In HLE stub context (CS=0x8), infer frame width from the return CS
       // descriptor. The caller may have built a 16-bit chain frame even though
       // the stub itself is USE32.
@@ -3351,6 +3351,63 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
   case 0xFF: { // HLE Interrupt Trap (0x0F 0xFF <vector>)
     uint8_t vector = fetch8();
     LOG_DEBUG("HLE Intercept: INT 0x", std::hex, (int)vector);
+    auto hfPeek = m_cpu.peekHLEFrameForVector(vector);
+    bool hasTrackedFrame = (hfPeek.framePhysAddr != 0);
+    bool isChainCall = false;
+    uint32_t preCurPhys = 0;
+    if (hasTrackedFrame) {
+      m_segBase[SS] = m_cpu.getSegBase(SS);
+      uint32_t ssBase = m_segBase[SS];
+      uint32_t curSP = m_cpu.is32BitStack()
+                           ? m_cpu.getReg32(ESP)
+                           : static_cast<uint32_t>(m_cpu.getReg16(SP));
+      preCurPhys = ssBase + curSP;
+      isChainCall = (preCurPhys != hfPeek.framePhysAddr);
+      {
+        static uint32_t s_chainAudit21 = 0;
+        static uint32_t s_chainAuditOther = 0;
+        bool want21 = (vector == 0x21 && s_chainAudit21 < 256);
+        bool wantOther = (vector != 0x21 && s_chainAuditOther < 24);
+        if (want21 || wantOther) {
+          uint32_t n = 0;
+          const char *tag = "chain-audit";
+          if (want21) {
+            ++s_chainAudit21;
+            n = s_chainAudit21;
+            tag = "chain-audit-21";
+          } else {
+            ++s_chainAuditOther;
+            n = s_chainAuditOther;
+          }
+          LOG_INFO("[", tag, " #", std::dec, n,
+                   "] vec=0x", std::hex, static_cast<uint32_t>(vector),
+                   " curPhys=0x", preCurPhys,
+                   " framePhys=0x", hfPeek.framePhysAddr,
+                   " isChain=", isChainCall ? 1 : 0,
+                   " hleDepth=", std::dec, m_cpu.hleStackSize(),
+                   std::hex,
+                   " ss=0x", m_cpu.getSegReg(SS),
+                   " esp=0x", (m_cpu.is32BitStack() ? m_cpu.getReg32(ESP)
+                                                    : m_cpu.getReg16(SP)),
+                   " cs=0x", m_cpu.getSegReg(CS),
+                   " eip=0x", m_cpu.getEIP(),
+                   " stack32=", m_cpu.is32BitStack() ? 1 : 0,
+                   " frame32=", hfPeek.is32 ? 1 : 0);
+        }
+      }
+    } else {
+      static uint32_t s_noFrame = 0;
+      if (s_noFrame < 32) {
+        ++s_noFrame;
+        LOG_INFO("[chain-audit-noframe #", std::dec, s_noFrame,
+                 "] vec=0x", std::hex, static_cast<uint32_t>(vector),
+                 " ss=0x", m_cpu.getSegReg(SS),
+                 " esp=0x", (m_cpu.is32BitStack() ? m_cpu.getReg32(ESP)
+                                                  : m_cpu.getReg16(SP)),
+                 " cs=0x", m_cpu.getSegReg(CS),
+                 " eip=0x", m_cpu.getEIP());
+      }
+    }
     bool handled = false;
 
     // First try DOS, then BIOS
@@ -3380,25 +3437,21 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
       //
       // Two cases:
       // (A) Direct dispatch — triggerInterrupt dispatched directly to our
-      //     stub. Current SP matches the stored HLE frame. Pop the frame
+      //     stub. Pre-handler SP matches the stored HLE frame. Pop the frame
       //     and IRET to the original caller, merging status flags.
       // (B) Chain call — a hooked handler (e.g. DOS/4GW thunk) chained
-      //     to our stub via PUSHF+CALL FAR. Current SP does NOT match
+      //     to our stub via PUSHF+CALL FAR. Pre-handler SP does NOT match
       //     the stored HLE frame. Do inline IRET from the current stack
       //     to return to the chain caller (thunk), letting it clean up
       //     its transfer stack and eventually IRET through the original
       //     frame. The HLE frame is left in place for cleanup by the
       //     0xCF IRET handler's popHLEFrameByPhysAddr.
-      auto hfPeek = m_cpu.peekHLEFrameForVector(vector);
-      bool isChainCall = false;
-      if (hfPeek.framePhysAddr != 0) {
-        m_segBase[SS] = m_cpu.getSegBase(SS);
-        uint32_t ssBase = m_segBase[SS];
-        uint32_t curSP = m_cpu.is32BitStack()
-                             ? m_cpu.getReg32(ESP)
-                             : static_cast<uint32_t>(m_cpu.getReg16(SP));
-        uint32_t curPhys = ssBase + curSP;
-        isChainCall = (curPhys != hfPeek.framePhysAddr);
+      if (!hasTrackedFrame) {
+        // Handled trap without a tracked INT frame means this came via
+        // CALL/JMP chaining into the stub (or equivalent thunk path).
+        // Use chain return semantics; direct-dispatch frame pop would read
+        // an invalid frame address.
+        isChainCall = true;
       }
 
       if (isChainCall) {
@@ -3448,8 +3501,54 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
           }
         }
 
+        {
+          static uint32_t s_chainWidth21 = 0;
+          static uint32_t s_chainWidthOther = 0;
+          bool want21 = (vector == 0x21 && s_chainWidth21 < 256);
+          bool wantOther = (vector != 0x21 && s_chainWidthOther < 24);
+          if (want21 || wantOther) {
+            uint32_t n = 0;
+            const char *tag = "chain-width";
+            if (want21) {
+              ++s_chainWidth21;
+              n = s_chainWidth21;
+              tag = "chain-width-21";
+            } else {
+              ++s_chainWidthOther;
+              n = s_chainWidthOther;
+            }
+            uint32_t espNow = m_cpu.getReg32(ESP);
+            uint16_t csAtSp2 = m_memory.read16(ssBase + sp16 + 2);
+            uint16_t csAtEsp4 = m_memory.read16(ssBase + espNow + 4);
+            uint32_t d0 = m_memory.read32(ssBase + espNow + 0);
+            uint32_t d4 = m_memory.read32(ssBase + espNow + 4);
+            uint32_t d8 = m_memory.read32(ssBase + espNow + 8);
+            LOG_INFO("[", tag, " #", std::dec, n,
+                     "] vec=0x", std::hex, static_cast<uint32_t>(vector),
+                     " chain32=", chainIs32 ? 1 : 0,
+                     " hleDepth=", std::dec, m_cpu.hleStackSize(),
+                     std::hex,
+                     " ss=0x", m_cpu.getSegReg(SS),
+                     " sp16=0x", static_cast<uint32_t>(sp16),
+                     " esp=0x", espNow,
+                     " cs@sp+2=0x", csAtSp2,
+                     " cs@esp+4=0x", csAtEsp4,
+                     " d0=0x", d0,
+                     " d4=0x", d4,
+                     " d8=0x", d8,
+                     " curPhys=0x", preCurPhys,
+                     " framePhys=0x", hfPeek.framePhysAddr);
+          }
+        }
+
         uint32_t mask = FLAG_CARRY | FLAG_ZERO | FLAG_SIGN | FLAG_OVERFLOW |
                         FLAG_AUX | FLAG_PARITY;
+        if (vector == 0x31) {
+          // INT 31h chain callers (DOS/4GW wrappers) rely primarily on CF
+          // for status. Keeping other bits from the caller frame avoids
+          // perturbing wrapper-internal condition checks.
+          mask = FLAG_CARRY;
+        }
         if (chainIs32) {
           uint32_t esp = m_cpu.getReg32(ESP);
           uint32_t newEip = m_memory.read32(ssBase + esp);
@@ -3491,6 +3590,13 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
                      " oldSP=0x", static_cast<uint32_t>(oldSp),
                      " newSP=0x", static_cast<uint32_t>(m_cpu.getReg16(SP)));
           }
+        }
+
+        // We have completed the synthetic chain return for this frame.
+        // Remove matching metadata eagerly so later vector lookups cannot
+        // classify against stale historical frames.
+        if (hfPeek.framePhysAddr != 0) {
+          m_cpu.popHLEFrameByPhysAddr(hfPeek.framePhysAddr);
         }
       } else {
         // Direct dispatch: pop HLE frame and IRET to original caller.

@@ -5,9 +5,11 @@
 
 #include "test_framework.hpp"
 #include "cpu/CPU.hpp"
+#include "cpu/InstructionDecoder.hpp"
 #include "memory/MemoryBus.hpp"
 #include "memory/himem/HIMEM.hpp"
 #include "hw/DPMI.hpp"
+#include "hw/IOBus.hpp"
 #include "hw/BIOS.hpp"
 #include "hw/DOS.hpp"
 #include "hw/KeyboardController.hpp"
@@ -1192,7 +1194,7 @@ TEST_CASE("DPMI 0205h writes physical IDT when we are the sole DPMI host", "[dpm
     REQUIRE(env.mem.read32(IDT_PM_PHYS + vec * 8 + 4) == idtHigh(0x00012345));
 }
 
-TEST_CASE("DPMI 0205h does NOT overwrite IDT when INT 31h is hooked", "[dpmi][int][idt]") {
+TEST_CASE("DPMI 0205h always writes IDT; sub-host passes its own wrapper", "[dpmi][int][idt]") {
     DPMITestEnv env;
     constexpr uint8_t vecClient = 0x43;
 
@@ -1208,30 +1210,33 @@ TEST_CASE("DPMI 0205h does NOT overwrite IDT when INT 31h is hooked", "[dpmi][in
     // Record the IDT entry for vecClient (should still be original HLE stub)
     uint32_t beforeLow  = env.mem.read32(IDT_PM_PHYS + vecClient * 8);
     uint32_t beforeHigh = env.mem.read32(IDT_PM_PHYS + vecClient * 8 + 4);
-    // Verify this actually matches the expected HLE stub
     REQUIRE(beforeLow  == idtLow(0x0008, hleStubPhys(vecClient)));
     REQUIRE(beforeHigh == idtHigh(hleStubPhys(vecClient)));
 
-    // Step 2: hook vecClient (simulating client program calling 0x0205h)
+    // Step 2: simulate DOS/4GW's INT 31h thunk chaining to our stub for vecClient.
+    // A real sub-host intercepts the client's 0205h call and substitutes its OWN
+    // wrapper address in CX:EDX before calling the DPMI host. So what we receive
+    // here is DOS/4GW's chain wrapper, not the raw client handler.
     env.cpu.setReg16(cpu::AX, 0x0205);
     env.cpu.setReg8(cpu::BL, vecClient);
-    env.cpu.setReg16(cpu::CX, 0x008F); // client selector
-    env.cpu.setReg32(cpu::EDX, 0x0001ABCD);
+    env.cpu.setReg16(cpu::CX, 0x0057); // DOS/4GW's wrapper selector
+    env.cpu.setReg32(cpu::EDX, 0x0001ABCD); // DOS/4GW's wrapper offset
     env.clearCarry();
     env.dpmi.handleInt31();
     REQUIRE(!env.carrySet());
 
-    // IDT entry for vecClient must be UNCHANGED — DOS/4GW's wrapper stays in place
-    REQUIRE(env.mem.read32(IDT_PM_PHYS + vecClient * 8)     == beforeLow);
-    REQUIRE(env.mem.read32(IDT_PM_PHYS + vecClient * 8 + 4) == beforeHigh);
+    // IDT entry for vecClient must now contain DOS/4GW's wrapper —
+    // the host always writes whatever selector:offset it receives.
+    REQUIRE(env.mem.read32(IDT_PM_PHYS + vecClient * 8)     == idtLow(0x0057, 0x0001ABCD));
+    REQUIRE(env.mem.read32(IDT_PM_PHYS + vecClient * 8 + 4) == idtHigh(0x0001ABCD));
 
-    // But m_pmVectors[vecClient] must be updated (readable via 0x0204h)
+    // m_pmVectors[vecClient] must also reflect the new (wrapper) value
     env.cpu.setReg16(cpu::AX, 0x0204);
     env.cpu.setReg8(cpu::BL, vecClient);
     env.clearCarry();
     env.dpmi.handleInt31();
     REQUIRE(!env.carrySet());
-    REQUIRE(env.cpu.getReg16(cpu::CX)  == 0x008F);
+    REQUIRE(env.cpu.getReg16(cpu::CX)  == 0x0057);
     REQUIRE(env.cpu.getReg32(cpu::EDX) == 0x0001ABCD);
 }
 
@@ -1261,6 +1266,55 @@ TEST_CASE("DPMI 0205h always writes IDT when setting INT 31h itself", "[dpmi][in
     // IDT[0x31] must reflect the newest hook
     REQUIRE(env.mem.read32(IDT_PM_PHYS + 0x31 * 8)     == idtLow(0x008F, 0x00020000));
     REQUIRE(env.mem.read32(IDT_PM_PHYS + 0x31 * 8 + 4) == idtHigh(0x00020000));
+}
+
+TEST_CASE("DPMI 0205h preserves installed chain wrapper when caller restores original stub", "[dpmi][int][idt][chain]") {
+    DPMITestEnv env;
+    constexpr uint8_t vec = 0x21;
+
+    // Initial state: IDT and pmVectors point at our original HLE stub.
+    uint32_t origLow = idtLow(0x0008, hleStubPhys(vec));
+    uint32_t origHigh = idtHigh(hleStubPhys(vec));
+    REQUIRE(env.mem.read32(IDT_PM_PHYS + vec * 8) == origLow);
+    REQUIRE(env.mem.read32(IDT_PM_PHYS + vec * 8 + 4) == origHigh);
+
+    // Sub-host installs a chain wrapper for INT 21h.
+    // This is what DOS/4GW-style dispatchers pass to the host via 0205h.
+    constexpr uint16_t wrapSel = 0x008F;
+    constexpr uint32_t wrapOff = 0x00000084;
+    env.cpu.setReg16(cpu::AX, 0x0205);
+    env.cpu.setReg8(cpu::BL, vec);
+    env.cpu.setReg16(cpu::CX, wrapSel);
+    env.cpu.setReg32(cpu::EDX, wrapOff);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+
+    REQUIRE(env.mem.read32(IDT_PM_PHYS + vec * 8) == idtLow(wrapSel, wrapOff));
+    REQUIRE(env.mem.read32(IDT_PM_PHYS + vec * 8 + 4) == idtHigh(wrapOff));
+
+    // A later "restore old vector" call presents the original stub address.
+    // The host must preserve active chain wrappers in this scenario.
+    env.cpu.setReg16(cpu::AX, 0x0205);
+    env.cpu.setReg8(cpu::BL, vec);
+    env.cpu.setReg16(cpu::CX, 0x0008);
+    env.cpu.setReg32(cpu::EDX, hleStubPhys(vec));
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+
+    // Wrapper remains authoritative in physical IDT.
+    REQUIRE(env.mem.read32(IDT_PM_PHYS + vec * 8) == idtLow(wrapSel, wrapOff));
+    REQUIRE(env.mem.read32(IDT_PM_PHYS + vec * 8 + 4) == idtHigh(wrapOff));
+
+    // 0204h should also continue returning the wrapper.
+    env.cpu.setReg16(cpu::AX, 0x0204);
+    env.cpu.setReg8(cpu::BL, vec);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+    REQUIRE(env.cpu.getReg16(cpu::CX) == wrapSel);
+    REQUIRE(env.cpu.getReg32(cpu::EDX) == wrapOff);
 }
 
 TEST_CASE("DPMI 0204h returns m_pmVectors even when IDT was not written", "[dpmi][int][idt]") {
@@ -1531,4 +1585,105 @@ TEST_CASE("DPMI 0302h HLE frame stack is clean after RM round-trip", "[dpmi][tra
 
     // 0302h is pure HLE; it must not leave orphaned frames on the HLE stack
     REQUIRE(env.cpu.hleStackSize() == hleSizeBefore);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PM INT entry semantics (triggerInterrupt path): pushed flags and IF/TF
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("PM INT entry pushes original EFLAGS before IF/TF adjustment", "[dpmi][int][entry]") {
+    DPMITestEnv env;
+    hw::IOBus iobus;
+    cpu::InstructionDecoder decoder(env.cpu, env.mem, iobus, env.bios, env.dos);
+
+    constexpr uint8_t vec = 0x77;
+
+    // Execute INT 77h from current PM CS:EIP
+    uint32_t codePhys = env.cpu.getSegBase(cpu::CS) + env.cpu.getEIP();
+    env.mem.write8(codePhys, 0xCD);
+    env.mem.write8(codePhys + 1, vec);
+
+    // Force known source flags before entry.
+    uint32_t preFlags = env.cpu.getEFLAGS();
+    preFlags |= (cpu::FLAG_INTERRUPT | cpu::FLAG_TRAP | cpu::FLAG_CARRY);
+    env.cpu.setEFLAGS(preFlags);
+
+    uint32_t ssBase = env.cpu.getSegBase(cpu::SS);
+    uint16_t oldCs = env.cpu.getSegReg(cpu::CS);
+    uint32_t spBefore = env.cpu.is32BitStack()
+                            ? env.cpu.getReg32(cpu::ESP)
+                            : static_cast<uint32_t>(env.cpu.getReg16(cpu::SP));
+
+    uint32_t idtEntry = env.cpu.getIDTR().base + static_cast<uint32_t>(vec) * 8u;
+    uint32_t idtLow = env.mem.read32(idtEntry);
+    uint32_t idtHigh = env.mem.read32(idtEntry + 4);
+    uint16_t newCs = static_cast<uint16_t>((idtLow >> 16) & 0xFFFFu);
+    uint8_t gateType = static_cast<uint8_t>((idtHigh >> 8) & 0x0Fu);
+    bool use32Gate = (gateType & 0x08u) != 0;
+    bool privChange = ((newCs & 3u) < (oldCs & 3u)) || ((preFlags & 0x00020000u) != 0);
+    uint32_t expectedDelta = use32Gate ? (privChange ? 20u : 12u)
+                                       : (privChange ? 10u : 6u);
+
+    decoder.step();
+
+    uint32_t spAfter = env.cpu.is32BitStack()
+                           ? env.cpu.getReg32(cpu::ESP)
+                           : static_cast<uint32_t>(env.cpu.getReg16(cpu::SP));
+
+    // Stack delta depends on gate width and whether CPL changes.
+    // Privilege changes also push old SS:ESP before the IRET frame.
+    if (env.cpu.is32BitStack()) {
+        REQUIRE(spAfter == spBefore - expectedDelta);
+    } else {
+        REQUIRE(spAfter == ((spBefore - expectedDelta) & 0xFFFFu));
+    }
+
+    uint32_t pushedFlags = env.mem.read32(ssBase + spAfter + 8);
+    REQUIRE(pushedFlags == preFlags);
+}
+
+TEST_CASE("PM INT entry clears IF only for interrupt gates, always clears TF", "[dpmi][int][entry]") {
+    DPMITestEnv env;
+    hw::IOBus iobus;
+    cpu::InstructionDecoder decoder(env.cpu, env.mem, iobus, env.bios, env.dos);
+
+    constexpr uint8_t vecInt = 0x78;
+    constexpr uint8_t vecTrap = 0x79;
+
+    auto writeIntInstruction = [&](uint8_t vec) {
+        uint32_t codePhys = env.cpu.getSegBase(cpu::CS) + env.cpu.getEIP();
+        env.mem.write8(codePhys, 0xCD);
+        env.mem.write8(codePhys + 1, vec);
+    };
+
+    auto runInt = [&](uint8_t vec) {
+        writeIntInstruction(vec);
+        decoder.step();
+    };
+
+    // Convert vecTrap IDT entry to a trap gate (type 0xF) while preserving
+    // selector/offset/DPL/present bits.
+    uint32_t idtBase = env.cpu.getIDTR().base;
+    uint32_t trapEntry = idtBase + static_cast<uint32_t>(vecTrap) * 8u;
+    uint32_t trapHigh = env.mem.read32(trapEntry + 4);
+    trapHigh = (trapHigh & ~0x00000F00u) | 0x00000F00u;
+    env.mem.write32(trapEntry + 4, trapHigh);
+
+    SECTION("interrupt gate clears IF and TF") {
+        uint32_t flags = env.cpu.getEFLAGS() | cpu::FLAG_INTERRUPT | cpu::FLAG_TRAP;
+        env.cpu.setEFLAGS(flags);
+        runInt(vecInt);
+
+        REQUIRE((env.cpu.getEFLAGS() & cpu::FLAG_TRAP) == 0);
+        REQUIRE((env.cpu.getEFLAGS() & cpu::FLAG_INTERRUPT) == 0);
+    }
+
+    SECTION("trap gate clears TF but preserves IF") {
+        uint32_t flags = env.cpu.getEFLAGS() | cpu::FLAG_INTERRUPT | cpu::FLAG_TRAP;
+        env.cpu.setEFLAGS(flags);
+        runInt(vecTrap);
+
+        REQUIRE((env.cpu.getEFLAGS() & cpu::FLAG_TRAP) == 0);
+        REQUIRE((env.cpu.getEFLAGS() & cpu::FLAG_INTERRUPT) != 0);
+    }
 }

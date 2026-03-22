@@ -634,24 +634,77 @@ void DPMI::handleInterruptVectors() {
     uint16_t newSel = m_cpu.getReg16(cpu::CX);
     uint32_t newOff = m_is32BitClient ? m_cpu.getReg32(cpu::EDX)
                                       : m_cpu.getReg16(cpu::DX);
-    m_pmVectors[vec].selector = newSel;
-    m_pmVectors[vec].offset = newOff;
+      // Skip updates (both m_pmVectors and IDT) when the caller is restoring our
+      // own HLE stub for this vector. That is a save/restore operation by a
+      // sub-host (e.g. DOS/4GW cleanup) and must not disturb the chain-wrappers
+      // that are currently installed.
+      {
+        uint32_t hleStub = 0xF0000u + 0x0100u + static_cast<uint32_t>(vec) * 4;
+        bool isRestoringHleStub = (newSel == 0x0008 && newOff == hleStub);
+        if (!isRestoringHleStub) {
+          m_pmVectors[vec].selector = newSel;
+          m_pmVectors[vec].offset = newOff;
+        uint32_t idtAddr = IDT_PM_PHYS + vec * 8;
+        uint32_t low =
+            (static_cast<uint32_t>(newSel) << 16) | (newOff & 0xFFFF);
+        uint32_t high = (newOff & 0xFFFF0000) | 0x0000EE00;
+        {
+          static uint32_t s_0205log = 0;
+          if (s_0205log < 512) {
+            ++s_0205log;
+            uint32_t oldLow = m_memory.read32(idtAddr);
+            uint32_t oldHigh = m_memory.read32(idtAddr + 4);
+            uint16_t oldSel = (oldLow >> 16) & 0xFFFF;
+            uint32_t oldOff = (oldLow & 0xFFFF) | (oldHigh & 0xFFFF0000);
+            bool host31 = (m_pmVectors[0x31].selector == 0x08);
+            LOG_INFO("[0205 #", std::dec, s_0205log,
+                     "] vec=0x", std::hex, static_cast<uint32_t>(vec),
+                     " new=", newSel, ":", newOff,
+                     " old=", oldSel, ":", oldOff,
+                     " host31=", host31 ? 1 : 0);
+          }
+        }
+        m_memory.write32(idtAddr, low);
+        m_memory.write32(idtAddr + 4, high);
+      }
+    }
 
-    // Only write to the physical IDT when we are the sole DPMI host
-    // (INT 31h still points to our original HLE stub). Once DOS/4GW
-    // hooks INT 31h, its thunk intercepts all 0205h calls and writes
-    // its own wrapper entries to the IDT directly (via executed code).
-    // If we also write from HLE, we clobber the wrapper with the raw
-    // client handler and DOS/4GW detects the mismatch → error 1001.
-    bool weAreOnlyHost =
-        (m_pmVectors[0x31].selector == 0x08) || (vec == 0x31);
-    if (weAreOnlyHost) {
-      uint32_t idtAddr = IDT_PM_PHYS + vec * 8;
-      uint32_t low =
-          (static_cast<uint32_t>(newSel) << 16) | (newOff & 0xFFFF);
-      uint32_t high = (newOff & 0xFFFF0000) | 0x0000EE00;
-      m_memory.write32(idtAddr, low);
-      m_memory.write32(idtAddr + 4, high);
+    // Phase 6: compare authoritative m_pmVectors against physical IDT after
+    // each 0205 update for this vector and key chain-critical vectors.
+    {
+      auto logVecState = [&](uint8_t v, const char *tag) {
+        uint32_t idtAddr = IDT_PM_PHYS + static_cast<uint32_t>(v) * 8;
+        uint32_t idtLow = m_memory.read32(idtAddr);
+        uint32_t idtHigh = m_memory.read32(idtAddr + 4);
+        uint16_t idtSel = static_cast<uint16_t>((idtLow >> 16) & 0xFFFF);
+        uint32_t idtOff = (idtLow & 0xFFFF) | (idtHigh & 0xFFFF0000);
+        uint16_t pmSel = m_pmVectors[v].selector;
+        uint32_t pmOff = m_pmVectors[v].offset;
+        bool mismatch = (idtSel != pmSel) || (idtOff != pmOff);
+        if (mismatch) {
+          static uint32_t s_phase6Mismatch = 0;
+          if (s_phase6Mismatch < 128) {
+            ++s_phase6Mismatch;
+            LOG_INFO("[phase6-0205-mismatch #", std::dec, s_phase6Mismatch,
+                     "] tag=", tag,
+                     " vec=0x", std::hex, static_cast<uint32_t>(v),
+                     " idt=", idtSel, ":", idtOff,
+                     " pm=", pmSel, ":", pmOff,
+                     " ax=0x", m_cpu.getReg16(cpu::AX),
+                     " bx=0x", m_cpu.getReg16(cpu::BX),
+                     " cs=0x", m_cpu.getSegReg(cpu::CS),
+                     " eip=0x", m_cpu.getEIP());
+          }
+        }
+      };
+
+      logVecState(vec, "updated");
+      if (vec != 0x21)
+        logVecState(0x21, "watch");
+      if (vec != 0x31)
+        logVecState(0x31, "watch");
+      if (vec != 0x3D)
+        logVecState(0x3D, "watch");
     }
 
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
@@ -675,6 +728,45 @@ void DPMI::handleTranslation() {
   {
     uint8_t intNo = m_cpu.getReg8(cpu::BL);
     uint32_t structAddr = getLinearAddr(cpu::ES, cpu::EDI);
+    uint32_t reqRmEax = m_is32BitClient ? m_memory.read32(structAddr + 0x1C)
+                                        : m_memory.read16(structAddr + 0x1C);
+    uint32_t reqRmEbx = m_is32BitClient ? m_memory.read32(structAddr + 0x10)
+                                        : m_memory.read16(structAddr + 0x10);
+    uint32_t reqRmEdx = m_is32BitClient ? m_memory.read32(structAddr + 0x14)
+                                        : m_memory.read16(structAddr + 0x14);
+
+    // Phase 6: runtime consistency snapshot near DOS call flow that leads to
+    // interrupt-chain validation.
+    if (func == 0x0302) {
+      uint16_t ax16 = static_cast<uint16_t>(reqRmEax & 0xFFFF);
+      bool watchCall = (ax16 == 0x4400) || (ax16 == 0x3D00) ||
+                       (ax16 == 0x3F82) || (ax16 == 0x4200);
+      static uint32_t s_phase6Snap = 0;
+      if (watchCall && s_phase6Snap < 96) {
+        auto logSnap = [&](uint8_t v) {
+          uint32_t idtAddr = IDT_PM_PHYS + static_cast<uint32_t>(v) * 8;
+          uint32_t idtLow = m_memory.read32(idtAddr);
+          uint32_t idtHigh = m_memory.read32(idtAddr + 4);
+          uint16_t idtSel = static_cast<uint16_t>((idtLow >> 16) & 0xFFFF);
+          uint32_t idtOff = (idtLow & 0xFFFF) | (idtHigh & 0xFFFF0000);
+          uint16_t pmSel = m_pmVectors[v].selector;
+          uint32_t pmOff = m_pmVectors[v].offset;
+          bool mismatch = (idtSel != pmSel) || (idtOff != pmOff);
+          LOG_INFO("[phase6-0302-snap #", std::dec, s_phase6Snap,
+                   "] vec=0x", std::hex, static_cast<uint32_t>(v),
+                   " idt=", idtSel, ":", idtOff,
+                   " pm=", pmSel, ":", pmOff,
+                   " mm=", mismatch ? 1 : 0,
+                   " reqAX=0x", ax16,
+                   " reqBX=0x", (reqRmEbx & 0xFFFF),
+                   " reqDX=0x", (reqRmEdx & 0xFFFF));
+        };
+        ++s_phase6Snap;
+        logSnap(0x21);
+        logSnap(0x31);
+        logSnap(0x3D);
+      }
+    }
 
     // Save current PM state
     uint32_t savedRegs[8];
@@ -690,6 +782,30 @@ void DPMI::handleTranslation() {
     uint32_t savedEFLAGS = m_cpu.getEFLAGS();
     bool savedIs32Code = m_cpu.is32BitCode();
     bool savedIs32Stack = m_cpu.is32BitStack();
+
+    if (func == 0x0302) {
+      static uint32_t s_trace0302Enter = 0;
+      bool interesting = ((reqRmEax & 0xFFFF) == 0x4400) ||
+                         (savedRegs[cpu::ESP] < 0x1000) ||
+                         (savedSegs[cpu::SS] == 0x0177) ||
+                         (savedSegs[cpu::SS] == 0x00AF);
+      if ((interesting || s_trace0302Enter < 8) && s_trace0302Enter < 96) {
+        ++s_trace0302Enter;
+        LOG_INFO("[0302-enter #", std::dec, s_trace0302Enter,
+                 "] int=0x", std::hex, static_cast<uint32_t>(intNo),
+                 " reqAX=0x", (reqRmEax & 0xFFFF),
+                 " reqBX=0x", (reqRmEbx & 0xFFFF),
+                 " reqDX=0x", (reqRmEdx & 0xFFFF),
+                 " pmSS=0x", savedSegs[cpu::SS],
+                 " pmESP=0x", savedRegs[cpu::ESP],
+                 " pmSP=0x", (savedRegs[cpu::ESP] & 0xFFFF),
+                 " pmStack32=", savedIs32Stack ? 1 : 0,
+                 " pmCode32=", savedIs32Code ? 1 : 0,
+                 " cs=0x", savedSegs[cpu::CS],
+                 " eip=0x", savedEIP,
+                 " struct=0x", structAddr);
+      }
+    }
 
     // Load registers from the RM call structure (50 bytes):
     // +00: EDI, +04: ESI, +08: EBP, +0C: reserved
@@ -741,6 +857,25 @@ void DPMI::handleTranslation() {
     m_cpu.setSegReg(cpu::SS, rmSS);
     m_cpu.setSegBase(cpu::SS, static_cast<uint32_t>(rmSS) << 4);
     m_cpu.setReg16(cpu::SP, rmSP);
+
+    if (func == 0x0302) {
+      static uint32_t s_trace0302Armed = 0;
+      bool interesting = ((reqRmEax & 0xFFFF) == 0x4400) ||
+                         (rmSS == 0x0177) || (rmSS == 0x00AF) ||
+                         (rmSP < 0x1000);
+      if ((interesting || s_trace0302Armed < 8) && s_trace0302Armed < 96) {
+        ++s_trace0302Armed;
+        LOG_INFO("[0302-rm-armed #", std::dec, s_trace0302Armed,
+                 "] int=0x", std::hex, static_cast<uint32_t>(intNo),
+                 " rmSS=0x", m_cpu.getSegReg(cpu::SS),
+                 " rmSP=0x", m_cpu.getReg16(cpu::SP),
+                 " rmESP=0x", m_cpu.getReg32(cpu::ESP),
+                 " stack32=", m_cpu.is32BitStack() ? 1 : 0,
+                 " code32=", m_cpu.is32BitCode() ? 1 : 0,
+                 " cs=0x", m_cpu.getSegReg(cpu::CS),
+                 " eip=0x", m_cpu.getEIP());
+      }
+    }
 
     if (func == 0x0300) {
       LOG_DEBUG("DPMI 0300h: Simulate RM INT 0x", std::hex, (int)intNo);
@@ -841,6 +976,28 @@ void DPMI::handleTranslation() {
     m_memory.write16(structAddr + 0x2E, m_cpu.getReg16(cpu::SP));
     m_memory.write16(structAddr + 0x30, m_cpu.getSegReg(cpu::SS));
 
+    if (func == 0x0302) {
+      static uint32_t s_trace0302PreRestore = 0;
+      bool interesting = ((reqRmEax & 0xFFFF) == 0x4400) ||
+                         (m_cpu.getReg16(cpu::SP) < 0x1000) ||
+                         (m_cpu.getSegReg(cpu::SS) == 0x0177) ||
+                         (m_cpu.getSegReg(cpu::SS) == 0x00AF);
+      if ((interesting || s_trace0302PreRestore < 8) &&
+          s_trace0302PreRestore < 96) {
+        ++s_trace0302PreRestore;
+        LOG_INFO("[0302-pre-restore #", std::dec, s_trace0302PreRestore,
+                 "] int=0x", std::hex, static_cast<uint32_t>(intNo),
+                 " reqAX=0x", (reqRmEax & 0xFFFF),
+                 " curSS=0x", m_cpu.getSegReg(cpu::SS),
+                 " curSP=0x", m_cpu.getReg16(cpu::SP),
+                 " curESP=0x", m_cpu.getReg32(cpu::ESP),
+                 " stack32=", m_cpu.is32BitStack() ? 1 : 0,
+                 " code32=", m_cpu.is32BitCode() ? 1 : 0,
+                 " retAX=0x", m_cpu.getReg16(cpu::AX),
+                 " retCF=", (m_cpu.getEFLAGS() & cpu::FLAG_CARRY) ? 1 : 0);
+      }
+    }
+
     // Restore PM state
     for (int i = 0; i < 8; i++)
       m_cpu.setReg32(i, savedRegs[i]);
@@ -852,6 +1009,32 @@ void DPMI::handleTranslation() {
     m_cpu.setEFLAGS(savedEFLAGS & ~cpu::FLAG_CARRY);
     m_cpu.setIs32BitCode(savedIs32Code);
     m_cpu.setIs32BitStack(savedIs32Stack);
+
+    if (func == 0x0302) {
+      static uint32_t s_trace0302Restored = 0;
+      bool mismatch = (m_cpu.getSegReg(cpu::SS) != savedSegs[cpu::SS]) ||
+                      (m_cpu.getReg32(cpu::ESP) != savedRegs[cpu::ESP]) ||
+                      (m_cpu.is32BitStack() != savedIs32Stack);
+      bool interesting = ((reqRmEax & 0xFFFF) == 0x4400) || mismatch ||
+                         (savedRegs[cpu::ESP] < 0x1000) ||
+                         (savedSegs[cpu::SS] == 0x0177) ||
+                         (savedSegs[cpu::SS] == 0x00AF);
+      if ((interesting || s_trace0302Restored < 8) &&
+          s_trace0302Restored < 96) {
+        ++s_trace0302Restored;
+        LOG_INFO("[0302-restored #", std::dec, s_trace0302Restored,
+                 "] int=0x", std::hex, static_cast<uint32_t>(intNo),
+                 " reqAX=0x", (reqRmEax & 0xFFFF),
+                 " ss=0x", m_cpu.getSegReg(cpu::SS),
+                 " esp=0x", m_cpu.getReg32(cpu::ESP),
+                 " sp=0x", m_cpu.getReg16(cpu::SP),
+                 " stack32=", m_cpu.is32BitStack() ? 1 : 0,
+                 " code32=", m_cpu.is32BitCode() ? 1 : 0,
+                 " savedSS=0x", savedSegs[cpu::SS],
+                 " savedESP=0x", savedRegs[cpu::ESP],
+                 " mismatch=", mismatch ? 1 : 0);
+      }
+    }
     break;
   }
   case 0x0303: { // Allocate Real Mode Callback Address
