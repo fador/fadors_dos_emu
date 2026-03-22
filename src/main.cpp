@@ -428,6 +428,25 @@ int main(int argc, char *argv[]) {
         pit.addCycles(4);
         instrCount++;
 
+        if ((instrCount & 0x3FF) == 0) {
+          pit.update();
+
+          if (pit.checkPendingIRQ0()) {
+            pic.raiseIRQ(0);
+          }
+          if (kbd.checkPendingIRQ()) {
+            pic.raiseIRQ(1);
+          }
+
+          if (cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) {
+            int pending = pic.getPendingInterrupt();
+            if (pending != -1) {
+              decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
+              pic.acknowledgeInterrupt();
+            }
+          }
+        }
+
         if (stopAfterCycles > 0 && instrCount >= stopAfterCycles) {
           LOG_INFO("Stopped after ", instrCount, " cycles (--stop-after)");
           debugger.dumpState();

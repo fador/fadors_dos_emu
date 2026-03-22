@@ -193,6 +193,10 @@ void CPU::push16(uint16_t value) {
     if (!descValid && ss != 0) {
       // Fallback for transient RM-style selector states under PE.
       stackBase = static_cast<uint32_t>(ss) << 4;
+      // Keep cached SS base in sync with the fallback so other code
+      // that reads `m_segBase[SS]` (e.g. InstructionDecoder) sees the
+      // same effective base used for the push/pop memory accesses.
+      m_segBase[SS] = stackBase;
       use32Stack = false;
     }
   }
@@ -264,6 +268,7 @@ void CPU::push32(uint32_t value) {
     if (!descValid && ss != 0) {
       // Fallback for transient RM-style selector states under PE.
       stackBase = static_cast<uint32_t>(ss) << 4;
+      m_segBase[SS] = stackBase;
       use32Stack = false;
     }
   }
@@ -342,6 +347,7 @@ uint16_t CPU::pop16() {
     if (!descValid && ss != 0) {
       // Fallback for transient RM-style selector states under PE.
       stackBase = static_cast<uint32_t>(ss) << 4;
+      m_segBase[SS] = stackBase;
       use32Stack = false;
     }
   }
@@ -496,7 +502,8 @@ uint32_t CPU::pop32() {
     }
     if (!descValid && ss != 0) {
       // Fallback for transient RM-style selector states under PE.
-      stackBase = static_cast<uint32_t>(ss) << 4;
+       stackBase = static_cast<uint32_t>(ss) << 4;
+       m_segBase[SS] = stackBase;
       use32Stack = false;
     }
   }

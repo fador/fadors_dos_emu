@@ -307,3 +307,192 @@ TEST_CASE("0F FF chain width falls back to CS at ESP+4", "[Interrupts][Chain][IR
     REQUIRE(cpu.getEIP() == 0x1234);
     REQUIRE(cpu.getReg16(cpu::SP) == 0x010C);
 }
+
+TEST_CASE("IRET infers 16-bit synthetic frame width with FLAGS=0x0000", "[Interrupts][IRET]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::IOBus iobus;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::DOS dos(cpu, mem);
+    hw::BIOS bios(cpu, mem, kbd, pit);
+    bios.initialize();
+    dos.initialize();
+    cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
+
+    auto writeDesc = [&](uint32_t addr, uint32_t base, uint32_t limit,
+                         uint8_t access, uint8_t flagsNibble) {
+        uint32_t low = (limit & 0xFFFFu) | ((base & 0xFFFFu) << 16);
+        uint32_t high = ((base >> 16) & 0xFFu) |
+                        (static_cast<uint32_t>(access) << 8) |
+                        (((limit >> 16) & 0x0Fu) << 16) |
+                        ((static_cast<uint32_t>(flagsNibble) & 0x0Fu) << 20) |
+                        (base & 0xFF000000u);
+        mem.write32(addr, low);
+        mem.write32(addr + 4, high);
+    };
+
+    constexpr uint32_t gdtBase = 0x3000;
+    mem.write32(gdtBase + 0, 0);
+    mem.write32(gdtBase + 4, 0);
+    writeDesc(gdtBase + 0x08, 0x00004000u, 0x000FFFFFu, 0x9Au, 0xCu);
+    writeDesc(gdtBase + 0x10, 0x00005000u, 0x000FFFFFu, 0x9Au, 0x8u);
+    writeDesc(gdtBase + 0x18, 0x00006000u, 0x0000FFFFu, 0x92u, 0x0u);
+
+    cpu.setGDTR({0x0030, gdtBase});
+    cpu.setCR(0, cpu.getCR(0) | 1u); // PE=1
+
+    // Current execution context: HLE stub-like CS=0x08 (USE32), SS=0x18 (16-bit).
+    cpu.setSegReg(cpu::CS, 0x0008);
+    cpu.setSegBase(cpu::CS, 0x00004000u);
+    cpu.setIs32BitCode(true);
+
+    cpu.setSegReg(cpu::SS, 0x0018);
+    cpu.setSegBase(cpu::SS, 0x00006000u);
+    cpu.setIs32BitStack(true); // <--- Set to 32-bit stack!
+
+    cpu.setEIP(0x0000);
+    cpu.setReg32(cpu::ESP, 0x0100); // <--- Use ESP
+
+    // 16-bit synthetic IRET frame at SS:SP -> IP=0x1234, CS=0x0010, FLAGS=0x0000.
+    mem.write16(0x00006000u + 0x0100u, 0x1234);
+    mem.write16(0x00006000u + 0x0102u, 0x0010);
+    mem.write16(0x00006000u + 0x0104u, 0x0000); // NO 0x02 BIT!
+
+    // Execute IRET opcode in the 32-bit stub context.
+    mem.write8(0x00004000u, 0xCF);
+    decoder.step();
+
+    // Must infer 16-bit frame width.
+    REQUIRE(cpu.getSegReg(cpu::CS) == 0x0010);
+    REQUIRE(cpu.getEIP() == 0x1234);
+    REQUIRE(cpu.getReg32(cpu::ESP) == 0x0106); // <--- Use getReg32
+}
+
+TEST_CASE("IRETD infers 32-bit synthetic frame width with EFLAGS=0x00000000", "[Interrupts][IRET]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::IOBus iobus;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::DOS dos(cpu, mem);
+    hw::BIOS bios(cpu, mem, kbd, pit);
+    bios.initialize();
+    dos.initialize();
+    cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
+
+    auto writeDesc = [&](uint32_t addr, uint32_t base, uint32_t limit,
+                         uint8_t access, uint8_t flagsNibble) {
+        uint32_t low = (limit & 0xFFFFu) | ((base & 0xFFFFu) << 16);
+        uint32_t high = ((base >> 16) & 0xFFu) |
+                        (static_cast<uint32_t>(access) << 8) |
+                        (((limit >> 16) & 0x0Fu) << 16) |
+                        ((static_cast<uint32_t>(flagsNibble) & 0x0Fu) << 20) |
+                        (base & 0xFF000000u);
+        mem.write32(addr, low);
+        mem.write32(addr + 4, high);
+    };
+
+    constexpr uint32_t gdtBase = 0x3000;
+    mem.write32(gdtBase + 0, 0);
+    mem.write32(gdtBase + 4, 0);
+    writeDesc(gdtBase + 0x08, 0x00004000u, 0x000FFFFFu, 0x9Au, 0xCu);
+    writeDesc(gdtBase + 0x10, 0x00005000u, 0x000FFFFFu, 0x9Au, 0xCu);
+    writeDesc(gdtBase + 0x18, 0x00006000u, 0x0000FFFFu, 0x92u, 0x0u);
+
+    cpu.setGDTR({0x0030, gdtBase});
+    cpu.setCR(0, cpu.getCR(0) | 1u); // PE=1
+
+    // Current execution context: HLE stub-like CS=0x08 (USE32).
+    cpu.setSegReg(cpu::CS, 0x0008);
+    cpu.setSegBase(cpu::CS, 0x00004000u);
+    cpu.setIs32BitCode(true);
+
+    cpu.setSegReg(cpu::SS, 0x0018);
+    cpu.setSegBase(cpu::SS, 0x00006000u);
+    cpu.setIs32BitStack(false); // Called from 16-bit stack
+
+    cpu.setEIP(0x0000);
+    cpu.setReg16(cpu::SP, 0x0100);
+
+    // 32-bit synthetic IRETD frame at SS:SP -> EIP=0x12345678, CS=0x0010, EFLAGS=0x00000000.
+    mem.write32(0x00006000u + 0x0100u, 0x12345678u);
+    mem.write32(0x00006000u + 0x0104u, 0x00000010u);
+    mem.write32(0x00006000u + 0x0108u, 0x00000000u); // NO 0x02 BIT!
+
+    // Execute IRET opcode in the 32-bit stub context.
+    mem.write8(0x00004000u, 0xCF);
+    decoder.step();
+
+    // Must infer 32-bit frame width.
+    REQUIRE(cpu.getSegReg(cpu::CS) == 0x0010);
+    REQUIRE(cpu.getEIP() == 0x12345678u);
+    REQUIRE(cpu.getReg16(cpu::SP) == 0x010C);
+}
+
+TEST_CASE("0F FF chain infers 16-bit synthetic frame with FLAGS=0x0000", "[Interrupts][Chain]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::IOBus iobus;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::DOS dos(cpu, mem);
+    hw::BIOS bios(cpu, mem, kbd, pit);
+    bios.initialize();
+    dos.initialize();
+    cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
+
+    auto writeDesc = [&](uint32_t addr, uint32_t base, uint32_t limit,
+                         uint8_t access, uint8_t flagsNibble) {
+        uint32_t low = (limit & 0xFFFFu) | ((base & 0xFFFFu) << 16);
+        uint32_t high = ((base >> 16) & 0xFFu) |
+                        (static_cast<uint32_t>(access) << 8) |
+                        (((limit >> 16) & 0x0Fu) << 16) |
+                        ((static_cast<uint32_t>(flagsNibble) & 0x0Fu) << 20) |
+                        (base & 0xFF000000u);
+        mem.write32(addr, low);
+        mem.write32(addr + 4, high);
+    };
+
+    constexpr uint32_t gdtBase = 0x4000;
+    mem.write32(gdtBase + 0, 0);
+    mem.write32(gdtBase + 4, 0);
+    writeDesc(gdtBase + 0x08, 0x00003000u, 0x000FFFFFu, 0x9Au, 0xCu); // 32-bit code
+    writeDesc(gdtBase + 0x10, 0x00004000u, 0x000FFFFFu, 0x9Au, 0x8u); // return CS (16-bit)
+    writeDesc(gdtBase + 0x18, 0x00005000u, 0x0000FFFFu, 0x92u, 0x0u); // 16-bit stack
+
+    cpu.setGDTR({0x0030, gdtBase});
+    cpu.setCR(0, cpu.getCR(0) | 1u);
+    cpu.setSegReg(cpu::CS, 0x0008);
+    cpu.setSegBase(cpu::CS, 0x00003000u);
+    cpu.setSegReg(cpu::SS, 0x0018);
+    cpu.setSegBase(cpu::SS, 0x00005000u);
+    cpu.setIs32BitCode(true);
+    cpu.setIs32BitStack(true); // <--- Set to 32-bit stack!
+    cpu.setEIP(0x0000);
+    cpu.setReg32(cpu::ESP, 0x0100); // <--- Use ESP
+
+    // 16-bit chain frame at SP: IP=0x1234, CS=0x0010, FLAGS=0x0000
+    mem.write16(0x00005000u + 0x0100u, 0x1234);
+    mem.write16(0x00005000u + 0x0102u, 0x0010);
+    mem.write16(0x00005000u + 0x0104u, 0x0000);
+
+    // Seed a tracked frame at another address so this is classified as chain call.
+    cpu.pushHLEFrame(true, 0x15);
+    auto &hf = cpu.lastHLEFrameMut();
+    hf.framePhysAddr = 0x0000DEADu;
+    hf.frameSP = 0x0000DEADu;
+    hf.stackIs32 = false;
+
+    cpu.setReg8(cpu::AH, 0x88);
+    mem.write8(0x00003000u + 0x0000u, 0x0F);
+    mem.write8(0x00003000u + 0x0001u, 0xFF);
+    mem.write8(0x00003000u + 0x0002u, 0x15);
+
+    decoder.step();
+
+    REQUIRE(cpu.getSegReg(cpu::CS) == 0x0010);
+    REQUIRE(cpu.getEIP() == 0x1234);
+    REQUIRE(cpu.getReg32(cpu::ESP) == 0x0106); // <--- Use getReg32
+}
+
