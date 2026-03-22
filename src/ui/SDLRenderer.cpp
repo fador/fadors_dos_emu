@@ -3,6 +3,7 @@
 #include "../hw/BIOS.hpp"
 #include "../hw/VideoMode.hpp"
 #include "../utils/Logger.hpp"
+#include <algorithm>
 #include <cstring>
 
 namespace fador::ui {
@@ -761,6 +762,10 @@ void SDLRenderer::render(bool /*force*/) {
 
   uint8_t videoMode = m_memory.read8(0x449);
   const auto *mi = hw::findVideoMode(videoMode);
+  if(!mi) {
+    LOG_WARN("Unknown video mode: ", std::hex, int(videoMode), std::dec);
+    return;
+  }
 
   // Determine required texture dimensions
   int needW, needH;
@@ -782,6 +787,8 @@ void SDLRenderer::render(bool /*force*/) {
   // Recreate texture if dimensions changed
   if (needW != m_texWidth || needH != m_texHeight ||
       videoMode != m_lastVideoMode) {
+        LOG_INFO("Video mode ", std::hex, int(videoMode), std::dec,
+                 " requires texture size ", needW, "x", needH);
     m_texWidth = needW;
     m_texHeight = needH;
     if (m_texture)
@@ -797,7 +804,21 @@ void SDLRenderer::render(bool /*force*/) {
       scale = 2;
     if (m_texWidth > 640 || m_texHeight > 480)
       scale = 1;
-    SDL_SetWindowSize(m_window, m_texWidth * scale, m_texHeight * scale);
+    int targetW = m_texWidth * scale;
+    int targetH = m_texHeight * scale;
+
+    // Keep auto-resize within the display's usable bounds so mode changes
+    // can't grow the window beyond the desktop.
+    SDL_Rect usable{};
+    if (SDL_GetDisplayUsableBounds(0, &usable) == 0 && usable.w > 0 &&
+        usable.h > 0) {
+      int maxW = std::max(320, (usable.w * 95) / 100);
+      int maxH = std::max(200, (usable.h * 95) / 100);
+      targetW = std::min(targetW, maxW);
+      targetH = std::min(targetH, maxH);
+    }
+
+    SDL_SetWindowSize(m_window, targetW, targetH);
     m_lastVideoMode = videoMode;
   }
 
@@ -811,7 +832,19 @@ void SDLRenderer::render(bool /*force*/) {
   SDL_UpdateTexture(m_texture, nullptr, m_framebuffer.data(),
                     m_texWidth * sizeof(uint32_t));
   SDL_RenderClear(m_renderer);
-  SDL_RenderCopy(m_renderer, m_texture, nullptr, nullptr);
+
+  // Preserve texture aspect ratio regardless of window size (letterbox).
+  int winW = 1, winH = 1;
+  SDL_GetWindowSize(m_window, &winW, &winH);
+  float sx = static_cast<float>(winW) / static_cast<float>(m_texWidth);
+  float sy = static_cast<float>(winH) / static_cast<float>(m_texHeight);
+  float s = std::min(sx, sy);
+  if (s <= 0.0f)
+    s = 1.0f;
+  int dstW = std::max(1, static_cast<int>(m_texWidth * s));
+  int dstH = std::max(1, static_cast<int>(m_texHeight * s));
+  SDL_Rect dst{(winW - dstW) / 2, (winH - dstH) / 2, dstW, dstH};
+  SDL_RenderCopy(m_renderer, m_texture, nullptr, &dst);
   SDL_RenderPresent(m_renderer);
 }
 

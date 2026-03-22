@@ -1,8 +1,22 @@
 #include "MemoryBus.hpp"
 #include <algorithm>
+#include <execinfo.h>
 #include <iostream>
+#include <memory>
 
 namespace fador::memory {
+
+namespace {
+constexpr uint32_t kWatchAddrStart = 0x75E;
+constexpr uint32_t kWatchAddrEnd = 0x761;
+
+bool overlapsWatchAddr(uint32_t base, uint32_t width) {
+  if (width == 0)
+    return false;
+  uint32_t end = base + width - 1;
+  return base <= kWatchAddrEnd && end >= kWatchAddrStart;
+}
+} // namespace
 
 MemoryBus::MemoryBus() {
   m_ram.resize(MEMORY_SIZE, 0);
@@ -40,6 +54,16 @@ MemoryBus::MemoryBus() {
 uint8_t MemoryBus::read8(uint32_t address) const {
   uint32_t effectiveAddress = m_a20Enabled ? address : (address & 0xFFFFF);
   if (effectiveAddress < MEMORY_SIZE) {
+    if (overlapsWatchAddr(effectiveAddress, 1)) {
+      static int watchLogs = 0;
+      if (watchLogs < 2000) {
+        ++watchLogs;
+        void *caller = __builtin_return_address(0);
+        LOG_ERROR("MEM ABS WATCH read8 at 0x", std::hex, effectiveAddress,
+                  " val: 0x", static_cast<uint32_t>(m_ram[effectiveAddress]),
+                  " caller=0x", reinterpret_cast<uintptr_t>(caller));
+      }
+    }
     return m_ram[effectiveAddress];
   }
   LOG_WARN("Memory out of bounds READ 8-bit at: 0x", std::hex, address,
@@ -50,6 +74,17 @@ uint8_t MemoryBus::read8(uint32_t address) const {
 uint16_t MemoryBus::read16(uint32_t address) const {
   uint32_t effectiveAddress = m_a20Enabled ? address : (address & 0xFFFFF);
   if (effectiveAddress + 1 < MEMORY_SIZE) {
+    if (overlapsWatchAddr(effectiveAddress, 2)) {
+      static int watchLogs = 0;
+      if (watchLogs < 2000) {
+        ++watchLogs;
+        uint16_t value = m_ram[effectiveAddress] | (m_ram[effectiveAddress + 1] << 8);
+        void *caller = __builtin_return_address(0);
+        LOG_ERROR("MEM ABS WATCH read16 at 0x", std::hex, effectiveAddress,
+                  " val: 0x", static_cast<uint32_t>(value),
+                  " caller=0x", reinterpret_cast<uintptr_t>(caller));
+      }
+    }
     return m_ram[effectiveAddress] | (m_ram[effectiveAddress + 1] << 8);
   }
   LOG_WARN("Memory out of bounds READ 16-bit at: 0x", std::hex, address,
@@ -60,6 +95,19 @@ uint16_t MemoryBus::read16(uint32_t address) const {
 uint32_t MemoryBus::read32(uint32_t address) const {
   uint32_t effectiveAddress = m_a20Enabled ? address : (address & 0xFFFFF);
   if (effectiveAddress + 3 < MEMORY_SIZE) {
+    if (overlapsWatchAddr(effectiveAddress, 4)) {
+      static int watchLogs = 0;
+      if (watchLogs < 2000) {
+        ++watchLogs;
+        uint32_t value = m_ram[effectiveAddress] | (m_ram[effectiveAddress + 1] << 8) |
+                         (m_ram[effectiveAddress + 2] << 16) |
+                         (m_ram[effectiveAddress + 3] << 24);
+        void *caller = __builtin_return_address(0);
+        LOG_ERROR("MEM ABS WATCH read32 at 0x", std::hex, effectiveAddress,
+                  " val: 0x", value,
+                  " caller=0x", reinterpret_cast<uintptr_t>(caller));
+      }
+    }
     return m_ram[effectiveAddress] | (m_ram[effectiveAddress + 1] << 8) |
            (m_ram[effectiveAddress + 2] << 16) |
            (m_ram[effectiveAddress + 3] << 24);
@@ -75,6 +123,12 @@ void MemoryBus::write8(uint32_t address, uint8_t value) {
     if (effectiveAddress < 0x400) {
       LOG_DEBUG("IVT WRITE8 at 0x", std::hex, effectiveAddress, " val: 0x",
                 static_cast<int>(value));
+    }
+    if (overlapsWatchAddr(effectiveAddress, 1)) {
+      void *caller = __builtin_return_address(0);
+      LOG_ERROR("MEM ABS WATCH write8 at 0x", std::hex, effectiveAddress,
+                " val: 0x", static_cast<uint32_t>(value),
+                " caller=0x", reinterpret_cast<uintptr_t>(caller));
     }
     m_ram[effectiveAddress] = value;
     // Simple hook for CGA/VGA text mode (0xB8000 - 0xBFFFF)
@@ -98,6 +152,12 @@ void MemoryBus::write16(uint32_t address, uint16_t value) {
       LOG_DEBUG("IVT WRITE16 at 0x", std::hex, effectiveAddress, " val: 0x",
                 static_cast<int>(value));
     }
+    if (overlapsWatchAddr(effectiveAddress, 2)) {
+      void *caller = __builtin_return_address(0);
+      LOG_ERROR("MEM ABS WATCH write16 at 0x", std::hex, effectiveAddress,
+                " val: 0x", static_cast<uint32_t>(value),
+                " caller=0x", reinterpret_cast<uintptr_t>(caller));
+    }
     m_ram[effectiveAddress] = value & 0xFF;
     m_ram[effectiveAddress + 1] = (value >> 8) & 0xFF;
     if (effectiveAddress >= 0xB8000 && effectiveAddress < 0xBFFFF) {
@@ -114,6 +174,30 @@ void MemoryBus::write16(uint32_t address, uint16_t value) {
 void MemoryBus::write32(uint32_t address, uint32_t value) {
   uint32_t effectiveAddress = m_a20Enabled ? address : (address & 0xFFFFF);
   if (effectiveAddress + 3 < MEMORY_SIZE) {
+    if (overlapsWatchAddr(effectiveAddress, 4)) {
+      void *caller = __builtin_return_address(0);
+      LOG_ERROR("MEM ABS WATCH write32 at 0x", std::hex, effectiveAddress,
+                " val: 0x", value,
+                " caller=0x", reinterpret_cast<uintptr_t>(caller));
+
+      // One-shot symbolic backtrace for the repeating IDT-like clobber pattern.
+      if (effectiveAddress == 0x75E &&
+          (value == 0x016F0024 || value == 0x70700000)) {
+        static int btCount = 0;
+        if (btCount < 6) {
+          ++btCount;
+          void *frames[12] = {};
+          int n = ::backtrace(frames, 12);
+          std::unique_ptr<char *, decltype(&std::free)> symbols(
+              ::backtrace_symbols(frames, n), &std::free);
+          if (symbols) {
+            for (int i = 0; i < n; ++i) {
+              LOG_ERROR("MEM ABS WATCH bt[", i, "] ", symbols.get()[i]);
+            }
+          }
+        }
+      }
+    }
     m_ram[effectiveAddress] = value & 0xFF;
     m_ram[effectiveAddress + 1] = (value >> 8) & 0xFF;
     m_ram[effectiveAddress + 2] = (value >> 16) & 0xFF;

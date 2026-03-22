@@ -432,17 +432,18 @@ void DPMI::handleDescriptorMgmt() {
   }
   case 0x000B: { // Get Descriptor
     uint16_t sel = m_cpu.getReg16(cpu::BX);
+    uint8_t ptrReg = m_is32BitClient ? cpu::EDI : cpu::DI;
     int idx = selectorToIndex(sel);
     if (idx == 0) {
       // Null selector (GDT[0]): return 8 zero bytes (the null descriptor).
       // DOS/4GW queries selector 0 during dispatcher init and expects
       // CF=0 with an all-zero descriptor (access byte 0 = "not present").
-      uint32_t addr = getLinearAddr(cpu::ES, cpu::DI);
+      uint32_t addr = getLinearAddr(cpu::ES, ptrReg);
       m_memory.write32(addr, 0);
       m_memory.write32(addr + 4, 0);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
     } else if (idx < MAX_LDT && m_ldtUsed[idx]) {
-      uint32_t addr = getLinearAddr(cpu::ES, cpu::DI);
+      uint32_t addr = getLinearAddr(cpu::ES, ptrReg);
       m_memory.write32(addr, m_ldt[idx].low);
       m_memory.write32(addr + 4, m_ldt[idx].high);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
@@ -454,9 +455,10 @@ void DPMI::handleDescriptorMgmt() {
   }
   case 0x000C: { // Set Descriptor
     uint16_t sel = m_cpu.getReg16(cpu::BX);
+    uint8_t ptrReg = m_is32BitClient ? cpu::EDI : cpu::DI;
     int idx = selectorToIndex(sel);
     if (idx > 0 && idx < MAX_LDT && m_ldtUsed[idx]) {
-      uint32_t addr = getLinearAddr(cpu::ES, cpu::DI);
+      uint32_t addr = getLinearAddr(cpu::ES, ptrReg);
       uint32_t oldBase = extractBase(m_ldt[idx]);
       uint32_t newLow = m_memory.read32(addr);
       uint32_t newHigh = m_memory.read32(addr + 4);
@@ -679,8 +681,11 @@ void DPMI::handleTranslation() {
     for (int i = 0; i < 8; i++)
       savedRegs[i] = m_cpu.getReg32(i);
     uint16_t savedSegs[6];
-    for (int i = 0; i < 6; i++)
+    uint32_t savedSegBases[6];
+    for (int i = 0; i < 6; i++) {
       savedSegs[i] = m_cpu.getSegReg(i);
+      savedSegBases[i] = m_cpu.getSegBase(i);
+    }
     uint32_t savedEIP = m_cpu.getEIP();
     uint32_t savedEFLAGS = m_cpu.getEFLAGS();
     bool savedIs32Code = m_cpu.is32BitCode();
@@ -691,13 +696,25 @@ void DPMI::handleTranslation() {
     // +10: EBX, +14: EDX, +18: ECX, +1C: EAX
     // +20: FLAGS, +22: ES, +24: DS, +26: FS, +28: GS
     // +2A: IP, +2C: CS, +2E: SP, +30: SS
-    m_cpu.setReg32(cpu::EDI, m_memory.read32(structAddr + 0x00));
-    m_cpu.setReg32(cpu::ESI, m_memory.read32(structAddr + 0x04));
-    m_cpu.setReg32(cpu::EBP, m_memory.read32(structAddr + 0x08));
-    m_cpu.setReg32(cpu::EBX, m_memory.read32(structAddr + 0x10));
-    m_cpu.setReg32(cpu::EDX, m_memory.read32(structAddr + 0x14));
-    m_cpu.setReg32(cpu::ECX, m_memory.read32(structAddr + 0x18));
-    m_cpu.setReg32(cpu::EAX, m_memory.read32(structAddr + 0x1C));
+    if (m_is32BitClient) {
+      m_cpu.setReg32(cpu::EDI, m_memory.read32(structAddr + 0x00));
+      m_cpu.setReg32(cpu::ESI, m_memory.read32(structAddr + 0x04));
+      m_cpu.setReg32(cpu::EBP, m_memory.read32(structAddr + 0x08));
+      m_cpu.setReg32(cpu::EBX, m_memory.read32(structAddr + 0x10));
+      m_cpu.setReg32(cpu::EDX, m_memory.read32(structAddr + 0x14));
+      m_cpu.setReg32(cpu::ECX, m_memory.read32(structAddr + 0x18));
+      m_cpu.setReg32(cpu::EAX, m_memory.read32(structAddr + 0x1C));
+    } else {
+      // 16-bit clients use only low halves in this structure.
+      // Zero-extend to avoid propagating stale high-word garbage.
+      m_cpu.setReg32(cpu::EDI, m_memory.read16(structAddr + 0x00));
+      m_cpu.setReg32(cpu::ESI, m_memory.read16(structAddr + 0x04));
+      m_cpu.setReg32(cpu::EBP, m_memory.read16(structAddr + 0x08));
+      m_cpu.setReg32(cpu::EBX, m_memory.read16(structAddr + 0x10));
+      m_cpu.setReg32(cpu::EDX, m_memory.read16(structAddr + 0x14));
+      m_cpu.setReg32(cpu::ECX, m_memory.read16(structAddr + 0x18));
+      m_cpu.setReg32(cpu::EAX, m_memory.read16(structAddr + 0x1C));
+    }
 
     uint16_t rmFlags = m_memory.read16(structAddr + 0x20);
     uint16_t rmES = m_memory.read16(structAddr + 0x22);
@@ -739,6 +756,9 @@ void DPMI::handleTranslation() {
       // func == 0x0301/0x0302: Call RM procedure at CS:IP from the structure
       uint16_t rmIP = m_memory.read16(structAddr + 0x2A);
       uint16_t rmCS = m_memory.read16(structAddr + 0x2C);
+      m_cpu.setSegReg(cpu::CS, rmCS);
+      m_cpu.setSegBase(cpu::CS, static_cast<uint32_t>(rmCS) << 4);
+      m_cpu.setEIP(rmIP);
       {
         uint32_t rmEAX = m_memory.read32(structAddr + 0x1C);
         uint32_t rmEBX = m_memory.read32(structAddr + 0x10);
@@ -752,7 +772,6 @@ void DPMI::handleTranslation() {
       }
       // Try HLE at the target address
       bool handled = false;
-      uint32_t targetAddr = (static_cast<uint32_t>(rmCS) << 4) + rmIP;
       // Check if the target is one of our HLE stubs (matching IVT entry)
       if (m_bios) {
         for (int v = 0; v < 256; v++) {
@@ -794,28 +813,21 @@ void DPMI::handleTranslation() {
       m_memory.write32(structAddr + 0x18, m_cpu.getReg32(cpu::ECX));
       m_memory.write32(structAddr + 0x1C, m_cpu.getReg32(cpu::EAX));
     } else {
-      // 16-bit clients use only low halves; preserve incoming high words.
-      uint32_t inEdi = m_memory.read32(structAddr + 0x00) & 0xFFFF0000;
-      uint32_t inEsi = m_memory.read32(structAddr + 0x04) & 0xFFFF0000;
-      uint32_t inEbp = m_memory.read32(structAddr + 0x08) & 0xFFFF0000;
-      uint32_t inEbx = m_memory.read32(structAddr + 0x10) & 0xFFFF0000;
-      uint32_t inEdx = m_memory.read32(structAddr + 0x14) & 0xFFFF0000;
-      uint32_t inEcx = m_memory.read32(structAddr + 0x18) & 0xFFFF0000;
-      uint32_t inEax = m_memory.read32(structAddr + 0x1C) & 0xFFFF0000;
+      // 16-bit client return: write low halves and clear high halves.
       m_memory.write32(structAddr + 0x00,
-                       inEdi | static_cast<uint32_t>(m_cpu.getReg16(cpu::DI)));
+                       static_cast<uint32_t>(m_cpu.getReg16(cpu::DI)));
       m_memory.write32(structAddr + 0x04,
-                       inEsi | static_cast<uint32_t>(m_cpu.getReg16(cpu::SI)));
+                       static_cast<uint32_t>(m_cpu.getReg16(cpu::SI)));
       m_memory.write32(structAddr + 0x08,
-                       inEbp | static_cast<uint32_t>(m_cpu.getReg16(cpu::BP)));
+                       static_cast<uint32_t>(m_cpu.getReg16(cpu::BP)));
       m_memory.write32(structAddr + 0x10,
-                       inEbx | static_cast<uint32_t>(m_cpu.getReg16(cpu::BX)));
+                       static_cast<uint32_t>(m_cpu.getReg16(cpu::BX)));
       m_memory.write32(structAddr + 0x14,
-                       inEdx | static_cast<uint32_t>(m_cpu.getReg16(cpu::DX)));
+                       static_cast<uint32_t>(m_cpu.getReg16(cpu::DX)));
       m_memory.write32(structAddr + 0x18,
-                       inEcx | static_cast<uint32_t>(m_cpu.getReg16(cpu::CX)));
+                       static_cast<uint32_t>(m_cpu.getReg16(cpu::CX)));
       m_memory.write32(structAddr + 0x1C,
-                       inEax | static_cast<uint32_t>(m_cpu.getReg16(cpu::AX)));
+                       static_cast<uint32_t>(m_cpu.getReg16(cpu::AX)));
     }
     m_memory.write16(structAddr + 0x20,
                      static_cast<uint16_t>(m_cpu.getEFLAGS() & 0xFFFF));
@@ -834,30 +846,7 @@ void DPMI::handleTranslation() {
       m_cpu.setReg32(i, savedRegs[i]);
     for (int i = 0; i < 6; i++) {
       m_cpu.setSegReg(i, savedSegs[i]);
-      uint16_t sel = savedSegs[i];
-      if (sel == 0) {
-        m_cpu.setSegBase(i, 0);
-        continue;
-      }
-
-      // Restore base for selectors from either LDT or GDT so cached
-      // segment bases don't remain stale after temporary RM state.
-      if (sel & LDT_TI_BIT) {
-        int idx = selectorToIndex(sel);
-        if (idx > 0 && idx < MAX_LDT && m_ldtUsed[idx]) {
-          m_cpu.setSegBase(i, extractBase(m_ldt[idx]));
-        } else {
-          // Invalid/unused LDT selector: keep base deterministic.
-          m_cpu.setSegBase(i, 0);
-        }
-      } else {
-        uint32_t entryAddr = m_cpu.getGDTR().base + (sel & ~7);
-        uint32_t low = m_memory.read32(entryAddr);
-        uint32_t high = m_memory.read32(entryAddr + 4);
-        uint32_t base = ((low >> 16) & 0xFFFF) | ((high & 0xFF) << 16) |
-                        (high & 0xFF000000);
-        m_cpu.setSegBase(i, base);
-      }
+      m_cpu.setSegBase(i, savedSegBases[i]);
     }
     m_cpu.setEIP(savedEIP);
     m_cpu.setEFLAGS(savedEFLAGS & ~cpu::FLAG_CARRY);
@@ -920,7 +909,8 @@ void DPMI::handleMemoryInfo() {
   uint16_t func = m_cpu.getReg16(cpu::AX);
   switch (func) {
   case 0x0500: { // Get Free Memory Information
-    uint32_t addr = getLinearAddr(cpu::ES, cpu::DI);
+    uint8_t ptrReg = m_is32BitClient ? cpu::EDI : cpu::DI;
+    uint32_t addr = getLinearAddr(cpu::ES, ptrReg);
     uint32_t freeBytes = 0;
     if (m_himem) {
       uint16_t largestKB = 0;
@@ -1201,6 +1191,12 @@ void DPMI::handleRawSwitchPMtoRM() {
   m_cpu.setSegReg(cpu::ES, newDS); // ES defaults to DS per convention
   m_cpu.setSegReg(cpu::FS, 0);
   m_cpu.setSegReg(cpu::GS, 0);
+  m_cpu.setSegBase(cpu::CS, static_cast<uint32_t>(newCS) << 4);
+  m_cpu.setSegBase(cpu::DS, static_cast<uint32_t>(newDS) << 4);
+  m_cpu.setSegBase(cpu::SS, static_cast<uint32_t>(newSS) << 4);
+  m_cpu.setSegBase(cpu::ES, static_cast<uint32_t>(newDS) << 4);
+  m_cpu.setSegBase(cpu::FS, 0);
+  m_cpu.setSegBase(cpu::GS, 0);
 
   m_cpu.setReg16(cpu::SP, newSP);
   m_cpu.setEIP(newIP);
@@ -1234,20 +1230,58 @@ void DPMI::handleRawSwitchRMtoPM() {
   m_cpu.setSegReg(cpu::FS, 0);
   m_cpu.setSegReg(cpu::GS, 0);
 
+  auto decodePMSelector = [&](uint16_t sel, uint32_t &base, bool &is32,
+                              bool &valid) {
+    base = 0;
+    is32 = false;
+    valid = false;
+    if (sel == 0)
+      return;
+
+    uint32_t low = 0;
+    uint32_t high = 0;
+    if (sel & LDT_TI_BIT) {
+      int idx = selectorToIndex(sel);
+      if (idx <= 0 || idx >= MAX_LDT || !m_ldtUsed[idx])
+        return;
+      low = m_ldt[idx].low;
+      high = m_ldt[idx].high;
+    } else {
+      auto gdtr = m_cpu.getGDTR();
+      uint32_t entry = gdtr.base + (sel & ~7);
+      if (entry + 7 > gdtr.base + gdtr.limit)
+        return;
+      low = m_memory.read32(entry);
+      high = m_memory.read32(entry + 4);
+    }
+
+    base = ((low >> 16) & 0xFFFF) | ((high & 0xFF) << 16) |
+           (high & 0xFF000000);
+    is32 = (high & 0x00400000u) != 0;
+    valid = true;
+  };
+
+  uint32_t csBase = 0, dsBase = 0, ssBase = 0;
+  bool cs32 = false, ds32 = false, ss32 = false;
+  bool csValid = false, dsValid = false, ssValid = false;
+  decodePMSelector(newCS, csBase, cs32, csValid);
+  decodePMSelector(newDS, dsBase, ds32, dsValid);
+  decodePMSelector(newSS, ssBase, ss32, ssValid);
+  m_cpu.setSegBase(cpu::CS, csBase);
+  m_cpu.setSegBase(cpu::DS, dsBase);
+  m_cpu.setSegBase(cpu::SS, ssBase);
+  m_cpu.setSegBase(cpu::ES, dsBase);
+  m_cpu.setSegBase(cpu::FS, 0);
+  m_cpu.setSegBase(cpu::GS, 0);
+
   m_cpu.setReg32(cpu::ESP, newESP);
   m_cpu.setEIP(newEIP);
 
   // Determine 32-bit mode from the CS descriptor's D bit
-  int csIdx = selectorToIndex(newCS);
-  if (csIdx > 0 && csIdx < MAX_LDT && m_ldtUsed[csIdx]) {
-    bool d = (m_ldt[csIdx].high & 0x00400000) != 0;
-    m_cpu.setIs32BitCode(d);
-  }
-  int ssIdx = selectorToIndex(newSS);
-  if (ssIdx > 0 && ssIdx < MAX_LDT && m_ldtUsed[ssIdx]) {
-    bool b = (m_ldt[ssIdx].high & 0x00400000) != 0;
-    m_cpu.setIs32BitStack(b);
-  }
+  if (csValid)
+    m_cpu.setIs32BitCode(cs32);
+  if (ssValid)
+    m_cpu.setIs32BitStack(ss32);
 }
 
 } // namespace fador::hw

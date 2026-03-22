@@ -153,7 +153,7 @@ public:
   void addCycles(uint32_t c) { m_cycles += c; }
 
   uint32_t getEIP() const { return m_eip; }
-  void setEIP(uint32_t val) { m_eip = val; }
+  void setEIP(uint32_t val);
 
   uint32_t getEFLAGS() const { return m_eflags; }
   void setEFLAGS(uint32_t val) { m_eflags = val; }
