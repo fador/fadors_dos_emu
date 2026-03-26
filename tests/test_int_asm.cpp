@@ -499,6 +499,85 @@ TEST_CASE("INT 20h Terminate via asm", "[int][asm][dos]") {
     REQUIRE(e.dos.getExitCode() == 0);
 }
 
+TEST_CASE("0F FF INT 21h handled by DOS uses chain-return semantics", "[int][asm][chain][doom]") {
+    IntTestEnv e;
+
+    // Prepare real-mode stack and code segment
+    e.cpu.setSegReg(cpu::CS, IntTestEnv::CODE_SEG);
+    e.cpu.setSegBase(cpu::CS, IntTestEnv::CODE_SEG << 4);
+    e.cpu.setSegReg(cpu::SS, 0x0000);
+    e.cpu.setSegBase(cpu::SS, 0x0000);
+    e.cpu.setIs32BitCode(false);
+    e.cpu.setIs32BitStack(false);
+
+    // Place a chain frame at SS:SP (IP, CS, FLAGS)
+    e.cpu.setReg16(cpu::SP, 0x0200);
+    uint32_t ssBase = (e.cpu.getSegReg(cpu::SS) << 4);
+    e.mem.write16(ssBase + 0x0200, 0x3456); // IP
+    e.mem.write16(ssBase + 0x0202, 0x1234); // CS
+    e.mem.write16(ssBase + 0x0204, 0x0202); // FLAGS
+
+    // Arrange DOS to handle INT 21h AH=02h (print char)
+    e.cpu.setReg8(cpu::AH, 0x02);
+    e.cpu.setReg8(cpu::DL, 'X');
+
+    // Assemble HLE_INT 21h at CS:IP
+    e.assemble("HLE_INT 21h");
+
+    REQUIRE(e.cpu.hleStackSize() == 0);
+    e.run(1); // execute the HLE trap
+
+    // After handling, should have returned to chained caller IP/CS and adjusted SP
+    REQUIRE(e.cpu.getSegReg(cpu::CS) == 0x1234);
+    REQUIRE(e.cpu.getEIP() == 0x3456);
+    REQUIRE(e.cpu.getReg16(cpu::SP) == 0x0206);
+    REQUIRE(e.cpu.hleStackSize() == 0);
+
+    // DOS should have written the character to VRAM via INT 21h/02h
+    REQUIRE(e.mem.read8(0xB8000) == 'X');
+}
+
+TEST_CASE("0F FF INT 21h pops tracked HLE frame when framePhysAddr matches", "[int][asm][chain]") {
+    IntTestEnv e;
+
+    // Prepare real-mode stack and code segment
+    e.cpu.setSegReg(cpu::CS, IntTestEnv::CODE_SEG);
+    e.cpu.setSegBase(cpu::CS, IntTestEnv::CODE_SEG << 4);
+    e.cpu.setSegReg(cpu::SS, 0x0000);
+    e.cpu.setSegBase(cpu::SS, 0x0000);
+    e.cpu.setIs32BitCode(false);
+    e.cpu.setIs32BitStack(false);
+
+    // Place an IRET-like frame at SS:SP (IP, CS, FLAGS)
+    e.cpu.setReg16(cpu::SP, 0x0300);
+    uint32_t framePhys = (e.cpu.getSegReg(cpu::SS) << 4) + 0x0300;
+    e.mem.write16(framePhys + 0x0000, 0x1111); // IP
+    e.mem.write16(framePhys + 0x0002, 0x2222); // CS
+    e.mem.write16(framePhys + 0x0004, 0x0202); // FLAGS
+
+    // Simulate an HLE frame being tracked for INT 0x21
+    e.cpu.pushHLEFrame(false, 0x21);
+    e.cpu.lastHLEFrameMut().framePhysAddr = framePhys;
+    e.cpu.lastHLEFrameMut().frameSP = 0x0300;
+
+    // Arrange DOS to handle INT 21h AH=02h (print char)
+    e.cpu.setReg8(cpu::AH, 0x02);
+    e.cpu.setReg8(cpu::DL, 'Z');
+
+    // Assemble HLE_INT 21h at CS:IP
+    e.assemble("HLE_INT 21h");
+
+    REQUIRE(e.cpu.hleStackSize() == 1);
+    e.run(1); // execute the HLE trap
+
+    // The tracked HLE frame should have been popped and execution
+    // should return to the frame's CS:IP and DOS should print the char.
+    REQUIRE(e.cpu.hleStackSize() == 0);
+    REQUIRE(e.cpu.getSegReg(cpu::CS) == 0x2222);
+    REQUIRE(e.cpu.getEIP() == 0x1111);
+    REQUIRE(e.mem.read8(0xB8000) == 'Z');
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 //  INT 21h – DOS API
 // ════════════════════════════════════════════════════════════════════════════

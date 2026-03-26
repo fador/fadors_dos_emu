@@ -3278,114 +3278,112 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
         loadSegment(GS, m_cpu.getSegReg(GS));
         break;
       }
+    }
 
-      // The HLE code was executed successfully. Now simulate an IRET
-      // to return to the caller.
-      //
-      // Two cases:
-      // (A) Direct dispatch — triggerInterrupt dispatched directly to our
-      //     stub. Pre-handler SP matches the stored HLE frame. Pop the frame
-      //     and IRET to the original caller, merging status flags.
-      // (B) Chain call — a hooked handler (e.g. DOS/4GW thunk) chained
-      //     to our stub via PUSHF+CALL FAR. Pre-handler SP does NOT match
-      //     the stored HLE frame. Do inline IRET from the current stack
-      //     to return to the chain caller (thunk), letting it clean up
-      //     its transfer stack and eventually IRET through the original
-      //     frame. The HLE frame is left in place for cleanup by the
-      //     0xCF IRET handler's popHLEFrameByPhysAddr.
-      if (!hasTrackedFrame) {
-        // Handled trap without a tracked INT frame means this came via
-        // CALL/JMP chaining into the stub (or equivalent thunk path).
-        // Use chain return semantics; direct-dispatch frame pop would read
-        // an invalid frame address.
-        isChainCall = true;
+    // Two cases for returning from the HLE trap:
+    // (A) Direct dispatch — triggerInterrupt dispatched directly to our
+    //     stub. Pre-handler SP matches the stored HLE frame. Pop the frame
+    //     and IRET to the original caller.
+    // (B) Chain call — a hooked handler (e.g. DOS/4GW thunk) chained
+    //     to our stub via PUSHF+CALL FAR. Pre-handler SP does NOT match
+    //     the stored HLE frame. Do inline IRET from the current stack
+    //     to return to the chain caller (thunk).
+    if (!hasTrackedFrame) {
+      isChainCall = true;
+    }
+
+    if (isChainCall) {
+      uint32_t currentFlags = m_cpu.getEFLAGS();
+      bool chainIs32 = m_hasPrefix66 ^ m_cpu.is32BitCode();
+
+      if (m_cpu.getCR(0) & 1) { // Protected mode
+        auto scoreFrame = [&](uint16_t cs, uint32_t ip, uint32_t flags, bool expect32) -> int {
+          if ((cs & ~7) == 0) return -100;
+          uint32_t tbl = (cs & 0x04) ? m_cpu.getLDTR().base : m_cpu.getGDTR().base;
+          uint32_t dLow = m_memory.read32(tbl + (cs & ~7));
+          uint32_t dHigh = m_memory.read32(tbl + (cs & ~7) + 4);
+          Descriptor d = decodeDescriptor(dLow, dHigh);
+          if (d.isSystem || !(d.type & 0x08) || !d.isPresent) return -100;
+          
+          int score = 100;
+          uint32_t limit = d.limit;
+          if (ip > limit && limit > 0) return -200;
+          else score += 50;
+          
+          if (d.is32Bit == expect32) score += 20;
+          if ((flags & 0x2A) == 0x02) score += 10;
+          return score;
+        };
+
+        uint16_t cs16 = m_memory.read16(ssBase + currentESP + 2);
+        uint16_t flags16 = m_memory.read16(ssBase + currentESP + 4);
+        uint32_t ip16 = m_memory.read16(ssBase + currentESP);
+
+        uint16_t cs32 = m_memory.read16(ssBase + currentESP + 4);
+        uint32_t flags32 = m_memory.read32(ssBase + currentESP + 8);
+        uint32_t eip32 = m_memory.read32(ssBase + currentESP);
+
+        int score16 = scoreFrame(cs16, ip16, flags16, false);
+        int score32 = scoreFrame(cs32, eip32, flags32, true);
+
+        if (score32 > score16 && score32 >= 0) {
+          chainIs32 = true;
+        } else if (score16 > score32 && score16 >= 0) {
+          chainIs32 = false;
+        } else if (score16 >= 0 && score32 >= 0 && score16 == score32) {
+          chainIs32 = true;
+        }
       }
 
-      if (isChainCall) {
-        uint32_t currentFlags = m_cpu.getEFLAGS();
-        bool chainIs32 = m_hasPrefix66 ^ m_cpu.is32BitCode();
-
-        if (m_cpu.getCR(0) & 1) { // Protected mode
-          auto scoreFrame = [&](uint16_t cs, uint32_t ip, uint32_t flags, bool expect32) -> int {
-            if ((cs & ~7) == 0) return -100;
-            uint32_t tbl = (cs & 0x04) ? m_cpu.getLDTR().base : m_cpu.getGDTR().base;
-            uint32_t dLow = m_memory.read32(tbl + (cs & ~7));
-            uint32_t dHigh = m_memory.read32(tbl + (cs & ~7) + 4);
-            Descriptor d = decodeDescriptor(dLow, dHigh);
-            if (d.isSystem || !(d.type & 0x08) || !d.isPresent) return -100;
-            
-            int score = 100;
-            uint32_t limit = d.limit;
-            if (ip > limit && limit > 0) return -200;
-            else score += 50;
-            
-            if (d.is32Bit == expect32) score += 20;
-            if ((flags & 0x2A) == 0x02) score += 10;
-            return score;
-          };
-
-          uint16_t cs16 = m_memory.read16(ssBase + currentESP + 2);
-          uint16_t flags16 = m_memory.read16(ssBase + currentESP + 4);
-          uint32_t ip16 = m_memory.read16(ssBase + currentESP);
-
-          uint16_t cs32 = m_memory.read16(ssBase + currentESP + 4);
-          uint32_t flags32 = m_memory.read32(ssBase + currentESP + 8);
-          uint32_t eip32 = m_memory.read32(ssBase + currentESP);
-
-          int score16 = scoreFrame(cs16, ip16, flags16, false);
-          int score32 = scoreFrame(cs32, eip32, flags32, true);
-
-          if (score32 > score16 && score32 >= 0) {
-            chainIs32 = true;
-          } else if (score16 > score32 && score16 >= 0) {
-            chainIs32 = false;
-          } else if (score16 >= 0 && score32 >= 0 && score16 == score32) {
-            chainIs32 = true;
-          }
-        }
-
-        uint32_t mask = FLAG_CARRY | FLAG_ZERO | FLAG_SIGN | FLAG_OVERFLOW |
-                        FLAG_AUX | FLAG_PARITY;
+      uint32_t mask = 0;
+      if (handled) {
+        mask = FLAG_CARRY | FLAG_ZERO | FLAG_SIGN | FLAG_OVERFLOW |
+               FLAG_AUX | FLAG_PARITY;
         if (vector == 0x31) {
           mask = FLAG_CARRY;
         }
+      }
 
-        if (chainIs32) {
-          uint32_t newEip = m_memory.read32(ssBase + currentESP);
-          uint16_t newCs = m_memory.read32(ssBase + currentESP + 4) & 0xFFFF;
-          uint32_t popFlags = m_memory.read32(ssBase + currentESP + 8);
-          popFlags = (popFlags & ~mask) | (currentFlags & mask);
-          m_cpu.setEFLAGS(popFlags);
-          m_cpu.setEIP(newEip);
-          loadSegment(CS, newCs);
-          if (m_cpu.is32BitStack())
-            m_cpu.setReg32(ESP, currentESP + 12);
-          else
-            m_cpu.setReg16(SP, static_cast<uint16_t>(currentESP + 12));
-        } else {
-          uint16_t newIp = m_memory.read16(ssBase + currentESP);
-          uint16_t newCs = m_memory.read16(ssBase + currentESP + 2);
-          uint16_t popFlags16 = m_memory.read16(ssBase + currentESP + 4);
-          uint16_t mask16 = static_cast<uint16_t>(mask);
-          popFlags16 = (popFlags16 & ~mask16) | (currentFlags & mask16);
-          m_cpu.setEFLAGS((currentFlags & 0xFFFF0000) | popFlags16);
-          m_cpu.setEIP(newIp);
-          loadSegment(CS, newCs);
-          if (m_cpu.is32BitStack())
-            m_cpu.setReg32(ESP, currentESP + 6);
-          else
-            m_cpu.setReg16(SP, static_cast<uint16_t>(currentESP + 6));
-        }
-
-        if (hasTrackedFrame) {
-          m_cpu.popHLEFrameByPhysAddr(hfPeek.framePhysAddr);
-        }
+      if (chainIs32) {
+        uint32_t newEip = m_memory.read32(ssBase + currentESP);
+        uint16_t newCs = m_memory.read32(ssBase + currentESP + 4) & 0xFFFF;
+        uint32_t popFlags = m_memory.read32(ssBase + currentESP + 8);
+        popFlags = (popFlags & ~mask) | (currentFlags & mask);
+        m_cpu.setEFLAGS(popFlags);
+        m_cpu.setEIP(newEip);
+        loadSegment(CS, newCs);
+        if (m_cpu.is32BitStack())
+          m_cpu.setReg32(ESP, currentESP + 12);
+        else
+          m_cpu.setReg16(SP, static_cast<uint16_t>(currentESP + 12));
       } else {
-        auto hf = m_cpu.popHLEFrameForVector(vector);
+        uint16_t newIp = m_memory.read16(ssBase + currentESP);
+        uint16_t newCs = m_memory.read16(ssBase + currentESP + 2);
+        uint16_t popFlags16 = m_memory.read16(ssBase + currentESP + 4);
+        uint16_t mask16 = static_cast<uint16_t>(mask);
+        popFlags16 = (popFlags16 & ~mask16) | (static_cast<uint16_t>(currentFlags) & mask16);
+        m_cpu.setEFLAGS((currentFlags & 0xFFFF0000) | popFlags16);
+        m_cpu.setEIP(newIp);
+        loadSegment(CS, newCs);
+        if (m_cpu.is32BitStack())
+          m_cpu.setReg32(ESP, currentESP + 6);
+        else
+          m_cpu.setReg16(SP, static_cast<uint16_t>(currentESP + 6));
+      }
+
+      if (handled && hasTrackedFrame) {
+        m_cpu.popHLEFrameByPhysAddr(hfPeek.framePhysAddr);
+      }
+    } else {
+      auto hf = m_cpu.popHLEFrameForVector(vector);
+      if (hf.framePhysAddr != 0) {
         uint32_t frameAddr = hf.framePhysAddr;
         uint32_t currentFlags = m_cpu.getEFLAGS();
-        uint32_t mask = FLAG_CARRY | FLAG_ZERO | FLAG_SIGN | FLAG_OVERFLOW |
-                        FLAG_AUX | FLAG_PARITY;
+        uint32_t mask = 0;
+        if (handled) {
+          mask = FLAG_CARRY | FLAG_ZERO | FLAG_SIGN | FLAG_OVERFLOW |
+                 FLAG_AUX | FLAG_PARITY;
+        }
 
         if (hf.is32) {
           uint32_t newEip = m_memory.read32(frameAddr);
@@ -3408,85 +3406,6 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
           m_cpu.setEIP(newIp);
           loadSegment(CS, newCs);
           m_cpu.setReg16(SP, static_cast<uint16_t>(hf.frameSP + 6));
-        }
-      }
-    } else {
-      auto hf_uh = m_cpu.popHLEFrameForVector(vector);
-      if (hf_uh.framePhysAddr != 0) {
-        uint32_t frameAddr = hf_uh.framePhysAddr;
-        if (hf_uh.is32) {
-          m_cpu.setEFLAGS(m_memory.read32(frameAddr + 8));
-          m_cpu.setEIP(m_memory.read32(frameAddr));
-          loadSegment(CS, m_memory.read32(frameAddr + 4) & 0xFFFF);
-          if (hf_uh.stackIs32)
-            m_cpu.setReg32(ESP, hf_uh.frameSP + 12);
-          else
-            m_cpu.setReg16(SP, static_cast<uint16_t>(hf_uh.frameSP + 12));
-        } else {
-          uint16_t popFlags = m_memory.read16(frameAddr + 4);
-          m_cpu.setEFLAGS((m_cpu.getEFLAGS() & 0xFFFF0000) | popFlags);
-          m_cpu.setEIP(m_memory.read16(frameAddr));
-          loadSegment(CS, m_memory.read16(frameAddr + 2));
-          m_cpu.setReg16(SP, static_cast<uint16_t>(hf_uh.frameSP + 6));
-        }
-      } else {
-        bool chainIs32 = m_hasPrefix66 ^ m_cpu.is32BitCode();
-        if (m_cpu.getCR(0) & 1) { // Protected mode
-          auto scoreFrame = [&](uint16_t cs, uint32_t ip, uint32_t flags, bool expect32) -> int {
-            if ((cs & ~7) == 0) return -100;
-            uint32_t tbl = (cs & 0x04) ? m_cpu.getLDTR().base : m_cpu.getGDTR().base;
-            uint32_t dLow = m_memory.read32(tbl + (cs & ~7));
-            uint32_t dHigh = m_memory.read32(tbl + (cs & ~7) + 4);
-            Descriptor d = decodeDescriptor(dLow, dHigh);
-            if (d.isSystem || !(d.type & 0x08) || !d.isPresent) return -100;
-            
-            int score = 100;
-            uint32_t limit = d.limit;
-            if (ip > limit && limit > 0) return -200;
-            else score += 50;
-            
-            if (d.is32Bit == expect32) score += 20;
-            if ((flags & 0x2A) == 0x02) score += 10;
-            return score;
-          };
-
-          uint16_t cs16 = m_memory.read16(ssBase + currentESP + 2);
-          uint16_t flags16 = m_memory.read16(ssBase + currentESP + 4);
-          uint32_t ip16 = m_memory.read16(ssBase + currentESP);
-
-          uint16_t cs32 = m_memory.read16(ssBase + currentESP + 4);
-          uint32_t flags32 = m_memory.read32(ssBase + currentESP + 8);
-          uint32_t eip32 = m_memory.read32(ssBase + currentESP);
-
-          int score16 = scoreFrame(cs16, ip16, flags16, false);
-          int score32 = scoreFrame(cs32, eip32, flags32, true);
-
-          if (score32 > score16 && score32 >= 0) {
-            chainIs32 = true;
-          } else if (score16 > score32 && score16 >= 0) {
-            chainIs32 = false;
-          } else if (score16 >= 0 && score32 >= 0 && score16 == score32) {
-            chainIs32 = true;
-          }
-        }
-
-        if (chainIs32) {
-          m_cpu.setEFLAGS(m_memory.read32(ssBase + currentESP + 8));
-          m_cpu.setEIP(m_memory.read32(ssBase + currentESP));
-          loadSegment(CS, m_memory.read32(ssBase + currentESP + 4) & 0xFFFF);
-          if (m_cpu.is32BitStack())
-            m_cpu.setReg32(ESP, currentESP + 12);
-          else
-            m_cpu.setReg16(SP, static_cast<uint16_t>(currentESP + 12));
-        } else {
-          uint16_t popFlags16 = m_memory.read16(ssBase + currentESP + 4);
-          m_cpu.setEFLAGS((m_cpu.getEFLAGS() & 0xFFFF0000) | popFlags16);
-          m_cpu.setEIP(m_memory.read16(ssBase + currentESP));
-          loadSegment(CS, m_memory.read16(ssBase + currentESP + 2));
-          if (m_cpu.is32BitStack())
-            m_cpu.setReg32(ESP, currentESP + 6);
-          else
-            m_cpu.setReg16(SP, static_cast<uint16_t>(currentESP + 6));
         }
       }
     }

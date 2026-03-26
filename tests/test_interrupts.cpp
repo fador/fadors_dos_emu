@@ -496,3 +496,71 @@ TEST_CASE("0F FF chain infers 16-bit synthetic frame with FLAGS=0x0000", "[Inter
     REQUIRE(cpu.getReg32(cpu::ESP) == 0x0106); // <--- Use getReg32
 }
 
+TEST_CASE("Interrupt Chaining: HLE stub returns to chain caller", "[Interrupts][Chain]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::IOBus iobus;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::DOS dos(cpu, mem);
+    hw::BIOS bios(cpu, mem, kbd, pit);
+    bios.initialize();
+    dos.initialize();
+    cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
+
+    // RM setup
+    decoder.loadSegment(cpu::CS, 0x1000);
+    decoder.loadSegment(cpu::SS, 0x0000);
+    cpu.setReg16(cpu::SP, 0x1000);
+    cpu.setEIP(0x0100);
+
+    // 1. Manually push a "tracked" frame to simulate a pending interrupt
+    // Vector 0xAA, CS:IP=0x1234:0x5678, Flags=0x0000
+    uint32_t origSP = 0x1000;
+    cpu.pushHLEFrame(false, 0xAA);
+    auto& hf = cpu.lastHLEFrameMut();
+    hf.framePhysAddr = 0x00000000u + (origSP - 6);
+    hf.frameSP = origSP - 6;
+    hf.stackIs32 = false;
+
+    // Simulate the INT AAh pushing onto stack
+    mem.write16(origSP - 6, 0x5678); // IP
+    mem.write16(origSP - 4, 0x1234); // CS
+    mem.write16(origSP - 2, 0x0000); // Flags
+    cpu.setReg16(cpu::SP, origSP - 6);
+
+    // 2. Simulate a chain call: Hooked handler does PUSHF + CALL FAR to HLE stub
+    // Current SP = origSP - 6
+    cpu.push16(0x0202); // PUSHF
+    cpu.push16(0x1000); // CS (return to handler)
+    cpu.push16(0x0105); // IP (return to handler)
+    // New SP = origSP - 12
+
+    // 3. Execute HLE trap 0F FF AA
+    mem.write8(0x10000 + 0x0100, 0x0F);
+    mem.write8(0x10000 + 0x0101, 0xFF);
+    mem.write8(0x10000 + 0x0102, 0xAA);
+    cpu.setEIP(0x0100);
+
+    decoder.step();
+
+    // Should have detected chain call (SP=origSP-12 != trackedSP=origSP-6)
+    // and simulated IRET back to 1000:0105
+    REQUIRE(cpu.getSegReg(cpu::CS) == 0x1000);
+    REQUIRE(cpu.getEIP() == 0x0105);
+    REQUIRE(cpu.getReg16(cpu::SP) == (origSP - 6));
+    
+    // The tracked HLE frame should STILL BE THERE because we didn't "handle" it
+    // and we returned to a chain caller who will likely perform their own IRET.
+    REQUIRE(cpu.hleStackSize() == 1);
+
+    // 4. Now execute the IRET in the chain caller (at 1000:0105)
+    mem.write8(0x10000 + 0x0105, 0xCF); // IRET
+    decoder.step();
+
+    // Now it should return to original caller 1234:5678 and pop the frame
+    REQUIRE(cpu.getSegReg(cpu::CS) == 0x1234);
+    REQUIRE(cpu.getEIP() == 0x5678);
+    REQUIRE(cpu.getReg16(cpu::SP) == origSP);
+    REQUIRE(cpu.hleStackSize() == 0);
+}

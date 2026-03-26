@@ -849,6 +849,16 @@ AsmResult Assembler::assembleLine(const std::string& line, uint32_t origin) cons
             return r;
         }
 
+        // ── HLE_INT ──
+        if (mnem == "HLE_INT") {
+            if (op1.kind == OpKind::Imm) {
+                r.bytes.push_back(0x0F);
+                r.bytes.push_back(0xFF);
+                emitImm8(r.bytes, op1.imm);
+            } else { r.error = "HLE_INT requires immediate operand"; }
+            return r;
+        }
+
         // ── No-operand instructions ──
         static const std::unordered_map<std::string, std::vector<uint8_t>> noOpInstrs = {
             {"NOP",  {0x90}},
