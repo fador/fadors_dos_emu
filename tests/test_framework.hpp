@@ -1,5 +1,6 @@
 #pragma once
 #include <iostream>
+#include "utils/Logger.hpp"
 #include <cstdlib>
 #include <vector>
 #include <string>
@@ -52,6 +53,13 @@ struct SectionScope {
 inline int run_all_tests() {
     const char* envFilter = std::getenv("TEST_FILTER");
     std::string testFilter = envFilter ? std::string(envFilter) : std::string();
+
+    // Optional: enable debug logging for test runs by setting DEBUG_LOGS=1
+    const char* dbg = std::getenv("DEBUG_LOGS");
+    if (dbg && std::string(dbg) != "0") {
+        fador::utils::currentLevel = fador::utils::LogLevel::Debug;
+        fador::utils::enabledCategories = fador::utils::CAT_GENERIC | fador::utils::CAT_CPU | fador::utils::CAT_DOS | fador::utils::CAT_VIDEO;
+    }
     int passed = 0;
     int failed = 0;
     auto& tests = get_tests();

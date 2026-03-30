@@ -8,6 +8,7 @@
 #include "cpu/CPU.hpp"
 #include "cpu/InstructionDecoder.hpp"
 #include "cpu/Assembler.hpp"
+#include "utils/Logger.hpp"
 #include "memory/MemoryBus.hpp"
 #include "hw/IOBus.hpp"
 #include "hw/BIOS.hpp"
@@ -62,6 +63,10 @@ struct IntTestEnv {
             throw std::runtime_error("Assembly error: " + r.error);
         for (size_t i = 0; i < r.bytes.size(); ++i)
             mem.write8(CODE_LINEAR + static_cast<uint32_t>(i), r.bytes[i]);
+        // Debug: print assembled bytes and location when DEBUG_LOGS is enabled
+        LOG_INFO("Assembled ", r.bytes.size(), " bytes at 0x", std::hex, CODE_LINEAR);
+        for (size_t i = 0; i < r.bytes.size(); ++i)
+            LOG_DEBUG("ASM[0x", std::hex, (CODE_LINEAR + static_cast<uint32_t>(i)), "] = 0x", std::hex, (int)r.bytes[i]);
         return static_cast<uint32_t>(r.bytes.size());
     }
 
@@ -526,8 +531,8 @@ TEST_CASE("0F FF INT 21h handled by DOS uses chain-return semantics", "[int][asm
 
     REQUIRE(e.cpu.hleStackSize() == 0);
     e.run(1); // execute the HLE trap
-
     // After handling, should have returned to chained caller IP/CS and adjusted SP
+    LOG_INFO("TEST DBG: CS=0x", std::hex, e.cpu.getSegReg(cpu::CS), " EIP=0x", e.cpu.getEIP(), " SP=0x", e.cpu.getReg16(cpu::SP), " hleSize=", e.cpu.hleStackSize());
     REQUIRE(e.cpu.getSegReg(cpu::CS) == 0x1234);
     REQUIRE(e.cpu.getEIP() == 0x3456);
     REQUIRE(e.cpu.getReg16(cpu::SP) == 0x0206);
@@ -569,9 +574,9 @@ TEST_CASE("0F FF INT 21h pops tracked HLE frame when framePhysAddr matches", "[i
 
     REQUIRE(e.cpu.hleStackSize() == 1);
     e.run(1); // execute the HLE trap
-
     // The tracked HLE frame should have been popped and execution
     // should return to the frame's CS:IP and DOS should print the char.
+    LOG_INFO("TEST DBG (pop): CS=0x", std::hex, e.cpu.getSegReg(cpu::CS), " EIP=0x", e.cpu.getEIP(), " SP=0x", e.cpu.getReg16(cpu::SP), " hleSize=", e.cpu.hleStackSize());
     REQUIRE(e.cpu.hleStackSize() == 0);
     REQUIRE(e.cpu.getSegReg(cpu::CS) == 0x2222);
     REQUIRE(e.cpu.getEIP() == 0x1111);

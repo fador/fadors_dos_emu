@@ -3376,6 +3376,14 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
                   " score16=", score16, " score32=", score32,
                   " pref32=", chainIs32 ? 1 : 0);
 
+        if (vector == 0x21) {
+          LOG_INFO("HLE DEBUG vec=0x21 ssBase=0x", std::hex, ssBase,
+                   " currESP=0x", currentESP,
+                   " cs16=0x", cs16, " ip16=0x", ip16, " flags16=0x", flags16,
+                   " cs32=0x", cs32, " eip32=0x", eip32, " flags32=0x", flags32,
+                   " score16=", score16, " score32=", score32);
+        }
+
         if (score32 > score16 && score32 >= 0) {
           chainIs32 = true;
         } else if (score16 > score32 && score16 >= 0) {
@@ -3463,9 +3471,17 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
         uint16_t mergeSource16 = static_cast<uint16_t>(mergeSource32_for16);
         popFlags16 = (popFlags16 & ~mask16) | (mergeSource16 & mask16);
         uint32_t merged16 = (mergeSource32_for16 & 0xFFFF0000) | popFlags16;
+          if (vector == 0x21) {
+            LOG_INFO("HLE return16: vec=0x21 newIp=0x", std::hex, newIp,
+                     " newCs=0x", newCs, " popFlags16=0x", popFlags16,
+                     " merged16=0x", merged16, " preSP=0x", currentESP);
+          }
         LOG_DEBUG("HLE setEFLAGS before: vec=0x", std::hex, (int)vector,
             " curEFLAGS=0x", m_cpu.getEFLAGS());
         m_cpu.setEFLAGS(merged16);
+          if (vector == 0x21) {
+            LOG_INFO("HLE setEFLAGS after: vec=0x21 curEFLAGS=0x", std::hex, m_cpu.getEFLAGS());
+          }
         LOG_DEBUG("HLE setEFLAGS after: vec=0x", std::hex, (int)vector,
             " curEFLAGS=0x", m_cpu.getEFLAGS());
         m_cpu.setEIP(newIp);

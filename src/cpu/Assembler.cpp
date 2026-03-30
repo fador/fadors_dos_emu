@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cctype>
 #include <sstream>
+#include <iostream>
 #include <unordered_map>
 
 namespace fador::cpu {
@@ -61,7 +62,22 @@ std::vector<Assembler::Token> Assembler::tokenize(const std::string& line) const
         if (c == '*') { toks.push_back({TokKind::Star, "*"}); ++i; continue; }
 
         // Number: hex (0x.., ..h), decimal, or bare hex bytes like '0F' / 'FF'
-        if (std::isdigit(static_cast<unsigned char>(c))) {
+        // Treat as number if it starts with a digit, or if it starts with
+        // two hex digits that are *not* followed by an alpha mnemonic character
+        // (this avoids treating mnemonics like "ADD", "DEC", "CBW" as numbers).
+        bool looksLikeNumber = false;
+        if (std::isdigit(static_cast<unsigned char>(c))) looksLikeNumber = true;
+        else if (std::isxdigit(static_cast<unsigned char>(c)) &&
+                 (i + 1 < line.size()) && std::isxdigit(static_cast<unsigned char>(line[i+1]))) {
+            // Allow if either the token ends after two hex digits, the next
+            // character is non-alpha (space/punct), or it's a hex-suffix 'h/H'.
+            if (i + 2 >= line.size()) looksLikeNumber = true;
+            else {
+                unsigned char third = static_cast<unsigned char>(line[i+2]);
+                if (!std::isalpha(third) || third == 'h' || third == 'H') looksLikeNumber = true;
+            }
+        }
+        if (looksLikeNumber) {
             size_t start = i;
             while (i < line.size() && std::isxdigit(static_cast<unsigned char>(line[i])))
                 ++i;
@@ -512,6 +528,20 @@ AsmResult Assembler::assembleLine(const std::string& line, uint32_t origin) cons
     if (hasOp1 && pos < toks.size() && toks[pos].kind == TokKind::Comma) {
         ++pos; // skip comma
         hasOp2 = parseOperand(toks, pos, op2);
+    }
+
+    // Debugging: print token/operand parse for suspicious mnemonics
+    if (mnem == "CBW" || mnem == "ADD" || mnem == "DEC" || mnem == "CALL") {
+        std::cerr << "ASM_DEBUG: line='" << line << "' mnem=" << mnem << " tokens=[";
+        for (const auto &t : toks) {
+            std::cerr << "(" << static_cast<int>(t.kind) << ":" << t.text << ":" << t.value << "),";
+        }
+        std::cerr << "] pos=" << pos << " hasOp1=" << hasOp1 << " hasOp2=" << hasOp2;
+        if (hasOp1) std::cerr << " op1(kind=" << static_cast<int>(op1.kind) << ",reg=" << int(op1.reg)
+                               << ",imm=" << op1.imm << ",size=" << int(op1.sizeHint) << ")";
+        if (hasOp2) std::cerr << " op2(kind=" << static_cast<int>(op2.kind) << ",reg=" << int(op2.reg)
+                               << ",imm=" << op2.imm << ",size=" << int(op2.sizeHint) << ")";
+        std::cerr << "\n";
     }
 
     // Segment override prefix from operands
@@ -1056,6 +1086,13 @@ AsmResult Assembler::assembleLine(const std::string& line, uint32_t origin) cons
     }();
 
     if (!encodedResult.error.empty()) return encodedResult;
+
+    // Debug: show final encoded bytes for suspicious mnemonics
+    if (mnem == "CBW" || mnem == "ADD" || mnem == "DEC" || mnem == "CALL") {
+        std::cerr << "ASM_DEBUG_ENCODE: mnem=" << mnem << " encoded=[";
+        for (uint8_t b : encodedResult.bytes) std::cerr << std::hex << (int)b << " ";
+        std::cerr << std::dec << "]\n";
+    }
 
     // Prepend prefixes
     result.bytes = prefixes;
