@@ -382,6 +382,18 @@ void InstructionDecoder::step() {
 
   m_instrStartEIP = m_cpu.getEIP();
   uint8_t opcode = fetch8();
+  // Temporary diagnostic: log the next few bytes at the instruction start
+  {
+    // DECODER FETCH instrumentation is noisy; keep it behind an opt-in define.
+#ifdef ENABLE_DECODER_FETCH_LOG
+    uint32_t phys = m_segBase[CS] + m_instrStartEIP;
+    uint8_t b0 = m_memory.read8(phys);
+    uint8_t b1 = m_memory.read8(phys + 1);
+    uint8_t b2 = m_memory.read8(phys + 2);
+    LOG_CPU("DECODER FETCH: CS:EIP=0x", std::hex, m_cpu.getSegReg(CS), ":", m_instrStartEIP,
+            " bytes=", std::hex, static_cast<int>(b0), " ", static_cast<int>(b1), " ", static_cast<int>(b2));
+#endif
+  }
 
   while (true) {
     switch (opcode) {
@@ -529,9 +541,12 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     bool iretStackIs32 = m_cpu.is32BitStack();
     uint32_t iretSP = iretStackIs32 ? m_cpu.getReg32(ESP)
                                     : static_cast<uint32_t>(m_cpu.getReg16(SP));
-    uint32_t iretPhysAddr = m_segBase[SS] + iretSP;
+    uint32_t iretPhysAddr = m_cpu.getSegBase(SS) + iretSP;
 
     bool useIretd = m_hasPrefix66 ^ m_cpu.is32BitCode();
+    LOG_CPU("IRET: iretStackIs32=", iretStackIs32, " iretSP=0x", std::hex,
+            iretSP, " iretPhys=0x", iretPhysAddr, " initialUseIretd=",
+            useIretd);
     {
       auto scoreFrame = [&](uint16_t cs, uint32_t ip, uint32_t flags, bool expect32) -> int {
         if ((cs & ~7) == 0) return -100;
@@ -552,7 +567,9 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
         return score;
       };
 
-      uint32_t currentESP = m_cpu.is32BitStack() ? m_cpu.getReg32(ESP) : m_cpu.getReg16(SP);
+
+      uint32_t currentESP = m_cpu.is32BitStack() ? m_cpu.getReg32(ESP)
+                                                 : m_cpu.getReg16(SP);
       uint32_t ssBase = m_cpu.getSegBase(SS);
 
       uint16_t cs16 = m_memory.read16(ssBase + currentESP + 2);
@@ -566,6 +583,11 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
       int score16 = scoreFrame(cs16, ip16, flags16, false);
       int score32 = scoreFrame(cs32, eip32, flags32, true);
 
+      LOG_DEBUG("IRET scoring: cs16=0x", std::hex, cs16, " ip16=0x", ip16,
+                " flags16=0x", flags16, " score16=", score16,
+                " cs32=0x", cs32, " eip32=0x", eip32, " flags32=0x",
+                flags32, " score32=", score32);
+
       if ((m_cpu.getCR(0) & 1) && m_cpu.getSegReg(CS) == 0x0008) {
         if (score32 > score16 && score32 >= 0) {
           useIretd = true;
@@ -574,27 +596,33 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
         } else if (score16 >= 0 && score32 >= 0 && score16 == score32) {
           useIretd = true;
         }
+        LOG_DEBUG("IRET decision: useIretd=", useIretd);
       }
     }
 
     if (useIretd) {
       // IRETD — pops 32-bit EIP, CS (zero-ext), EFLAGS
       uint32_t esp = m_cpu.getReg32(ESP);
-      uint32_t newEip = m_memory.read32(m_segBase[SS] + esp);
-      uint16_t newCs = m_memory.read32(m_segBase[SS] + esp + 4) & 0xFFFF;
-      uint32_t newEflags = m_memory.read32(m_segBase[SS] + esp + 8);
+      uint32_t ssBaseLocal = m_cpu.getSegBase(SS);
+      uint32_t newEip = m_memory.read32(ssBaseLocal + esp);
+      uint16_t newCs = m_memory.read32(ssBaseLocal + esp + 4) & 0xFFFF;
+      uint32_t newEflags = m_memory.read32(ssBaseLocal + esp + 8);
       uint8_t oldCpl = m_cpu.getSegReg(CS) & 3;
       uint8_t newCpl = newCs & 3;
       bool wasV86 = (m_cpu.getEFLAGS() & 0x00020000) != 0;
       bool isV86 = (newEflags & 0x00020000) != 0;
 
+      LOG_CPU("IRETD: oldEFLAGS=0x", std::hex, m_cpu.getEFLAGS(),
+              " newEFLAGS=0x", newEflags, " newCS=0x", newCs,
+              " newEIP=0x", newEip);
+
       if (!wasV86 && isV86) {
-        uint32_t newEsp = m_memory.read32(m_segBase[SS] + esp + 12);
-        uint16_t newSs = m_memory.read32(m_segBase[SS] + esp + 16) & 0xFFFF;
-        uint16_t newEs = m_memory.read32(m_segBase[SS] + esp + 20) & 0xFFFF;
-        uint16_t newDs = m_memory.read32(m_segBase[SS] + esp + 24) & 0xFFFF;
-        uint16_t newFs = m_memory.read32(m_segBase[SS] + esp + 28) & 0xFFFF;
-        uint16_t newGs = m_memory.read32(m_segBase[SS] + esp + 32) & 0xFFFF;
+        uint32_t newEsp = m_memory.read32(ssBaseLocal + esp + 12);
+        uint16_t newSs = m_memory.read32(ssBaseLocal + esp + 16) & 0xFFFF;
+        uint16_t newEs = m_memory.read32(ssBaseLocal + esp + 20) & 0xFFFF;
+        uint16_t newDs = m_memory.read32(ssBaseLocal + esp + 24) & 0xFFFF;
+        uint16_t newFs = m_memory.read32(ssBaseLocal + esp + 28) & 0xFFFF;
+        uint16_t newGs = m_memory.read32(ssBaseLocal + esp + 32) & 0xFFFF;
 
         m_cpu.setEFLAGS(newEflags);
         m_cpu.setEIP(newEip);
@@ -610,8 +638,8 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
         m_cpu.setEIP(newEip);
         loadSegment(CS, newCs);
         if (newCpl > oldCpl && (m_cpu.getCR(0) & 1)) {
-          uint32_t newEsp = m_memory.read32(m_segBase[SS] + esp + 12);
-          uint16_t newSs = m_memory.read32(m_segBase[SS] + esp + 16) & 0xFFFF;
+          uint32_t newEsp = m_memory.read32(ssBaseLocal + esp + 12);
+          uint16_t newSs = m_memory.read32(ssBaseLocal + esp + 16) & 0xFFFF;
           m_cpu.setReg32(ESP, newEsp);
           loadSegment(SS, newSs);
         } else {
@@ -620,19 +648,25 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
       }
     } else {
       uint16_t sp = m_cpu.getReg16(SP);
-      uint16_t newIp = m_memory.read16(m_segBase[SS] + sp);
-      uint16_t newCs = m_memory.read16(m_segBase[SS] + sp + 2);
-      uint16_t newFlags = m_memory.read16(m_segBase[SS] + sp + 4);
+      uint32_t ssBaseLocal2 = m_cpu.getSegBase(SS);
+      uint16_t newIp = m_memory.read16(ssBaseLocal2 + sp);
+      uint16_t newCs = m_memory.read16(ssBaseLocal2 + sp + 2);
+      uint16_t newFlags = m_memory.read16(ssBaseLocal2 + sp + 4);
       uint8_t oldCpl = m_cpu.getSegReg(CS) & 3;
       uint8_t newCpl = newCs & 3;
 
-      m_cpu.setEFLAGS((m_cpu.getEFLAGS() & 0xFFFF0000) | newFlags);
+      LOG_CPU("IRET (16-bit): oldEFLAGS=0x", std::hex, m_cpu.getEFLAGS(),
+              " newFlags=0x", newFlags, " newCS=0x", newCs,
+              " newIP=0x", newIp);
+
+      uint32_t merged = (m_cpu.getEFLAGS() & 0xFFFF0000) | newFlags;
+      m_cpu.setEFLAGS(merged);
       m_cpu.setEIP(newIp);
       loadSegment(CS, newCs);
 
       if (newCpl > oldCpl && (m_cpu.getCR(0) & 1)) {
-        uint16_t newSp = m_memory.read16(m_segBase[SS] + sp + 6);
-        uint16_t newSs = m_memory.read16(m_segBase[SS] + sp + 8);
+        uint16_t newSp = m_memory.read16(ssBaseLocal2 + sp + 6);
+        uint16_t newSs = m_memory.read16(ssBaseLocal2 + sp + 8);
         m_cpu.setReg16(SP, newSp);
         loadSegment(SS, newSs);
       } else {
@@ -645,7 +679,9 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     //  - Thunk final IRET (original frame address) → match → pop
     // For forwarded interrupts, the 0F FF handler pops via
     // popHLEFrameForVector instead.
-    m_cpu.popHLEFrameByPhysAddr(iretPhysAddr);
+        bool popped = m_cpu.popHLEFrameByPhysAddr(iretPhysAddr);
+        LOG_CPU("IRET popHLEFrameByPhysAddr: addr=0x", std::hex, iretPhysAddr,
+          " popped=", popped, " hleStackSize=", m_cpu.hleStackSize());
     break;
   }
 
@@ -2246,7 +2282,6 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
 
   // Return / Branch
   case 0xC3: { // RET Near
-    uint32_t espBefore = m_cpu.getReg32(ESP);
     uint32_t eip = m_hasPrefix66 ? m_cpu.pop32() : m_cpu.pop16();
     m_cpu.setEIP(eip);
     break;
@@ -2264,7 +2299,6 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
   case 0xCB: { // RETF Far
     uint32_t eip;
     uint16_t cs;
-    uint32_t espBefore = m_cpu.getReg32(ESP);
     if (m_hasPrefix66) {
       eip = m_cpu.pop32();
       cs = static_cast<uint16_t>(m_cpu.pop32() & 0xFFFF);
@@ -3242,11 +3276,15 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
 
   case 0xFF: { // HLE Interrupt Trap (0x0F 0xFF <vector>)
     uint8_t vector = fetch8();
-    LOG_DEBUG("HLE Intercept: INT 0x", std::hex, (int)vector);
-    m_segBase[SS] = m_cpu.getSegBase(SS);
+        LOG_DEBUG("HLE Intercept: INT 0x", std::hex, (int)vector);
+        m_segBase[SS] = m_cpu.getSegBase(SS);
     uint32_t ssBase = m_segBase[SS];
     uint32_t currentESP = m_cpu.is32BitStack() ? m_cpu.getReg32(ESP) : m_cpu.getReg16(SP);
     uint32_t preCurPhys = ssBase + currentESP;
+            LOG_INFO("HLE ENTRY: vec=0x", std::hex, (int)vector,
+              " SSbase=0x", ssBase, " ESP=0x", currentESP);
+
+    
 
     auto hfPeek = m_cpu.peekHLEFrameForVector(vector);
     bool hasTrackedFrame = (hfPeek.framePhysAddr != 0);
@@ -3255,6 +3293,15 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
     if (hasTrackedFrame) {
       isChainCall = (preCurPhys != hfPeek.framePhysAddr);
     }
+
+    // Extra debug: HLE frame / chain decision snapshot
+    LOG_DEBUG("HLE: vec=0x", std::hex, (int)vector,
+          " preCurPhys=0x", preCurPhys,
+          " hfPhys=0x", hfPeek.framePhysAddr,
+          " hasTracked=", hasTrackedFrame ? 1 : 0,
+          " isChainCall=", isChainCall ? 1 : 0);
+    // Capture flags at trap entry before any handlers may modify them
+    uint32_t entryFlags = m_cpu.getEFLAGS();
     bool handled = false;
 
     // First try DOS, then BIOS
@@ -3293,7 +3340,6 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
     }
 
     if (isChainCall) {
-      uint32_t currentFlags = m_cpu.getEFLAGS();
       bool chainIs32 = m_hasPrefix66 ^ m_cpu.is32BitCode();
 
       if (m_cpu.getCR(0) & 1) { // Protected mode
@@ -3326,6 +3372,10 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
         int score16 = scoreFrame(cs16, ip16, flags16, false);
         int score32 = scoreFrame(cs32, eip32, flags32, true);
 
+        LOG_DEBUG("HLE scoring: vec=0x", std::hex, (int)vector,
+                  " score16=", score16, " score32=", score32,
+                  " pref32=", chainIs32 ? 1 : 0);
+
         if (score32 > score16 && score32 >= 0) {
           chainIs32 = true;
         } else if (score16 > score32 && score16 >= 0) {
@@ -3333,8 +3383,16 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
         } else if (score16 >= 0 && score32 >= 0 && score16 == score32) {
           chainIs32 = true;
         }
+
+        LOG_DEBUG("HLE decision: vec=0x", std::hex, (int)vector,
+                  " chainIs32=", chainIs32 ? 1 : 0);
       }
 
+      // Capture flags *after* handlers ran so handlers can set CF/other bits
+      uint32_t afterFlags = m_cpu.getEFLAGS();
+      // Also report entry flags for comparison
+      LOG_DEBUG("HLE FLAGS: vec=0x", std::hex, (int)vector,
+        " entryFlags=0x", entryFlags, " currentFlags=0x", afterFlags);
       uint32_t mask = 0;
       if (handled) {
         mask = FLAG_CARRY | FLAG_ZERO | FLAG_SIGN | FLAG_OVERFLOW |
@@ -3343,13 +3401,45 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
           mask = FLAG_CARRY;
         }
       }
+      // DPMI INT 0x31 semantics require the carry bit to be considered for
+      // merging into the caller's FLAGS even when the handler path reports
+      // 'unhandled' (some DPMI stubs may signal errors by setting CF but
+      // still return control). Ensure CF is always merged for vector 0x31.
+      if (vector == 0x31)
+        mask |= FLAG_CARRY;
+
+      LOG_DEBUG("HLE mask: vec=0x", std::hex, (int)vector,
+        " mask=0x", mask, " handled=", handled ? 1 : 0,
+        " curFlags=0x", afterFlags);
 
       if (chainIs32) {
         uint32_t newEip = m_memory.read32(ssBase + currentESP);
         uint16_t newCs = m_memory.read32(ssBase + currentESP + 4) & 0xFFFF;
         uint32_t popFlags = m_memory.read32(ssBase + currentESP + 8);
-        popFlags = (popFlags & ~mask) | (currentFlags & mask);
+        // For INT 0x31: prefer handler-updated carry if the handler set it;
+        // otherwise preserve the caller's carry (entryFlags). For other
+        // vectors, use the flags after handlers ran so handler changes are
+        // preserved.
+        uint32_t mergeSource32;
+        if (vector == 0x31) {
+          if ((afterFlags & FLAG_CARRY) != 0)
+            mergeSource32 = afterFlags;
+          else
+            mergeSource32 = entryFlags;
+        } else {
+          mergeSource32 = afterFlags;
+        }
+        popFlags = (popFlags & ~mask) | (mergeSource32 & mask);
+        LOG_DEBUG("HLE return32: vec=0x", std::hex, (int)vector,
+          " newEIP=0x", newEip, " newCS=0x", newCs,
+          " popFlags=0x", popFlags,
+          " stackIs32=", m_cpu.is32BitStack() ? 1 : 0,
+          " preSP=0x", currentESP);
+        LOG_DEBUG("HLE setEFLAGS before: vec=0x", std::hex, (int)vector,
+              " curEFLAGS=0x", m_cpu.getEFLAGS());
         m_cpu.setEFLAGS(popFlags);
+        LOG_DEBUG("HLE setEFLAGS after: vec=0x", std::hex, (int)vector,
+              " curEFLAGS=0x", m_cpu.getEFLAGS());
         m_cpu.setEIP(newEip);
         loadSegment(CS, newCs);
         if (m_cpu.is32BitStack())
@@ -3361,8 +3451,23 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
         uint16_t newCs = m_memory.read16(ssBase + currentESP + 2);
         uint16_t popFlags16 = m_memory.read16(ssBase + currentESP + 4);
         uint16_t mask16 = static_cast<uint16_t>(mask);
-        popFlags16 = (popFlags16 & ~mask16) | (static_cast<uint16_t>(currentFlags) & mask16);
-        m_cpu.setEFLAGS((currentFlags & 0xFFFF0000) | popFlags16);
+        uint32_t mergeSource32_for16;
+        if (vector == 0x31) {
+          if ((afterFlags & FLAG_CARRY) != 0)
+            mergeSource32_for16 = afterFlags;
+          else
+            mergeSource32_for16 = entryFlags;
+        } else {
+          mergeSource32_for16 = afterFlags;
+        }
+        uint16_t mergeSource16 = static_cast<uint16_t>(mergeSource32_for16);
+        popFlags16 = (popFlags16 & ~mask16) | (mergeSource16 & mask16);
+        uint32_t merged16 = (mergeSource32_for16 & 0xFFFF0000) | popFlags16;
+        LOG_DEBUG("HLE setEFLAGS before: vec=0x", std::hex, (int)vector,
+            " curEFLAGS=0x", m_cpu.getEFLAGS());
+        m_cpu.setEFLAGS(merged16);
+        LOG_DEBUG("HLE setEFLAGS after: vec=0x", std::hex, (int)vector,
+            " curEFLAGS=0x", m_cpu.getEFLAGS());
         m_cpu.setEIP(newIp);
         loadSegment(CS, newCs);
         if (m_cpu.is32BitStack())
@@ -3371,14 +3476,25 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
           m_cpu.setReg16(SP, static_cast<uint16_t>(currentESP + 6));
       }
 
-      if (handled && hasTrackedFrame) {
-        m_cpu.popHLEFrameByPhysAddr(hfPeek.framePhysAddr);
-      }
+        if (handled && hasTrackedFrame) {
+          bool popped = m_cpu.popHLEFrameByPhysAddr(hfPeek.framePhysAddr);
+          LOG_DEBUG("HLE popByPhys: vec=0x", std::hex, (int)vector,
+                    " phys=0x", hfPeek.framePhysAddr,
+                    " popped=", popped ? 1 : 0,
+                    " newHleSize=", m_cpu.hleStackSize());
+        }
     } else {
       auto hf = m_cpu.popHLEFrameForVector(vector);
+      LOG_DEBUG("HLE popForVector: vec=0x", std::hex, (int)vector,
+            " returnedPhys=0x", hf.framePhysAddr,
+            " hfSP=0x", hf.frameSP,
+            " hfIs32=", hf.is32 ? 1 : 0,
+            " hfStackIs32=", hf.stackIs32 ? 1 : 0,
+            " newHleSize=", m_cpu.hleStackSize());
+
       if (hf.framePhysAddr != 0) {
         uint32_t frameAddr = hf.framePhysAddr;
-        uint32_t currentFlags = m_cpu.getEFLAGS();
+        uint32_t afterFlags = m_cpu.getEFLAGS();
         uint32_t mask = 0;
         if (handled) {
           mask = FLAG_CARRY | FLAG_ZERO | FLAG_SIGN | FLAG_OVERFLOW |
@@ -3389,8 +3505,21 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
           uint32_t newEip = m_memory.read32(frameAddr);
           uint16_t newCs = m_memory.read32(frameAddr + 4) & 0xFFFF;
           uint32_t popFlags = m_memory.read32(frameAddr + 8);
-          popFlags = (popFlags & ~mask) | (currentFlags & mask);
+          uint32_t mergeSrc;
+          if (vector == 0x31) {
+            if ((afterFlags & FLAG_CARRY) != 0)
+              mergeSrc = afterFlags;
+            else
+              mergeSrc = entryFlags;
+          } else {
+            mergeSrc = afterFlags;
+          }
+          popFlags = (popFlags & ~mask) | (mergeSrc & mask);
+          LOG_DEBUG("HLE setEFLAGS before: hf.vec=0x", std::hex, (int)vector,
+                    " curEFLAGS=0x", afterFlags, " framePhys=0x", frameAddr);
           m_cpu.setEFLAGS(popFlags);
+          LOG_DEBUG("HLE setEFLAGS after: hf.vec=0x", std::hex, (int)vector,
+                    " curEFLAGS=0x", m_cpu.getEFLAGS(), " framePhys=0x", frameAddr);
           m_cpu.setEIP(newEip);
           loadSegment(CS, newCs);
           if (hf.stackIs32)
@@ -3401,8 +3530,23 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
           uint16_t newIp = m_memory.read16(frameAddr);
           uint16_t newCs = m_memory.read16(frameAddr + 2);
           uint16_t popFlags = m_memory.read16(frameAddr + 4);
-          popFlags = (static_cast<uint16_t>(popFlags) & static_cast<uint16_t>(~mask)) | (static_cast<uint16_t>(currentFlags) & static_cast<uint16_t>(mask));
-          m_cpu.setEFLAGS((currentFlags & 0xFFFF0000) | popFlags);
+          uint32_t mergeSrc32;
+          if (vector == 0x31) {
+            if ((afterFlags & FLAG_CARRY) != 0)
+              mergeSrc32 = afterFlags;
+            else
+              mergeSrc32 = entryFlags;
+          } else {
+            mergeSrc32 = afterFlags;
+          }
+          uint16_t mergeSrc16 = static_cast<uint16_t>(mergeSrc32);
+          popFlags = (static_cast<uint16_t>(popFlags) & static_cast<uint16_t>(~mask)) | (mergeSrc16 & static_cast<uint16_t>(mask));
+          uint32_t merged = (mergeSrc32 & 0xFFFF0000) | popFlags;
+          LOG_DEBUG("HLE setEFLAGS before: hf.vec=0x", std::hex, (int)vector,
+                    " curEFLAGS=0x", m_cpu.getEFLAGS(), " framePhys=0x", frameAddr);
+          m_cpu.setEFLAGS(merged);
+          LOG_DEBUG("HLE setEFLAGS after: hf.vec=0x", std::hex, (int)vector,
+                    " curEFLAGS=0x", m_cpu.getEFLAGS(), " framePhys=0x", frameAddr);
           m_cpu.setEIP(newIp);
           loadSegment(CS, newCs);
           m_cpu.setReg16(SP, static_cast<uint16_t>(hf.frameSP + 6));

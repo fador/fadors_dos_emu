@@ -1,5 +1,6 @@
 #pragma once
 #include <iostream>
+#include <cstdlib>
 #include <vector>
 #include <string>
 #include <stdexcept>
@@ -49,6 +50,8 @@ struct SectionScope {
 };
 
 inline int run_all_tests() {
+    const char* envFilter = std::getenv("TEST_FILTER");
+    std::string testFilter = envFilter ? std::string(envFilter) : std::string();
     int passed = 0;
     int failed = 0;
     auto& tests = get_tests();
@@ -58,6 +61,10 @@ inline int run_all_tests() {
     std::cout << "===============================================================" << std::endl;
 
     for (auto& test : tests) {
+        if (!testFilter.empty()) {
+            if (std::string(test.name).find(testFilter) == std::string::npos)
+                continue;
+        }
         std::cout << "[ RUN      ] " << test.name << std::endl;
         std::set<std::string> local_executed;
         bool te_failed = false;

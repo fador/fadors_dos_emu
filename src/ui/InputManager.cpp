@@ -179,6 +179,8 @@ void InputManager::handleKey(int key, bool pressed) {
     uint8_t scancode = 0;
     uint8_t ascii = 0;
 
+    LOG_DEBUG("InputManager::handleKey key=", key, " pressed=", pressed);
+
     // Full ASCII-to-PC/XT scancode mapping
     switch (key) {
         case 27:            scancode = 0x01; ascii = 27;  break; // ESC
@@ -274,6 +276,8 @@ void InputManager::handleKey(int key, bool pressed) {
 
     if (scancode != 0 && pressed) {
         bool extended = (key >= 0x100); // extended keys have 0x100 flag
+        LOG_DEBUG("InputManager: mapped -> scancode=0x", std::hex, (int)scancode,
+                  " ascii=0x", std::hex, (int)ascii, " extended=", extended);
         auto it = m_heldKeys.find(scancode);
         if (it != m_heldKeys.end()) {
             // Key is already held — just refresh the timestamp.

@@ -60,7 +60,7 @@ std::vector<Assembler::Token> Assembler::tokenize(const std::string& line) const
         if (c == '-') { toks.push_back({TokKind::Minus, "-"}); ++i; continue; }
         if (c == '*') { toks.push_back({TokKind::Star, "*"}); ++i; continue; }
 
-        // Number: hex (0x.., ..h), decimal
+        // Number: hex (0x.., ..h), decimal, or bare hex bytes like '0F' / 'FF'
         if (std::isdigit(static_cast<unsigned char>(c))) {
             size_t start = i;
             while (i < line.size() && std::isxdigit(static_cast<unsigned char>(line[i])))
@@ -68,11 +68,25 @@ std::vector<Assembler::Token> Assembler::tokenize(const std::string& line) const
             std::string numStr = line.substr(start, i - start);
             uint32_t val = 0;
             bool isHex = false;
+            // Handle explicit hex suffix 'h' (e.g., 0Ah)
             if (i < line.size() && (line[i] == 'h' || line[i] == 'H')) {
                 isHex = true; ++i;
-            } else if (numStr.size() > 2 && numStr[0] == '0' && (numStr[1] == 'x' || numStr[1] == 'X')) {
+            }
+            // 0x prefix inside the token (e.g., 0x1A)
+            else if (numStr.size() > 2 && numStr[0] == '0' && (numStr[1] == 'x' || numStr[1] == 'X')) {
                 isHex = true;
                 numStr = numStr.substr(2);
+            }
+            // Treat short tokens (1-2 hex digits) as hex bytes (e.g., '0F', '21'),
+            // otherwise if token contains any hex letter (A-F) treat as hex.
+            else {
+                if (numStr.size() <= 2) {
+                    isHex = true;
+                } else {
+                    for (char ch : numStr) {
+                        if (std::isalpha(static_cast<unsigned char>(ch))) { isHex = true; break; }
+                    }
+                }
             }
             if (isHex) val = std::stoul(numStr, nullptr, 16);
             else val = std::stoul(numStr, nullptr, 10);
@@ -451,15 +465,45 @@ AsmResult Assembler::assembleLine(const std::string& line, uint32_t origin) cons
     if (pos >= toks.size() || toks[pos].kind == TokKind::Eol) return result;
 
     std::string mnem;
+    // Allow size tokens (DB/DW/DD) and bare byte sequences (e.g. "0F FF 21")
     if (toks[pos].kind == TokKind::Ident) {
         mnem = toks[pos].text;
         ++pos;
+    } else if (toks[pos].kind == TokKind::SizeBytePtr) {
+        mnem = "DB";
+        ++pos;
+    } else if (toks[pos].kind == TokKind::SizeWord) {
+        mnem = "DW";
+        ++pos;
+    } else if (toks[pos].kind == TokKind::SizeDwordPtr) {
+        mnem = "DD";
+        ++pos;
+    } else if (toks[pos].kind == TokKind::Imm) {
+        // Bare byte sequence shorthand
+        mnem = "DB";
     } else {
         result.error = "Expected mnemonic";
         return result;
     }
 
-    // Parse up to 2 operands
+    // Special-case data directives: parse successive immediate tokens
+    if (mnem == "DB" || mnem == "DW" || mnem == "DD") {
+        while (pos < toks.size() && toks[pos].kind != TokKind::Eol) {
+            if (toks[pos].kind == TokKind::Comma) { ++pos; continue; }
+            if (toks[pos].kind == TokKind::Imm) {
+                if (mnem == "DB") result.bytes.push_back(static_cast<uint8_t>(toks[pos].value));
+                else if (mnem == "DW") emitImm16(result.bytes, toks[pos].value);
+                else if (mnem == "DD") emitImm32(result.bytes, toks[pos].value);
+                ++pos;
+                continue;
+            }
+            // Unknown token in data directive — skip it
+            ++pos;
+        }
+        return result;
+    }
+
+    // Parse up to 2 operands for non-data mnemonics
     Operand op1, op2;
     bool hasOp1 = false, hasOp2 = false;
     if (pos < toks.size() && toks[pos].kind != TokKind::Eol) {
@@ -476,23 +520,6 @@ AsmResult Assembler::assembleLine(const std::string& line, uint32_t origin) cons
         static const uint8_t segPrefixes[] = {0x26, 0x2E, 0x36, 0x3E, 0x64, 0x65};
         if (memOp.segReg < 6)
             prefixes.push_back(segPrefixes[memOp.segReg]);
-    }
-
-    // ── DB (data bytes) ──
-    if (mnem == "DB") {
-        if (hasOp1 && op1.kind == OpKind::Imm) {
-            result.bytes.push_back(static_cast<uint8_t>(op1.imm));
-        }
-        // Handle comma-separated bytes: already parsed op2
-        if (hasOp2 && op2.kind == OpKind::Imm) {
-            result.bytes.push_back(static_cast<uint8_t>(op2.imm));
-        }
-        return result;
-    }
-    if (mnem == "DW") {
-        if (hasOp1 && op1.kind == OpKind::Imm) emitImm16(result.bytes, op1.imm);
-        if (hasOp2 && op2.kind == OpKind::Imm) emitImm16(result.bytes, op2.imm);
-        return result;
     }
 
     // ── Encode instruction ──

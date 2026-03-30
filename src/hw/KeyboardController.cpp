@@ -81,10 +81,14 @@ void KeyboardController::pushKeyWithBreak(uint8_t ascii, uint8_t scancode) {
   m_hwScanBuffer.push(static_cast<uint8_t>(scancode | 0x80));
   ++m_pendingIRQCount;
   // Also push to BIOS buffer so INT 16h still works
+  LOG_DEBUG("KBD: pushKeyWithBreak sc=0x", std::hex, (int)scancode,
+            " ascii=0x", std::hex, (int)ascii);
   m_keyBuffer.push({ascii, scancode});
 }
 
 void KeyboardController::pushMakeKey(uint8_t ascii, uint8_t scancode) {
+  LOG_DEBUG("KBD: pushMakeKey sc=0x", std::hex, (int)scancode,
+            " ascii=0x", std::hex, (int)ascii);
   m_hwScanBuffer.push(scancode);
   m_status |= 0x01;
   ++m_pendingIRQCount;
@@ -107,6 +111,8 @@ void KeyboardController::pushMakeKeyExtended(uint8_t ascii, uint8_t scancode) {
   m_status |= 0x01;
   ++m_pendingIRQCount;
   // Also push to BIOS buffer for INT 16h
+  LOG_DEBUG("KBD: pushMakeKeyExtended sc=0x", std::hex, (int)scancode,
+            " ascii=0x", std::hex, (int)ascii);
   m_keyBuffer.push({ascii, scancode});
 }
 

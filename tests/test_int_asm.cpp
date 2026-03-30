@@ -521,8 +521,8 @@ TEST_CASE("0F FF INT 21h handled by DOS uses chain-return semantics", "[int][asm
     e.cpu.setReg8(cpu::AH, 0x02);
     e.cpu.setReg8(cpu::DL, 'X');
 
-    // Assemble HLE_INT 21h at CS:IP
-    e.assemble("HLE_INT 21h");
+    // Assemble 0F FF 21 at CS:IP
+    e.assemble("0F FF 21");
 
     REQUIRE(e.cpu.hleStackSize() == 0);
     e.run(1); // execute the HLE trap
@@ -564,8 +564,8 @@ TEST_CASE("0F FF INT 21h pops tracked HLE frame when framePhysAddr matches", "[i
     e.cpu.setReg8(cpu::AH, 0x02);
     e.cpu.setReg8(cpu::DL, 'Z');
 
-    // Assemble HLE_INT 21h at CS:IP
-    e.assemble("HLE_INT 21h");
+    // Assemble 0F FF 21 at CS:IP
+    e.assemble("0F FF 21");
 
     REQUIRE(e.cpu.hleStackSize() == 1);
     e.run(1); // execute the HLE trap

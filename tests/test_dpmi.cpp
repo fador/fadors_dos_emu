@@ -40,6 +40,7 @@ struct DPMITestEnv {
         dos.initialize();
 
         dpmi.setDOS(&dos);
+        dos.setDPMI(&dpmi);
         dpmi.setBIOS(&bios);
         dpmi.setHIMEM(&himem);
         himem.setMemoryBus(&mem);
@@ -1350,6 +1351,64 @@ TEST_CASE("DPMI 0204h returns m_pmVectors even when IDT was not written", "[dpmi
         REQUIRE(env.cpu.getReg16(cpu::CX)  == 0x008F);
         REQUIRE(env.cpu.getReg32(cpu::EDX) == 0x00100000u + vec);
     }
+}
+
+TEST_CASE("HLE 0F FF chain merges only carry for INT 0x31", "[dpmi][hle][mask]") {
+    DPMITestEnv env;
+    hw::IOBus iobus;
+    cpu::InstructionDecoder decoder(env.cpu, env.mem, iobus, env.bios, env.dos);
+
+    // Let the DPMI host know about a wrapper for INT 0x31 so m_dos.handleInterrupt
+    // will dispatch into DPMI and 'handled' becomes true inside the HLE path.
+    env.cpu.setReg16(cpu::AX, 0x0205);
+    env.cpu.setReg8(cpu::BL, 0x31);
+    env.cpu.setReg16(cpu::CX, 0x008F);
+    env.cpu.setReg32(cpu::EDX, 0x000000C4);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+
+    // Prepare a tracked HLE frame (original IRET) at a different SP than the
+    // chain caller's IRET frame so the handler takes the "chain" path.
+    uint32_t ssBase = env.cpu.getSegBase(cpu::SS);
+    uint32_t espBase = env.cpu.getReg32(cpu::ESP);
+    uint32_t spTracked = espBase - 0x200;
+    uint32_t spChain = espBase - 0x100;
+
+    env.cpu.pushHLEFrame(true, 0x31);
+    auto &hf = env.cpu.lastHLEFrameMut();
+    hf.framePhysAddr = ssBase + spTracked;
+    hf.frameSP = spTracked;
+    hf.stackIs32 = true;
+
+    // Write the chained IRET-like frame at the current ESP location that the
+    // 0F FF handler will read: [newEIP(32), newCS(32), popFlags(32)].
+    uint32_t newEip = 0x00000918u;
+    uint32_t newCs = env.cpu.getSegReg(cpu::CS); // use a known-valid selector
+    uint32_t popFlagsVal = cpu::FLAG_ZERO | cpu::FLAG_SIGN; // 0x40 | 0x80
+    env.mem.write32(ssBase + spChain, newEip);
+    env.mem.write32(ssBase + spChain + 4, newCs);
+    env.mem.write32(ssBase + spChain + 8, popFlagsVal);
+
+    // Set CPU to the chain caller's SP and current flags (carry set)
+    env.cpu.setReg32(cpu::ESP, spChain);
+    env.cpu.setEFLAGS(cpu::FLAG_CARRY);
+
+    // Place the HLE trap instruction at CS:EIP and execute it
+    uint32_t codePhys = env.cpu.getSegBase(cpu::CS) + env.cpu.getEIP();
+    env.mem.write8(codePhys, 0x0F);
+    env.mem.write8(codePhys + 1, 0xFF);
+    env.mem.write8(codePhys + 2, 0x31);
+
+    decoder.step();
+
+    // After the chain return, the CPU should have been set to newEIP/newCS
+    // and EFLAGS should equal the stored popFlags with only the carry bit
+    // merged from the current flags (mask == FLAG_CARRY for vec=0x31).
+    uint32_t expected = popFlagsVal | cpu::FLAG_CARRY;
+    REQUIRE(env.cpu.getEIP() == newEip);
+    REQUIRE(env.cpu.getSegReg(cpu::CS) == static_cast<uint16_t>(newCs & 0xFFFFu));
+    REQUIRE((env.cpu.getEFLAGS() & 0xFFFFu) == (expected & 0xFFFFu));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

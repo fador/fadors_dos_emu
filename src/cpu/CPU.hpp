@@ -110,10 +110,33 @@ public:
   // by thunks (no forwarding to the 0F FF stub).
   // Returns true if a frame was found and popped.
   bool popHLEFrameByPhysAddr(uint32_t physAddr) {
+    // First try exact match (fast path)
     for (auto it = m_hleStack.rbegin(); it != m_hleStack.rend(); ++it) {
       if (it->framePhysAddr == physAddr) {
         m_hleStack.erase(std::prev(it.base()));
         return true;
+      }
+    }
+
+    // Fallback: tolerate small offsets between recorded frame address
+    // and observed IRET/SP-derived address. Small differences can occur
+    // when privilege-change stack words are pushed or when stack
+    // width interpretation varies; prefer not to disturb frames that
+    // are clearly distinct (use a small tolerance).
+    constexpr uint32_t TOLERANCE = 12; // bytes
+    for (auto it = m_hleStack.rbegin(); it != m_hleStack.rend(); ++it) {
+      uint32_t a = it->framePhysAddr;
+      uint32_t b = physAddr;
+      if (a >= b) {
+        if (a - b <= TOLERANCE) {
+          m_hleStack.erase(std::prev(it.base()));
+          return true;
+        }
+      } else {
+        if (b - a <= TOLERANCE) {
+          m_hleStack.erase(std::prev(it.base()));
+          return true;
+        }
       }
     }
     return false;
