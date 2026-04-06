@@ -89,6 +89,9 @@ public:
     uint32_t frameSP;       // SP/ESP value at push time (for restoring)
     bool stackIs32;         // Whether stack was 32-bit at push time
     uint8_t vector;         // Interrupt vector that created this frame
+    bool dpmiStackSwitch = false; // Reflection stack was used
+    uint32_t origESP = 0;        // Caller's original ESP before switch
+    uint16_t origSS = 0;         // Caller's original SS before switch
   };
 
   bool isLastInt32() const {
@@ -97,7 +100,7 @@ public:
   const HLEFrame &lastHLEFrame() const { return m_hleStack.back(); }
   HLEFrame &lastHLEFrameMut() { return m_hleStack.back(); }
   void pushHLEFrame(bool is32, uint8_t vector = 0xFF) {
-    m_hleStack.push_back({is32, 0, 0, false, vector});
+    m_hleStack.push_back({is32, 0, 0, false, vector, false, 0, 0});
   }
   void popHLEFrame() {
     if (!m_hleStack.empty())
@@ -110,11 +113,19 @@ public:
   // by thunks (no forwarding to the 0F FF stub).
   // Returns true if a frame was found and popped.
   bool popHLEFrameByPhysAddr(uint32_t physAddr) {
+    auto f = popAndGetHLEFrameByPhysAddr(physAddr);
+    return f.framePhysAddr != 0;
+  }
+
+  // Pop an HLE frame whose framePhysAddr matches the given address and
+  // return a copy. Returns a frame with framePhysAddr==0 if not found.
+  HLEFrame popAndGetHLEFrameByPhysAddr(uint32_t physAddr) {
     // First try exact match (fast path)
     for (auto it = m_hleStack.rbegin(); it != m_hleStack.rend(); ++it) {
       if (it->framePhysAddr == physAddr) {
+        HLEFrame result = *it;
         m_hleStack.erase(std::prev(it.base()));
-        return true;
+        return result;
       }
     }
 
@@ -129,24 +140,28 @@ public:
       uint32_t b = physAddr;
       if (a >= b) {
         if (a - b <= TOLERANCE) {
+          HLEFrame result = *it;
           m_hleStack.erase(std::prev(it.base()));
-          return true;
+          return result;
         }
       } else {
         if (b - a <= TOLERANCE) {
+          HLEFrame result = *it;
           m_hleStack.erase(std::prev(it.base()));
-          return true;
+          return result;
         }
       }
     }
-    return false;
+    return {false, 0, 0, false, 0xFF, false, 0, 0};
   }
 
   // Find and remove the most recent HLE frame for the given vector.
   // Returns a copy of the frame, or a default frame if not found.
+  // Skips frames with dpmiStackSwitch=true — those belong to the outer
+  // interrupt dispatch and should only be consumed by the IRET handler.
   HLEFrame popHLEFrameForVector(uint8_t vector) {
     for (auto it = m_hleStack.rbegin(); it != m_hleStack.rend(); ++it) {
-      if (it->vector == vector) {
+      if (it->vector == vector && !it->dpmiStackSwitch) {
         HLEFrame result = *it;
         // Erase all frames from this one to the end (orphans above it)
         m_hleStack.erase(std::prev(it.base()), m_hleStack.end());
@@ -154,16 +169,17 @@ public:
       }
     }
     // Not found — return default
-    return {false, 0, 0, false, vector};
+    return {false, 0, 0, false, vector, false, 0, 0};
   }
 
   // Peek at the most recent HLE frame for a given vector (non-destructive).
+  // Skips dpmiStackSwitch frames (see popHLEFrameForVector).
   HLEFrame peekHLEFrameForVector(uint8_t vector) const {
     for (auto it = m_hleStack.rbegin(); it != m_hleStack.rend(); ++it) {
-      if (it->vector == vector)
+      if (it->vector == vector && !it->dpmiStackSwitch)
         return *it;
     }
-    return {false, 0, 0, false, vector};
+    return {false, 0, 0, false, vector, false, 0, 0};
   }
 
   // Stack operations
