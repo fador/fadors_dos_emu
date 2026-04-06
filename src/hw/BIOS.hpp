@@ -12,11 +12,12 @@ namespace fador::memory { class HIMEM; }
 namespace fador::hw {
 
 class KeyboardController;
+class PIC8259;
 class PIT8254;
 
 class BIOS {
 public:
-    BIOS(cpu::CPU& cpu, memory::MemoryBus& memory, KeyboardController& kbd, PIT8254& pit);
+    BIOS(cpu::CPU& cpu, memory::MemoryBus& memory, KeyboardController& kbd, PIT8254& pit, PIC8259& pic);
     ~BIOS() = default;
 
     // Returns true if the interrupt was handled by HLE
@@ -72,6 +73,7 @@ private:
     memory::MemoryBus& m_memory;
     KeyboardController& m_kbd;
     PIT8254& m_pit;
+    PIC8259& m_pic;
 
 
     // Simple Floppy emulation (1.44MB)

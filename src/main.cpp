@@ -62,7 +62,7 @@ int main(int argc, char *argv[]) {
     kbd.setMemoryBus(&memory);
     fador::cpu::CPU cpu;
     fador::hw::DOS dos(cpu, memory);
-    fador::hw::BIOS bios(cpu, memory, kbd, pit);
+    fador::hw::BIOS bios(cpu, memory, kbd, pit, pic);
 
     joystick.setCPU(&cpu);
 

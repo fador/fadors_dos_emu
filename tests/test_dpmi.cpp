@@ -10,6 +10,7 @@
 #include "memory/himem/HIMEM.hpp"
 #include "hw/DPMI.hpp"
 #include "hw/IOBus.hpp"
+#include "hw/PIC8259.hpp"
 #include "hw/BIOS.hpp"
 #include "hw/DOS.hpp"
 #include "hw/KeyboardController.hpp"
@@ -24,6 +25,7 @@ struct DPMITestEnv {
     memory::MemoryBus mem;
     hw::KeyboardController kbd;
     hw::PIT8254 pit;
+    hw::PIC8259 pic{true};
     hw::DOS dos;
     hw::BIOS bios;
     memory::HIMEM himem;
@@ -33,7 +35,7 @@ struct DPMITestEnv {
     static constexpr uint32_t SCRATCH_ADDR = 0x20000;
 
     DPMITestEnv()
-        : dos(cpu, mem), bios(cpu, mem, kbd, pit),
+        : dos(cpu, mem), bios(cpu, mem, kbd, pit, pic),
           dpmi(cpu, mem)
     {
         bios.initialize();
@@ -119,7 +121,8 @@ TEST_CASE("DPMI entry switches to protected mode", "[dpmi][entry]") {
     hw::KeyboardController kbd;
     hw::PIT8254 pit;
     hw::DOS dos(cpu, mem);
-    hw::BIOS bios(cpu, mem, kbd, pit);
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
     hw::DPMI dpmi(cpu, mem);
 
     bios.initialize();
@@ -173,7 +176,8 @@ TEST_CASE("DPMI double entry fails with carry", "[dpmi][entry]") {
     memory::MemoryBus mem;
     hw::KeyboardController kbd;
     hw::PIT8254 pit;
-    hw::BIOS bios(cpu, mem, kbd, pit);
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
     hw::DOS dos(cpu, mem);
     hw::DPMI dpmi(cpu, mem);
     bios.initialize();
@@ -1420,7 +1424,8 @@ TEST_CASE("isOriginalIVT returns true only for original HLE stub addresses", "[b
     memory::MemoryBus mem;
     hw::KeyboardController kbd;
     hw::PIT8254 pit;
-    hw::BIOS bios(cpu, mem, kbd, pit);
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
     bios.initialize();
 
     constexpr uint8_t vec = 0x21;

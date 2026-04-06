@@ -3,6 +3,7 @@
 #include "cpu/InstructionDecoder.hpp"
 #include "memory/MemoryBus.hpp"
 #include "hw/IOBus.hpp"
+#include "hw/PIC8259.hpp"
 #include "hw/BIOS.hpp"
 #include "hw/DOS.hpp"
 #include "hw/KeyboardController.hpp"
@@ -17,7 +18,8 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
     hw::KeyboardController kbd;
     hw::PIT8254 pit;
     hw::DOS dos(cpu, mem);
-    hw::BIOS bios(cpu, mem, kbd, pit);
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
     bios.initialize();
     dos.initialize();
     cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);

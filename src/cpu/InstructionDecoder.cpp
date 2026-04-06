@@ -3694,6 +3694,36 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
   default:
     LOG_WARN("0x0F 0x", std::hex, static_cast<int>(opcode),
              " not implemented. Generating #UD INT 6.");
+    {
+      static int s_udCount = 0;
+      if (s_udCount < 1) {
+        ++s_udCount;
+        uint32_t csBase = m_cpu.getSegBase(CS);
+        uint32_t physAddr = csBase + m_instrStartEIP;
+        // Read CS descriptor from LDT
+        uint16_t sel = m_cpu.getSegReg(CS);
+        bool isLDT2 = (sel & 4) != 0;
+        uint16_t idx2 = sel >> 3;
+        uint32_t descAddr2 = isLDT2 ? m_cpu.getLDTR().base + idx2 * 8
+                                     : m_cpu.getGDTR().base + idx2 * 8;
+        uint32_t dLow2 = m_memory.read32(descAddr2);
+        uint32_t dHigh2 = m_memory.read32(descAddr2 + 4);
+        uint32_t descBase2 = (dLow2 >> 16) | ((dHigh2 & 0xFF) << 16) | (dHigh2 & 0xFF000000);
+        LOG_ERROR("UD-DIAG: CS=0x", std::hex, sel,
+                  " cached_base=0x", csBase,
+                  " desc_base=0x", descBase2,
+                  " EIP=0x", m_instrStartEIP);
+        char buf2[256];
+        int n2 = snprintf(buf2, sizeof(buf2), "  bytes @cached+EIP=0x%08X:", (unsigned)physAddr);
+        for (int bi = 0; bi < 16; ++bi)
+          n2 += snprintf(buf2 + n2, sizeof(buf2) - n2, " %02X", m_memory.read8(physAddr + bi));
+        LOG_ERROR(buf2);
+        n2 = snprintf(buf2, sizeof(buf2), "  bytes @desc+EIP=0x%08X:", (unsigned)(descBase2 + m_instrStartEIP));
+        for (int bi = 0; bi < 16; ++bi)
+          n2 += snprintf(buf2 + n2, sizeof(buf2) - n2, " %02X", m_memory.read8(descBase2 + m_instrStartEIP + bi));
+        LOG_ERROR(buf2);
+      }
+    }
     // Generate Invalid Opcode Exception.
     // Rewind EIP to the start of the instruction (including any prefixes)
     // so the faulting address pushed on the stack is correct.
@@ -3889,6 +3919,15 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
 }
 
 void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
+  // HLE fast-path: if the BIOS can handle this vector entirely in HLE,
+  // just call the handler and skip the full interrupt dispatch.
+  // This avoids dispatching through the DOS/4GW thunk for simple vectors
+  // like the timer tick (INT 8) where the thunk would chain back to our
+  // BIOS handler anyway.
+  if (m_bios.handleInterrupt(vector)) {
+    return;
+  }
+
   uint16_t cs;
   uint32_t eip32;
   bool use32 = false;

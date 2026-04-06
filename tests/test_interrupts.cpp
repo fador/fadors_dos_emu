@@ -3,6 +3,7 @@
 #include "cpu/InstructionDecoder.hpp"
 #include "memory/MemoryBus.hpp"
 #include "hw/IOBus.hpp"
+#include "hw/PIC8259.hpp"
 #include "hw/BIOS.hpp"
 #include "hw/DOS.hpp"
 #include "hw/DPMI.hpp"
@@ -18,7 +19,8 @@ TEST_CASE("CPU Interrupt Pipeline", "[Interrupts]") {
     hw::KeyboardController kbd;
     hw::PIT8254 pit;
     hw::DOS dos(cpu, mem);
-    hw::BIOS bios(cpu, mem, kbd, pit);
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
     bios.initialize();
     dos.initialize();
     cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
@@ -78,7 +80,8 @@ TEST_CASE("IRET in HLE stub infers 16-bit return frame width", "[Interrupts][IRE
     hw::KeyboardController kbd;
     hw::PIT8254 pit;
     hw::DOS dos(cpu, mem);
-    hw::BIOS bios(cpu, mem, kbd, pit);
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
     bios.initialize();
     dos.initialize();
     cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
@@ -143,7 +146,8 @@ TEST_CASE("0F FF handled interrupt without tracked frame uses chain-return frame
     hw::KeyboardController kbd;
     hw::PIT8254 pit;
     hw::DOS dos(cpu, mem);
-    hw::BIOS bios(cpu, mem, kbd, pit);
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
     bios.initialize();
     dos.initialize();
     cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
@@ -185,7 +189,8 @@ TEST_CASE("0F FF INT 31h chain path merges only CF into caller flags", "[Interru
     hw::KeyboardController kbd;
     hw::PIT8254 pit;
     hw::DOS dos(cpu, mem);
-    hw::BIOS bios(cpu, mem, kbd, pit);
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
     hw::DPMI dpmi(cpu, mem);
     hw::IOBus iobus;
 
@@ -246,7 +251,8 @@ TEST_CASE("0F FF chain width falls back to CS at ESP+4", "[Interrupts][Chain][IR
     hw::KeyboardController kbd;
     hw::PIT8254 pit;
     hw::DOS dos(cpu, mem);
-    hw::BIOS bios(cpu, mem, kbd, pit);
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
     bios.initialize();
     dos.initialize();
     cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
@@ -315,7 +321,8 @@ TEST_CASE("IRET infers 16-bit synthetic frame width with FLAGS=0x0000", "[Interr
     hw::KeyboardController kbd;
     hw::PIT8254 pit;
     hw::DOS dos(cpu, mem);
-    hw::BIOS bios(cpu, mem, kbd, pit);
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
     bios.initialize();
     dos.initialize();
     cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
@@ -376,7 +383,8 @@ TEST_CASE("IRETD infers 32-bit synthetic frame width with EFLAGS=0x00000000", "[
     hw::KeyboardController kbd;
     hw::PIT8254 pit;
     hw::DOS dos(cpu, mem);
-    hw::BIOS bios(cpu, mem, kbd, pit);
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
     bios.initialize();
     dos.initialize();
     cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
@@ -437,7 +445,8 @@ TEST_CASE("0F FF chain infers 16-bit synthetic frame with FLAGS=0x0000", "[Inter
     hw::KeyboardController kbd;
     hw::PIT8254 pit;
     hw::DOS dos(cpu, mem);
-    hw::BIOS bios(cpu, mem, kbd, pit);
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
     bios.initialize();
     dos.initialize();
     cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
@@ -503,7 +512,8 @@ TEST_CASE("Interrupt Chaining: HLE stub returns to chain caller", "[Interrupts][
     hw::KeyboardController kbd;
     hw::PIT8254 pit;
     hw::DOS dos(cpu, mem);
-    hw::BIOS bios(cpu, mem, kbd, pit);
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
     bios.initialize();
     dos.initialize();
     cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);

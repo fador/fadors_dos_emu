@@ -62,8 +62,15 @@ int PIC8259::getPendingInterrupt() {
     uint8_t pending = m_request & ~m_mask;
     if (pending == 0) return -1;
     
+    // Fully nested mode: only deliver if no equal-or-higher-priority IRQ
+    // is already in service (lower IRQ number = higher priority).
     for (int i = 0; i < 8; ++i) {
-        if (pending & (1 << i)) return m_baseVector + i;
+        if (pending & (1 << i)) {
+            uint8_t higherOrEqualMask = static_cast<uint8_t>((1u << (i + 1)) - 1);
+            if (m_service & higherOrEqualMask)
+                return -1;
+            return m_baseVector + i;
+        }
     }
     return -1;
 }

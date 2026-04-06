@@ -11,6 +11,7 @@
 #include "utils/Logger.hpp"
 #include "memory/MemoryBus.hpp"
 #include "hw/IOBus.hpp"
+#include "hw/PIC8259.hpp"
 #include "hw/BIOS.hpp"
 #include "hw/DOS.hpp"
 #include "hw/KeyboardController.hpp"
@@ -25,6 +26,7 @@ struct IntTestEnv {
     hw::IOBus iobus;
     hw::KeyboardController kbd;
     hw::PIT8254 pit;
+    hw::PIC8259 pic{true};
     hw::DOS dos;
     hw::BIOS bios;
     cpu::InstructionDecoder decoder;
@@ -35,7 +37,7 @@ struct IntTestEnv {
     static constexpr uint32_t CODE_LINEAR = (CODE_SEG << 4) + CODE_OFF;
 
     IntTestEnv()
-        : dos(cpu, mem), bios(cpu, mem, kbd, pit),
+        : dos(cpu, mem), bios(cpu, mem, kbd, pit, pic),
           decoder(cpu, mem, iobus, bios, dos)
     {
         bios.initialize();

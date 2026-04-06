@@ -3,6 +3,7 @@
 #include "cpu/InstructionDecoder.hpp"
 #include "memory/MemoryBus.hpp"
 #include "hw/IOBus.hpp"
+#include "hw/PIC8259.hpp"
 #include "hw/BIOS.hpp"
 #include "hw/DOS.hpp"
 #include "hw/KeyboardController.hpp"
@@ -18,7 +19,8 @@ TEST_CASE("CPU: Addressing Modes (16-bit)", "[Decoder][Addressing]") {
     IOBus iobus;
     KeyboardController kbd;
     PIT8254 pit;
-    BIOS bios(cpu, memory, kbd, pit);
+    PIC8259 pic(true);
+    BIOS bios(cpu, memory, kbd, pit, pic);
     DOS dos(cpu, memory);
     InstructionDecoder decoder(cpu, memory, iobus, bios, dos);
 
@@ -91,7 +93,8 @@ TEST_CASE("CPU: Addressing Modes (32-bit)", "[Decoder][Addressing]") {
     IOBus iobus;
     KeyboardController kbd;
     PIT8254 pit;
-    BIOS bios(cpu, memory, kbd, pit);
+    PIC8259 pic(true);
+    BIOS bios(cpu, memory, kbd, pit, pic);
     DOS dos(cpu, memory);
     InstructionDecoder decoder(cpu, memory, iobus, bios, dos);
 

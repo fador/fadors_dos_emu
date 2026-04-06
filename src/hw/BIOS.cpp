@@ -2,6 +2,7 @@
 #include "../memory/himem/HIMEM.hpp"
 #include "../utils/Logger.hpp"
 #include "KeyboardController.hpp"
+#include "PIC8259.hpp"
 #include "PIT8254.hpp"
 #include "VideoMode.hpp"
 #include <algorithm>
@@ -12,8 +13,8 @@
 namespace fador::hw {
 
 BIOS::BIOS(cpu::CPU &cpu, memory::MemoryBus &memory, KeyboardController &kbd,
-           PIT8254 &pit)
-    : m_cpu(cpu), m_memory(memory), m_kbd(kbd), m_pit(pit) {}
+           PIT8254 &pit, PIC8259 &pic)
+    : m_cpu(cpu), m_memory(memory), m_kbd(kbd), m_pit(pit), m_pic(pic) {}
 
 bool BIOS::loadDiskImage(const std::string &path) {
   std::ifstream file(path, std::ios::binary | std::ios::ate);
@@ -116,7 +117,9 @@ bool BIOS::handleInterrupt(uint8_t vector) {
     if ((lo & 0xFFFF) == 0)
       m_memory.write16(0x46E, m_memory.read16(0x46E) + 1);
     // INT 1Ch (user timer hook) is a no-op stub in our HLE.
-    // EOI is handled implicitly by the PIC acknowledge in the main loop.
+    // Send EOI to master PIC so the ISR bit is cleared and future
+    // timer ticks can be delivered.
+    m_pic.write8(0x20, 0x20);
     return true;
   }
   case 0x1B: // Ctrl-Break

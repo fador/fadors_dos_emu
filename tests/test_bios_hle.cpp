@@ -3,19 +3,22 @@
 #include "../src/memory/MemoryBus.hpp"
 #include "../src/hw/KeyboardController.hpp"
 #include "../src/hw/PIT8254.hpp"
+#include "../src/hw/PIC8259.hpp"
 #include "../src/hw/BIOS.hpp"
 
 using namespace fador;
 
 struct DummyKbd : hw::KeyboardController { DummyKbd() : KeyboardController() {} };
 struct DummyPit : hw::PIT8254 { DummyPit() : PIT8254() {} };
+struct DummyPic : hw::PIC8259 { DummyPic() : PIC8259(true) {} };
 
 TEST_CASE("BIOS HLE INT 11h/12h/14h/15h/17h/2Fh/1Bh-1Fh stubs work", "[bios][hle]") {
     memory::MemoryBus mem;
     cpu::CPU cpu;
     DummyKbd kbd;
     DummyPit pit;
-    hw::BIOS bios(cpu, mem, kbd, pit);
+    DummyPic pic;
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
 
     cpu.setReg8(cpu::AH, 0); cpu.setReg8(cpu::AL, 0); cpu.setReg16(cpu::AX, 0);
 

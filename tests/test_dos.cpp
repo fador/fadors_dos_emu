@@ -6,6 +6,7 @@
 #include "cpu/InstructionDecoder.hpp"
 #include "memory/MemoryBus.hpp"
 #include "hw/IOBus.hpp"
+#include "hw/PIC8259.hpp"
 #include "hw/BIOS.hpp"
 #include "hw/DOS.hpp"
 #include "hw/ProgramLoader.hpp"
@@ -20,7 +21,8 @@ TEST_CASE("DOS Emulation and Program Loading", "[DOS]") {
     hw::IOBus iobus;
     hw::KeyboardController kbd;
     hw::PIT8254 pit;
-    hw::BIOS bios(cpu, mem, kbd, pit);
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
     hw::DOS dos(cpu, mem);
     
     bios.initialize();
