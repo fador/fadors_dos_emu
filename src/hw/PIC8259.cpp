@@ -6,7 +6,7 @@ namespace fador::hw {
 PIC8259::PIC8259(bool master)
     : m_master(master)
     , m_baseVector(master ? 0x08 : 0x70)
-    , m_mask(0xFF)
+    , m_mask(0x00)
     , m_request(0)
     , m_service(0)
     , m_icwStep(0)

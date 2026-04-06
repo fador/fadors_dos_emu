@@ -3369,8 +3369,10 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
     uint32_t ssBase = m_segBase[SS];
     uint32_t currentESP = m_cpu.is32BitStack() ? m_cpu.getReg32(ESP) : m_cpu.getReg16(SP);
     uint32_t preCurPhys = ssBase + currentESP;
+    /*
             LOG_INFO("HLE ENTRY: vec=0x", std::hex, (int)vector,
               " SSbase=0x", ssBase, " ESP=0x", currentESP);
+              */
 
     
 
@@ -3383,11 +3385,13 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
     }
 
     // Extra debug: HLE frame / chain decision snapshot
+    /*
     LOG_DEBUG("HLE: vec=0x", std::hex, (int)vector,
           " preCurPhys=0x", preCurPhys,
           " hfPhys=0x", hfPeek.framePhysAddr,
           " hasTracked=", hasTrackedFrame ? 1 : 0,
           " isChainCall=", isChainCall ? 1 : 0);
+          */
     // Capture flags at trap entry before any handlers may modify them
     uint32_t entryFlags = m_cpu.getEFLAGS();
     bool handled = false;
@@ -3917,6 +3921,22 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
 
     bool privChange = (newCpl < oldCpl) || (m_cpu.getEFLAGS() & 0x00020000);
     m_cpu.pushHLEFrame(use32, vector);
+
+    // DPMI host stack switch simulation (same as triggerInterrupt):
+    // If the IDT target is a hooked handler (not our HLE stub) and
+    // ESP > 0xFFFF, the 16-bit thunk will truncate SP. Switch to the
+    // reflection stack so the thunk operates with low ESP.
+    bool isOrig = (cs == 0x08 && eip32 == (0xF0100u + vector * 4));
+    if (!isOrig && !(m_cpu.getEFLAGS() & 0x00020000) && oldEsp > 0xFFFF) {
+      auto &frame = m_cpu.lastHLEFrameMut();
+      frame.dpmiStackSwitch = true;
+      frame.origESP = oldEsp;
+      frame.origSS = oldSs;
+      m_cpu.setReg32(ESP, 0xA000);
+      LOG_DEBUG("HW-IRQ reflect: vec=0x", std::hex, (int)vector,
+                " origSS=0x", oldSs, " origESP=0x", oldEsp,
+                " reflectESP=0xA000");
+    }
 
     if (privChange) {
       if (use32) {

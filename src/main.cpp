@@ -353,9 +353,6 @@ int main(int argc, char *argv[]) {
             }
           }
 
-          static auto lastRender = std::chrono::steady_clock::now();
-          auto now = std::chrono::steady_clock::now();
-
           // Audio generation
           uint32_t queuedAudio = audio.getQueuedAudioSize();
           const uint32_t targetQueueBytes = 32768; // 4096 samples
@@ -371,6 +368,9 @@ int main(int argc, char *argv[]) {
               adlib.updateTimers((double)samplesNeeded / 44100.0);
             }
           }
+
+          static auto lastRender = std::chrono::steady_clock::now();
+          auto now = std::chrono::steady_clock::now();
 
           if (std::chrono::duration_cast<std::chrono::milliseconds>(now -
                                                                     lastRender)

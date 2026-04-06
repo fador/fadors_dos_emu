@@ -109,6 +109,16 @@ bool BIOS::handleInterrupt(uint8_t vector) {
     }
     return true;
   }
+  case 0x08: { // IRQ0 – Timer Tick (HLE path, matches machine code at F000:0200)
+    uint32_t lo = m_memory.read16(0x46C);
+    lo++;
+    m_memory.write16(0x46C, static_cast<uint16_t>(lo & 0xFFFF));
+    if ((lo & 0xFFFF) == 0)
+      m_memory.write16(0x46E, m_memory.read16(0x46E) + 1);
+    // INT 1Ch (user timer hook) is a no-op stub in our HLE.
+    // EOI is handled implicitly by the PIC acknowledge in the main loop.
+    return true;
+  }
   case 0x1B: // Ctrl-Break
   case 0x1C: // Timer Tick
   case 0x1D: // Video Parameters
