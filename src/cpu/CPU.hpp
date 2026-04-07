@@ -92,6 +92,12 @@ public:
     bool dpmiStackSwitch = false; // Reflection stack was used
     uint32_t origESP = 0;        // Caller's original ESP before switch
     uint16_t origSS = 0;         // Caller's original SS before switch
+    uint32_t origEIP = 0;        // Caller's original EIP before switch
+    uint16_t origCS = 0;         // Caller's original CS before switch
+    uint32_t origEFLAGS = 0;     // Caller's original EFLAGS before switch
+    uint16_t origDS = 0;          // Caller's original DS before switch
+    uint16_t origES = 0;          // Caller's original ES before switch
+    bool dispatchedToPM = false;  // Thunk dispatched to PM handler
   };
 
   bool isLastInt32() const {
@@ -107,6 +113,7 @@ public:
       m_hleStack.pop_back();
   }
   size_t hleStackSize() const { return m_hleStack.size(); }
+  const HLEFrame &hleFrameAt(size_t i) const { return m_hleStack[i]; }
 
   // Pop an HLE frame whose framePhysAddr matches the given address.
   // Used by IRET to clean up frames for interrupts handled entirely
@@ -152,7 +159,66 @@ public:
         }
       }
     }
-    return {false, 0, 0, false, 0xFF, false, 0, 0};
+    return {false, 0, 0, false, 0xFF, false, 0, 0, 0, 0};
+  }
+
+  // Pop a dpmiStackSwitch frame whose origCS:origEIP matches the given
+  // CS:EIP.  Used as a fallback when physical-address matching fails
+  // because the DOS/4GW thunk rearranges its internal stack.
+  HLEFrame popDpmiFrameByCSEIP(uint16_t cs, uint32_t eip) {
+    for (auto it = m_hleStack.rbegin(); it != m_hleStack.rend(); ++it) {
+      if (it->dpmiStackSwitch && it->origCS == cs && it->origEIP == eip) {
+        HLEFrame result = *it;
+        m_hleStack.erase(std::prev(it.base()));
+        return result;
+      }
+    }
+    return {false, 0, 0, false, 0xFF, false, 0, 0, 0, 0};
+  }
+
+  // Peek at a dpmiStackSwitch frame whose origCS matches the given CS
+  // and whose vector is a hardware IRQ (0x08-0x0F master, 0x70-0x77 slave).
+  // Non-destructive: returns a copy without removing from the stack.
+  // Used to detect thunk → PM handler dispatch (same CS, different EIP).
+  HLEFrame peekDpmiFrameByOrigCS(uint16_t cs) const {
+    for (auto it = m_hleStack.rbegin(); it != m_hleStack.rend(); ++it) {
+      if (it->dpmiStackSwitch && it->origCS == cs) {
+        uint8_t v = it->vector;
+        bool isHwIrq = (v >= 0x08 && v <= 0x0F) || (v >= 0x70 && v <= 0x77);
+        if (isHwIrq) return *it;
+      }
+    }
+    return {false, 0, 0, false, 0xFF, false, 0, 0, 0, 0};
+  }
+
+  // Mark a dpmiStackSwitch frame as dispatched to PM handler (in-place).
+  // Called when the thunk's IRET goes to origCS but different EIP.
+  bool markDpmiFrameDispatched(uint16_t origCS) {
+    for (auto it = m_hleStack.rbegin(); it != m_hleStack.rend(); ++it) {
+      if (it->dpmiStackSwitch && it->origCS == origCS && !it->dispatchedToPM) {
+        uint8_t v = it->vector;
+        bool isHwIrq = (v >= 0x08 && v <= 0x0F) || (v >= 0x70 && v <= 0x77);
+        if (isHwIrq) {
+          it->dispatchedToPM = true;
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  // Pop a dpmiStackSwitch frame that was dispatched to a PM handler
+  // whose code runs in the given CS.  Used to intercept the PM handler's
+  // IRET (which may use the wrong operand size) and restore full state.
+  HLEFrame popDpmiFrameByDispatchedPM(uint16_t currentCS) {
+    for (auto it = m_hleStack.rbegin(); it != m_hleStack.rend(); ++it) {
+      if (it->dpmiStackSwitch && it->dispatchedToPM && it->origCS == currentCS) {
+        HLEFrame result = *it;
+        m_hleStack.erase(std::prev(it.base()));
+        return result;
+      }
+    }
+    return {false, 0, 0, false, 0xFF, false, 0, 0, 0, 0};
   }
 
   // Find and remove the most recent HLE frame for the given vector.
@@ -169,7 +235,7 @@ public:
       }
     }
     // Not found — return default
-    return {false, 0, 0, false, vector, false, 0, 0};
+    return {false, 0, 0, false, vector, false, 0, 0, 0, 0, 0};
   }
 
   // Peek at the most recent HLE frame for a given vector (non-destructive).
@@ -179,7 +245,7 @@ public:
       if (it->vector == vector && !it->dpmiStackSwitch)
         return *it;
     }
-    return {false, 0, 0, false, vector, false, 0, 0};
+    return {false, 0, 0, false, vector, false, 0, 0, 0, 0, 0};
   }
 
   // Stack operations

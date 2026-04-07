@@ -543,6 +543,30 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                                     : static_cast<uint32_t>(m_cpu.getReg16(SP));
     uint32_t iretPhysAddr = m_cpu.getSegBase(SS) + iretSP;
 
+    // PM handler return interception: if the thunk dispatched to a PM
+    // handler (dispatchedToPM flag), intercept the handler's IRET before
+    // it pops.  The handler may use the wrong IRET size (16-bit IRET in
+    // 32-bit code) causing stack corruption.  We skip the normal pop and
+    // restore the full original state from the HLE frame.
+    {
+      uint16_t preIretCS = m_cpu.getSegReg(CS);
+      auto pmFrame = m_cpu.popDpmiFrameByDispatchedPM(preIretCS);
+      if (pmFrame.framePhysAddr != 0) {
+        loadSegment(CS, pmFrame.origCS);
+        m_cpu.setEIP(pmFrame.origEIP);
+        m_cpu.setEFLAGS(pmFrame.origEFLAGS);
+        loadSegment(SS, pmFrame.origSS);
+        m_cpu.setReg32(ESP, pmFrame.origESP);
+        loadSegment(DS, pmFrame.origDS);
+        loadSegment(ES, pmFrame.origES);
+        LOG_CPU("PM handler IRET intercepted: vec=0x", std::hex,
+                (int)pmFrame.vector,
+                " → CS:EIP=0x", pmFrame.origCS, ":", pmFrame.origEIP,
+                " SS:ESP=0x", pmFrame.origSS, ":", pmFrame.origESP);
+        break;
+      }
+    }
+
     bool useIretd = m_hasPrefix66 ^ m_cpu.is32BitCode();
     LOG_CPU("IRET: iretStackIs32=", iretStackIs32, " iretSP=0x", std::hex,
             iretSP, " iretPhys=0x", iretPhysAddr, " initialUseIretd=",
@@ -647,7 +671,11 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
         }
       }
     } else {
-      uint16_t sp = m_cpu.getReg16(SP);
+      // 16-bit IRET: pops IP (16), CS (16), FLAGS (16).
+      // Stack address size comes from SS.B, not the operand size.
+      bool iretStack32 = m_cpu.is32BitStack();
+      uint32_t sp = iretStack32 ? m_cpu.getReg32(ESP)
+                                : static_cast<uint32_t>(m_cpu.getReg16(SP));
       uint32_t ssBaseLocal2 = m_cpu.getSegBase(SS);
       uint16_t newIp = m_memory.read16(ssBaseLocal2 + sp);
       uint16_t newCs = m_memory.read16(ssBaseLocal2 + sp + 2);
@@ -667,10 +695,16 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
       if (newCpl > oldCpl && (m_cpu.getCR(0) & 1)) {
         uint16_t newSp = m_memory.read16(ssBaseLocal2 + sp + 6);
         uint16_t newSs = m_memory.read16(ssBaseLocal2 + sp + 8);
-        m_cpu.setReg16(SP, newSp);
+        if (iretStack32)
+          m_cpu.setReg32(ESP, newSp);
+        else
+          m_cpu.setReg16(SP, newSp);
         loadSegment(SS, newSs);
       } else {
-        m_cpu.setReg16(SP, (sp + 6) & 0xFFFF);
+        if (iretStack32)
+          m_cpu.setReg32(ESP, sp + 6);
+        else
+          m_cpu.setReg16(SP, (sp + 6) & 0xFFFF);
       }
     }
     // Pop the matching HLE frame if this IRET consumes a frame that was
@@ -684,19 +718,72 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
         bool popped = (poppedFrame.framePhysAddr != 0);
         LOG_CPU("IRET popHLEFrameByPhysAddr: addr=0x", std::hex, iretPhysAddr,
           " popped=", popped, " hleStackSize=", m_cpu.hleStackSize());
-        // Clear the thunk-dispatch re-entrancy guard when the frame pops.
-        if (popped && m_thunkDispatchActive) {
-          m_thunkDispatchActive = false;
+        // Fallback: if the physical-address match failed, check if the IRET
+        // returned to a CS:EIP that matches a dpmiStackSwitch frame's saved
+        // origCS:origEIP.  The DOS/4GW thunk rearranges its internal stack
+        // during dispatch, so the IRET happens at a different stack address
+        // than where we pushed the frame.  But the thunk's final IRET always
+        // restores CS:EIP to the interrupted code — we detect that here.
+        if (!popped) {
+          uint16_t newCs = m_cpu.getSegReg(CS);
+          uint32_t newEip = m_cpu.getEIP();
+          // Check if we returned to origCS:origEIP exactly (final return)
+          poppedFrame = m_cpu.popDpmiFrameByCSEIP(newCs, newEip);
+          popped = (poppedFrame.framePhysAddr != 0);
+          if (popped) {
+            LOG_CPU("IRET dpmiStackSwitch matched by CS:EIP=0x",
+                    std::hex, newCs, ":", newEip,
+                    " vec=0x", (int)poppedFrame.vector);
+          }
+        }
+        // Thunk → PM handler dispatch: the thunk's IRET went to origCS
+        // but at a different EIP (the PM handler, e.g. I_KeyboardISR).
+        // On real hardware the DPMI host would set SS:ESP to the app's
+        // stack and push a return frame pointing to the interrupted code.
+        // We do that here: fix SS:ESP, push a 32-bit IRET frame, and mark
+        // the HLE frame as dispatched so the handler's IRET is intercepted.
+        if (!popped) {
+          uint16_t newCs = m_cpu.getSegReg(CS);
+          uint32_t newEip = m_cpu.getEIP();
+          auto dpmiFrame = m_cpu.peekDpmiFrameByOrigCS(newCs);
+          if (dpmiFrame.framePhysAddr != 0 && dpmiFrame.origEIP != newEip) {
+            // Switch to the app's stack and restore segment registers
+            loadSegment(SS, dpmiFrame.origSS);
+            loadSegment(DS, dpmiFrame.origDS);
+            loadSegment(ES, dpmiFrame.origES);
+            uint32_t appEsp = dpmiFrame.origESP;
+            // Push a 32-bit IRET frame: EFLAGS, CS, EIP
+            appEsp -= 4; m_memory.write32(m_cpu.getSegBase(SS) + appEsp, dpmiFrame.origEFLAGS);
+            appEsp -= 4; m_memory.write32(m_cpu.getSegBase(SS) + appEsp, dpmiFrame.origCS);
+            appEsp -= 4; m_memory.write32(m_cpu.getSegBase(SS) + appEsp, dpmiFrame.origEIP);
+            m_cpu.setReg32(ESP, appEsp);
+            // Mark the frame so the PM handler's IRET is intercepted
+            m_cpu.markDpmiFrameDispatched(newCs);
+            LOG_CPU("DPMI thunk->PM: vec=0x", std::hex, (int)dpmiFrame.vector,
+                    " handler=0x", newCs, ":", newEip,
+                    " return=0x", dpmiFrame.origCS, ":", dpmiFrame.origEIP,
+                    " SS:ESP=0x", dpmiFrame.origSS, ":", appEsp);
+          }
         }
         // DPMI host stack switch restore: if the interrupt dispatch used
-        // a reflection stack, restore the caller's original SS:ESP.
+        // a reflection stack, restore the caller's full original state.
+        // The thunk's IRET may have used the wrong frame size (e.g. 16-bit
+        // IRET on a 32-bit frame), corrupting CS:EIP, so we override with
+        // the saved originals.
         if (popped && poppedFrame.dpmiStackSwitch) {
+          loadSegment(CS, poppedFrame.origCS);
+          m_cpu.setEIP(poppedFrame.origEIP);
+          m_cpu.setEFLAGS(poppedFrame.origEFLAGS);
           loadSegment(SS, poppedFrame.origSS);
           m_cpu.setReg32(ESP, poppedFrame.origESP);
-          LOG_DEBUG("DPMI reflect restore: vec=0x", std::hex,
-                    (int)poppedFrame.vector,
-                    " SS=0x", poppedFrame.origSS,
-                    " ESP=0x", poppedFrame.origESP);
+          loadSegment(DS, poppedFrame.origDS);
+          loadSegment(ES, poppedFrame.origES);
+          LOG_CPU("DPMI reflect restore: vec=0x", std::hex,
+                  (int)poppedFrame.vector,
+                  " CS:EIP=0x", poppedFrame.origCS,
+                  ":", poppedFrame.origEIP,
+                  " SS:ESP=0x", poppedFrame.origSS,
+                  ":", poppedFrame.origESP);
         }
     }
     break;
@@ -2329,18 +2416,6 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
       eip = m_cpu.pop16();
       cs = m_cpu.pop16();
     }
-    // Temporary trace: log far returns from the thunk's mode-switch handler
-    {
-      static int s_retfTrace = 0;
-      uint16_t fromCs = m_cpu.getSegReg(CS);
-      uint32_t fromEip = m_instrStartEIP;
-      // Log only the critical RETF at 0x0C32 AND any RETF to non-thunk segments
-      if (fromCs == 0x8F && (fromEip == 0x0C32 || cs != 0x8F) && s_retfTrace < 10) {
-        ++s_retfTrace;
-        LOG_ERROR("THUNK-RETF #", s_retfTrace, ": from=", std::hex, fromCs, ":", fromEip,
-                  " to=", cs, ":", eip, " SS=", m_cpu.getSegReg(SS));
-      }
-    }
     loadSegment(CS, cs);
     m_cpu.setEIP(eip);
     break;
@@ -3864,20 +3939,6 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
                  " callerCS=", oldCs);
       }
     }
-    // Also log ALL INT 31h calls where target is INT 8 (for debugging)
-    if (vector == 0x31 && m_cpu.getReg8(BL) == 0x08 &&
-        (m_cpu.getReg16(AX) == 0x0205 || m_cpu.getReg16(AX) == 0x0204)) {
-      static int s_int8log = 0;
-      if (s_int8log < 20) {
-        ++s_int8log;
-        LOG_ERROR("INT31-VEC8 #", std::dec, s_int8log,
-                  ": AX=", std::hex, m_cpu.getReg16(AX),
-                  " BL=", static_cast<uint32_t>(m_cpu.getReg8(BL)),
-                  " CX=", m_cpu.getReg16(CX),
-                  " EDX=", m_cpu.getReg32(EDX),
-                  " callerCS=", oldCs);
-      }
-    }
 
     // DPMI host stack switch simulation:
     // On real hardware, the DPMI host intercepts interrupts at ring 0
@@ -3891,6 +3952,11 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
       frame.dpmiStackSwitch = true;
       frame.origESP = oldEsp;
       frame.origSS = oldSs;
+      frame.origEIP = m_cpu.getEIP();
+      frame.origCS = oldCs;
+      frame.origEFLAGS = m_cpu.getEFLAGS();
+      frame.origDS = m_cpu.getSegReg(DS);
+      frame.origES = m_cpu.getSegReg(ES);
       // Use physical 0x9C00-0xA000 as reflection stack area.
       // Safe during brief interrupt handling with interrupts disabled.
       m_cpu.setReg32(ESP, 0xA000);
@@ -4003,9 +4069,11 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
       useHLE = (idtSel == 0x08) && (idtOff == (0xF0100u + vector * 4));
 
       // If the IDT vector points to a 16-bit (D=0) code segment — i.e. a
-      // DOS extender thunk — always use HLE.  The thunk's PM→RM mode-switch
-      // relies on a real DPMI host we don't provide, so dispatching into it
-      // corrupts state.
+      // DOS extender thunk — use HLE for vectors that have HLE handlers
+      // (e.g. INT 8 timer). For other hardware IRQs (e.g. INT 9 keyboard),
+      // let them dispatch through the thunk so the application's ISR runs.
+      // The thunk's 16-bit dispatch code works correctly in our CPU because
+      // triggerInterrupt handles 16-bit gate frames properly.
       if (!useHLE) {
         uint32_t descTableBase;
         if (idtSel & 0x04) {
@@ -4017,7 +4085,12 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
         auto idtDesc = decodeDescriptor(
             m_memory.read32(descAddr), m_memory.read32(descAddr + 4));
         if (!idtDesc.is32Bit) {
-          useHLE = true;
+          // Only force HLE for vectors where BIOS has an HLE handler.
+          // INT 8 (timer): has HLE + ticcount increment.
+          // INT 9 (keyboard) and others: no HLE, let thunk dispatch.
+          if (vector == 0x08) {
+            useHLE = true;
+          }
         }
       }
     } else {
@@ -4055,10 +4128,8 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
       return;
     }
     if (useHLE) {
-      // The D-bit guard determined the IDT target is a 16-bit thunk that
-      // cannot be dispatched, but the BIOS has no HLE handler for this
-      // vector (e.g. keyboard IRQ 0x09).  Send EOI and drop the interrupt
-      // rather than falling through into the broken thunk.
+      // The HLE path was selected (INT vector has an HLE-only handler like
+      // INT 8 timer) but handleInterrupt returned false. Send EOI as safety.
       m_bios.sendEOI(vector);
       return;
     }
@@ -4097,20 +4168,43 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
     bool privChange = (newCpl < oldCpl) || (m_cpu.getEFLAGS() & 0x00020000);
     m_cpu.pushHLEFrame(use32, vector);
 
-    // DPMI host stack switch simulation (same as triggerInterrupt):
-    // If the IDT target is a hooked handler (not our HLE stub) and
-    // ESP > 0xFFFF, the 16-bit thunk will truncate SP. Switch to the
-    // reflection stack so the thunk operates with low ESP.
+    // DPMI host stack switch simulation:
+    // On real hardware, the DPMI host intercepts hardware interrupts at
+    // ring 0, switches to its internal stack (SS=host_SS), and reflects
+    // the interrupt to the client's PM handler (thunk). The thunk expects
+    // SS to be the DOS extender's data segment (sel 0xAF for DOS/4GW)
+    // with a stack pointer managed in its internal data at DS:0x0A42.
+    // Without this, the thunk's 16-bit code operating on the app's
+    // 32-bit stack (SS=0x177, ESP > 0xFFFF) corrupts state.
+    // We switch SS to 0xAF and ESP to the DOS/4GW internal stack pointer.
     bool isOrig = (cs == 0x08 && eip32 == (0xF0100u + vector * 4));
-    if (!isOrig && !(m_cpu.getEFLAGS() & 0x00020000) && oldEsp > 0xFFFF) {
+    if (!isOrig && !(m_cpu.getEFLAGS() & 0x00020000)) {
       auto &frame = m_cpu.lastHLEFrameMut();
       frame.dpmiStackSwitch = true;
       frame.origESP = oldEsp;
       frame.origSS = oldSs;
-      m_cpu.setReg32(ESP, 0xA000);
+      frame.origEIP = m_cpu.getEIP();
+      frame.origCS = oldCs;
+      frame.origEFLAGS = m_cpu.getEFLAGS();
+      frame.origDS = m_cpu.getSegReg(DS);
+      frame.origES = m_cpu.getSegReg(ES);
+
+      // Read the DOS/4GW host stack pointer from DS:AF:0x0A42
+      uint32_t dsAFBase = 0x1197C0; // sel 0xAF base
+      uint32_t hostSP = m_memory.read32(dsAFBase + 0x0A42);
+      if (hostSP == 0 || hostSP > 0xFFF0) hostSP = 0x4800; // fallback
+      // Switch SS to 0xAF and ESP to the host stack pointer
+      loadSegment(cpu::SS, 0xAF);
+      m_cpu.setReg32(ESP, hostSP);
       LOG_DEBUG("HW-IRQ reflect: vec=0x", std::hex, (int)vector,
                 " origSS=0x", oldSs, " origESP=0x", oldEsp,
-                " reflectESP=0xA000");
+                " newSS=0xAF newESP=0x", hostSP);
+      // Force privilege-change frame: on real hardware, the HW interrupt
+      // always transitions ring 3 → ring 0, so the CPU always pushes
+      // SS:ESP.  The thunk expects a full 5-word frame (SS, ESP, FLAGS,
+      // CS, EIP).  Without this, the thunk reads garbage for SS:ESP and
+      // restores the wrong stack when it IRETs to the PM handler.
+      privChange = true;
     }
 
     if (privChange) {
@@ -4170,38 +4264,6 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
   }
   m_cpu.setEFLAGS(entryFlags);
   loadSegment(CS, cs);
-
-  // One-time trace of hooked interrupt dispatches
-  {
-    static int s_hwTrace = 0;
-    bool isOrig2 = (cs == 0x08 && eip32 == (0xF0100u + vector * 4));
-    if (!isOrig2 && s_hwTrace < 5) {
-      ++s_hwTrace;
-      char buf[512];
-      snprintf(buf, sizeof(buf),
-        "HW-INJECT #%d: vec=%02X oldCS=%04X to=%04X:%08X",
-        s_hwTrace, vector, oldCs, cs, eip32);
-      LOG_ERROR(buf);
-      // Dump Watcom RTL interrupt hook table at 0x26D3E0 periodically
-      if (s_hwTrace == 1 || s_hwTrace == 5 || s_hwTrace == 50 || s_hwTrace == 200) {
-        // Table: 8 entries × 64 bytes, base 0x26D3E0
-        // Each entry: [+0]=handler_addr, [+4]=flags, ...
-        for (int slot = 0; slot < 8; slot++) {
-          uint32_t base = 0x26D3E0 + slot * 64;
-          uint32_t handler = m_memory.read32(base);
-          uint8_t  flags   = m_memory.read8(base + 4);
-          uint32_t word8   = m_memory.read32(base + 8);
-          uint32_t word12  = m_memory.read32(base + 12);
-          uint32_t word16  = m_memory.read32(base + 16);
-          uint32_t word20  = m_memory.read32(base + 20);
-          snprintf(buf, sizeof(buf),
-            "WATCOM-ISR slot[%d] @%08X: handler=%08X flags=%02X +8=%08X +12=%08X +16=%08X +20=%08X",
-            slot, base, handler, flags, word8, word12, word16, word20);
-          LOG_ERROR(buf);
-        }
-      }
-    }
-  }
 
   m_cpu.setEIP(eip32);
 }
