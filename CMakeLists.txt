@@ -72,6 +72,7 @@ set(TEST_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_assembler.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_int_asm.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_dpmi.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_vga_and_irq.cpp"
 )
 
 add_executable(fadors_tests ${TEST_FILES})

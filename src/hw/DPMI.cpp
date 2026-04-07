@@ -933,11 +933,13 @@ void DPMI::handleTranslation() {
     {
       uint16_t retFlags = static_cast<uint16_t>(m_cpu.getEFLAGS() & 0xFFFF);
       bool retCF = !!(retFlags & cpu::FLAG_CARRY);
+      /*
       LOG_INFO("DPMI 030xh result: AX=", std::hex,
                 m_cpu.getReg16(cpu::AX),
                 " BX=", m_cpu.getReg16(cpu::BX),
                 " CF=", retCF ? 1 : 0,
                 " ES=", m_cpu.getSegReg(cpu::ES));
+                */
     }
     if (m_is32BitClient) {
       m_memory.write32(structAddr + 0x00, m_cpu.getReg32(cpu::EDI));
