@@ -255,6 +255,7 @@ public:
   uint32_t pop32();
 
   uint64_t getCycles() const { return m_cycles; }
+  const uint64_t &getCyclesRef() const { return m_cycles; }
   void addCycles(uint32_t c) { m_cycles += c; }
 
   uint32_t getEIP() const { return m_eip; }

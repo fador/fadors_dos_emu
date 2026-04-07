@@ -3,6 +3,7 @@
 #include "../../memory/MemoryBus.hpp"
 #include "../DMA8237.hpp"
 #include "../IODevice.hpp"
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <queue>
@@ -60,6 +61,13 @@ private:
 
   // Last read sample value (held for oversampling)
   float m_lastSample = 0.0f;
+
+  // IRQ state
+  bool m_irqPending = false;
+
+  // Mixer registers (SB Pro)
+  uint8_t m_mixerIndex = 0;
+  std::array<uint8_t, 256> m_mixerRegs{};
 };
 
 } // namespace fador::hw::audio

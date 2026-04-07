@@ -39,6 +39,7 @@ int main(int argc, char *argv[]) {
     fador::hw::PIT8254 pit;
     fador::hw::VGAController vga(memory);
     fador::hw::DMA8237 dma;
+    fador::cpu::CPU cpu;
 
     // Connect VGA plane memory to the memory bus
     memory.setVGA(&vga);
@@ -46,7 +47,7 @@ int main(int argc, char *argv[]) {
     fador::hw::audio::AudioBackend audio;
     audio.init(44100, 2, 1024);
 
-    fador::hw::audio::AdLib adlib(44100.0f);
+    fador::hw::audio::AdLib adlib(44100.0f, &cpu.getCyclesRef());
     fador::hw::audio::SoundBlaster sb(memory, dma, 44100.0f);
 
     // Register devices with IOBus
@@ -63,7 +64,6 @@ int main(int argc, char *argv[]) {
     iobus.registerDevice(0x388, 0x389, &adlib);
 
     kbd.setMemoryBus(&memory);
-    fador::cpu::CPU cpu;
     fador::hw::DOS dos(cpu, memory);
     fador::hw::BIOS bios(cpu, memory, kbd, pit, pic);
 
