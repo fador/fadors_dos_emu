@@ -684,6 +684,10 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
         bool popped = (poppedFrame.framePhysAddr != 0);
         LOG_CPU("IRET popHLEFrameByPhysAddr: addr=0x", std::hex, iretPhysAddr,
           " popped=", popped, " hleStackSize=", m_cpu.hleStackSize());
+        // Clear the thunk-dispatch re-entrancy guard when the frame pops.
+        if (popped && m_thunkDispatchActive) {
+          m_thunkDispatchActive = false;
+        }
         // DPMI host stack switch restore: if the interrupt dispatch used
         // a reflection stack, restore the caller's original SS:ESP.
         if (popped && poppedFrame.dpmiStackSwitch) {
@@ -2325,6 +2329,18 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
       eip = m_cpu.pop16();
       cs = m_cpu.pop16();
     }
+    // Temporary trace: log far returns from the thunk's mode-switch handler
+    {
+      static int s_retfTrace = 0;
+      uint16_t fromCs = m_cpu.getSegReg(CS);
+      uint32_t fromEip = m_instrStartEIP;
+      // Log only the critical RETF at 0x0C32 AND any RETF to non-thunk segments
+      if (fromCs == 0x8F && (fromEip == 0x0C32 || cs != 0x8F) && s_retfTrace < 10) {
+        ++s_retfTrace;
+        LOG_ERROR("THUNK-RETF #", s_retfTrace, ": from=", std::hex, fromCs, ":", fromEip,
+                  " to=", cs, ":", eip, " SS=", m_cpu.getSegReg(SS));
+      }
+    }
     loadSegment(CS, cs);
     m_cpu.setEIP(eip);
     break;
@@ -3816,6 +3832,53 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
       }
     }
 
+    // Capture app-level PM vectors: when INT 31h is dispatched through a
+    // hooked vector (DOS extender thunk) and AX=0205h, the app is setting
+    // a PM interrupt handler. The DOS extender will intercept this and
+    // never forward the original CX:EDX to the DPMI host. Capture them
+    // here so we can invoke the app's handler from HLE.
+    if (vector == 0x31 && m_cpu.getReg16(AX) == 0x0205) {
+      uint8_t targetVec = m_cpu.getReg8(BL);
+      uint16_t targetSel = m_cpu.getReg16(CX);
+      uint32_t targetOff = m_cpu.getReg32(EDX);
+      static int s_appVecLog = 0;
+      if (s_appVecLog < 300) {
+        ++s_appVecLog;
+        LOG_INFO("APP-PM-VEC #", std::dec, s_appVecLog,
+                 ": vec=0x", std::hex, static_cast<uint32_t>(targetVec),
+                 " CX=", targetSel, " EDX=", targetOff,
+                 " callerCS=", oldCs,
+                 " idtCS=", cs,
+                 " isOrig=", isOrig ? 1 : 0);
+      }
+      // Capture if caller is a 32-bit flat code segment (the app itself),
+      // not the thunk (0x8F) or DOS/4GW internal code (0x57, 0x0F).
+      // The app uses its own code selector (e.g., 0x016F for DOOM).
+      if (oldCs != 0x8F && oldCs != 0x57 && oldCs != 0x0F && oldCs != 0x08) {
+        m_appPMVectors[targetVec].selector = targetSel;
+        m_appPMVectors[targetVec].offset = targetOff;
+        m_appPMVectors[targetVec].valid = true;
+        LOG_INFO("APP-PM-VEC-SAVED: vec=0x", std::hex,
+                 static_cast<uint32_t>(targetVec),
+                 " -> ", targetSel, ":", targetOff,
+                 " callerCS=", oldCs);
+      }
+    }
+    // Also log ALL INT 31h calls where target is INT 8 (for debugging)
+    if (vector == 0x31 && m_cpu.getReg8(BL) == 0x08 &&
+        (m_cpu.getReg16(AX) == 0x0205 || m_cpu.getReg16(AX) == 0x0204)) {
+      static int s_int8log = 0;
+      if (s_int8log < 20) {
+        ++s_int8log;
+        LOG_ERROR("INT31-VEC8 #", std::dec, s_int8log,
+                  ": AX=", std::hex, m_cpu.getReg16(AX),
+                  " BL=", static_cast<uint32_t>(m_cpu.getReg8(BL)),
+                  " CX=", m_cpu.getReg16(CX),
+                  " EDX=", m_cpu.getReg32(EDX),
+                  " callerCS=", oldCs);
+      }
+    }
+
     // DPMI host stack switch simulation:
     // On real hardware, the DPMI host intercepts interrupts at ring 0
     // and reflects to the client's thunk handler with a host-managed
@@ -3921,11 +3984,84 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
 void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
   // HLE fast-path: if the BIOS can handle this vector entirely in HLE,
   // just call the handler and skip the full interrupt dispatch.
-  // This avoids dispatching through the DOS/4GW thunk for simple vectors
-  // like the timer tick (INT 8) where the thunk would chain back to our
-  // BIOS handler anyway.
-  if (m_bios.handleInterrupt(vector)) {
-    return;
+  // For hooked vectors (like INT 8 under DOS/4GW), we MUST dispatch
+  // through the thunk so the application's handler runs and updates
+  // its own internal variables (e.g. DOOM's ticcount).
+  // Exception: if the CPU is ALREADY executing inside the thunk's code
+  // segment (e.g. during a DOS INT 21h call dispatched through DOS/4GW),
+  // nesting another interrupt through the same thunk entry corrupts its
+  // internal state. In that case, fall back to HLE.
+  {
+    bool useHLE = false;
+    if (m_cpu.getCR(0) & 1) {
+      uint32_t idtBase = m_cpu.getIDTR().base;
+      uint32_t entryAddr = idtBase + vector * 8;
+      uint32_t low = m_memory.read32(entryAddr);
+      uint32_t high = m_memory.read32(entryAddr + 4);
+      uint16_t idtSel = (low >> 16) & 0xFFFF;
+      uint32_t idtOff = (low & 0xFFFF) | (high & 0xFFFF0000);
+      useHLE = (idtSel == 0x08) && (idtOff == (0xF0100u + vector * 4));
+
+      // If the IDT vector points to a 16-bit (D=0) code segment — i.e. a
+      // DOS extender thunk — always use HLE.  The thunk's PM→RM mode-switch
+      // relies on a real DPMI host we don't provide, so dispatching into it
+      // corrupts state.
+      if (!useHLE) {
+        uint32_t descTableBase;
+        if (idtSel & 0x04) {
+          descTableBase = m_cpu.getLDTR().base;
+        } else {
+          descTableBase = m_cpu.getGDTR().base;
+        }
+        uint32_t descAddr = descTableBase + (idtSel & 0xFFF8);
+        auto idtDesc = decodeDescriptor(
+            m_memory.read32(descAddr), m_memory.read32(descAddr + 4));
+        if (!idtDesc.is32Bit) {
+          useHLE = true;
+        }
+      }
+    } else {
+      useHLE = true;
+    }
+    if (useHLE && m_bios.handleInterrupt(vector)) {
+      // After HLE, if the vector is hooked by a DOS extender thunk and we're
+      // in 32-bit PM code, also dispatch to the app's registered PM callback
+      // (if any).  The Watcom C/C++ RTL maintains an internal ISR table;
+      // slot 0 at 0x26D3E0 holds the handler for _dos_setvect-installed ISRs.
+      // We emulate the handler's effect directly (HLE) rather than jumping
+      // into the app code, because the DOS/4GW thunk infra-structure is not
+      // functional in our HLE environment.
+      //
+      // The Watcom-compiled I_TimerISR typically compiles to:
+      //   PUSH EDX; MOV EDX,[addr]; INC EDX; ... MOV [addr],EDX; POP EDX; RET
+      // We detect the MOV EDX,[imm32] pattern (opcode 8B 15) to extract the
+      // counter address, then increment the dword at that address.
+      if ((m_cpu.getCR(0) & 1) && m_cpu.is32BitCode() && vector == 0x08) {
+        uint32_t appHandler = m_memory.read32(0x26D3E0);
+        if (appHandler != 0) {
+          // Look for: 8B 15 XX XX XX XX = MOV EDX, [imm32]
+          // Handler might start with PUSH EDX (0x52), so check offset 0 or 1.
+          uint32_t scan = appHandler;
+          if (m_memory.read8(scan) == 0x52) scan++; // skip PUSH EDX
+          if (m_memory.read8(scan) == 0x8B && m_memory.read8(scan + 1) == 0x15) {
+            uint32_t counterAddr = m_memory.read32(scan + 2);
+            if (counterAddr < fador::memory::MemoryBus::MEMORY_SIZE - 3) {
+              uint32_t val = m_memory.read32(counterAddr);
+              m_memory.write32(counterAddr, val + 1);
+            }
+          }
+        }
+      }
+      return;
+    }
+    if (useHLE) {
+      // The D-bit guard determined the IDT target is a 16-bit thunk that
+      // cannot be dispatched, but the BIOS has no HLE handler for this
+      // vector (e.g. keyboard IRQ 0x09).  Send EOI and drop the interrupt
+      // rather than falling through into the broken thunk.
+      m_bios.sendEOI(vector);
+      return;
+    }
   }
 
   uint16_t cs;
@@ -4034,9 +4170,39 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
   }
   m_cpu.setEFLAGS(entryFlags);
   loadSegment(CS, cs);
-  if (cs == 0x16F && eip32 < 0x1000) {
 
+  // One-time trace of hooked interrupt dispatches
+  {
+    static int s_hwTrace = 0;
+    bool isOrig2 = (cs == 0x08 && eip32 == (0xF0100u + vector * 4));
+    if (!isOrig2 && s_hwTrace < 5) {
+      ++s_hwTrace;
+      char buf[512];
+      snprintf(buf, sizeof(buf),
+        "HW-INJECT #%d: vec=%02X oldCS=%04X to=%04X:%08X",
+        s_hwTrace, vector, oldCs, cs, eip32);
+      LOG_ERROR(buf);
+      // Dump Watcom RTL interrupt hook table at 0x26D3E0 periodically
+      if (s_hwTrace == 1 || s_hwTrace == 5 || s_hwTrace == 50 || s_hwTrace == 200) {
+        // Table: 8 entries × 64 bytes, base 0x26D3E0
+        // Each entry: [+0]=handler_addr, [+4]=flags, ...
+        for (int slot = 0; slot < 8; slot++) {
+          uint32_t base = 0x26D3E0 + slot * 64;
+          uint32_t handler = m_memory.read32(base);
+          uint8_t  flags   = m_memory.read8(base + 4);
+          uint32_t word8   = m_memory.read32(base + 8);
+          uint32_t word12  = m_memory.read32(base + 12);
+          uint32_t word16  = m_memory.read32(base + 16);
+          uint32_t word20  = m_memory.read32(base + 20);
+          snprintf(buf, sizeof(buf),
+            "WATCOM-ISR slot[%d] @%08X: handler=%08X flags=%02X +8=%08X +12=%08X +16=%08X +20=%08X",
+            slot, base, handler, flags, word8, word12, word16, word20);
+          LOG_ERROR(buf);
+        }
+      }
+    }
   }
+
   m_cpu.setEIP(eip32);
 }
 

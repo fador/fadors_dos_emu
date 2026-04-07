@@ -21,6 +21,7 @@ uint8_t VGAController::read8(uint16_t port) {
         case 0x3C4: return m_seqIndex;
         case 0x3C5:
             if (m_seqIndex == 2) return m_seqMapMask;
+            if (m_seqIndex == 4) return m_chain4 ? 0x08 : 0x00;
             return 0;
 
         // --- Graphics Controller ---
@@ -75,6 +76,7 @@ void VGAController::write8(uint16_t port, uint8_t value) {
         case 0x3C4: m_seqIndex = value; break;
         case 0x3C5:
             if (m_seqIndex == 2) m_seqMapMask = value & 0x0F;
+            else if (m_seqIndex == 4) m_chain4 = (value & 0x08) != 0;
             break;
 
         // --- Graphics Controller ---
@@ -96,3 +98,33 @@ void VGAController::write8(uint16_t port, uint8_t value) {
 }
 
 } // namespace fador::hw
+
+// ── Plane-aware VRAM access ──────────────────────────────────────────
+
+void fador::hw::VGAController::planeWrite8(uint32_t offset, uint8_t value) {
+    if (m_chain4) {
+        // Chain-4: address bits [1:0] select plane, [15:2] select offset
+        uint8_t plane = offset & 3;
+        uint32_t planeOff = offset >> 2;
+        m_planes[plane][planeOff & 0xFFFF] = value;
+    } else {
+        // Mode-X / unchained: write to all planes selected by mapMask
+        uint32_t planeOff = offset & 0xFFFF;
+        for (int p = 0; p < 4; ++p) {
+            if (m_seqMapMask & (1 << p))
+                m_planes[p][planeOff] = value;
+        }
+    }
+}
+
+uint8_t fador::hw::VGAController::planeRead8(uint32_t offset) const {
+    if (m_chain4) {
+        // Chain-4: address bits [1:0] select plane, [15:2] select offset
+        uint8_t plane = offset & 3;
+        uint32_t planeOff = offset >> 2;
+        return m_planes[plane][planeOff & 0xFFFF];
+    } else {
+        // Mode-X / unchained: read from the plane selected by readMapSelect
+        return m_planes[m_gcReadMap & 3][offset & 0xFFFF];
+    }
+}

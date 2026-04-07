@@ -23,6 +23,11 @@ public:
     // Returns true if the interrupt was handled by HLE
     bool handleInterrupt(uint8_t vector);
 
+    // Send End-Of-Interrupt for a hardware interrupt vector.
+    // Used when the D-bit guard suppresses thunk dispatch but BIOS has
+    // no HLE handler — the EOI must still be sent so the PIC unblocks.
+    void sendEOI(uint8_t vector);
+
     // Set a callback that polls host input; called by INT 16h when blocking.
     void setInputPollCallback(std::function<void()> cb) { m_pollInput = std::move(cb); }
     void setIdleCallback(std::function<void()> cb) { m_idleCallback = std::move(cb); }

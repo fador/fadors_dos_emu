@@ -35,6 +35,18 @@ bool BIOS::loadDiskImage(const std::string &path) {
   return false;
 }
 
+void BIOS::sendEOI(uint8_t vector) {
+  // Vectors 0x08-0x0F are master PIC (IRQ 0-7)
+  // Vectors 0x70-0x77 are slave PIC (IRQ 8-15)
+  if (vector >= 0x70 && vector <= 0x77) {
+    m_pic.write8(0xA0, 0x20); // slave EOI
+  }
+  if ((vector >= 0x08 && vector <= 0x0F) ||
+      (vector >= 0x70 && vector <= 0x77)) {
+    m_pic.write8(0x20, 0x20); // master EOI
+  }
+}
+
 bool BIOS::handleInterrupt(uint8_t vector) {
   switch (vector) {
   case 0x10:
@@ -120,6 +132,52 @@ bool BIOS::handleInterrupt(uint8_t vector) {
     // Send EOI to master PIC so the ISR bit is cleared and future
     // timer ticks can be delivered.
     m_pic.write8(0x20, 0x20);
+    {
+      static int s_timerLog = 0;
+      if (s_timerLog < 20 || (s_timerLog % 100 == 0 && s_timerLog < 1000)) {
+        LOG_INFO("TIMER-TICK #", s_timerLog, " counter=", lo);
+      }
+      // Check Watcom RTL table at tick #100 — dump all 8 slots
+      if (s_timerLog == 100) {
+        for (int slot = 0; slot < 8; slot++) {
+          uint32_t base = 0x26D3E0 + slot * 64;
+          uint32_t handler = m_memory.read32(base);
+          if (handler != 0) {
+            char buf[512];
+            snprintf(buf, sizeof(buf),
+              "WATCOM-ISR slot[%d] @%06X: handler=%08X bytes=%02X %02X %02X %02X "
+              "+8=%08X +12=%08X +16=%08X +20=%08X +24=%08X +28=%08X +32=%08X +36=%08X",
+              slot, base, handler,
+              m_memory.read8(base+4), m_memory.read8(base+5),
+              m_memory.read8(base+6), m_memory.read8(base+7),
+              m_memory.read32(base+8), m_memory.read32(base+12),
+              m_memory.read32(base+16), m_memory.read32(base+20),
+              m_memory.read32(base+24), m_memory.read32(base+28),
+              m_memory.read32(base+32), m_memory.read32(base+36));
+            LOG_ERROR(buf);
+            // Dump I_TimerISR code at handler address
+            snprintf(buf, sizeof(buf),
+              "HANDLER-CODE @%08X: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+              handler,
+              m_memory.read8(handler), m_memory.read8(handler+1),
+              m_memory.read8(handler+2), m_memory.read8(handler+3),
+              m_memory.read8(handler+4), m_memory.read8(handler+5),
+              m_memory.read8(handler+6), m_memory.read8(handler+7),
+              m_memory.read8(handler+8), m_memory.read8(handler+9),
+              m_memory.read8(handler+10), m_memory.read8(handler+11),
+              m_memory.read8(handler+12), m_memory.read8(handler+13),
+              m_memory.read8(handler+14), m_memory.read8(handler+15));
+            LOG_ERROR(buf);
+          }
+        }
+        uint32_t ivt8_raw = m_memory.read32(8 * 4);
+        char ivtbuf[128];
+        snprintf(ivtbuf, sizeof(ivtbuf), "IVT[8] raw=%08X (seg=%04X off=%04X)",
+                 ivt8_raw, ivt8_raw >> 16, ivt8_raw & 0xFFFF);
+        LOG_ERROR(ivtbuf);
+      }
+      s_timerLog++;
+    }
     return true;
   }
   case 0x1B: // Ctrl-Break
@@ -1210,6 +1268,11 @@ void BIOS::initialize() {
     uint32_t phys = 0xF0063;
     m_memory.write8(phys, 0xCB); // RETF (no state to save/restore)
   }
+
+  // IRETD trampoline at physical 0xF0300 — used by the HW interrupt
+  // reflection path so that a PM handler called via near CALL can return
+  // to the interrupted code through IRETD.
+  m_memory.write8(0xF0300, 0xCF); // IRETD (in a D=1 segment, 0xCF = IRETD)
 
   LOG_INFO("BIOS: BDA and IVT initialized.");
 }

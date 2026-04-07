@@ -655,8 +655,9 @@ static constexpr uint32_t kCGAPalette[16] = {
 
 // ── Construction / destruction ─────────────────────────────────────────
 
-SDLRenderer::SDLRenderer(memory::MemoryBus &memory, hw::KeyboardController &kbd)
-    : m_memory(memory), m_kbd(kbd) {
+SDLRenderer::SDLRenderer(memory::MemoryBus &memory, hw::KeyboardController &kbd,
+                         hw::VGAController &vga)
+    : m_memory(memory), m_kbd(kbd), m_vga(vga) {
   if (SDL_Init(SDL_INIT_VIDEO) < 0) {
     LOG_ERROR("SDL_Init failed: ", SDL_GetError());
     return;
@@ -913,8 +914,21 @@ void SDLRenderer::renderGraphicsMode() {
   int w = mi->width;
   int h = mi->height;
 
-  if (mi->layout == hw::VMemLayout::Linear256) {
-    // Fast path for mode 13h: direct VRAM bulk read
+  if (mi->layout == hw::VMemLayout::Linear256 && !m_vga.isChain4()) {
+    // Mode-X: Chain-4 disabled, unchained 256-color planar mode.
+    // Pixel at (x, y): plane = x % 4, offset = displayStart + y*(w/4) + x/4
+    uint32_t displayStart = m_vga.getDisplayStart();
+    int rowBytes = w / 4; // 80 for 320-wide
+    for (int y = 0; y < h; ++y) {
+      for (int x = 0; x < w; ++x) {
+        int plane = x & 3;
+        uint32_t offset = displayStart + y * rowBytes + (x >> 2);
+        m_framebuffer[y * m_texWidth + x] =
+            paletteToARGB(m_vga.readPlane(plane, offset));
+      }
+    }
+  } else if (mi->layout == hw::VMemLayout::Linear256) {
+    // Standard mode 13h (Chain-4): direct VRAM bulk read
     const uint8_t *vram = m_memory.directAccess(mi->vramBase);
     for (int y = 0; y < h; ++y) {
       for (int x = 0; x < w; ++x) {

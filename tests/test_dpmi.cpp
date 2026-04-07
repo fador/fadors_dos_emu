@@ -121,7 +121,7 @@ TEST_CASE("DPMI entry switches to protected mode", "[dpmi][entry]") {
     hw::KeyboardController kbd;
     hw::PIT8254 pit;
     hw::DOS dos(cpu, mem);
-    hw::PIC8259 pic(true);
+    hw::PIC8259 pic{true};
     hw::BIOS bios(cpu, mem, kbd, pit, pic);
     hw::DPMI dpmi(cpu, mem);
 
@@ -176,7 +176,7 @@ TEST_CASE("DPMI double entry fails with carry", "[dpmi][entry]") {
     memory::MemoryBus mem;
     hw::KeyboardController kbd;
     hw::PIT8254 pit;
-    hw::PIC8259 pic(true);
+    hw::PIC8259 pic{true};
     hw::BIOS bios(cpu, mem, kbd, pit, pic);
     hw::DOS dos(cpu, mem);
     hw::DPMI dpmi(cpu, mem);
@@ -1177,8 +1177,8 @@ static constexpr uint32_t hleStubPhys(uint8_t v) {
 static uint32_t idtLow (uint16_t sel, uint32_t off) {
     return (static_cast<uint32_t>(sel) << 16) | (off & 0xFFFF);
 }
-static uint32_t idtHigh(uint32_t off) {
-    return (off & 0xFFFF0000u) | 0x0000EE00u;
+static uint32_t idtHigh(uint32_t off, uint16_t gateType = 0xEE00) {
+    return (off & 0xFFFF0000u) | gateType;
 }
 
 TEST_CASE("DPMI 0205h writes physical IDT when we are the sole DPMI host", "[dpmi][int][idt]") {
@@ -1424,7 +1424,7 @@ TEST_CASE("isOriginalIVT returns true only for original HLE stub addresses", "[b
     memory::MemoryBus mem;
     hw::KeyboardController kbd;
     hw::PIT8254 pit;
-    hw::PIC8259 pic(true);
+    hw::PIC8259 pic{true};
     hw::BIOS bios(cpu, mem, kbd, pit, pic);
     bios.initialize();
 

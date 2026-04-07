@@ -2,6 +2,7 @@
 #ifdef HAVE_SDL2
 
 #include "../hw/KeyboardController.hpp"
+#include "../hw/VGAController.hpp"
 #include "../memory/MemoryBus.hpp"
 #include <SDL.h>
 #include <cstdint>
@@ -18,7 +19,8 @@ namespace fador::ui {
 // Also handles keyboard and mouse input via SDL events.
 class SDLRenderer {
 public:
-  SDLRenderer(memory::MemoryBus &memory, hw::KeyboardController &kbd);
+  SDLRenderer(memory::MemoryBus &memory, hw::KeyboardController &kbd,
+              hw::VGAController &vga);
   ~SDLRenderer();
 
   void setBIOS(hw::BIOS &bios) { m_bios = &bios; }
@@ -36,6 +38,7 @@ public:
 private:
   memory::MemoryBus &m_memory;
   hw::KeyboardController &m_kbd;
+  hw::VGAController &m_vga;
   hw::BIOS *m_bios = nullptr;
 
   SDL_Window *m_window = nullptr;

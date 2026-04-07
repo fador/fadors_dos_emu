@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <vector>
 
+namespace fador::hw { class VGAController; }
+
 namespace fador::memory {
 
 class MemoryBus {
@@ -32,11 +34,15 @@ public:
   }
   bool isA20Enabled() const { return m_a20Enabled; }
 
+  // Connect VGA controller for plane-aware VRAM access
+  void setVGA(hw::VGAController *vga) { m_vga = vga; }
+
   static constexpr uint32_t MEMORY_SIZE = 64 * 1024 * 1024; // 64MB
 
 private:
   std::vector<uint8_t> m_ram;
   bool m_a20Enabled{false};
+  hw::VGAController *m_vga = nullptr;
 };
 
 } // namespace fador::memory

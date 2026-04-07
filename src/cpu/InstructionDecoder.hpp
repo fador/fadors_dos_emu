@@ -2,6 +2,7 @@
 
 #include "../memory/MemoryBus.hpp"
 #include "CPU.hpp"
+#include <array>
 #include <cstdint>
 #include <tuple>
 
@@ -64,6 +65,23 @@ private:
   bool m_hasRepz;
   uint8_t m_segmentOverride; // SegRegIndex or 0xFF for none
   uint32_t m_segBase[6];     // Cached bases for ES, CS, SS, DS, FS, GS
+
+  // App-level PM interrupt vectors captured from INT 31h/0205h calls
+  // that are intercepted by DOS extender thunks before reaching the DPMI host.
+  // When a DOS extender (e.g. DOS/4GW) hooks INT 31h and intercepts 0205h
+  // calls from the application, the DPMI host never sees the app's handler.
+  // We capture the original CX:EDX at the point of the INT 31h instruction.
+  struct AppPMVector {
+    uint16_t selector = 0;
+    uint32_t offset = 0;
+    bool valid = false;
+  };
+  std::array<AppPMVector, 256> m_appPMVectors{};
+
+  // Re-entrancy guard for thunk dispatch from injectHardwareInterrupt.
+  // Set true when we dispatch a HW interrupt through a D=0 thunk after HLE,
+  // cleared when the corresponding IRET returns from the thunk.
+  bool m_thunkDispatchActive = false;
 
   uint32_t m_trace_eip[128];
   uint16_t m_trace_cs[128];

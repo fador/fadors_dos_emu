@@ -40,6 +40,9 @@ int main(int argc, char *argv[]) {
     fador::hw::VGAController vga(memory);
     fador::hw::DMA8237 dma;
 
+    // Connect VGA plane memory to the memory bus
+    memory.setVGA(&vga);
+
     fador::hw::audio::AudioBackend audio;
     audio.init(44100, 2, 1024);
 
@@ -244,7 +247,7 @@ int main(int argc, char *argv[]) {
 #ifdef HAVE_SDL2
     if (useSDL) {
       // ── SDL2 graphical window path ──────────────────────────
-      fador::ui::SDLRenderer sdlRenderer(memory, kbd);
+      fador::ui::SDLRenderer sdlRenderer(memory, kbd, vga);
       sdlRenderer.setBIOS(bios);
 
       bios.setInputPollCallback([&sdlRenderer]() { sdlRenderer.pollInput(); });
@@ -260,8 +263,8 @@ int main(int argc, char *argv[]) {
         if (cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) {
           int pending = pic.getPendingInterrupt();
           if (pending != -1) {
-            decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
             pic.acknowledgeInterrupt();
+            decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
           }
         }
         static auto lr = std::chrono::steady_clock::now();
@@ -286,7 +289,34 @@ int main(int argc, char *argv[]) {
         pit.addCycles(4);
         instrCount++;
 
+        // Periodic EIP sample for progress tracking
+        if ((instrCount & 0xFFFFFF) == 0) {
+          uint16_t cs_s = cpu.getSegReg(fador::cpu::CS);
+          uint32_t eip_s = cpu.getEIP();
+          LOG_INFO("SAMPLE @", instrCount, ": CS=", std::hex, cs_s, " EIP=", eip_s,
+                   " flags=", cpu.getEFLAGS());
+        }
+
         if (stopAfterCycles > 0 && instrCount >= stopAfterCycles) {
+          // Trace next 50 instructions for diagnostic
+          LOG_INFO("=== Instruction trace at stop point ===");
+          for (int t = 0; t < 50; ++t) {
+            uint32_t eip = cpu.getEIP();
+            uint16_t cs_val = cpu.getSegReg(fador::cpu::CS);
+            uint32_t csBase = cpu.getSegBase(fador::cpu::CS);
+            uint32_t phys = csBase + eip;
+            char buf[256];
+            snprintf(buf, sizeof(buf),
+              "TRACE %02d: CS=%04X EIP=%08X phys=%08X bytes=%02X %02X %02X %02X %02X %02X EAX=%08X",
+              t, cs_val, eip, phys,
+              memory.read8(phys), memory.read8(phys+1), memory.read8(phys+2),
+              memory.read8(phys+3), memory.read8(phys+4), memory.read8(phys+5),
+              cpu.getReg32(fador::cpu::EAX));
+            LOG_INFO(buf);
+            decoder.step();
+            cpu.addCycles(4);
+            pit.addCycles(4);
+          }
           LOG_INFO("Stopped after ", instrCount, " cycles (--stop-after)");
           debugger.dumpState();
           for (int row = 0; row < 25; ++row) {
@@ -348,8 +378,8 @@ int main(int argc, char *argv[]) {
           if (cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) {
             int pending = pic.getPendingInterrupt();
             if (pending != -1) {
-              decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
               pic.acknowledgeInterrupt();
+              decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
             }
           }
 
@@ -402,8 +432,8 @@ int main(int argc, char *argv[]) {
         if (cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) {
           int pending = pic.getPendingInterrupt();
           if (pending != -1) {
-            decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
             pic.acknowledgeInterrupt();
+            decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
           }
         }
         static auto lr = std::chrono::steady_clock::now();
@@ -441,8 +471,8 @@ int main(int argc, char *argv[]) {
           if (cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) {
             int pending = pic.getPendingInterrupt();
             if (pending != -1) {
-              decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
               pic.acknowledgeInterrupt();
+              decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
             }
           }
         }
@@ -503,8 +533,8 @@ int main(int argc, char *argv[]) {
           if (cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) {
             int pending = pic.getPendingInterrupt();
             if (pending != -1) {
-              decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
               pic.acknowledgeInterrupt();
+              decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
             }
           }
 
