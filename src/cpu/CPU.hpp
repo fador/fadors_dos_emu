@@ -98,6 +98,10 @@ public:
     uint16_t origDS = 0;          // Caller's original DS before switch
     uint16_t origES = 0;          // Caller's original ES before switch
     bool dispatchedToPM = false;  // Thunk dispatched to PM handler
+    // GPRs + extra segments saved at thunk→PM dispatch, restored at PM-OK
+    uint32_t savedEAX = 0, savedEBX = 0, savedECX = 0, savedEDX = 0;
+    uint32_t savedESI = 0, savedEDI = 0, savedEBP = 0;
+    uint16_t savedFS = 0, savedGS = 0;
   };
 
   bool isLastInt32() const {
@@ -176,13 +180,13 @@ public:
     return {false, 0, 0, false, 0xFF, false, 0, 0, 0, 0};
   }
 
-  // Peek at a dpmiStackSwitch frame whose origCS matches the given CS
-  // and whose vector is a hardware IRQ (0x08-0x0F master, 0x70-0x77 slave).
+  // Peek at the most recent undispatched dpmiStackSwitch frame whose
+  // vector is a hardware IRQ (0x08-0x0F master, 0x70-0x77 slave).
   // Non-destructive: returns a copy without removing from the stack.
-  // Used to detect thunk → PM handler dispatch (same CS, different EIP).
-  HLEFrame peekDpmiFrameByOrigCS(uint16_t cs) const {
+  // Used to detect thunk → PM handler dispatch.
+  HLEFrame peekUndispatchedHwIrqFrame() const {
     for (auto it = m_hleStack.rbegin(); it != m_hleStack.rend(); ++it) {
-      if (it->dpmiStackSwitch && it->origCS == cs) {
+      if (it->dpmiStackSwitch && !it->dispatchedToPM) {
         uint8_t v = it->vector;
         bool isHwIrq = (v >= 0x08 && v <= 0x0F) || (v >= 0x70 && v <= 0x77);
         if (isHwIrq) return *it;
@@ -191,15 +195,32 @@ public:
     return {false, 0, 0, false, 0xFF, false, 0, 0, 0, 0};
   }
 
-  // Mark a dpmiStackSwitch frame as dispatched to PM handler (in-place).
-  // Called when the thunk's IRET goes to origCS but different EIP.
-  bool markDpmiFrameDispatched(uint16_t origCS) {
+  // Find the outermost (first) dpmiStackSwitch frame on the HLE stack.
+  // Returns the application's original SS:ESP before any reflection.
+  // Used to give the PM handler the app's stack when a HW IRQ fires
+  // inside a thunk (nested reflection).
+  const HLEFrame *peekOutermostDpmiFrame() const {
+    for (auto it = m_hleStack.begin(); it != m_hleStack.end(); ++it) {
+      if (it->dpmiStackSwitch) return &(*it);
+    }
+    return nullptr;
+  }
+
+  // Mark the most recent undispatched dpmiStackSwitch hw IRQ frame as
+  // dispatched to PM handler (in-place).  Also saves current GPRs + FS/GS
+  // so they can be restored when the PM handler's IRET is intercepted.
+  bool markDpmiFrameDispatched() {
     for (auto it = m_hleStack.rbegin(); it != m_hleStack.rend(); ++it) {
-      if (it->dpmiStackSwitch && it->origCS == origCS && !it->dispatchedToPM) {
+      if (it->dpmiStackSwitch && !it->dispatchedToPM) {
         uint8_t v = it->vector;
         bool isHwIrq = (v >= 0x08 && v <= 0x0F) || (v >= 0x70 && v <= 0x77);
         if (isHwIrq) {
           it->dispatchedToPM = true;
+          it->savedEAX = m_regs[EAX]; it->savedEBX = m_regs[EBX];
+          it->savedECX = m_regs[ECX]; it->savedEDX = m_regs[EDX];
+          it->savedESI = m_regs[ESI]; it->savedEDI = m_regs[EDI];
+          it->savedEBP = m_regs[EBP];
+          it->savedFS = m_segRegs[FS]; it->savedGS = m_segRegs[GS];
           return true;
         }
       }
@@ -207,18 +228,27 @@ public:
     return false;
   }
 
-  // Pop a dpmiStackSwitch frame that was dispatched to a PM handler
-  // whose code runs in the given CS.  Used to intercept the PM handler's
-  // IRET (which may use the wrong operand size) and restore full state.
-  HLEFrame popDpmiFrameByDispatchedPM(uint16_t currentCS) {
+  // Pop the most recent dpmiStackSwitch frame that was dispatched to a
+  // PM handler.  Used to intercept the PM handler's IRET (which may use
+  // the wrong operand size) and restore full state.
+  HLEFrame popDpmiFrameByDispatchedPM() {
     for (auto it = m_hleStack.rbegin(); it != m_hleStack.rend(); ++it) {
-      if (it->dpmiStackSwitch && it->dispatchedToPM && it->origCS == currentCS) {
+      if (it->dpmiStackSwitch && it->dispatchedToPM) {
         HLEFrame result = *it;
         m_hleStack.erase(std::prev(it.base()));
         return result;
       }
     }
     return {false, 0, 0, false, 0xFF, false, 0, 0, 0, 0};
+  }
+
+  // Peek (non-destructive) at the most recent dispatchedToPM frame.
+  const HLEFrame *peekDpmiFrameByDispatchedPM() const {
+    for (auto it = m_hleStack.rbegin(); it != m_hleStack.rend(); ++it) {
+      if (it->dpmiStackSwitch && it->dispatchedToPM)
+        return &(*it);
+    }
+    return nullptr;
   }
 
   // Find and remove the most recent HLE frame for the given vector.

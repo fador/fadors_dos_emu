@@ -78,11 +78,6 @@ private:
   };
   std::array<AppPMVector, 256> m_appPMVectors{};
 
-  uint32_t m_trace_eip[128];
-  uint16_t m_trace_cs[128];
-  uint8_t m_trace_op[128];
-  int m_trace_idx = 0;
-
   // Caching for EA to avoid double-fetching displacement in RMW instructions
   uint32_t m_currentEA;
   uint32_t m_currentOffset; // Holds isolated offset (critical for 0x8D LEA)
