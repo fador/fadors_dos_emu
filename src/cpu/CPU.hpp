@@ -171,7 +171,7 @@ public:
   // because the DOS/4GW thunk rearranges its internal stack.
   HLEFrame popDpmiFrameByCSEIP(uint16_t cs, uint32_t eip) {
     for (auto it = m_hleStack.rbegin(); it != m_hleStack.rend(); ++it) {
-      if (it->dpmiStackSwitch && it->origCS == cs && it->origEIP == eip) {
+      if (it->origCS == cs && it->origEIP == eip && cs != 0) {
         HLEFrame result = *it;
         m_hleStack.erase(std::prev(it.base()));
         return result;

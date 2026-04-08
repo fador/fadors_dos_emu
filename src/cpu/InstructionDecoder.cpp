@@ -743,6 +743,22 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
         bool popped = (poppedFrame.framePhysAddr != 0);
         LOG_CPU("IRET popHLEFrameByPhysAddr: addr=0x", std::hex, iretPhysAddr,
           " popped=", popped, " hleStackSize=", m_cpu.hleStackSize());
+
+        // TEMP DIAG: log when HLE frames are deep
+        if (m_cpu.hleStackSize() > 4) {
+          uint16_t iretCS = m_cpu.getSegReg(CS);
+          uint32_t iretEIP = m_cpu.getEIP();
+          static int s_iretLog = 0;
+          if (s_iretLog < 20) {
+            ++s_iretLog;
+            LOG_ERROR("HLE-IRET: popped=", popped,
+                      " depth=", std::dec, m_cpu.hleStackSize(),
+                      " iretPhysAddr=0x", std::hex, iretPhysAddr,
+                      " CS:EIP=", iretCS, ":", iretEIP,
+                      " SS:ESP=", m_cpu.getSegReg(SS), ":", m_cpu.getReg32(ESP),
+                      " useIretd=", useIretd);
+          }
+        }
         // Fallback: if the physical-address match failed, check if the IRET
         // returned to a CS:EIP that matches a dpmiStackSwitch frame's saved
         // origCS:origEIP.  The DOS/4GW thunk rearranges its internal stack
@@ -2616,10 +2632,38 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     f1_count++;
     break;
   }
-  case 0xF4:
-    LOG_INFO("HLT encountered at ", std::hex, m_cpu.getSegReg(CS), ":",
+  case 0xF4: {
+    uint16_t haltCs = m_cpu.getSegReg(CS);
+    LOG_INFO("HLT encountered at ", std::hex, haltCs, ":",
              m_cpu.getEIP() - 1);
+    // DPMI thunk error bailout: if HLT fires inside the thunk code and
+    // there's an outermost dpmiStackSwitch frame (the app's DPMI call),
+    // the thunk has entered its fatal error path. Restore the app's
+    // state from the outermost frame with CF=1 to signal error.
+    if (m_cpu.hleStackSize() > 0) {
+      auto *outerFrame = m_cpu.peekOutermostDpmiFrame();
+      if (outerFrame && outerFrame->origCS != 0 && haltCs != outerFrame->origCS) {
+        LOG_DEBUG("DPMI thunk error bailout: restoring to CS:EIP=0x",
+                 std::hex, outerFrame->origCS, ":", outerFrame->origEIP,
+                 " SS:ESP=0x", outerFrame->origSS, ":", outerFrame->origESP,
+                 " origAX=0x", outerFrame->savedEAX,
+                 " vec=0x", (int)outerFrame->vector,
+                 " hleDepth=", std::dec, m_cpu.hleStackSize());
+        loadSegment(CS, outerFrame->origCS);
+        m_cpu.setEIP(outerFrame->origEIP);
+        uint32_t eflags = outerFrame->origEFLAGS | 1; // Set CF for error
+        m_cpu.setEFLAGS(eflags);
+        loadSegment(SS, outerFrame->origSS);
+        m_cpu.setReg32(ESP, outerFrame->origESP);
+        loadSegment(DS, outerFrame->origDS);
+        loadSegment(ES, outerFrame->origES);
+        // Clear all HLE frames — the DPMI call is aborted
+        while (m_cpu.hleStackSize() > 0)
+          m_cpu.popHLEFrame();
+      }
+    }
     break;
+  }
 
   default:
     LOG_WARN("Unknown opcode 0x", std::hex, static_cast<int>(opcode),
@@ -3897,6 +3941,15 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
 
     uint8_t newCpl = cs & 3;
 
+    // Self-referential interrupt guard: if the interrupt fires from within
+    // the DPMI thunk code (oldCs == IDT handler CS) and the vector is a
+    // CPU exception (0-31), the thunk has entered its internal error/halt
+    // path.  On real hardware the ring-0 DPMI host would catch these;
+    // reflecting them back to the same handler creates infinite loops.
+    if (oldCs == cs && vector < 32) {
+      return;
+    }
+
     // Privilege change check
     bool privChange = (newCpl < oldCpl) || (m_cpu.getEFLAGS() & 0x00020000);
 
@@ -3965,22 +4018,41 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
     // truncates ESP > 0xFFFF during its SP save/restore, corrupting the
     // return path. We switch to a "reflection stack" at a low physical
     // address before pushing the IRET frame.
-    if (!isOrig && !(m_cpu.getEFLAGS() & 0x00020000) && oldEsp > 0xFFFF) {
+    //
+    // For ALL hooked vectors (isOrig=false), save the interrupted
+    // CS:EIP so the IRET handler can match this frame even when the
+    // thunk rearranges its stack (physical-address matching fails).
+    if (!isOrig) {
       auto &frame = m_cpu.lastHLEFrameMut();
-      frame.dpmiStackSwitch = true;
-      frame.origESP = oldEsp;
-      frame.origSS = oldSs;
-      frame.origEIP = m_cpu.getEIP();
       frame.origCS = oldCs;
-      frame.origEFLAGS = m_cpu.getEFLAGS();
-      frame.origDS = m_cpu.getSegReg(DS);
-      frame.origES = m_cpu.getSegReg(ES);
-      // Use physical 0x9C00-0xA000 as reflection stack area.
-      // Safe during brief interrupt handling with interrupts disabled.
-      m_cpu.setReg32(ESP, 0xA000);
-      LOG_DEBUG("DPMI reflect: vec=0x", std::hex, (int)vector,
-                " origSS=0x", oldSs, " origESP=0x", oldEsp,
-                " reflectESP=0xA000");
+      frame.origEIP = m_cpu.getEIP();
+      frame.savedEAX = m_cpu.getReg32(EAX); // Save for bailout diagnostics
+      if (!(m_cpu.getEFLAGS() & 0x00020000) && oldEsp > 0xFFFF) {
+        frame.dpmiStackSwitch = true;
+        frame.origESP = oldEsp;
+        frame.origSS = oldSs;
+        frame.origEFLAGS = m_cpu.getEFLAGS();
+        frame.origDS = m_cpu.getSegReg(DS);
+        frame.origES = m_cpu.getSegReg(ES);
+        // DOS/4GW thunk expects to run on its own host stack (SS=0xAF)
+        // with the app's SS:ESP pushed as part of a privilege-change
+        // IRET frame. On real hardware the DPMI host does this at
+        // ring 0; we emulate it here for software INTs too.
+        if (oldSs == 0xAF) {
+          // Already on host stack — keep current ESP.
+        } else {
+          uint32_t dsAFBase = 0x1197C0; // sel 0xAF base
+          uint32_t hostSP = m_memory.read32(dsAFBase + 0x0A42);
+          if (hostSP == 0 || hostSP > 0xFFF0) hostSP = 0x4800;
+          loadSegment(cpu::SS, 0xAF);
+          m_cpu.setReg32(ESP, hostSP);
+          privChange = true;
+        }
+        LOG_DEBUG("DPMI reflect: vec=0x", std::hex, (int)vector,
+                  " origSS=0x", oldSs, " origESP=0x", oldEsp,
+                  " newSS:ESP=", m_cpu.getSegReg(SS), ":",
+                  m_cpu.getReg32(ESP));
+      }
     }
 
     // Hardware-compatible entry order: push original EFLAGS first,
