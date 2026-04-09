@@ -907,8 +907,27 @@ void DPMI::handleTranslation() {
       }
       // Try HLE at the target address
       bool handled = false;
-      // Check if the target is one of our HLE stubs (matching IVT entry)
-      if (m_bios) {
+      // Check if the target is one of our HLE stubs: F000:(0x100 + v*4).
+      // We match against the known stub layout directly rather than the
+      // runtime IVT, which may have been hooked by DOS extenders/TSRs.
+      if (m_bios && rmCS == 0xF000 && rmIP >= 0x0100 &&
+          rmIP < 0x0100 + 256 * 4 && ((rmIP - 0x0100) & 3) == 0) {
+        int v = (rmIP - 0x0100) / 4;
+        if (m_dos && m_dos->handleInterrupt(v))
+          handled = true;
+        if (!handled && m_bios->handleInterrupt(v))
+          handled = true;
+        if (!handled) {
+          // The target is our HLE stub but neither DOS nor BIOS handles
+          // this vector. On real hardware, executing the stub would just
+          // IRET (it's a dummy). Treat as successful no-op.
+          LOG_DEBUG("DPMI 030", (int)(func & 0xF),
+                    "h: stub for INT 0x", std::hex, v, " — no-op");
+          handled = true;
+        }
+      }
+      // Also check the runtime IVT as fallback for non-standard stubs
+      if (!handled && m_bios) {
         for (int v = 0; v < 256; v++) {
           uint16_t ivtIP = m_memory.read16(v * 4);
           uint16_t ivtCS = m_memory.read16(v * 4 + 2);
@@ -924,9 +943,12 @@ void DPMI::handleTranslation() {
           }
         }
       }
-      if (!handled)
+      if (!handled) {
         LOG_WARN("DPMI 030", (int)(func & 0xF),
                  "h: RM proc at ", std::hex, rmCS, ":", rmIP, " not handled");
+        // Signal failure to the caller — set CF in the returned flags
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      }
     }
 
     // Write back modified registers to the call structure
