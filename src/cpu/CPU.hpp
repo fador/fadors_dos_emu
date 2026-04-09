@@ -170,8 +170,22 @@ public:
   // CS:EIP.  Used as a fallback when physical-address matching fails
   // because the DOS/4GW thunk rearranges its internal stack.
   HLEFrame popDpmiFrameByCSEIP(uint16_t cs, uint32_t eip) {
+    // Exact 32-bit match
     for (auto it = m_hleStack.rbegin(); it != m_hleStack.rend(); ++it) {
       if (it->origCS == cs && it->origEIP == eip && cs != 0) {
+        HLEFrame result = *it;
+        m_hleStack.erase(std::prev(it.base()));
+        return result;
+      }
+    }
+    // Fallback: tolerate 16-bit EIP truncation. A 16-bit IRET on a
+    // 32-bit frame restores only the low 16 bits of EIP (the high 16
+    // bits come from the zero-extension of the 16-bit pop). Match when
+    // CS is identical and the low 16 bits of both EIPs agree.
+    for (auto it = m_hleStack.rbegin(); it != m_hleStack.rend(); ++it) {
+      if (it->origCS == cs && cs != 0 &&
+          (it->origEIP & 0xFFFF) == (eip & 0xFFFF) &&
+          it->origEIP != eip) {
         HLEFrame result = *it;
         m_hleStack.erase(std::prev(it.base()));
         return result;

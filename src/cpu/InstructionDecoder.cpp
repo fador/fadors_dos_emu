@@ -638,6 +638,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                 flags32, " score32=", score32);
 
       if ((m_cpu.getCR(0) & 1) && m_cpu.getSegReg(CS) == 0x0008) {
+        // Full scoring for HLE stub IRETs (original safe behaviour)
         if (score32 > score16 && score32 >= 0) {
           useIretd = true;
         } else if (score16 > score32 && score16 >= 0) {
@@ -646,6 +647,16 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
           useIretd = true;
         }
         LOG_DEBUG("IRET decision: useIretd=", useIretd);
+      } else if ((m_cpu.getCR(0) & 1) && !useIretd &&
+                 score32 >= 100 && score16 < 0) {
+        // Conservative override for 16-bit thunk code doing IRET on a
+        // 32-bit gate frame: the 16-bit interpretation gives clearly
+        // invalid CS (null/non-code/not-present → negative score) while
+        // the 32-bit one yields a valid code segment.  Only promote
+        // 16→32; never demote the other direction.
+        useIretd = true;
+        LOG_DEBUG("IRET conservative 16→32: score16=", score16,
+                  " score32=", score32);
       }
     }
 
