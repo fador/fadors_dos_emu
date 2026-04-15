@@ -381,6 +381,7 @@ void InstructionDecoder::step() {
   m_eaResolved = false;
 
   m_instrStartEIP = m_cpu.getEIP();
+  m_cpu.setInstructionStartEIP(m_instrStartEIP);
   uint8_t opcode = fetch8();
   // Temporary diagnostic: log the next few bytes at the instruction start
   {

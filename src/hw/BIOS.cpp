@@ -1025,7 +1025,7 @@ void BIOS::handleKeyboardService() {
       if (!m_kbd.hasKey()) {
         if (m_idleCallback)
           m_idleCallback();
-        m_cpu.setEIP(m_cpu.getEIP() - 2);
+        m_cpu.setEIP(m_cpu.getInstructionStartEIP());
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         return;
       }
