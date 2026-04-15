@@ -96,7 +96,7 @@ int main(int argc, char *argv[]) {
 
     sb.setIRQCallback([&pic]() { pic.raiseIRQ(5); });
 
-    fador::hw::ProgramLoader loader(cpu, memory);
+    fador::hw::ProgramLoader loader(cpu, memory, dos.getHIMEM());
     fador::ui::TerminalRenderer renderer(memory);
     fador::ui::Debugger debugger(cpu, memory, decoder);
 

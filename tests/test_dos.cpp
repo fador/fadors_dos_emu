@@ -28,7 +28,7 @@ TEST_CASE("DOS Emulation and Program Loading", "[DOS]") {
     bios.initialize();
     dos.initialize();
     cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
-    hw::ProgramLoader loader(cpu, mem);
+    hw::ProgramLoader loader(cpu, mem, dos.getHIMEM());
 
     SECTION("COM File Loading and PSP Initialization") {
         // Create a dummy .COM file (B4 09 BA 00 00 CD 21 CD 20) -> AH=09, DX=0, INT 21, INT 20

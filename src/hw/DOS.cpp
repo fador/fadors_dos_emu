@@ -1,10 +1,5 @@
 #include "../memory/himem/HIMEM.hpp"
 
-namespace fador {
-namespace hw {
-memory::HIMEM *g_himem = nullptr;
-}
-} // namespace fador
 #include "../utils/Logger.hpp"
 #include "DOS.hpp"
 #include "DPMI.hpp"
@@ -23,7 +18,6 @@ namespace fador::hw {
 DOS::DOS(cpu::CPU &cpu, memory::MemoryBus &memory)
     : m_cpu(cpu), m_memory(memory) {
   m_himem = std::make_unique<memory::HIMEM>();
-  fador::hw::g_himem = m_himem.get();
 }
 
 void DOS::initialize() {

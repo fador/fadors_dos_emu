@@ -8,8 +8,9 @@
 
 namespace fador::hw {
 
-ProgramLoader::ProgramLoader(cpu::CPU &cpu, memory::MemoryBus &memory)
-    : m_cpu(cpu), m_memory(memory) {}
+ProgramLoader::ProgramLoader(cpu::CPU &cpu, memory::MemoryBus &memory,
+                             memory::HIMEM *himem)
+    : m_cpu(cpu), m_memory(memory), m_himem(himem) {}
 
 bool ProgramLoader::loadCOM(const std::string &path, uint16_t segment,
                             const std::string &args) {
@@ -273,12 +274,9 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
   if (loadAddr + imageSize > memory::MemoryBus::MEMORY_SIZE) {
     if (useHimem) {
       // Try to use XMS (HIMEM)
-      // Find global HIMEM instance (hack: static pointer, or pass in
-      // constructor in future)
-      extern fador::memory::HIMEM *g_himem;
-      if (g_himem && g_himem->available() >= imageSize) {
-        uint16_t handle = g_himem->allocate(imageSize);
-        uint8_t *xmsPtr = g_himem->getBlock(handle);
+      if (m_himem && m_himem->available() >= imageSize) {
+        uint16_t handle = m_himem->allocate(imageSize);
+        uint8_t *xmsPtr = m_himem->getBlock(handle);
         if (xmsPtr) {
           std::copy(buffer.begin(), buffer.end(), xmsPtr);
           LOG_WARN("ProgramLoader: Loaded EXE into XMS (HIMEM) at handle ",
