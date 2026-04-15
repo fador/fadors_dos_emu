@@ -62,6 +62,7 @@ set(TEST_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_instruction_decoder.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_interrupts.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_hw_devices.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_dma8237.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_bios.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_dos.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_dos_memory.cpp"
