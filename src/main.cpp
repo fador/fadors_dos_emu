@@ -282,6 +282,7 @@ int main(int argc, char *argv[]) {
 
       bool running = true;
       uint64_t instrCount = 0;
+      std::vector<float> audioBuf;
 
       while (running) {
         decoder.step();
@@ -391,7 +392,7 @@ int main(int argc, char *argv[]) {
             size_t samplesNeeded =
                 (targetQueueBytes - queuedAudio) / 8; // 2 channels * 4 bytes
             if (samplesNeeded > 0) {
-              std::vector<float> audioBuf(samplesNeeded * 2, 0.0f);
+              audioBuf.assign(samplesNeeded * 2, 0.0f);
               adlib.generateSamples(audioBuf.data(), samplesNeeded);
               sb.generateSamples(audioBuf.data(), samplesNeeded);
               audio.queueSamples(audioBuf.data(), samplesNeeded * 2);
@@ -451,6 +452,7 @@ int main(int argc, char *argv[]) {
 
       bool running = true;
       uint64_t instrCount = 0;
+      std::vector<float> audioBuf;
 
       while (running) {
         decoder.step();
@@ -549,7 +551,7 @@ int main(int argc, char *argv[]) {
             size_t samplesNeeded =
                 (targetQueueBytes - queuedAudio) / 8; // 2 channels * 4 bytes
             if (samplesNeeded > 0) {
-              std::vector<float> audioBuf(samplesNeeded * 2, 0.0f);
+              audioBuf.assign(samplesNeeded * 2, 0.0f);
               adlib.generateSamples(audioBuf.data(), samplesNeeded);
               sb.generateSamples(audioBuf.data(), samplesNeeded);
               audio.queueSamples(audioBuf.data(), samplesNeeded * 2);
