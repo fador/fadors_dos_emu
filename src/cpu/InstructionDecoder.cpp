@@ -794,11 +794,29 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
         // stack and push a return frame pointing to the interrupted code.
         // We do that here: fix SS:ESP, push a 32-bit IRET frame, and mark
         // the HLE frame as dispatched so the handler's IRET is intercepted.
+        //
+        // Guard: only dispatch when the IRET destination is a 32-bit LDT
+        // code segment (the app's PM handler).  The thunk's internal IRETs
+        // (to its own 16-bit CS=0x8F) and HLE chain calls (to GDT CS=0x08)
+        // must NOT trigger this path — doing so would prematurely switch
+        // the stack and skip the actual PM handler dispatch.
         if (!popped) {
           uint16_t newCs = m_cpu.getSegReg(CS);
           uint32_t newEip = m_cpu.getEIP();
           auto dpmiFrame = m_cpu.peekUndispatchedHwIrqFrame();
           if (dpmiFrame.framePhysAddr != 0 && dpmiFrame.origEIP != newEip) {
+            // Verify the IRET destination is the PM handler (32-bit LDT
+            // code segment), not the thunk itself or an HLE stub.
+            bool isPMHandler = false;
+            if (newCs & 0x04) { // LDT selector
+              uint32_t tbl = m_cpu.getLDTR().base;
+              uint32_t dLow = m_memory.read32(tbl + (newCs & ~7));
+              uint32_t dHigh = m_memory.read32(tbl + (newCs & ~7) + 4);
+              Descriptor d = decodeDescriptor(dLow, dHigh);
+              isPMHandler = d.is32Bit && d.isPresent && !d.isSystem &&
+                            (d.type & 0x08); // 32-bit present code segment
+            }
+            if (isPMHandler) {
             // Use the application's stack for the PM handler, not the
             // thunk's reflection stack.  When a HW IRQ fires inside a
             // thunk (nested reflection), dpmiFrame.origSS:origESP points
@@ -829,6 +847,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                     " handler=0x", newCs, ":", newEip,
                     " return=0x", dpmiFrame.origCS, ":", dpmiFrame.origEIP,
                     " SS:ESP=0x", pmSS, ":", appEsp);
+            } // isPMHandler
           }
         }
         // DPMI host stack switch restore: if the interrupt dispatch used
@@ -2668,6 +2687,15 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
         m_cpu.setReg32(ESP, outerFrame->origESP);
         loadSegment(DS, outerFrame->origDS);
         loadSegment(ES, outerFrame->origES);
+        // Send EOI for all HW IRQ vectors in the HLE stack so the PIC
+        // unblocks future interrupts (especially keyboard IRQ1).
+        for (size_t i = 0; i < m_cpu.hleStackSize(); ++i) {
+          uint8_t v = m_cpu.hleFrameAt(i).vector;
+          bool isHwIrq = (v >= 0x08 && v <= 0x0F) || (v >= 0x70 && v <= 0x77);
+          if (isHwIrq) {
+            m_bios.sendEOI(v);
+          }
+        }
         // Clear all HLE frames — the DPMI call is aborted
         while (m_cpu.hleStackSize() > 0)
           m_cpu.popHLEFrame();
