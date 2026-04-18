@@ -183,10 +183,10 @@ void TerminalRenderer::renderGraphicsFullRes(bool force) {
 
     // Build packed per-cell values and detect changes
     bool changed = false;
-    // Reuse a flat vector of packed 48-bit-ish values (top RGB | bot RGB)
-    // encoded as two 24-bit values packed: hi=top, lo=bot
-    struct CellPair { uint32_t topPacked; uint32_t botPacked; };
-    std::vector<CellPair> cells(totalCells);
+
+    if (static_cast<int>(m_fullResCells.size()) != totalCells) {
+        m_fullResCells.resize(totalCells);
+    }
 
     for (int row = 0; row < outRows; ++row) {
         int y0 = row * 2;
@@ -212,7 +212,7 @@ void TerminalRenderer::renderGraphicsFullRes(bool force) {
             };
             uint32_t top = toRGB(idx0);
             uint32_t bot = toRGB(idx1);
-            cells[row * outCols + col] = {top, bot};
+            m_fullResCells[row * outCols + col] = {top, bot};
 
             // Pack both into a single 32-bit hash for dirty detection
             // (We combine via XOR with shift — fast, catches most changes)
@@ -238,7 +238,7 @@ void TerminalRenderer::renderGraphicsFullRes(bool force) {
 
     for (int row = 0; row < outRows; ++row) {
         for (int col = 0; col < outCols; ++col) {
-            const auto& c = cells[row * outCols + col];
+            const auto& c = m_fullResCells[row * outCols + col];
             // Emit color escape only when fg or bg actually changes
             if (c.topPacked != prevFg || c.botPacked != prevBg) {
                 uint8_t fgR = (c.topPacked >> 16) & 0xFF;
@@ -313,8 +313,10 @@ void TerminalRenderer::renderGraphicsDownsampled(bool force) {
         force = true;
     }
 
-    struct CellInfo { uint8_t r, g, b; int fillLevel; };
-    std::vector<CellInfo> cells(totalCells);
+    if (static_cast<int>(m_downsampledCells.size()) != totalCells) {
+        m_downsampledCells.resize(totalCells);
+    }
+
     bool changed = false;
     const uint8_t* pal = m_memory.directAccess(PALETTE_BASE);
 
@@ -362,7 +364,7 @@ void TerminalRenderer::renderGraphicsDownsampled(bool force) {
                 fillLevel = 1 + (litPixels * 3) / count; // 1..4
                 if (fillLevel >= numBlocks) fillLevel = numBlocks - 1;
             }
-            cells[row * outCols + col] = {avgR, avgG, avgB, fillLevel};
+            m_downsampledCells[row * outCols + col] = {avgR, avgG, avgB, fillLevel};
 
             uint32_t packed = (uint32_t(avgR) << 16) | (uint32_t(avgG) << 8) | avgB
                             | (uint32_t(fillLevel) << 24);
@@ -381,7 +383,7 @@ void TerminalRenderer::renderGraphicsDownsampled(bool force) {
     uint32_t prevFg = 0xFFFFFFFF;
     for (int row = 0; row < outRows; ++row) {
         for (int col = 0; col < outCols; ++col) {
-            const auto& c = cells[row * outCols + col];
+            const auto& c = m_downsampledCells[row * outCols + col];
             if (c.fillLevel == 0) {
                 // Empty cell — just a space, reset colors if needed
                 if (prevFg != 0) {

@@ -41,6 +41,12 @@ private:
     uint8_t m_lastVideoMode = 0xFF;
     bool m_cursorHidden = false;
 
+    struct CellPair { uint32_t topPacked; uint32_t botPacked; };
+    struct CellInfo { uint8_t r, g, b; int fillLevel; };
+
+    std::vector<CellPair> m_fullResCells;
+    std::vector<CellInfo> m_downsampledCells;
+
     void renderTextMode(bool force);
     void renderGraphicsMode(bool force);
     void renderGraphicsFullRes(bool force);
