@@ -658,6 +658,7 @@ static constexpr uint32_t kCGAPalette[16] = {
 SDLRenderer::SDLRenderer(memory::MemoryBus &memory, hw::KeyboardController &kbd,
                          hw::VGAController &vga)
     : m_memory(memory), m_kbd(kbd), m_vga(vga) {
+  SDL_SetMainReady();
   if (SDL_Init(SDL_INIT_VIDEO) < 0) {
     LOG_ERROR("SDL_Init failed: ", SDL_GetError());
     return;

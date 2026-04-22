@@ -4,11 +4,35 @@ project(FadorsDOSEmulator VERSION 1.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF) # Ensure strict standard C++
-
 # Optional SDL2 graphics backend
 find_package(SDL2 QUIET)
+
+if(WIN32 AND NOT SDL2_FOUND)
+    message(STATUS "SDL2 not found — attempting to download and build SDL2 from source")
+    include(FetchContent)
+    
+    # Disable SDL2 test applications and installation to speed up the subproject build
+    set(SDL_TEST OFF CACHE BOOL "" FORCE)
+    set(SDL_TESTS OFF CACHE BOOL "" FORCE)
+    set(SDL2_DISABLE_INSTALL ON CACHE BOOL "" FORCE)
+
+    FetchContent_Declare(
+        SDL2
+        GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
+        GIT_TAG release-2.26.5
+    )
+    FetchContent_MakeAvailable(SDL2)
+
+    # FetchContent doesn't set find_package variables natively.
+    # We check for the exported targets and manually flag it as found.
+    if(TARGET SDL2::SDL2 OR TARGET SDL2)
+        set(SDL2_FOUND TRUE)
+    endif()
+endif()
+
 if(SDL2_FOUND)
-    message(STATUS "SDL2 found — graphical window backend enabled")
+    message(STATUS "SDL2 found/built — graphical window backend enabled")
+    # You can now link safely: target_link_libraries(your_target PRIVATE SDL2::SDL2)
 else()
     message(STATUS "SDL2 not found — using terminal-only rendering")
 endif()
