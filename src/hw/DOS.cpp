@@ -1545,11 +1545,16 @@ void DOS::handleFileService() {
     } else if (handle >= 5 && handle - 5 < m_fileHandles.size() &&
                m_fileHandles[handle - 5]) {
       auto &fh = m_fileHandles[handle - 5];
-      std::vector<char> buf(bytesToWrite);
-      for (uint16_t i = 0; i < bytesToWrite; ++i) {
-        buf[i] = m_memory.read8(bufAddr + i);
+      uint8_t *ptr = m_memory.directAccess(bufAddr);
+      if (ptr) {
+        fh->stream.write(reinterpret_cast<const char *>(ptr), bytesToWrite);
+      } else {
+        std::vector<char> buf(bytesToWrite);
+        for (uint16_t i = 0; i < bytesToWrite; ++i) {
+          buf[i] = m_memory.read8(bufAddr + i);
+        }
+        fh->stream.write(buf.data(), bytesToWrite);
       }
-      fh->stream.write(buf.data(), bytesToWrite);
 
       if (fh->stream.good()) {
         m_cpu.setReg16(cpu::AX, bytesToWrite);
