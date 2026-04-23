@@ -1,34 +1,9 @@
 #include "test_framework.hpp"
-#include "hw/IOBus.hpp"
 #include "hw/PIC8259.hpp"
 #include "hw/PIT8254.hpp"
 #include "hw/KeyboardController.hpp"
 
 using namespace fador::hw;
-
-TEST_CASE("Hardware: IOBus and Generic Devices", "[HW]") {
-    IOBus bus;
-    
-    class MockDevice : public IODevice {
-    public:
-        uint8_t val = 0;
-        uint8_t read8(uint16_t) override { return val; }
-        void write8(uint16_t, uint8_t v) override { val = v; }
-    };
-
-    MockDevice dev;
-    bus.registerDevice(0x10, 0x10, &dev);
-
-    SECTION("IOBus dispatching") {
-        bus.write8(0x10, 0x42);
-        REQUIRE(bus.read8(0x10) == 0x42);
-        REQUIRE(dev.val == 0x42);
-    }
-
-    SECTION("Unmapped ports") {
-        REQUIRE(bus.read8(0xFF) == 0xFF);
-    }
-}
 
 TEST_CASE("Hardware: PIC8259A", "[HW]") {
     PIC8259 pic(true); // Master

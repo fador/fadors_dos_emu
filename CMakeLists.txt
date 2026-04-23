@@ -62,6 +62,7 @@ set(TEST_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_instruction_decoder.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_interrupts.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_hw_devices.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_iobus.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_dma8237.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_bios.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_dos.cpp"
@@ -74,9 +75,11 @@ set(TEST_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_int_asm.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_dpmi.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_vga_and_irq.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_adlib.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_himem.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/memory/himem/test_himem.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_audio_backend.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_pic8259.cpp"
 )
 
 add_executable(fadors_tests ${TEST_FILES})
