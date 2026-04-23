@@ -5,6 +5,7 @@
 #include "../utils/Logger.hpp"
 #include <algorithm>
 #include <cstring>
+#include <unordered_map>
 
 namespace fador::ui {
 
@@ -971,6 +972,99 @@ bool SDLRenderer::pollInput() {
   return processed;
 }
 
+namespace {
+struct KeyMapping {
+  uint8_t scancode;
+  uint8_t asciiUnshifted;
+  uint8_t asciiShifted;
+  bool extended;
+};
+
+static const std::unordered_map<SDL_Scancode, KeyMapping> kKeyMap = {
+    {SDL_SCANCODE_ESCAPE, {0x01, 27, 27, false}},
+    {SDL_SCANCODE_1, {0x02, '1', '!', false}},
+    {SDL_SCANCODE_2, {0x03, '2', '@', false}},
+    {SDL_SCANCODE_3, {0x04, '3', '#', false}},
+    {SDL_SCANCODE_4, {0x05, '4', '$', false}},
+    {SDL_SCANCODE_5, {0x06, '5', '%', false}},
+    {SDL_SCANCODE_6, {0x07, '6', '^', false}},
+    {SDL_SCANCODE_7, {0x08, '7', '&', false}},
+    {SDL_SCANCODE_8, {0x09, '8', '*', false}},
+    {SDL_SCANCODE_9, {0x0A, '9', '(', false}},
+    {SDL_SCANCODE_0, {0x0B, '0', ')', false}},
+    {SDL_SCANCODE_MINUS, {0x0C, '-', '_', false}},
+    {SDL_SCANCODE_EQUALS, {0x0D, '=', '+', false}},
+    {SDL_SCANCODE_BACKSPACE, {0x0E, 8, 8, false}},
+    {SDL_SCANCODE_TAB, {0x0F, 9, 9, false}},
+    {SDL_SCANCODE_Q, {0x10, 'q', 'Q', false}},
+    {SDL_SCANCODE_W, {0x11, 'w', 'W', false}},
+    {SDL_SCANCODE_E, {0x12, 'e', 'E', false}},
+    {SDL_SCANCODE_R, {0x13, 'r', 'R', false}},
+    {SDL_SCANCODE_T, {0x14, 't', 'T', false}},
+    {SDL_SCANCODE_Y, {0x15, 'y', 'Y', false}},
+    {SDL_SCANCODE_U, {0x16, 'u', 'U', false}},
+    {SDL_SCANCODE_I, {0x17, 'i', 'I', false}},
+    {SDL_SCANCODE_O, {0x18, 'o', 'O', false}},
+    {SDL_SCANCODE_P, {0x19, 'p', 'P', false}},
+    {SDL_SCANCODE_LEFTBRACKET, {0x1A, '[', '{', false}},
+    {SDL_SCANCODE_RIGHTBRACKET, {0x1B, ']', '}', false}},
+    {SDL_SCANCODE_RETURN, {0x1C, 13, 13, false}},
+    {SDL_SCANCODE_A, {0x1E, 'a', 'A', false}},
+    {SDL_SCANCODE_S, {0x1F, 's', 'S', false}},
+    {SDL_SCANCODE_D, {0x20, 'd', 'D', false}},
+    {SDL_SCANCODE_F, {0x21, 'f', 'F', false}},
+    {SDL_SCANCODE_G, {0x22, 'g', 'G', false}},
+    {SDL_SCANCODE_H, {0x23, 'h', 'H', false}},
+    {SDL_SCANCODE_J, {0x24, 'j', 'J', false}},
+    {SDL_SCANCODE_K, {0x25, 'k', 'K', false}},
+    {SDL_SCANCODE_L, {0x26, 'l', 'L', false}},
+    {SDL_SCANCODE_SEMICOLON, {0x27, ';', ':', false}},
+    {SDL_SCANCODE_APOSTROPHE, {0x28, '\'', '"', false}},
+    {SDL_SCANCODE_GRAVE, {0x29, '`', '~', false}},
+    {SDL_SCANCODE_LSHIFT, {0x2A, 0, 0, false}},
+    {SDL_SCANCODE_BACKSLASH, {0x2B, '\\', '|', false}},
+    {SDL_SCANCODE_Z, {0x2C, 'z', 'Z', false}},
+    {SDL_SCANCODE_X, {0x2D, 'x', 'X', false}},
+    {SDL_SCANCODE_C, {0x2E, 'c', 'C', false}},
+    {SDL_SCANCODE_V, {0x2F, 'v', 'V', false}},
+    {SDL_SCANCODE_B, {0x30, 'b', 'B', false}},
+    {SDL_SCANCODE_N, {0x31, 'n', 'N', false}},
+    {SDL_SCANCODE_M, {0x32, 'm', 'M', false}},
+    {SDL_SCANCODE_COMMA, {0x33, ',', '<', false}},
+    {SDL_SCANCODE_PERIOD, {0x34, '.', '>', false}},
+    {SDL_SCANCODE_SLASH, {0x35, '/', '?', false}},
+    {SDL_SCANCODE_RSHIFT, {0x36, 0, 0, false}},
+    {SDL_SCANCODE_SPACE, {0x39, ' ', ' ', false}},
+    {SDL_SCANCODE_CAPSLOCK, {0x3A, 0, 0, false}},
+    {SDL_SCANCODE_F1, {0x3B, 0, 0, false}},
+    {SDL_SCANCODE_F2, {0x3C, 0, 0, false}},
+    {SDL_SCANCODE_F3, {0x3D, 0, 0, false}},
+    {SDL_SCANCODE_F4, {0x3E, 0, 0, false}},
+    {SDL_SCANCODE_F5, {0x3F, 0, 0, false}},
+    {SDL_SCANCODE_F6, {0x40, 0, 0, false}},
+    {SDL_SCANCODE_F7, {0x41, 0, 0, false}},
+    {SDL_SCANCODE_F8, {0x42, 0, 0, false}},
+    {SDL_SCANCODE_F9, {0x43, 0, 0, false}},
+    {SDL_SCANCODE_F10, {0x44, 0, 0, false}},
+    {SDL_SCANCODE_F11, {0x57, 0, 0, true}},
+    {SDL_SCANCODE_F12, {0x58, 0, 0, true}},
+    {SDL_SCANCODE_UP, {0x48, 0, 0, true}},
+    {SDL_SCANCODE_DOWN, {0x50, 0, 0, true}},
+    {SDL_SCANCODE_LEFT, {0x4B, 0, 0, true}},
+    {SDL_SCANCODE_RIGHT, {0x4D, 0, 0, true}},
+    {SDL_SCANCODE_HOME, {0x47, 0, 0, true}},
+    {SDL_SCANCODE_END, {0x4F, 0, 0, true}},
+    {SDL_SCANCODE_PAGEUP, {0x49, 0, 0, true}},
+    {SDL_SCANCODE_PAGEDOWN, {0x51, 0, 0, true}},
+    {SDL_SCANCODE_INSERT, {0x52, 0, 0, true}},
+    {SDL_SCANCODE_DELETE, {0x53, 0, 0, true}},
+    {SDL_SCANCODE_LCTRL, {0x1D, 0, 0, false}},
+    {SDL_SCANCODE_RCTRL, {0x1D, 0, 0, true}},
+    {SDL_SCANCODE_LALT, {0x38, 0, 0, false}},
+    {SDL_SCANCODE_RALT, {0x38, 0, 0, true}},
+};
+} // namespace
+
 void SDLRenderer::handleSDLKey(const SDL_KeyboardEvent &ev) {
   bool pressed = (ev.type == SDL_KEYDOWN);
   // Ignore repeats for make/break simulation
@@ -981,355 +1075,22 @@ void SDLRenderer::handleSDLKey(const SDL_KeyboardEvent &ev) {
   uint8_t ascii = 0;
   bool extended = false; // true for keys that need 0xE0 prefix
 
-  // Map SDL scancodes to PC/XT scancodes + ASCII values
-  switch (ev.keysym.scancode) {
-  case SDL_SCANCODE_ESCAPE:
-    scancode = 0x01;
-    ascii = 27;
-    break;
-  case SDL_SCANCODE_1:
-    scancode = 0x02;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? '!' : '1';
-    break;
-  case SDL_SCANCODE_2:
-    scancode = 0x03;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? '@' : '2';
-    break;
-  case SDL_SCANCODE_3:
-    scancode = 0x04;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? '#' : '3';
-    break;
-  case SDL_SCANCODE_4:
-    scancode = 0x05;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? '$' : '4';
-    break;
-  case SDL_SCANCODE_5:
-    scancode = 0x06;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? '%' : '5';
-    break;
-  case SDL_SCANCODE_6:
-    scancode = 0x07;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? '^' : '6';
-    break;
-  case SDL_SCANCODE_7:
-    scancode = 0x08;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? '&' : '7';
-    break;
-  case SDL_SCANCODE_8:
-    scancode = 0x09;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? '*' : '8';
-    break;
-  case SDL_SCANCODE_9:
-    scancode = 0x0A;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? '(' : '9';
-    break;
-  case SDL_SCANCODE_0:
-    scancode = 0x0B;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? ')' : '0';
-    break;
-  case SDL_SCANCODE_MINUS:
-    scancode = 0x0C;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? '_' : '-';
-    break;
-  case SDL_SCANCODE_EQUALS:
-    scancode = 0x0D;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? '+' : '=';
-    break;
-  case SDL_SCANCODE_BACKSPACE:
-    scancode = 0x0E;
-    ascii = 8;
-    break;
-  case SDL_SCANCODE_TAB:
-    scancode = 0x0F;
-    ascii = 9;
-    break;
-  case SDL_SCANCODE_Q:
-    scancode = 0x10;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? 'Q' : 'q';
-    break;
-  case SDL_SCANCODE_W:
-    scancode = 0x11;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? 'W' : 'w';
-    break;
-  case SDL_SCANCODE_E:
-    scancode = 0x12;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? 'E' : 'e';
-    break;
-  case SDL_SCANCODE_R:
-    scancode = 0x13;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? 'R' : 'r';
-    break;
-  case SDL_SCANCODE_T:
-    scancode = 0x14;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? 'T' : 't';
-    break;
-  case SDL_SCANCODE_Y:
-    scancode = 0x15;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? 'Y' : 'y';
-    break;
-  case SDL_SCANCODE_U:
-    scancode = 0x16;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? 'U' : 'u';
-    break;
-  case SDL_SCANCODE_I:
-    scancode = 0x17;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? 'I' : 'i';
-    break;
-  case SDL_SCANCODE_O:
-    scancode = 0x18;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? 'O' : 'o';
-    break;
-  case SDL_SCANCODE_P:
-    scancode = 0x19;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? 'P' : 'p';
-    break;
-  case SDL_SCANCODE_LEFTBRACKET:
-    scancode = 0x1A;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? '{' : '[';
-    break;
-  case SDL_SCANCODE_RIGHTBRACKET:
-    scancode = 0x1B;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? '}' : ']';
-    break;
-  case SDL_SCANCODE_RETURN:
-    scancode = 0x1C;
-    ascii = 13;
-    break;
-  case SDL_SCANCODE_A:
-    scancode = 0x1E;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? 'A' : 'a';
-    break;
-  case SDL_SCANCODE_S:
-    scancode = 0x1F;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? 'S' : 's';
-    break;
-  case SDL_SCANCODE_D:
-    scancode = 0x20;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? 'D' : 'd';
-    break;
-  case SDL_SCANCODE_F:
-    scancode = 0x21;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? 'F' : 'f';
-    break;
-  case SDL_SCANCODE_G:
-    scancode = 0x22;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? 'G' : 'g';
-    break;
-  case SDL_SCANCODE_H:
-    scancode = 0x23;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? 'H' : 'h';
-    break;
-  case SDL_SCANCODE_J:
-    scancode = 0x24;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? 'J' : 'j';
-    break;
-  case SDL_SCANCODE_K:
-    scancode = 0x25;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? 'K' : 'k';
-    break;
-  case SDL_SCANCODE_L:
-    scancode = 0x26;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? 'L' : 'l';
-    break;
-  case SDL_SCANCODE_SEMICOLON:
-    scancode = 0x27;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? ':' : ';';
-    break;
-  case SDL_SCANCODE_APOSTROPHE:
-    scancode = 0x28;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? '"' : '\'';
-    break;
-  case SDL_SCANCODE_GRAVE:
-    scancode = 0x29;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? '~' : '`';
-    break;
-  case SDL_SCANCODE_LSHIFT:
-    scancode = 0x2A;
-    ascii = 0;
-    break;
-  case SDL_SCANCODE_BACKSLASH:
-    scancode = 0x2B;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? '|' : '\\';
-    break;
-  case SDL_SCANCODE_Z:
-    scancode = 0x2C;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? 'Z' : 'z';
-    break;
-  case SDL_SCANCODE_X:
-    scancode = 0x2D;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? 'X' : 'x';
-    break;
-  case SDL_SCANCODE_C:
-    scancode = 0x2E;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? 'C' : 'c';
-    break;
-  case SDL_SCANCODE_V:
-    scancode = 0x2F;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? 'V' : 'v';
-    break;
-  case SDL_SCANCODE_B:
-    scancode = 0x30;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? 'B' : 'b';
-    break;
-  case SDL_SCANCODE_N:
-    scancode = 0x31;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? 'N' : 'n';
-    break;
-  case SDL_SCANCODE_M:
-    scancode = 0x32;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? 'M' : 'm';
-    break;
-  case SDL_SCANCODE_COMMA:
-    scancode = 0x33;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? '<' : ',';
-    break;
-  case SDL_SCANCODE_PERIOD:
-    scancode = 0x34;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? '>' : '.';
-    break;
-  case SDL_SCANCODE_SLASH:
-    scancode = 0x35;
-    ascii = (ev.keysym.mod & KMOD_SHIFT) ? '?' : '/';
-    break;
-  case SDL_SCANCODE_RSHIFT:
-    scancode = 0x36;
-    ascii = 0;
-    break;
-  case SDL_SCANCODE_SPACE:
-    scancode = 0x39;
-    ascii = ' ';
-    break;
-  case SDL_SCANCODE_CAPSLOCK:
-    scancode = 0x3A;
-    ascii = 0;
-    break;
-  case SDL_SCANCODE_F1:
-    scancode = 0x3B;
-    ascii = 0;
-    break;
-  case SDL_SCANCODE_F2:
-    scancode = 0x3C;
-    ascii = 0;
-    break;
-  case SDL_SCANCODE_F3:
-    scancode = 0x3D;
-    ascii = 0;
-    break;
-  case SDL_SCANCODE_F4:
-    scancode = 0x3E;
-    ascii = 0;
-    break;
-  case SDL_SCANCODE_F5:
-    scancode = 0x3F;
-    ascii = 0;
-    break;
-  case SDL_SCANCODE_F6:
-    scancode = 0x40;
-    ascii = 0;
-    break;
-  case SDL_SCANCODE_F7:
-    scancode = 0x41;
-    ascii = 0;
-    break;
-  case SDL_SCANCODE_F8:
-    scancode = 0x42;
-    ascii = 0;
-    break;
-  case SDL_SCANCODE_F9:
-    scancode = 0x43;
-    ascii = 0;
-    break;
-  case SDL_SCANCODE_F10:
-    scancode = 0x44;
-    ascii = 0;
-    if (pressed && (ev.keysym.mod & KMOD_CTRL)) {
-      m_mouseCaptured = !m_mouseCaptured;
-      SDL_SetRelativeMouseMode(m_mouseCaptured ? SDL_TRUE : SDL_FALSE);
-      LOG_INFO("Mouse capture ", m_mouseCaptured ? "enabled" : "disabled");
-      return; // Eat the shortcut
-    }
-    break;
-  case SDL_SCANCODE_F11:
-    scancode = 0x57;
-    ascii = 0;
-    extended = true;
-    break;
-  case SDL_SCANCODE_F12:
-    scancode = 0x58;
-    ascii = 0;
-    extended = true;
-    break;
-  // Extended keys (arrow keys, navigation) - need 0xE0 prefix
-  case SDL_SCANCODE_UP:
-    scancode = 0x48;
-    ascii = 0;
-    extended = true;
-    break;
-  case SDL_SCANCODE_DOWN:
-    scancode = 0x50;
-    ascii = 0;
-    extended = true;
-    break;
-  case SDL_SCANCODE_LEFT:
-    scancode = 0x4B;
-    ascii = 0;
-    extended = true;
-    break;
-  case SDL_SCANCODE_RIGHT:
-    scancode = 0x4D;
-    ascii = 0;
-    extended = true;
-    break;
-  case SDL_SCANCODE_HOME:
-    scancode = 0x47;
-    ascii = 0;
-    extended = true;
-    break;
-  case SDL_SCANCODE_END:
-    scancode = 0x4F;
-    ascii = 0;
-    extended = true;
-    break;
-  case SDL_SCANCODE_PAGEUP:
-    scancode = 0x49;
-    ascii = 0;
-    extended = true;
-    break;
-  case SDL_SCANCODE_PAGEDOWN:
-    scancode = 0x51;
-    ascii = 0;
-    extended = true;
-    break;
-  case SDL_SCANCODE_INSERT:
-    scancode = 0x52;
-    ascii = 0;
-    extended = true;
-    break;
-  case SDL_SCANCODE_DELETE:
-    scancode = 0x53;
-    ascii = 0;
-    extended = true;
-    break;
-  case SDL_SCANCODE_LCTRL:
-    scancode = 0x1D;
-    ascii = 0;
-    break;
-  case SDL_SCANCODE_RCTRL:
-    scancode = 0x1D;
-    ascii = 0;
-    extended = true;
-    break;
-  case SDL_SCANCODE_LALT:
-    scancode = 0x38;
-    ascii = 0;
-    break;
-  case SDL_SCANCODE_RALT:
-    scancode = 0x38;
-    ascii = 0;
-    extended = true;
-    break;
-  default:
-    break;
+  // Handle Ctrl+F10 for mouse capture toggle immediately
+  if (ev.keysym.scancode == SDL_SCANCODE_F10 && pressed &&
+      (ev.keysym.mod & KMOD_CTRL)) {
+    m_mouseCaptured = !m_mouseCaptured;
+    SDL_SetRelativeMouseMode(m_mouseCaptured ? SDL_TRUE : SDL_FALSE);
+    LOG_INFO("Mouse capture ", m_mouseCaptured ? "enabled" : "disabled");
+    return; // Eat the shortcut
+  }
+
+  // Lookup scancode mapping
+  auto it = kKeyMap.find(ev.keysym.scancode);
+  if (it != kKeyMap.end()) {
+    scancode = it->second.scancode;
+    extended = it->second.extended;
+    ascii = (ev.keysym.mod & KMOD_SHIFT) ? it->second.asciiShifted
+                                         : it->second.asciiUnshifted;
   }
 
   // Ctrl+letter: ascii = 1..26

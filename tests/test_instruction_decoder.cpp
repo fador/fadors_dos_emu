@@ -334,9 +334,66 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
         mem.write8(0x102, 0x06); // disp8 = +6
         mem.write8(0x103, 0x02); // imm8 = 2
         decoder.step();
-
         REQUIRE(cpu.getEIP() == 0x104);
         REQUIRE(mem.read8(targetAddr) == 0x10); // 0x40 >> 2 = 0x10
         REQUIRE(mem.read8(wrongAddr) == 0xAA);  // sentinel untouched
+    }
+
+    SECTION("fetch32: MOV EAX, imm32") {
+        // MOV EAX, 0x12345678 (0x66 0xB8 0x78 0x56 0x34 0x12)
+        mem.write8(0x100, 0x66); // Operand size override
+        mem.write8(0x101, 0xB8); // MOV EAX, imm32
+        mem.write32(0x102, 0x12345678);
+        decoder.step();
+        REQUIRE(cpu.getReg32(cpu::Reg16Index::AX) == 0x12345678);
+        REQUIRE(cpu.getEIP() == 0x106);
+    }
+
+    SECTION("getEffectiveAddress32 & decodeModRM: MOV [EAX], EBX") {
+        cpu.setReg32(cpu::Reg16Index::AX, 0x1000); // Address
+        cpu.setReg32(cpu::Reg16Index::BX, 0xCAFEBABE); // Data
+        // MOV [EAX], EBX (0x67 0x66 0x89 0x18)
+        // 0x67: Address size override (32-bit addresses)
+        // 0x66: Operand size override (32-bit operands)
+        // 0x89: MOV r/m32, r32
+        // ModRM: mod=00 (register indirect), reg=011 (EBX), rm=000 (EAX) -> 0x18
+        mem.write8(0x100, 0x67);
+        mem.write8(0x101, 0x66);
+        mem.write8(0x102, 0x89);
+        mem.write8(0x103, 0x18);
+        decoder.step();
+        REQUIRE(mem.read32(0x1000) == 0xCAFEBABE);
+    }
+
+    SECTION("decodeSIB & getEffectiveAddress32: MOV [EBX + ECX*4], EAX") {
+        cpu.setReg32(cpu::Reg16Index::BX, 0x2000); // Base
+        cpu.setReg32(cpu::Reg16Index::CX, 0x0002); // Index
+        cpu.setReg32(cpu::Reg16Index::AX, 0xDEADBEEF); // Data
+        // Target: 0x2000 + 2*4 = 0x2008
+        // MOV [EBX + ECX*4], EAX (0x67 0x66 0x89 0x04 0x8B)
+        // ModRM: mod=00 (register indirect), reg=000 (EAX), rm=100 (SIB) -> 0x04
+        // SIB: scale=10 (*4), index=001 (ECX), base=011 (EBX) -> 10001011 (0x8B)
+        mem.write8(0x100, 0x67);
+        mem.write8(0x101, 0x66);
+        mem.write8(0x102, 0x89);
+        mem.write8(0x103, 0x04);
+        mem.write8(0x104, 0x8B);
+        decoder.step();
+        REQUIRE(mem.read32(0x2008) == 0xDEADBEEF);
+    }
+
+    SECTION("getEffectiveAddress16: MOV [BP+SI+0x10], AX") {
+        cpu.setReg16(cpu::Reg16Index::BP, 0x1000);
+        cpu.setReg16(cpu::Reg16Index::SI, 0x0020);
+        cpu.setReg16(cpu::Reg16Index::AX, 0x1234);
+        // By default BP uses SS segment, SS=0 -> base=0
+        // Target: 0x1000 + 0x0020 + 0x10 = 0x1030
+        // MOV [BP+SI+disp8], AX (0x89 0x42 0x10)
+        // ModRM: mod=01 (disp8), reg=000 (AX), rm=010 (BP+SI) -> 01000010 (0x42)
+        mem.write8(0x100, 0x89);
+        mem.write8(0x101, 0x42);
+        mem.write8(0x102, 0x10);
+        decoder.step();
+        REQUIRE(mem.read16(0x1030) == 0x1234);
     }
 }
