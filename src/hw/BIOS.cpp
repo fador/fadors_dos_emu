@@ -1452,8 +1452,15 @@ void BIOS::handleSystemService() {
     LOG_DEBUG("BIOS INT 15h AH=87h: Copy ", len, " bytes from 0x", std::hex,
               srcPhys, " to 0x", dstPhys);
 
-    for (uint32_t i = 0; i < len; ++i) {
-      m_memory.write8(dstPhys + i, m_memory.read8(srcPhys + i));
+    uint8_t *srcPtr = m_memory.directAccess(srcPhys);
+    uint8_t *dstPtr = m_memory.directAccess(dstPhys);
+    if (srcPtr && dstPtr && (srcPhys + len <= memory::MemoryBus::MEMORY_SIZE) &&
+        (dstPhys + len <= memory::MemoryBus::MEMORY_SIZE)) {
+      std::memmove(dstPtr, srcPtr, len);
+    } else {
+      for (uint32_t i = 0; i < len; ++i) {
+        m_memory.write8(dstPhys + i, m_memory.read8(srcPhys + i));
+      }
     }
 
     m_cpu.setReg8(cpu::AH, 0);
