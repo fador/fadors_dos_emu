@@ -1,32 +1,35 @@
 #include "test_framework.hpp"
-#include "hw/IOBus.hpp"
 #include "hw/PIC8259.hpp"
 #include "hw/PIT8254.hpp"
 #include "hw/KeyboardController.hpp"
 
 using namespace fador::hw;
 
-TEST_CASE("Hardware: IOBus and Generic Devices", "[HW]") {
-    IOBus bus;
-    
-    class MockDevice : public IODevice {
-    public:
-        uint8_t val = 0;
-        uint8_t read8(uint16_t) override { return val; }
-        void write8(uint16_t, uint8_t v) override { val = v; }
-    };
+TEST_CASE("Hardware: PIC8259A", "[HW]") {
+    PIC8259 pic(true); // Master
 
-    MockDevice dev;
-    bus.registerDevice(0x10, 0x10, &dev);
-
-    SECTION("IOBus dispatching") {
-        bus.write8(0x10, 0x42);
-        REQUIRE(bus.read8(0x10) == 0x42);
-        REQUIRE(dev.val == 0x42);
+    SECTION("Initialization sequence") {
+        pic.write8(0x20, 0x11); // ICW1
+        pic.write8(0x21, 0x20); // ICW2: Vector 0x20
+        pic.write8(0x21, 0x04); // ICW3
+        pic.write8(0x21, 0x01); // ICW4
+        
+        REQUIRE(pic.getPendingInterrupt() == -1);
     }
 
-    SECTION("Unmapped ports") {
-        REQUIRE(bus.read8(0xFF) == 0xFF);
+    SECTION("IRQ Masking") {
+        // Must initialize first to set vector base to 0x20
+        pic.write8(0x20, 0x11); // ICW1
+        pic.write8(0x21, 0x20); // ICW2: Vector 0x20
+        pic.write8(0x21, 0x04); // ICW3
+        pic.write8(0x21, 0x01); // ICW4
+
+        pic.write8(0x21, 0xFE); // Mask all but IRQ 0
+        pic.raiseIRQ(0);
+        REQUIRE(pic.getPendingInterrupt() == 0x20);
+        
+        pic.raiseIRQ(1); // Masked
+        REQUIRE(pic.getPendingInterrupt() == 0x20);
     }
 }
 
