@@ -76,6 +76,7 @@ set(TEST_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_vga_and_irq.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_himem.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/memory/himem/test_himem.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/hw/test_vga_controller.cpp"
 )
 
 add_executable(fadors_tests ${TEST_FILES})
