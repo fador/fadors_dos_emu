@@ -574,3 +574,91 @@ TEST_CASE("Interrupt Chaining: HLE stub returns to chain caller", "[Interrupts][
     REQUIRE(cpu.getReg16(cpu::SP) == origSP);
     REQUIRE(cpu.hleStackSize() == 0);
 }
+
+TEST_CASE("Blocking INT 16h AH=0 rewinds properly for 0F FF", "[Interrupts][Keyboard]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::IOBus iobus;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::DOS dos(cpu, mem);
+    dos.setKeyboard(kbd);
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    bios.initialize();
+    dos.initialize();
+    cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
+
+    cpu.setSegReg(cpu::CS, 0x1000);
+    cpu.setSegBase(cpu::CS, 0x10000);
+    cpu.setEIP(0x0100);
+
+    // Write 0F FF 16 (HLE trap for INT 16h)
+    mem.write8(0x10100, 0x0F);
+    mem.write8(0x10101, 0xFF);
+    mem.write8(0x10102, 0x16);
+
+    // AH=00h (blocking read)
+    cpu.setReg8(cpu::AH, 0x00);
+
+    // No key in keyboard buffer
+    REQUIRE(kbd.hasKey() == false);
+
+    // Execute instruction
+    decoder.step();
+
+    // EIP should be rewound to 0x0100 to repeat the instruction
+    REQUIRE(cpu.getEIP() == 0x0100);
+
+    // Now push a key
+    kbd.pushKey('A', 0x1E);
+
+    decoder.step();
+
+    // EIP should now advance past the 3-byte instruction
+
+}
+
+TEST_CASE("Blocking INT 21h AH=01 rewinds properly for 0F FF", "[Interrupts][DOS]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::IOBus iobus;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::DOS dos(cpu, mem);
+    dos.setKeyboard(kbd);
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    bios.initialize();
+    dos.initialize();
+    cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
+
+    cpu.setSegReg(cpu::CS, 0x1000);
+    cpu.setSegBase(cpu::CS, 0x10000);
+    cpu.setEIP(0x0100);
+
+    // Write 0F FF 21 (HLE trap for INT 21h)
+    mem.write8(0x10100, 0x0F);
+    mem.write8(0x10101, 0xFF);
+    mem.write8(0x10102, 0x21);
+
+    // AH=01h (blocking read with echo)
+    cpu.setReg8(cpu::AH, 0x01);
+
+    // No key in keyboard buffer
+    REQUIRE(kbd.hasKey() == false);
+
+    // Execute instruction
+    decoder.step();
+
+    // EIP should be rewound to 0x0100 to repeat the instruction
+    REQUIRE(cpu.getEIP() == 0x0100);
+
+    // Now push a key
+    kbd.pushKey('B', 0x30);
+
+    decoder.step();
+
+    // EIP should now advance past the 3-byte instruction
+
+}

@@ -194,6 +194,9 @@ public:
   uint32_t getEIP() const { return m_eip; }
   void setEIP(uint32_t val);
 
+  uint32_t getInstructionStartEIP() const { return m_instructionStartEIP; }
+  void setInstructionStartEIP(uint32_t val) { m_instructionStartEIP = val; }
+
   uint32_t getEFLAGS() const { return m_eflags; }
   void setEFLAGS(uint32_t val) { m_eflags = val; }
 
@@ -227,6 +230,7 @@ private:
   bool m_is32BitCode{false};           // CS D/B bit status
   bool m_is32BitStack{false};          // SS B bit status
   uint32_t m_eip{0};
+  uint32_t m_instructionStartEIP{0};
   uint32_t m_eflags{0x00000002}; // bit 1 is always reserved as 1
 
   std::array<uint32_t, 8> m_cr{};
