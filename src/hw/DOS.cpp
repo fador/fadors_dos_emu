@@ -649,21 +649,37 @@ std::string DOS::dosToHostPath(const std::string &dosPath) {
 }
 
 std::string DOS::resolvePath(const std::string &path) {
+  std::string resolvedStr;
   // Check for DOS drive letter prefix (e.g. "C:\foo")
   if (path.size() >= 2 && std::isalpha(static_cast<unsigned char>(path[0])) &&
       path[1] == ':') {
-    return dosToHostPath(path);
+    resolvedStr = dosToHostPath(path);
   }
   // Check for DOS backslash paths
-  if (!path.empty() && path[0] == '\\') {
-    return dosToHostPath(path);
+  else if (!path.empty() && path[0] == '\\') {
+    resolvedStr = dosToHostPath(path);
   }
-  // If path is already an absolute host path, use as-is
-  fs::path p(path);
-  if (p.is_absolute())
-    return path;
-  // Resolve relative to m_currentDir
-  return (fs::path(m_currentDir) / p).string();
+  else {
+    // If path is already an absolute host path, use as-is
+    fs::path p(path);
+    if (p.is_absolute())
+      resolvedStr = path;
+    else
+      // Resolve relative to m_currentDir
+      resolvedStr = (fs::path(m_currentDir) / p).string();
+  }
+
+  // Security check: ensure the resolved path stays within m_hostRootDir
+  fs::path resolvedPath = fs::weakly_canonical(fs::absolute(resolvedStr));
+  fs::path rootPath = fs::weakly_canonical(fs::absolute(m_hostRootDir));
+
+  auto [rootEnd, nothing] = std::mismatch(rootPath.begin(), rootPath.end(), resolvedPath.begin(), resolvedPath.end());
+  if (rootEnd != rootPath.end()) {
+      LOG_WARN("DOS: Path traversal attempt blocked: ", path);
+      return rootPath.string();
+  }
+
+  return resolvedPath.string();
 }
 
 void DOS::writeCharToVRAM(uint8_t c) {
