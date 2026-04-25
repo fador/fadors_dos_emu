@@ -86,3 +86,48 @@ TEST_CASE("DOS: Directory Search", "[DOS][Search]") {
     fs::current_path(originalDir);
     fs::remove_all(testDir);
 }
+
+TEST_CASE("DOS: Path Traversal Prevention via Find First/Next", "[DOS][Search][Security]") {
+    CPU cpu;
+    MemoryBus memory;
+    DOS dos(cpu, memory);
+
+    std::string testDir = fs::weakly_canonical(fs::absolute("test_dos_search")).string();
+    if (fs::exists(testDir)) fs::remove_all(testDir);
+    fs::create_directory(testDir);
+
+    // Set program dir which also sets m_hostRootDir internally
+    dos.setProgramDir(testDir + "/fake_prog.exe");
+
+    auto originalDir = fs::current_path();
+    fs::current_path(testDir);
+
+    SECTION("Find First via traversal attempt is blocked") {
+        std::string attackPath = "../../../../../etc/passwd";
+        for (size_t i = 0; i < attackPath.length(); ++i) memory.write8(0x2000 + i, attackPath[i]);
+        memory.write8(0x2000 + attackPath.length(), 0);
+
+        // Set DTA
+        cpu.setReg8(AH, 0x1A);
+        cpu.setSegReg(DS, 0x1000);
+        cpu.setReg16(DX, 0x0000);
+        dos.handleInterrupt(0x21);
+
+        // Find First
+        cpu.setReg8(AH, 0x4E);
+        cpu.setSegReg(DS, 0x0000);
+        cpu.setReg16(DX, 0x2000);
+        cpu.setReg8(CL, 0); // Normal files
+
+        dos.handleInterrupt(0x21);
+
+        // This should fail to find "/etc/passwd" because it got clamped to testDir
+        // Note: Unless testDir has a file literally called passwd or something weird, it should set carry
+        // or return safe data. Either way, it shouldn't successfully read /etc/passwd attributes.
+        REQUIRE((cpu.getEFLAGS() & FLAG_CARRY) != 0);
+        REQUIRE(cpu.getReg16(AX) == 0x02); // File not found or 0x03 Path not found
+    }
+
+    fs::current_path(originalDir);
+    fs::remove_all(testDir);
+}

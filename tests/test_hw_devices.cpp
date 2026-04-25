@@ -8,7 +8,7 @@ using namespace fador::hw;
 
 TEST_CASE("Hardware: IOBus and Generic Devices", "[HW]") {
     IOBus bus;
-    
+
     class MockDevice : public IODevice {
     public:
         uint8_t val = 0;

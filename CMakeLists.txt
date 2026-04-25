@@ -59,6 +59,7 @@ enable_testing()
 set(TEST_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_main.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cpu_behavior.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_disassembler.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_instruction_decoder.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_interrupts.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_hw_devices.cpp"
@@ -72,11 +73,15 @@ set(TEST_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_addressing_modes.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_assembler.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_int_asm.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cpu.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_dpmi.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_vga_and_irq.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_himem.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/memory/himem/test_himem.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_program_loader.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/memory/test_memory_bus.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_audio_backend.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/hw/test_vga_controller.cpp"
 )
 
 add_executable(fadors_tests ${TEST_FILES})
