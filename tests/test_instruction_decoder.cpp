@@ -30,6 +30,23 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
     cpu.setSegReg(cpu::SegRegIndex::SS, 0x0000);
     cpu.setEIP(0x100);
 
+    SECTION("decodeModRM boundary conditions") {
+        auto check_modrm = [&](uint8_t byte, uint8_t exp_mod, uint8_t exp_reg, uint8_t exp_rm) {
+            cpu::ModRM modrm = decoder.decodeModRM(byte);
+            REQUIRE(modrm.mod == exp_mod);
+            REQUIRE(modrm.reg == exp_reg);
+            REQUIRE(modrm.rm == exp_rm);
+        };
+
+        check_modrm(0x00, 0, 0, 0);
+        check_modrm(0xFF, 3, 7, 7);
+        check_modrm(0xC0, 3, 0, 0); // 11000000 -> mod=3, reg=0, rm=0
+        check_modrm(0x38, 0, 7, 0); // 00111000 -> mod=0, reg=7, rm=0
+        check_modrm(0x07, 0, 0, 7); // 00000111 -> mod=0, reg=0, rm=7
+        check_modrm(0x75, 1, 6, 5); // 01110101 -> mod=1, reg=6, rm=5
+        check_modrm(0xAA, 2, 5, 2); // 10101010 -> mod=2, reg=5, rm=2
+    }
+
     SECTION("NOP Instruction") {
         mem.write8(0x100, 0x90);
         decoder.step();

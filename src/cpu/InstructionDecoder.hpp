@@ -98,7 +98,9 @@ private:
   uint16_t fetch16();
   uint32_t fetch32();
 
+public:
   ModRM decodeModRM(uint8_t byte);
+private:
   SIB decodeSIB(uint8_t byte);
 
   // Helpers to resolve operand values
