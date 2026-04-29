@@ -3732,12 +3732,20 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
                   " EIP=0x", m_instrStartEIP);
         char buf2[256];
         int n2 = snprintf(buf2, sizeof(buf2), "  bytes @cached+EIP=0x%08X:", (unsigned)physAddr);
-        for (int bi = 0; bi < 16; ++bi)
-          n2 += snprintf(buf2 + n2, sizeof(buf2) - n2, " %02X", m_memory.read8(physAddr + bi));
+        for (int bi = 0; bi < 16; ++bi) {
+          if ((size_t)n2 < sizeof(buf2)) {
+            int ret = snprintf(buf2 + n2, sizeof(buf2) - n2, " %02X", m_memory.read8(physAddr + bi));
+            if (ret > 0) n2 += ret;
+          }
+        }
         LOG_ERROR(buf2);
         n2 = snprintf(buf2, sizeof(buf2), "  bytes @desc+EIP=0x%08X:", (unsigned)(descBase2 + m_instrStartEIP));
-        for (int bi = 0; bi < 16; ++bi)
-          n2 += snprintf(buf2 + n2, sizeof(buf2) - n2, " %02X", m_memory.read8(descBase2 + m_instrStartEIP + bi));
+        for (int bi = 0; bi < 16; ++bi) {
+          if ((size_t)n2 < sizeof(buf2)) {
+            int ret = snprintf(buf2 + n2, sizeof(buf2) - n2, " %02X", m_memory.read8(descBase2 + m_instrStartEIP + bi));
+            if (ret > 0) n2 += ret;
+          }
+        }
         LOG_ERROR(buf2);
       }
     }
