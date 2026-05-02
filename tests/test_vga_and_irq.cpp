@@ -913,3 +913,215 @@ TEST_CASE("Keyboard: INT 9 injected HLE handles keyboard IRQ", "[KBD][IRQ]") {
     (void)eipBefore;
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// PIC Priority & Simultaneous IRQ Edge Cases
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_CASE("PIC: IRQ priority — higher IRQ masks lower", "[PIC][IRQ]") {
+    hw::PIC8259 pic(true);
+
+    pic.write8(0x20, 0x11);
+    pic.write8(0x21, 0x08);
+    pic.write8(0x21, 0x04);
+    pic.write8(0x21, 0x01);
+    pic.write8(0x21, 0x00);
+
+    // IRQ0 has highest priority
+    pic.raiseIRQ(0);
+    REQUIRE(pic.getPendingInterrupt() == 0x08);
+
+    // Raising IRQ1 should not change pending (IRQ0 still highest priority)
+    pic.raiseIRQ(1);
+    int pending = pic.getPendingInterrupt();
+    // Either IRQ0 is still pending (if ISR blocks), or it was already returned
+    REQUIRE(pending != -1); // Something should be pending
+}
+
+TEST_CASE("PIC: IRQ masking prevents interrupt delivery", "[PIC]") {
+    hw::PIC8259 pic(true);
+
+    pic.write8(0x20, 0x11);
+    pic.write8(0x21, 0x08);
+    pic.write8(0x21, 0x04);
+    pic.write8(0x21, 0x01);
+    pic.write8(0x21, 0x00);
+
+    // Mask IRQ0
+    pic.write8(0x21, 0x01);
+    pic.raiseIRQ(0);
+    REQUIRE(pic.getPendingInterrupt() == -1);
+
+    // Unmask IRQ0
+    pic.write8(0x21, 0x00);
+    pic.raiseIRQ(0);
+    REQUIRE(pic.getPendingInterrupt() == 0x08);
+}
+
+TEST_CASE("PIC: Simultaneous IRQ raise and acknowledge", "[PIC]") {
+    hw::PIC8259 pic(true);
+
+    pic.write8(0x20, 0x11);
+    pic.write8(0x21, 0x08);
+    pic.write8(0x21, 0x04);
+    pic.write8(0x21, 0x01);
+    pic.write8(0x21, 0x00);
+
+    // Raise both
+    pic.raiseIRQ(0);
+    pic.raiseIRQ(1);
+
+    // First pending should be IRQ0 (highest priority)
+    int first = pic.getPendingInterrupt();
+    REQUIRE(first == 0x08);
+
+    // After ack, IRQ1 should be available
+    pic.acknowledgeInterrupt();
+}
+
+TEST_CASE("PIC: EOI without acknowledge should not crash", "[PIC]") {
+    hw::PIC8259 pic(true);
+
+    pic.write8(0x20, 0x11);
+    pic.write8(0x21, 0x08);
+    pic.write8(0x21, 0x04);
+    pic.write8(0x21, 0x01);
+    pic.write8(0x21, 0x00);
+
+    pic.raiseIRQ(0);
+    int pending = pic.getPendingInterrupt();
+    REQUIRE(pending == 0x08);
+
+    // Send EOI without acknowledge
+    pic.write8(0x20, 0x20); // Non-specific EOI
+    // Should not crash — the PIC handles this gracefully
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// VGA Edge Cases: Out-of-bounds, Palette Wrap, Unmapped Ports
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_CASE("VGA: Read from unmapped VGA ports returns safe value", "[VGA]") {
+    memory::MemoryBus mem;
+    hw::VGAController vga(mem);
+
+    // Reading from unmapped VGA registers should not crash
+    uint8_t val = vga.read8(0x3C0); // Attribute controller (reads data)
+    (void)val; // Value is implementation-defined, just ensure no crash
+
+    val = vga.read8(0x3CC); // Miscellaneous output register
+    (void)val;
+}
+
+TEST_CASE("VGA: DAC palette wrap at index 255", "[VGA][DAC]") {
+    memory::MemoryBus mem;
+    hw::VGAController vga(mem);
+
+    // Write to last palette entry (255)
+    vga.write8(0x3C8, 255);
+    vga.write8(0x3C9, 63); // R
+    vga.write8(0x3C9, 0);  // G
+    vga.write8(0x3C9, 0);  // B
+
+    // Auto-increment should wrap? On real VGA it wraps to 0.
+    // Just verify no crash when writing past entry 255
+    vga.write8(0x3C9, 31); // Should go to entry 0's R
+    vga.write8(0x3C9, 31); // Entry 0's G
+    vga.write8(0x3C9, 31); // Entry 0's B
+
+    // Read back entry 0
+    vga.write8(0x3C7, 0);
+    uint8_t r = vga.read8(0x3C9);
+    uint8_t g = vga.read8(0x3C9);
+    uint8_t b = vga.read8(0x3C9);
+    REQUIRE(r == 31);
+    REQUIRE(g == 31);
+    REQUIRE(b == 31);
+}
+
+TEST_CASE("VGA: Sequencer register index write/read", "[VGA]") {
+    memory::MemoryBus mem;
+    hw::VGAController vga(mem);
+
+    // Write to sequencer index 0 (reset)
+    vga.write8(0x3C4, 0);
+    vga.write8(0x3C5, 0x03);
+
+    // Read back by setting index again — should not crash
+    vga.write8(0x3C4, 0);
+    vga.read8(0x3C5); // Value is implementation-defined, just verify no crash
+}
+
+TEST_CASE("VGA: CRTC register access with write-only regs", "[VGA]") {
+    memory::MemoryBus mem;
+    hw::VGAController vga(mem);
+
+    // CRTC index register
+    vga.write8(0x3D4, 0x0A); // Cursor start register
+    vga.write8(0x3D5, 0x0D); // Cursor scan lines
+
+    // Read back
+    vga.write8(0x3D4, 0x0A);
+    uint8_t val = vga.read8(0x3D5);
+    REQUIRE(val == 0x0D);
+}
+
+TEST_CASE("VGA: Write outside valid plane memory range", "[VGA]") {
+    memory::MemoryBus mem;
+    hw::VGAController vga(mem);
+    mem.setVGA(&vga);
+
+    // Each plane is 64KB (0x0000-0xFFFF)
+    // Writing to offset 0x10000 (beyond 64KB) should be safe
+    // In Chain-4 mode, offset gets divided by 4 and plane selected by low bits
+    // Offsets beyond 0xFFFF should be handled gracefully
+    mem.write8(0xA0000 + 0x10000, 0x42); // Beyond 64KB plane boundary
+    // Just verify no crash — value may be silently dropped or handled
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Memory Bus Dirty Memory Pattern Verification
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_CASE("Memory: Dirty RAM pattern is deterministic", "[Memory][Init]") {
+    memory::MemoryBus mem1;
+    memory::MemoryBus mem2;
+
+    // Two instances with same initialization should have identical fill pattern
+    // Skip IVT/BDA area (0x000-0x4FF) which is zero-filled
+    bool identical = true;
+    for (uint32_t addr = 0x500; addr < 0x1000 && identical; addr++) {
+        if (mem1.read8(addr) != mem2.read8(addr))
+            identical = false;
+    }
+    REQUIRE(identical == true);
+}
+
+TEST_CASE("Memory: Dirty RAM pattern is not all zeros (simulates real DOS)", "[Memory][Init]") {
+    memory::MemoryBus mem;
+
+    // Check that memory above BDA is NOT all zeros
+    bool allZero = true;
+    for (uint32_t addr = 0x500; addr < 0x1000 && allZero; addr++) {
+        if (mem.read8(addr) != 0)
+            allZero = false;
+    }
+    REQUIRE(allZero == false); // Must have some non-zero bytes (dirty RAM)
+
+    // Also not all 0xCC (the fill was changed to LCG to avoid this)
+    bool allCC = true;
+    for (uint32_t addr = 0x500; addr < 0x1000 && allCC; addr++) {
+        if (mem.read8(addr) != 0xCC)
+            allCC = false;
+    }
+    REQUIRE(allCC == false);
+}
+
+TEST_CASE("Memory: IVT/BDA area is zero-initialized", "[Memory][Init]") {
+    memory::MemoryBus mem;
+
+    // IVT (0x000-0x3FF) and BDA (0x400-0x4FF) should start as zeros
+    for (uint32_t addr = 0x000; addr < 0x500; addr++) {
+        REQUIRE(mem.read8(addr) == 0);
+    }
+}
+

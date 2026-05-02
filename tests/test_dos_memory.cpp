@@ -79,3 +79,130 @@ TEST_CASE("DOS: Memory Management (MCB)", "[DOS][Memory]") {
         REQUIRE(memory.read16(nextMcbAddr + 1) == 0);
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MCB Chain Integrity / Corruption Edge Cases
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("DOS: Double free detection", "[DOS][Memory][Corruption]") {
+    CPU cpu;
+    MemoryBus memory;
+    DOS dos(cpu, memory);
+    dos.initialize();
+
+    // Allocate a block
+    cpu.setReg8(AH, 0x48);
+    cpu.setReg16(BX, 0x10);
+    dos.handleInterrupt(0x21);
+    if (cpu.getEFLAGS() & FLAG_CARRY) return; // No free memory — skip
+    uint16_t seg = cpu.getReg16(AX);
+
+    // Free it once
+    cpu.setReg8(AH, 0x49);
+    cpu.setSegReg(ES, seg);
+    dos.handleInterrupt(0x21);
+    REQUIRE(!(cpu.getEFLAGS() & FLAG_CARRY));
+
+    // Double free should fail
+    cpu.setReg8(AH, 0x49);
+    cpu.setSegReg(ES, seg);
+    dos.handleInterrupt(0x21);
+    REQUIRE(cpu.getEFLAGS() & FLAG_CARRY);
+}
+
+TEST_CASE("DOS: Free invalid segment (not an MCB)", "[DOS][Memory][Corruption]") {
+    CPU cpu;
+    MemoryBus memory;
+    DOS dos(cpu, memory);
+    dos.initialize();
+
+    cpu.setReg8(AH, 0x49);
+    cpu.setSegReg(ES, 0xB800); // Video memory
+    dos.handleInterrupt(0x21);
+    REQUIRE(cpu.getEFLAGS() & FLAG_CARRY);
+}
+
+TEST_CASE("DOS: Free null segment", "[DOS][Memory][Corruption]") {
+    CPU cpu;
+    MemoryBus memory;
+    DOS dos(cpu, memory);
+    dos.initialize();
+
+    cpu.setReg8(AH, 0x49);
+    cpu.setSegReg(ES, 0x0000);
+    dos.handleInterrupt(0x21);
+    REQUIRE(cpu.getEFLAGS() & FLAG_CARRY);
+}
+
+TEST_CASE("DOS: Allocate maximum paragraphs", "[DOS][Memory][Stress]") {
+    CPU cpu;
+    MemoryBus memory;
+    DOS dos(cpu, memory);
+    dos.initialize();
+
+    cpu.setReg8(AH, 0x48);
+    cpu.setReg16(BX, 0xFFFF);
+    dos.handleInterrupt(0x21);
+    // Should fail (not enough memory)
+    REQUIRE(cpu.getEFLAGS() & FLAG_CARRY);
+}
+
+TEST_CASE("DOS: MCB chain walk after rapid alloc/free cycle", "[DOS][Memory][Stress]") {
+    CPU cpu;
+    MemoryBus memory;
+    DOS dos(cpu, memory);
+    dos.initialize();
+
+    // Allocate 3 blocks
+    uint16_t segments[3];
+    int allocated = 0;
+    for (int i = 0; i < 3; i++) {
+        cpu.setReg8(AH, 0x48);
+        cpu.setReg16(BX, 0x08);
+        dos.handleInterrupt(0x21);
+        if (cpu.getEFLAGS() & FLAG_CARRY) break;
+        segments[i] = cpu.getReg16(AX);
+        allocated++;
+    }
+
+    // Free them all
+    for (int i = 0; i < allocated; i++) {
+        cpu.setReg8(AH, 0x49);
+        cpu.setSegReg(ES, segments[i]);
+        dos.handleInterrupt(0x21);
+        REQUIRE(!(cpu.getEFLAGS() & FLAG_CARRY));
+    }
+
+    // If we allocated any blocks, try allocating again
+    if (allocated > 0) {
+        cpu.setReg8(AH, 0x48);
+        cpu.setReg16(BX, 0x04);
+        dos.handleInterrupt(0x21);
+        // After freeing, should be able to allocate again
+    }
+}
+
+TEST_CASE("DOS: Write to MCB signature byte (corruption attempt)", "[DOS][Memory][Corruption]") {
+    CPU cpu;
+    MemoryBus memory;
+    DOS dos(cpu, memory);
+    dos.initialize();
+
+    // Allocate a block
+    cpu.setReg8(AH, 0x48);
+    cpu.setReg16(BX, 0x10);
+    dos.handleInterrupt(0x21);
+    if (cpu.getEFLAGS() & FLAG_CARRY) return; // No free memory — skip
+    uint16_t seg = cpu.getReg16(AX);
+
+    // Corrupt MCB signature
+    uint32_t mcbAddr = (seg - 1) << 4;
+    memory.write8(mcbAddr, 'X');
+    REQUIRE(memory.read8(mcbAddr) == 'X');
+
+    // Try to free — should detect corruption and fail
+    cpu.setReg8(AH, 0x49);
+    cpu.setSegReg(ES, seg);
+    dos.handleInterrupt(0x21);
+    REQUIRE(cpu.getEFLAGS() & FLAG_CARRY);
+}

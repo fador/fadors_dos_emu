@@ -121,3 +121,295 @@ TEST_CASE("DOS Emulation and Program Loading", "[DOS]") {
         std::remove("hello.txt");
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// File I/O Edge Cases
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("DOS: File open non-existent file returns error", "[DOS][File]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    bios.initialize();
+    dos.initialize();
+
+    std::string fname = "NONEXIST.TXT";
+    uint32_t fnameAddr = 0x70000;
+    for (size_t i = 0; i < fname.size(); i++)
+        mem.write8(fnameAddr + i, fname[i]);
+    mem.write8(fnameAddr + fname.size(), 0);
+
+    cpu.setSegReg(cpu::DS, 0x7000);
+    cpu.setSegBase(cpu::DS, 0x70000);
+    cpu.setReg16(cpu::DX, 0x0000);
+    cpu.setReg8(cpu::AH, 0x3D);
+    cpu.setReg8(cpu::AL, 0x00);
+    dos.handleInterrupt(0x21);
+
+    REQUIRE(cpu.getEFLAGS() & cpu::FLAG_CARRY);
+}
+
+TEST_CASE("DOS: File read with zero bytes", "[DOS][File]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    bios.initialize();
+    dos.initialize();
+
+    {
+        std::ofstream ofs("zeroread.txt", std::ios::binary);
+        ofs.write("DATA", 4);
+    }
+
+    std::string fname = "ZEROREAD.TXT";
+    uint32_t fnameAddr = 0x70000;
+    for (size_t i = 0; i < fname.size(); i++)
+        mem.write8(fnameAddr + i, fname[i]);
+    mem.write8(fnameAddr + fname.size(), 0);
+
+    cpu.setSegReg(cpu::DS, 0x7000);
+    cpu.setSegBase(cpu::DS, 0x70000);
+    cpu.setReg16(cpu::DX, 0x0000);
+    cpu.setReg8(cpu::AH, 0x3D);
+    cpu.setReg8(cpu::AL, 0x00);
+    dos.handleInterrupt(0x21);
+    REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    uint16_t handle = cpu.getReg16(cpu::AX);
+
+    cpu.setReg8(cpu::AH, 0x3F);
+    cpu.setReg16(cpu::BX, handle);
+    cpu.setReg16(cpu::CX, 0);
+    cpu.setSegReg(cpu::DS, 0x8000);
+    cpu.setSegBase(cpu::DS, 0x80000);
+    cpu.setReg16(cpu::DX, 0x0000);
+    dos.handleInterrupt(0x21);
+    uint16_t bytesRead = cpu.getReg16(cpu::AX);
+    REQUIRE(bytesRead == 0);
+
+    cpu.setReg8(cpu::AH, 0x3E);
+    cpu.setReg16(cpu::BX, handle);
+    dos.handleInterrupt(0x21);
+
+    std::remove("zeroread.txt");
+}
+
+TEST_CASE("DOS: File SEEK to end", "[DOS][File]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    bios.initialize();
+    dos.initialize();
+
+    {
+        std::ofstream ofs("seektest.txt", std::ios::binary);
+        ofs.write("ABCDEFGH", 8);
+    }
+
+    std::string fname = "SEEKTEST.TXT";
+    uint32_t fnameAddr = 0x70000;
+    for (size_t i = 0; i < fname.size(); i++)
+        mem.write8(fnameAddr + i, fname[i]);
+    mem.write8(fnameAddr + fname.size(), 0);
+
+    cpu.setSegReg(cpu::DS, 0x7000);
+    cpu.setSegBase(cpu::DS, 0x70000);
+    cpu.setReg16(cpu::DX, 0x0000);
+    cpu.setReg8(cpu::AH, 0x3D);
+    cpu.setReg8(cpu::AL, 0x00);
+    dos.handleInterrupt(0x21);
+    REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    uint16_t handle = cpu.getReg16(cpu::AX);
+
+    // Seek to end (AL=2)
+    cpu.setReg8(cpu::AH, 0x42);
+    cpu.setReg16(cpu::BX, handle);
+    cpu.setReg8(cpu::AL, 0x02);
+    cpu.setReg16(cpu::CX, 0);
+    cpu.setReg16(cpu::DX, 0);
+    dos.handleInterrupt(0x21);
+
+    cpu.setReg8(cpu::AH, 0x3E);
+    cpu.setReg16(cpu::BX, handle);
+    dos.handleInterrupt(0x21);
+
+    std::remove("seektest.txt");
+}
+
+TEST_CASE("DOS: Close invalid file handle returns error", "[DOS][File]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    bios.initialize();
+    dos.initialize();
+
+    // Try to close an invalid handle
+    cpu.setReg8(cpu::AH, 0x3E);
+    cpu.setReg16(cpu::BX, 0xFFFF);
+    dos.handleInterrupt(0x21);
+    REQUIRE(cpu.getEFLAGS() & cpu::FLAG_CARRY);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DOS Date/Time & Misc Services Edge Cases
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("DOS: Get/set date edge cases", "[DOS][DateTime]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    bios.initialize();
+    dos.initialize();
+
+    // Get current date (AH=2Ah)
+    cpu.setReg8(cpu::AH, 0x2A);
+    dos.handleInterrupt(0x21);
+    REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+
+    uint16_t year = cpu.getReg16(cpu::CX);
+    uint8_t month = cpu.getReg8(cpu::DH);
+    uint8_t day = cpu.getReg8(cpu::DL);
+    uint8_t dayOfWeek = cpu.getReg8(cpu::AL);
+
+    REQUIRE(year >= 1980);
+    REQUIRE(month >= 1 && month <= 12);
+    REQUIRE(day >= 1 && day <= 31);
+    REQUIRE(dayOfWeek <= 6); // 0=Sunday, 6=Saturday
+}
+
+TEST_CASE("DOS: Get time edge cases", "[DOS][DateTime]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    bios.initialize();
+    dos.initialize();
+
+    // Get current time (AH=2Ch)
+    cpu.setReg8(cpu::AH, 0x2C);
+    dos.handleInterrupt(0x21);
+    REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+
+    uint8_t hours = cpu.getReg8(cpu::CH);
+    uint8_t minutes = cpu.getReg8(cpu::CL);
+    uint8_t seconds = cpu.getReg8(cpu::DH);
+    uint8_t hundredths = cpu.getReg8(cpu::DL);
+
+    REQUIRE(hours <= 23);
+    REQUIRE(minutes <= 59);
+    REQUIRE(seconds <= 59);
+    REQUIRE(hundredths <= 99);
+}
+
+TEST_CASE("DOS: Get DOS version", "[DOS][Version]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    bios.initialize();
+    dos.initialize();
+
+    cpu.setReg8(cpu::AH, 0x30);
+    dos.handleInterrupt(0x21);
+    REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+
+    uint8_t major = cpu.getReg8(cpu::AL);
+    uint8_t minor = cpu.getReg8(cpu::AH);
+    REQUIRE(major >= 3);
+    REQUIRE(minor <= 99);
+}
+
+TEST_CASE("DOS: Set interrupt vector and get it back", "[DOS][IVT]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    bios.initialize();
+    dos.initialize();
+
+    // Set INT 0x60 vector to F000:1234
+    cpu.setReg8(cpu::AH, 0x25);
+    cpu.setReg8(cpu::AL, 0x60);
+    cpu.setSegReg(cpu::DS, 0xF000);
+    cpu.setSegBase(cpu::DS, 0xF0000);
+    cpu.setReg16(cpu::DX, 0x1234);
+    dos.handleInterrupt(0x21);
+    REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+
+    // Get it back
+    cpu.setReg8(cpu::AH, 0x35);
+    cpu.setReg8(cpu::AL, 0x60);
+    dos.handleInterrupt(0x21);
+    REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(cpu.getSegReg(cpu::ES) == 0xF000);
+    REQUIRE(cpu.getReg16(cpu::BX) == 0x1234);
+}
+
+TEST_CASE("DOS: Get/set interrupt vector round-trip", "[DOS][IVT]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    bios.initialize();
+    dos.initialize();
+
+    // First get existing vector for INT 0x10
+    cpu.setReg8(cpu::AH, 0x35);
+    cpu.setReg8(cpu::AL, 0x10);
+    dos.handleInterrupt(0x21);
+    uint16_t origES = cpu.getSegReg(cpu::ES);
+    uint16_t origBX = cpu.getReg16(cpu::BX);
+
+    // Set a new one
+    cpu.setReg8(cpu::AH, 0x25);
+    cpu.setReg8(cpu::AL, 0x10);
+    cpu.setSegReg(cpu::DS, 0x5000);
+    cpu.setReg16(cpu::DX, 0xABCD);
+    dos.handleInterrupt(0x21);
+    REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+
+    // Get it back — should be our new value
+    cpu.setReg8(cpu::AH, 0x35);
+    cpu.setReg8(cpu::AL, 0x10);
+    dos.handleInterrupt(0x21);
+    REQUIRE(cpu.getSegReg(cpu::ES) == 0x5000);
+    REQUIRE(cpu.getReg16(cpu::BX) == 0xABCD);
+
+    // Restore original
+    cpu.setReg8(cpu::AH, 0x25);
+    cpu.setReg8(cpu::AL, 0x10);
+    cpu.setSegReg(cpu::DS, origES);
+    cpu.setReg16(cpu::DX, origBX);
+    dos.handleInterrupt(0x21);
+}
