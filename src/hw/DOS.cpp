@@ -195,6 +195,8 @@ void DOS::handleDOSService() {
     } else {
       if (m_kbd && !m_kbd->hasKey() && m_pollInput)
         m_pollInput();
+      if (m_idleCallback)
+        m_idleCallback();
       if (m_kbd && m_kbd->hasKey()) {
         auto [ascii, scancode] = m_kbd->popKey();
         m_cpu.setReg8(cpu::AL, ascii);
@@ -212,6 +214,8 @@ void DOS::handleDOSService() {
       if (m_pollInput)
         m_pollInput();
       if (!m_kbd || !m_kbd->hasKey()) {
+        if (m_idleCallback)
+          m_idleCallback();
         m_cpu.setEIP(m_cpu.getInstructionStartEIP());
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         return;
@@ -245,6 +249,8 @@ void DOS::handleDOSService() {
   case 0x0B: { // Get Stdin Status
     if (m_kbd && !m_kbd->hasKey() && m_pollInput)
       m_pollInput();
+    if (m_idleCallback)
+      m_idleCallback();
     m_cpu.setReg8(cpu::AL, (m_kbd && m_kbd->hasKey()) ? 0xFF : 0x00);
     break;
   }

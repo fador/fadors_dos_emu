@@ -358,6 +358,19 @@ int main(int argc, char *argv[]) {
       });
       dos.setKeyboard(kbd);
       dos.setInputPollCallback([&sdlRenderer]() { sdlRenderer.pollInput(); });
+      dos.setIdleCallback([&pit, &cpu, &decoder, &kbd, &pic]() {
+        cpu.addCycles(64);
+        pit.addCycles(64);
+        if (pit.checkPendingIRQ0()) { pic.raiseIRQ(0); }
+        if (kbd.checkPendingIRQ()) { pic.raiseIRQ(1); }
+        if (cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) {
+          int pending = pic.getPendingInterrupt();
+          if (pending != -1) {
+            pic.acknowledgeInterrupt();
+            decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
+          }
+        }
+      });
 
       cpu.setEFLAGS(cpu.getEFLAGS() | fador::cpu::FLAG_INTERRUPT);
 
@@ -528,6 +541,18 @@ int main(int argc, char *argv[]) {
       });
       dos.setKeyboard(kbd);
       dos.setInputPollCallback([&input]() { input.pollInput(); });
+      dos.setIdleCallback([&pit, &cpu, &decoder, &kbd, &pic]() {
+        pit.addCycles(64);
+        if (pit.checkPendingIRQ0()) { pic.raiseIRQ(0); }
+        if (kbd.checkPendingIRQ()) { pic.raiseIRQ(1); }
+        if (cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) {
+          int pending = pic.getPendingInterrupt();
+          if (pending != -1) {
+            pic.acknowledgeInterrupt();
+            decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
+          }
+        }
+      });
 
       cpu.setEFLAGS(cpu.getEFLAGS() | fador::cpu::FLAG_INTERRUPT);
 

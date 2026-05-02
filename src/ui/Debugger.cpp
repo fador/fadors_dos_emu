@@ -127,7 +127,7 @@ void Debugger::dumpMemory(uint32_t address, uint32_t count) {
         }
         std::cout << " | ";
         for (uint32_t j = 0; j < 16; ++j) {
-            char c = (char)m_memory.read8(address + i + j);
+            unsigned char c = static_cast<unsigned char>(m_memory.read8(address + i + j));
             std::cout << (isprint(c) ? c : '.');
         }
         std::cout << "\n";

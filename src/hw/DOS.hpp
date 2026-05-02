@@ -28,6 +28,9 @@ public:
   void setInputPollCallback(std::function<void()> cb) {
     m_pollInput = std::move(cb);
   }
+  void setIdleCallback(std::function<void()> cb) {
+    m_idleCallback = std::move(cb);
+  }
 
   // DPMI host wiring
   void setDPMI(DPMI *dpmi) { m_dpmi = dpmi; }
@@ -79,6 +82,7 @@ private:
   bool m_umbLinked = false;
   KeyboardController *m_kbd = nullptr;
   std::function<void()> m_pollInput;
+  std::function<void()> m_idleCallback;
   // VROOMM State
   std::string m_programPath;
   uint16_t m_neAlignShift = 0;
