@@ -17,6 +17,7 @@
 #include "ui/Debugger.hpp"
 #include "ui/InputManager.hpp"
 #include "ui/TerminalRenderer.hpp"
+#include "utils/CrashHandler.hpp"
 #include "utils/Logger.hpp"
 #include <iostream>
 #ifdef HAVE_SDL2
@@ -99,6 +100,86 @@ int main(int argc, char *argv[]) {
     fador::hw::ProgramLoader loader(cpu, memory, dos.getHIMEM());
     fador::ui::TerminalRenderer renderer(memory);
     fador::ui::Debugger debugger(cpu, memory, decoder);
+
+    // ── Install crash handlers ─────────────────────────────────────────
+    // Capture raw pointers to emulator core for the crash dump callback.
+    // We must not capture references in the lambda — the crash handler may
+    // fire during stack unwinding when references would be dangling.  Using
+    // pointers from the stack frame above main()'s try block is safe because
+    // the crash handler runs before the frame is destroyed.
+    fador::utils::setCrashDumpCallback([&]() {
+      // Emergency crash dump — use fprintf to stderr directly because
+      // the logger may not be safe inside a signal/SEH handler.
+      std::fprintf(stderr, "\n=== EMULATOR CRASH DUMP ===\n");
+
+      // CPU registers
+      std::fprintf(stderr, "EAX=%08X EBX=%08X ECX=%08X EDX=%08X\n",
+                   cpu.getReg32(fador::cpu::EAX), cpu.getReg32(fador::cpu::EBX),
+                   cpu.getReg32(fador::cpu::ECX), cpu.getReg32(fador::cpu::EDX));
+      std::fprintf(stderr, "ESI=%08X EDI=%08X EBP=%08X ESP=%08X\n",
+                   cpu.getReg32(fador::cpu::ESI), cpu.getReg32(fador::cpu::EDI),
+                   cpu.getReg32(fador::cpu::EBP), cpu.getReg32(fador::cpu::ESP));
+      std::fprintf(stderr, "CS=%04X DS=%04X ES=%04X SS=%04X EIP=%08X\n",
+                   cpu.getSegReg(fador::cpu::CS), cpu.getSegReg(fador::cpu::DS),
+                   cpu.getSegReg(fador::cpu::ES), cpu.getSegReg(fador::cpu::SS),
+                   cpu.getEIP());
+      std::fprintf(stderr, "EFLAGS=%08X CR0=%08X\n",
+                   cpu.getEFLAGS(), cpu.getCR(0));
+
+      // Disassembly around EIP
+      uint32_t eip = cpu.getEIP();
+      uint32_t csBase = cpu.getSegBase(fador::cpu::CS);
+      uint32_t phys = csBase + eip;
+      std::fprintf(stderr, "\n--- Disassembly around CS:EIP (phys=0x%08X) ---\n", phys);
+      for (int i = -5; i <= 10; i++) {
+        uint32_t addr = phys + static_cast<uint32_t>(i);
+        uint8_t byte = 0;
+        try { byte = memory.read8(addr); } catch (...) { byte = 0x00; }
+        std::fprintf(stderr, "%s 0x%08X: %02X\n", (i == 0 ? "-->" : "   "), addr, byte);
+      }
+
+      // Stack dump
+      uint16_t ss = cpu.getSegReg(fador::cpu::SS);
+      uint32_t ssBase = cpu.getSegBase(fador::cpu::SS);
+      uint32_t sp = cpu.getReg32(fador::cpu::ESP);
+      uint32_t stackPhys = ssBase + (sp & 0xFFFF);
+      std::fprintf(stderr, "\n--- Stack (SS:SP = %04X:%04X) ---\n", ss, (unsigned)(sp & 0xFFFF));
+      for (int i = 0; i < 32; i++) {
+        uint32_t addr = stackPhys + static_cast<uint32_t>(i);
+        try {
+          std::fprintf(stderr, "%02X ", memory.read8(addr));
+        } catch (...) {
+          std::fprintf(stderr, "?? ");
+        }
+        if ((i & 15) == 15) std::fprintf(stderr, "\n");
+      }
+      std::fprintf(stderr, "\n");
+
+      // VRAM dump (text mode)
+      std::fprintf(stderr, "\n--- Text-mode VRAM ---\n");
+      for (int row = 0; row < 25; row++) {
+        std::fprintf(stderr, "%02d: ", row);
+        for (int col = 0; col < 80; col++) {
+          try {
+            uint8_t ch = memory.read8(0xB8000 + (row * 80 + col) * 2);
+            std::fprintf(stderr, "%c", (ch >= 0x20 && ch < 0x7F) ? (char)ch : '.');
+          } catch (...) {
+            std::fprintf(stderr, "?");
+          }
+        }
+        std::fprintf(stderr, "\n");
+      }
+      std::fprintf(stderr, "=== END CRASH DUMP ===\n\n");
+      std::fflush(stderr);
+    });
+
+    fador::utils::installCrashHandler([](const std::string &desc) {
+      // The description is already written to stderr by the crash handler;
+      // here we could add additional logging if the logger is safe.
+      // We don't use LOG_ERROR because it may allocate memory or throw.
+      std::fprintf(stderr, "Crash reason: %s\n", desc.c_str());
+    });
+    // ── End crash handler installation ───────────────────────────────────
 
     LOG_INFO("System initialized successfully.");
 

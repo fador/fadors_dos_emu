@@ -62,7 +62,8 @@ if(SDL2_FOUND)
 endif()
 
 # Define the main emulator executable
-add_executable(fadors_emu ${SRC_DIR}/main.cpp)
+add_executable(fadors_emu ${SRC_DIR}/main.cpp
+    src/utils/CrashHandler.cpp)
 target_link_libraries(fadors_emu PRIVATE fadors_core)
 
 # Compiler warnings
