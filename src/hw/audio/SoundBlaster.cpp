@@ -10,27 +10,32 @@ SoundBlaster::SoundBlaster(fador::memory::MemoryBus &memory, DMA8237 &dma,
 }
 
 uint8_t SoundBlaster::read8(uint16_t port) {
-  if (port == m_basePort + 0xA) { // DSP Read Data
+  if (port == m_basePort + 0xA) { // DSP Read Data (0x22A)
     if (!m_readQueue.empty()) {
       uint8_t val = m_readQueue.front();
       m_readQueue.pop();
       return val;
     }
     return 0xFF;
-  } else if (port == m_basePort + 0xC) { // DSP Write Status
+  } else if (port == m_basePort + 0xC) { // DSP Write Status (0x22C)
     return 0x00;                         // Bit 7 clear = not busy
-  } else if (port == m_basePort + 0xE) { // DSP Data Available Status
+  } else if (port == m_basePort + 0xE) { // DSP Read-Buffer Status / IRQ Ack (0x22E)
+    m_irqPending = false; // Reading port 0x22E acknowledges the SB IRQ
     return m_readQueue.empty() ? 0x00 : 0x80;
-  } else if (port == m_basePort + 0x4) { // DSP Mixer Register port?
-    return 0xFF; // Not fully implementing SB Pro mixer yet
-  } else if (port == m_basePort + 0x5) { // DSP Mixer Data port?
-    return 0xFF; // Not fully implementing SB Pro mixer yet
+  } else if (port == m_basePort + 0x4) { // Mixer Address (0x224)
+    return m_mixerIndex;
+  } else if (port == m_basePort + 0x5) { // Mixer Data (0x225)
+    return m_mixerRegs[m_mixerIndex];
   }
   return 0xFF;
 }
 
 void SoundBlaster::write8(uint16_t port, uint8_t value) {
-  if (port == m_basePort + 0x6) { // DSP Reset
+  if (port == m_basePort + 0x4) { // Mixer Address (0x224)
+    m_mixerIndex = value;
+  } else if (port == m_basePort + 0x5) { // Mixer Data (0x225)
+    m_mixerRegs[m_mixerIndex] = value;
+  } else if (port == m_basePort + 0x6) { // DSP Reset (0x226)
     if (value == 1) {
       m_resetState = true;
     } else if (value == 0 && m_resetState) {
@@ -128,11 +133,20 @@ void SoundBlaster::processCommand(uint8_t cmd) {
     m_dmaBaseLength = m_dmaLength;
     break;
   }
+  case 0xD0: // Halt DMA (pause 8-bit)
+    m_dmaActive = false;
+    break;
   case 0xD1: // Turn on speaker
     m_speakerOn = true;
     break;
   case 0xD3: // Turn off speaker
     m_speakerOn = false;
+    break;
+  case 0xD4: // Continue DMA (resume 8-bit)
+    m_dmaActive = true;
+    break;
+  case 0xDA: // Exit auto-init 8-bit DMA
+    m_autoInitDma = false;
     break;
   case 0xE1:                // Get DSP Version
     m_readQueue.push(0x03); // Return v3.02 (Sound Blaster Pro)
@@ -153,6 +167,7 @@ void SoundBlaster::processCommand(uint8_t cmd) {
 }
 
 void SoundBlaster::triggerIRQ() {
+  m_irqPending = true;
   if (m_irqCallback) {
     m_irqCallback();
   }

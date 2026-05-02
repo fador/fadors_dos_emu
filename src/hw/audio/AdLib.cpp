@@ -11,17 +11,28 @@ const int AdLib::opOffsets[18] = {
     0x03, 0x04, 0x05, 0x0B, 0x0C, 0x0D, 0x13, 0x14, 0x15  // Slot 2 (Carriers)
 };
 
-AdLib::AdLib(float sampleRate) : m_sampleRate(sampleRate) {
+AdLib::AdLib(float sampleRate, const uint64_t *cpuCycles)
+    : m_sampleRate(sampleRate), m_cpuCycles(cpuCycles) {
+  if (m_cpuCycles)
+    m_lastTimerCycles = *m_cpuCycles;
   LOG_INFO("AdLib (OPL2) initialized. Sample rate: ", sampleRate);
 }
 
 uint8_t AdLib::read8(uint16_t port) {
   if (port == 0x388) {
-    // Status register
-    uint8_t ret = m_status;
-    // In real hardware, reading status resets some bits or takes time. We'll
-    // leave it simple.
-    return ret;
+    // Advance OPL timers based on elapsed CPU cycles so that polling
+    // loops (e.g. DMX OPL detection) see timer expiry without waiting
+    // for the audio generation callback.
+    if (m_cpuCycles) {
+      uint64_t now = *m_cpuCycles;
+      uint64_t elapsed = now - m_lastTimerCycles;
+      if (elapsed > 0) {
+        double dt = static_cast<double>(elapsed) / CPU_FREQ;
+        updateTimers(dt);
+        m_lastTimerCycles = now;
+      }
+    }
+    return m_status;
   }
   return 0xFF;
 }
@@ -135,6 +146,10 @@ void AdLib::writeRegister(uint8_t reg, uint8_t val) {
 }
 
 void AdLib::updateTimers(double dt) {
+  // Sync the cycle-based timer so read8 doesn't double-count this interval
+  if (m_cpuCycles)
+    m_lastTimerCycles = *m_cpuCycles;
+
   if (!(m_timerControl & 0x80)) {
     if (!(m_timerControl & 0x40)) { // Timer 1 unmasked
       if (m_timerControl & 0x01) {  // Timer 1 started

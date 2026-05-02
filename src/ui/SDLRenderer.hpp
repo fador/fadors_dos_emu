@@ -4,6 +4,7 @@
 #include "../hw/KeyboardController.hpp"
 #include "../hw/VGAController.hpp"
 #include "../memory/MemoryBus.hpp"
+#define SDL_MAIN_HANDLED
 #include <SDL.h>
 #include <cstdint>
 #include <vector>

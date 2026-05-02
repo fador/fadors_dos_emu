@@ -6,6 +6,8 @@
 #include <fstream>
 #include <vector>
 
+namespace fador::hw { extern memory::HIMEM *g_himem; }
+
 namespace fador::hw {
 
 ProgramLoader::ProgramLoader(cpu::CPU &cpu, memory::MemoryBus &memory,

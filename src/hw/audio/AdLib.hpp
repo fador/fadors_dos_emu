@@ -46,7 +46,7 @@ struct Channel {
 
 class AdLib : public IODevice {
 public:
-  AdLib(float sampleRate = 44100.0f);
+  AdLib(float sampleRate = 44100.0f, const uint64_t *cpuCycles = nullptr);
   ~AdLib() override = default;
 
   uint8_t read8(uint16_t port) override;
@@ -82,6 +82,11 @@ private:
   uint8_t m_status = 0;
 
   bool m_waveformEnable = false;
+
+  // CPU cycle counter for accurate timer advancement on status reads
+  const uint64_t *m_cpuCycles = nullptr;
+  uint64_t m_lastTimerCycles = 0;
+  static constexpr double CPU_FREQ = 33000000.0; // ~33 MHz 386
 
   // Lookups mapping register bases to operator indices
   static const int opOffsets[18];
