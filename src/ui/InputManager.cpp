@@ -83,9 +83,13 @@ bool InputManager::pollInput() {
                         while (idx < n && buf[idx] != 'M' && buf[idx] != 'm') {
                             if (buf[idx] == ';') { field++; idx++; continue; }
                             if (buf[idx] >= '0' && buf[idx] <= '9') {
-                                if (field == 0) cb = cb * 10 + (buf[idx] - '0');
-                                else if (field == 1) cx = cx * 10 + (buf[idx] - '0');
-                                else if (field == 2) cy = cy * 10 + (buf[idx] - '0');
+                                if (field == 0) {
+                                    if (cb < 1000000) cb = cb * 10 + (buf[idx] - '0');
+                                } else if (field == 1) {
+                                    if (cx < 1000000) cx = cx * 10 + (buf[idx] - '0');
+                                } else if (field == 2) {
+                                    if (cy < 1000000) cy = cy * 10 + (buf[idx] - '0');
+                                }
                             }
                             idx++;
                         }
@@ -116,8 +120,11 @@ bool InputManager::pollInput() {
                         // ESC [ <num> ~ sequences
                         int code = 0;
                         for (int i = 2; i < n - 1; ++i) {
-                            if (buf[i] >= '0' && buf[i] <= '9')
-                                code = code * 10 + (buf[i] - '0');
+                            if (buf[i] >= '0' && buf[i] <= '9') {
+                                if (code < 1000000) {
+                                    code = code * 10 + (buf[i] - '0');
+                                }
+                            }
                             else if (buf[i] == ';') break; // modifier follows
                         }
                         switch (code) {
