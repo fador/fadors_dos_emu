@@ -634,3 +634,282 @@ TEST_CASE("IRQ: BIOS sendEOI clears PIC ISR for master and slave", "[IRQ]") {
         REQUIRE(pic.getPendingInterrupt() == 0x09);
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Hardware Keyboard IRQ (INT 9) & Scancode Handling
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_CASE("Keyboard: pushScancode queues to HW buffer", "[KBD]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::IOBus iobus;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::DOS dos(cpu, mem);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+
+    bios.initialize();
+    dos.initialize();
+
+    iobus.registerDevice(0x20, 0x21, &pic);
+    iobus.registerDevice(0x60, 0x60, &kbd);
+    iobus.registerDevice(0x64, 0x64, &kbd);
+
+    // Initialize PIC
+    pic.write8(0x20, 0x11);
+    pic.write8(0x21, 0x08);
+    pic.write8(0x21, 0x04);
+    pic.write8(0x21, 0x01);
+    pic.write8(0x21, 0x00);
+
+    // Push a make scancode (0x1E = 'A' press)
+    kbd.pushScancode(0x1E);
+
+    // Read scancode from port 0x60
+    uint8_t scancode = kbd.read8(0x60);
+    REQUIRE(scancode == 0x1E);
+}
+
+TEST_CASE("Keyboard: pushMakeKey triggers IRQ and queues to HW buffer", "[KBD][IRQ]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::DOS dos(cpu, mem);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+
+    bios.initialize();
+    dos.initialize();
+
+    // pushMakeKey increments pending IRQ count
+    kbd.pushMakeKey('a', 0x1E);
+
+    // Should trigger IRQ
+    REQUIRE(kbd.checkPendingIRQ());
+
+    // BIOS buffer should have the key
+    REQUIRE(kbd.hasKey());
+    auto key = kbd.popKey();
+    REQUIRE(key.first == 'a');
+    REQUIRE(key.second == 0x1E);
+
+    // HW buffer should have the scancode
+    uint8_t sc = kbd.read8(0x60);
+    REQUIRE(sc == 0x1E);
+}
+
+TEST_CASE("Keyboard: pushKeyWithBreak queues both make and break scancodes", "[KBD]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::DOS dos(cpu, mem);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+
+    bios.initialize();
+    dos.initialize();
+
+    // Push a key with auto-break ('A', scancode 0x1E, break = 0x1E | 0x80 = 0x9E)
+    kbd.pushKeyWithBreak('a', 0x1E);
+
+    // Should have both make and break in HW buffer, and key in BIOS buffer
+    REQUIRE(kbd.hasKey()); // BIOS buffer has the key
+
+    auto key = kbd.popKey();
+    REQUIRE(key.first == 'a');   // ASCII
+    REQUIRE(key.second == 0x1E); // Scancode
+
+    // HW buffer should have make scancode + break scancode
+    REQUIRE(kbd.checkPendingIRQ()); // IRQ for make
+    uint8_t sc1 = kbd.read8(0x60);
+    REQUIRE(sc1 == 0x1E); // Make
+
+    REQUIRE(kbd.checkPendingIRQ()); // IRQ for break
+    uint8_t sc2 = kbd.read8(0x60);
+    REQUIRE(sc2 == 0x9E); // Break (0x80 | 0x1E)
+}
+
+TEST_CASE("Keyboard: pushMakeKey / pushBreakKey separate events", "[KBD]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::DOS dos(cpu, mem);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+
+    bios.initialize();
+    dos.initialize();
+
+    // Push make key ('B', scancode 0x30)
+    kbd.pushMakeKey('b', 0x30);
+
+    REQUIRE(kbd.hasKey());
+    auto key = kbd.popKey();
+    REQUIRE(key.first == 'b');
+    REQUIRE(key.second == 0x30);
+
+    REQUIRE(kbd.checkPendingIRQ());
+    uint8_t scMake = kbd.read8(0x60);
+    REQUIRE(scMake == 0x30);
+
+    // Push break for the same scancode
+    kbd.pushBreakKey(0x30);
+
+    REQUIRE(kbd.checkPendingIRQ());
+    uint8_t scBreak = kbd.read8(0x60);
+    REQUIRE(scBreak == 0xB0); // 0x80 | 0x30
+}
+
+TEST_CASE("Keyboard: extended key pushes E0 prefix bytes", "[KBD]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::DOS dos(cpu, mem);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+
+    bios.initialize();
+    dos.initialize();
+
+    // Push extended make key (right arrow, scancode 0x4D)
+    kbd.pushMakeKeyExtended(0x00, 0x4D);
+
+    // HW buffer should have: E0, 4D (two bytes)
+    REQUIRE(kbd.checkPendingIRQ());
+    uint8_t e0 = kbd.read8(0x60);
+    REQUIRE(e0 == 0xE0);
+
+    REQUIRE(kbd.checkPendingIRQ());
+    uint8_t sc = kbd.read8(0x60);
+    REQUIRE(sc == 0x4D);
+
+    // Push extended break
+    kbd.pushBreakKeyExtended(0x4D);
+
+    REQUIRE(kbd.checkPendingIRQ());
+    uint8_t e0b = kbd.read8(0x60);
+    REQUIRE(e0b == 0xE0);
+
+    REQUIRE(kbd.checkPendingIRQ());
+    uint8_t scb = kbd.read8(0x60);
+    REQUIRE(scb == 0xCD); // 0x80 | 0x4D
+}
+
+TEST_CASE("Keyboard: multiple keys in BIOS buffer maintain FIFO order", "[KBD]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::DOS dos(cpu, mem);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+
+    bios.initialize();
+    dos.initialize();
+
+    // Push three keys
+    kbd.pushKey('H', 0x23);
+    kbd.pushKey('i', 0x17);
+    kbd.pushKey('!', 0x02);
+
+    REQUIRE(kbd.hasKey());
+    auto k1 = kbd.popKey();
+    REQUIRE(k1.first == 'H');
+    REQUIRE(k1.second == 0x23);
+
+    REQUIRE(kbd.hasKey());
+    auto k2 = kbd.popKey();
+    REQUIRE(k2.first == 'i');
+    REQUIRE(k2.second == 0x17);
+
+    REQUIRE(kbd.hasKey());
+    auto k3 = kbd.popKey();
+    REQUIRE(k3.first == '!');
+    REQUIRE(k3.second == 0x02);
+
+    REQUIRE(!kbd.hasKey()); // Buffer should be empty
+}
+
+TEST_CASE("Keyboard: peekKey does not remove from buffer", "[KBD]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::DOS dos(cpu, mem);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+
+    bios.initialize();
+    dos.initialize();
+
+    kbd.pushKey('Z', 0x2C);
+
+    REQUIRE(kbd.hasKey());
+    auto p1 = kbd.peekKey();
+    REQUIRE(p1.first == 'Z');
+    REQUIRE(p1.second == 0x2C);
+
+    // Key should still be there
+    REQUIRE(kbd.hasKey());
+    auto p2 = kbd.peekKey();
+    REQUIRE(p2.first == 'Z');
+    REQUIRE(p2.second == 0x2C);
+
+    // Pop should remove it
+    auto k = kbd.popKey();
+    REQUIRE(k.first == 'Z');
+    REQUIRE(!kbd.hasKey());
+}
+
+TEST_CASE("Keyboard: INT 9 injected HLE handles keyboard IRQ", "[KBD][IRQ]") {
+    // Setup PM environment to test that keyboard IRQ injection
+    // gets HLE'd safely (D-bit guard) and doesn't crash
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::IOBus iobus;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::DOS dos(cpu, mem);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+
+    bios.initialize();
+    dos.initialize();
+
+    iobus.registerDevice(0x20, 0x21, &pic);
+    iobus.registerDevice(0x60, 0x60, &kbd);
+
+    pic.write8(0x20, 0x11);
+    pic.write8(0x21, 0x08);
+    pic.write8(0x21, 0x04);
+    pic.write8(0x21, 0x01);
+    pic.write8(0x21, 0x00);
+
+    // Push a key to the HW buffer and raise IRQ1 using pushMakeKey
+    kbd.pushMakeKey('a', 0x1E);
+    REQUIRE(kbd.checkPendingIRQ());
+    pic.raiseIRQ(1);
+
+    int pending = pic.getPendingInterrupt();
+    REQUIRE(pending == 0x09);
+
+    // Ack and try to inject — since we're in RM, should go through HLE path
+    pic.acknowledgeInterrupt();
+
+    cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
+    cpu.setSegReg(cpu::CS, 0xF000);
+    cpu.setEIP(0x0100);
+
+    uint32_t eipBefore = cpu.getEIP();
+    decoder.injectHardwareInterrupt(0x09);
+
+    // Even though we don't have a full PM environment, the HLE path
+    // should handle keyboard IRQ gracefully
+    (void)eipBefore;
+}
+

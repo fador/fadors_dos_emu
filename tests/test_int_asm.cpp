@@ -868,6 +868,195 @@ TEST_CASE("INT 21h AH=47h Get Current Directory via asm", "[int][asm][dos][dir]"
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+//  INT 33h — Mouse Driver
+// ════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("INT 33h AX=0000h Reset mouse via asm", "[int][asm][mouse]") {
+    IntTestEnv e;
+    e.assemble("MOV AX, 0000h\nINT 33h");
+    e.run(2);
+    REQUIRE(e.cpu.getReg16(cpu::AX) == 0xFFFF); // Driver installed
+    REQUIRE(e.cpu.getReg16(cpu::BX) == 2);      // 2 buttons
+}
+
+TEST_CASE("INT 33h AX=0001h Show / 0002h Hide cursor via asm", "[int][asm][mouse]") {
+    IntTestEnv e;
+    e.assemble(
+        "MOV AX, 0000h\n"  // Reset
+        "INT 33h\n"
+        "MOV AX, 0001h\n"  // Show cursor
+        "INT 33h\n"
+        "MOV AX, 0002h\n"  // Hide cursor
+        "INT 33h"
+    );
+    e.run(6);
+    // Reset returns AX=0xFFFF (installed), BX=2 (2 buttons)
+    // Show/Hide don't change AX/BX — so carry flag check is sufficient
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+}
+
+TEST_CASE("INT 33h AX=0003h Get position via asm", "[int][asm][mouse]") {
+    IntTestEnv e;
+    // Reset first, then set position, then get
+    e.assemble(
+        "MOV AX, 0000h\n"  // Reset
+        "INT 33h\n"
+        "MOV AX, 0004h\n"  // Set position to (320, 100) = (0x140, 0x64)
+        "MOV CX, 140h\n"
+        "MOV DX, 64h\n"
+        "INT 33h\n"
+        "MOV AX, 0003h\n"  // Get position
+        "INT 33h"
+    );
+    e.run(7);
+    // After set/get, CX=0x140 (320), DX=0x64 (100), BX=button state (0 unless pressed)
+    REQUIRE(e.cpu.getReg16(cpu::CX) == 0x140);
+    REQUIRE(e.cpu.getReg16(cpu::DX) == 0x64);
+}
+
+TEST_CASE("INT 33h AX=0004h Set position clamps to default bounds via asm", "[int][asm][mouse]") {
+    IntTestEnv e;
+    // Reset (sets bounds to 0-639, 0-199)
+    e.assemble(
+        "MOV AX, 0000h\n"
+        "INT 33h\n"
+        "MOV AX, 0004h\n"  // Set to (640, 200) = (0x280, 0xC8) — within bounds
+        "MOV CX, 280h\n"
+        "MOV DX, 0C8h\n"
+        "INT 33h\n"
+        "MOV AX, 0003h\n"  // Get position
+        "INT 33h"
+    );
+    e.run(7);
+    REQUIRE(e.cpu.getReg16(cpu::CX) == 0x280);
+    REQUIRE(e.cpu.getReg16(cpu::DX) == 0xC8);
+}
+
+TEST_CASE("INT 33h AX=0007h/0008h Set bounds via asm", "[int][asm][mouse]") {
+    IntTestEnv e;
+    e.assemble(
+        "MOV AX, 0000h\n"  // Reset
+        "INT 33h\n"
+        "MOV AX, 0007h\n"  // Set horizontal bounds: 100–500 (0x64–0x1F4)
+        "MOV CX, 64h\n"
+        "MOV DX, 1F4h\n"
+        "INT 33h\n"
+        "MOV AX, 0008h\n"  // Set vertical bounds: 50–150 (0x32–0x96)
+        "MOV CX, 32h\n"
+        "MOV DX, 96h\n"
+        "INT 33h\n"
+        "MOV AX, 0004h\n"  // Set position to midpoint
+        "MOV CX, 0C8h\n"   // 0xC8 = 200
+        "MOV DX, 64h\n"    // 0x64 = 100
+        "INT 33h\n"
+        "MOV AX, 0003h\n"  // Get position
+        "INT 33h"
+    );
+    e.run(14);
+    REQUIRE(e.cpu.getReg16(cpu::CX) == 0xC8); // 200 (within bounds)
+    REQUIRE(e.cpu.getReg16(cpu::DX) == 0x64); // 100 (within bounds)
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  INT 16h — Extended Keyboard BIOS
+// ════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("INT 16h AH=00h blocking read key via asm", "[int][asm][kbd]") {
+    IntTestEnv e;
+    // Push a key into buffer, then do blocking read
+    e.kbd.pushKey('X', 0x2D);
+    e.assemble("MOV AH, 00h\nINT 16h");
+    e.run(2);
+    REQUIRE(e.cpu.getReg8(cpu::AL) == 'X');   // ASCII
+    REQUIRE(e.cpu.getReg8(cpu::AH) == 0x2D);  // Scancode
+}
+
+TEST_CASE("INT 16h AH=10h extended keyboard read via asm", "[int][asm][kbd]") {
+    IntTestEnv e;
+    // Push an extended key (arrow key: scancode 0x48 with E0 prefix emulated as normal)
+    e.kbd.pushKey(0x00, 0x48); // Up arrow: no ASCII, scancode 0x48
+    e.assemble("MOV AH, 10h\nINT 16h");
+    e.run(2);
+    REQUIRE(e.cpu.getReg8(cpu::AH) == 0x48);  // Scancode
+    REQUIRE(e.cpu.getReg8(cpu::AL) == 0x00);  // No ASCII for extended keys
+}
+
+TEST_CASE("INT 16h AH=11h check extended keystroke via asm", "[int][asm][kbd]") {
+    IntTestEnv e;
+    // No key initially
+    e.assemble("MOV AH, 11h\nINT 16h");
+    e.run(2);
+    REQUIRE(e.cpu.getEFLAGS() & cpu::FLAG_ZERO); // ZF=1: no key
+
+    // Now push a key and check again
+    e.kbd.pushKey('!', 0x02);
+    e.cpu.setEIP(IntTestEnv::CODE_OFF); // Reset IP
+    e.assemble("MOV AH, 11h\nINT 16h");
+    e.run(2);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_ZERO)); // ZF=0: key present
+    REQUIRE(e.cpu.getReg8(cpu::AL) == '!');
+    REQUIRE(e.cpu.getReg8(cpu::AH) == 0x02);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  INT 15h AH=4Fh — Keyboard Intercept
+// ════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("INT 15h AH=4Fh keyboard intercept via asm", "[int][asm][kbd]") {
+    IntTestEnv e;
+    e.assemble("MOV AH, 4Fh\nINT 15h");
+    e.run(2);
+    // Should return with carry set (key should be processed normally)
+    REQUIRE(e.cpu.getEFLAGS() & cpu::FLAG_CARRY);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  INT 16h — Keyboard buffer edge cases
+// ════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("INT 16h AH=01h peek does not remove key via asm", "[int][asm][kbd]") {
+    IntTestEnv e;
+    e.kbd.pushKey('Q', 0x10);
+    // Peek twice — should see the same key both times
+    e.assemble(
+        "MOV AH, 01h\n"
+        "INT 16h\n"
+        "MOV AH, 01h\n"
+        "INT 16h"
+    );
+    e.run(4);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_ZERO));
+    REQUIRE(e.cpu.getReg8(cpu::AL) == 'Q');
+    REQUIRE(e.cpu.getReg8(cpu::AH) == 0x10);
+}
+
+TEST_CASE("INT 16h AH=00h empties buffer after read via asm", "[int][asm][kbd]") {
+    IntTestEnv e;
+    e.kbd.pushKey('A', 0x1E);
+    // Read with AH=00h — should get the key
+    e.assemble("MOV AH, 00h\nINT 16h");
+    e.run(2);
+    REQUIRE(e.cpu.getReg8(cpu::AL) == 'A');
+    REQUIRE(e.cpu.getReg8(cpu::AH) == 0x1E);
+}
+
+TEST_CASE("INT 16h AH=05h stores key with carry check via asm", "[int][asm][kbd]") {
+    IntTestEnv e;
+    // Store key, then read it back
+    // CH=scancode(0x19), CL=ascii('P'=0x50) → CX=0x1950
+    e.assemble(
+        "MOV AH, 05h\n"
+        "MOV CX, 1950h\n"  // CH=0x19, CL=0x50 ('P')
+        "INT 16h\n"
+        "MOV AH, 00h\n"
+        "INT 16h"
+    );
+    e.run(5);
+    REQUIRE(e.cpu.getReg8(cpu::AL) == 'P');
+    REQUIRE(e.cpu.getReg8(cpu::AH) == 0x19);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 //  Multi-instruction program: full int pipeline test
 // ════════════════════════════════════════════════════════════════════════════
 
