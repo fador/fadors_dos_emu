@@ -36,6 +36,7 @@ public:
 
   // Connect VGA controller for plane-aware VRAM access
   void setVGA(hw::VGAController *vga) { m_vga = vga; }
+  const hw::VGAController *getVGA() const { return m_vga; }
 
   static constexpr uint32_t MEMORY_SIZE = 64 * 1024 * 1024; // 64MB
 

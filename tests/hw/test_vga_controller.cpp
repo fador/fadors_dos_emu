@@ -61,6 +61,18 @@ TEST_CASE("Hardware: VGA Controller", "[HW][VGA]") {
         REQUIRE(vga.read8(0x3CE) == 0x04);
         REQUIRE(vga.read8(0x3CF) == 0x02);
         REQUIRE(vga.getReadMapSelect() == 0x02);
+
+        vga.write8(0x3CE, 0x00);
+        vga.write8(0x3CF, 0x0A);
+        REQUIRE(vga.read8(0x3CF) == 0x0A);
+
+        vga.write8(0x3CE, 0x03);
+        vga.write8(0x3CF, 0x12);
+        REQUIRE(vga.read8(0x3CF) == 0x12);
+
+        vga.write8(0x3CE, 0x08);
+        vga.write8(0x3CF, 0xF0);
+        REQUIRE(vga.read8(0x3CF) == 0xF0);
     }
 
     SECTION("CRTC registers") {
@@ -147,6 +159,90 @@ TEST_CASE("Hardware: VGA Controller", "[HW][VGA]") {
 
             // Read from offset 0
             REQUIRE(vga.planeRead8(0x0000) == 0x00);
+        }
+
+        SECTION("Write mode 0 applies bit mask against latched data") {
+            vga.write8(0x3C4, 0x04);
+            vga.write8(0x3C5, 0x00);
+            vga.write8(0x3C4, 0x02);
+            vga.write8(0x3C5, 0x01);
+
+            vga.planeWrite8(0x0000, 0xF0);
+            REQUIRE(vga.planeRead8(0x0000) == 0xF0);
+
+            vga.write8(0x3CE, 0x08);
+            vga.write8(0x3CF, 0x0F);
+            vga.planeWrite8(0x0000, 0xAA);
+
+            REQUIRE(vga.readPlane(0, 0) == 0xFA);
+        }
+
+        SECTION("Write mode 1 copies the latched source byte") {
+            vga.write8(0x3C4, 0x04);
+            vga.write8(0x3C5, 0x00);
+
+            for (int plane = 0; plane < 4; ++plane) {
+                vga.write8(0x3C4, 0x02);
+                vga.write8(0x3C5, 1 << plane);
+                vga.planeWrite8(0x0000, static_cast<uint8_t>(0x11 * (plane + 1)));
+            }
+
+            vga.write8(0x3CE, 0x04);
+            vga.write8(0x3CF, 0x00);
+            REQUIRE(vga.planeRead8(0x0000) == 0x11);
+
+            vga.write8(0x3C4, 0x02);
+            vga.write8(0x3C5, 0x0F);
+            vga.write8(0x3CE, 0x05);
+            vga.write8(0x3CF, 0x01);
+            vga.planeWrite8(0x0001, 0xFF);
+
+            REQUIRE(vga.readPlane(0, 1) == 0x11);
+            REQUIRE(vga.readPlane(1, 1) == 0x22);
+            REQUIRE(vga.readPlane(2, 1) == 0x33);
+            REQUIRE(vga.readPlane(3, 1) == 0x44);
+        }
+
+        SECTION("Write mode 2 expands host low nibble across planes") {
+            vga.write8(0x3C4, 0x04);
+            vga.write8(0x3C5, 0x00);
+            vga.write8(0x3C4, 0x02);
+            vga.write8(0x3C5, 0x0F);
+
+            vga.planeWrite8(0x0002, 0x55);
+            REQUIRE(vga.planeRead8(0x0002) == 0x55);
+
+            vga.write8(0x3CE, 0x05);
+            vga.write8(0x3CF, 0x02);
+            vga.write8(0x3CE, 0x08);
+            vga.write8(0x3CF, 0x0F);
+            vga.planeWrite8(0x0002, 0x05);
+
+            REQUIRE(vga.readPlane(0, 2) == 0x5F);
+            REQUIRE(vga.readPlane(1, 2) == 0x50);
+            REQUIRE(vga.readPlane(2, 2) == 0x5F);
+            REQUIRE(vga.readPlane(3, 2) == 0x50);
+        }
+
+        SECTION("Write mode 3 uses rotated host data as the write mask") {
+            vga.write8(0x3C4, 0x04);
+            vga.write8(0x3C5, 0x00);
+            vga.write8(0x3C4, 0x02);
+            vga.write8(0x3C5, 0x03);
+
+            vga.planeWrite8(0x0003, 0x0F);
+            REQUIRE(vga.planeRead8(0x0003) == 0x0F);
+
+            vga.write8(0x3CE, 0x00);
+            vga.write8(0x3CF, 0x01);
+            vga.write8(0x3CE, 0x08);
+            vga.write8(0x3CF, 0xF0);
+            vga.write8(0x3CE, 0x05);
+            vga.write8(0x3CF, 0x03);
+            vga.planeWrite8(0x0003, 0xCC);
+
+            REQUIRE(vga.readPlane(0, 3) == 0xCF);
+            REQUIRE(vga.readPlane(1, 3) == 0x0F);
         }
     }
 }

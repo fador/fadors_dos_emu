@@ -1,4 +1,5 @@
 #include "TerminalRenderer.hpp"
+#include "../hw/VGAController.hpp"
 #include "../hw/VideoMode.hpp"
 #include <iostream>
 #include <iomanip>
@@ -110,6 +111,15 @@ uint8_t TerminalRenderer::readPixel(int x, int y, uint8_t mode) const {
 
     switch (mi->layout) {
         case hw::VMemLayout::Linear256:
+            if (const auto* vga = m_memory.getVGA(); vga != nullptr && !vga->isChain4()) {
+                uint32_t displayStart = vga->getDisplayStart();
+                uint32_t rowBytes = static_cast<uint32_t>(mi->width) / 4;
+                int plane = x & 3;
+                uint32_t offset = displayStart + static_cast<uint32_t>(y) * rowBytes
+                                + static_cast<uint32_t>(x >> 2);
+                return vga->readPlane(plane, offset);
+            }
+
             return m_memory.read8(mi->vramBase + y * mi->width + x);
 
         case hw::VMemLayout::CGA4: {
@@ -176,7 +186,7 @@ void TerminalRenderer::renderGraphicsFullRes(bool force) {
     }
 
     const uint8_t* pal = m_memory.directAccess(PALETTE_BASE);
-    // For Linear256, grab a direct pointer to VRAM for fast bulk reads
+    // For standard chained Linear256, grab a direct pointer to VRAM for fast bulk reads
     const uint8_t* vram = (mi->layout == hw::VMemLayout::Linear256)
                         ? m_memory.directAccess(mi->vramBase)
                         : nullptr;

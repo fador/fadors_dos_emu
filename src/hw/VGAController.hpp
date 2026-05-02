@@ -1,6 +1,7 @@
 #pragma once
 #include "IODevice.hpp"
 #include "../memory/MemoryBus.hpp"
+#include <array>
 #include <chrono>
 
 namespace fador::hw {
@@ -39,6 +40,8 @@ public:
     static constexpr uint32_t VGA_WINDOW_SIZE = 0x10000; // 64KB
 
 private:
+    void loadLatches(uint32_t planeOffset) const;
+
     memory::MemoryBus& m_memory;
     uint8_t m_dacWriteIndex = 0;
     uint8_t m_dacReadIndex = 0;
@@ -55,14 +58,23 @@ private:
 
     // Graphics Controller registers (port 0x3CE/0x3CF)
     uint8_t m_gcIndex = 0;
+    uint8_t m_gcSetReset = 0;
+    uint8_t m_gcEnableSetReset = 0;
+    uint8_t m_gcColorCompare = 0;
+    uint8_t m_gcDataRotate = 0;
     uint8_t m_gcReadMap = 0;     // register 4: which plane to read
+    uint8_t m_gcMode = 0;
+    uint8_t m_gcMisc = 0;
+    uint8_t m_gcColorDontCare = 0x0F;
+    uint8_t m_gcBitMask = 0xFF;
+    mutable std::array<uint8_t, 4> m_latches{};
 
     // CRTC registers (port 0x3D4/0x3D5) — mostly stubs
     uint8_t m_crtcIndex = 0;
-    uint8_t m_crtcRegs[0x19] = {};
+    std::array<uint8_t, 0x19> m_crtcRegs{};
 
     // VGA plane memory (4 planes × 64KB each = 256KB total)
-    uint8_t m_planes[4][65536] = {};
+    std::array<std::array<uint8_t, 65536>, 4> m_planes{};
 };
 
 } // namespace fador::hw
