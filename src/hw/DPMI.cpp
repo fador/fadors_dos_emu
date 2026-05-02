@@ -648,6 +648,7 @@ void DPMI::handleInterruptVectors() {
         uint32_t low =
             (static_cast<uint32_t>(newSel) << 16) | (newOff & 0xFFFF);
         uint32_t high = (newOff & 0xFFFF0000) | 0x0000EE00;
+#if FADOR_ENABLE_DEBUG_DIAGNOSTICS
         {
           static uint32_t s_0205log = 0;
           if (s_0205log < 512) {
@@ -664,11 +665,13 @@ void DPMI::handleInterruptVectors() {
                      " host31=", host31 ? 1 : 0);
           }
         }
+#endif
         m_memory.write32(idtAddr, low);
         m_memory.write32(idtAddr + 4, high);
       }
     }
 
+#if FADOR_ENABLE_DEBUG_DIAGNOSTICS
     // Phase 6: compare authoritative m_pmVectors against physical IDT after
     // each 0205 update for this vector and key chain-critical vectors.
     {
@@ -706,6 +709,7 @@ void DPMI::handleInterruptVectors() {
       if (vec != 0x3D)
         logVecState(0x3D, "watch");
     }
+#endif
 
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
     break;
@@ -735,6 +739,7 @@ void DPMI::handleTranslation() {
     uint32_t reqRmEdx = m_is32BitClient ? m_memory.read32(structAddr + 0x14)
                                         : m_memory.read16(structAddr + 0x14);
 
+#if FADOR_ENABLE_DEBUG_DIAGNOSTICS
     // Phase 6: runtime consistency snapshot near DOS call flow that leads to
     // interrupt-chain validation.
     if (func == 0x0302) {
@@ -767,6 +772,7 @@ void DPMI::handleTranslation() {
         logSnap(0x3D);
       }
     }
+#endif
 
     // Save current PM state
     uint32_t savedRegs[8];
@@ -783,6 +789,7 @@ void DPMI::handleTranslation() {
     bool savedIs32Code = m_cpu.is32BitCode();
     bool savedIs32Stack = m_cpu.is32BitStack();
 
+    #if FADOR_ENABLE_DEBUG_DIAGNOSTICS
     if (func == 0x0302) {
       static uint32_t s_trace0302Enter = 0;
       bool interesting = ((reqRmEax & 0xFFFF) == 0x4400) ||
@@ -806,6 +813,7 @@ void DPMI::handleTranslation() {
                  " struct=0x", structAddr);
       }
     }
+    #endif
 
     // Load registers from the RM call structure (50 bytes):
     // +00: EDI, +04: ESI, +08: EBP, +0C: reserved
@@ -858,6 +866,7 @@ void DPMI::handleTranslation() {
     m_cpu.setSegBase(cpu::SS, static_cast<uint32_t>(rmSS) << 4);
     m_cpu.setReg16(cpu::SP, rmSP);
 
+    #if FADOR_ENABLE_DEBUG_DIAGNOSTICS
     if (func == 0x0302) {
       static uint32_t s_trace0302Armed = 0;
       bool interesting = ((reqRmEax & 0xFFFF) == 0x4400) ||
@@ -876,6 +885,7 @@ void DPMI::handleTranslation() {
                  " eip=0x", m_cpu.getEIP());
       }
     }
+    #endif
 
     if (func == 0x0300) {
       LOG_DEBUG("DPMI 0300h: Simulate RM INT 0x", std::hex, (int)intNo);
@@ -1000,6 +1010,7 @@ void DPMI::handleTranslation() {
     m_memory.write16(structAddr + 0x2E, m_cpu.getReg16(cpu::SP));
     m_memory.write16(structAddr + 0x30, m_cpu.getSegReg(cpu::SS));
 
+    #if FADOR_ENABLE_DEBUG_DIAGNOSTICS
     if (func == 0x0302) {
       static uint32_t s_trace0302PreRestore = 0;
       bool interesting = ((reqRmEax & 0xFFFF) == 0x4400) ||
@@ -1021,6 +1032,7 @@ void DPMI::handleTranslation() {
                  " retCF=", (m_cpu.getEFLAGS() & cpu::FLAG_CARRY) ? 1 : 0);
       }
     }
+    #endif
 
     // Restore PM state
     for (int i = 0; i < 8; i++)
@@ -1034,6 +1046,7 @@ void DPMI::handleTranslation() {
     m_cpu.setIs32BitCode(savedIs32Code);
     m_cpu.setIs32BitStack(savedIs32Stack);
 
+    #if FADOR_ENABLE_DEBUG_DIAGNOSTICS
     if (func == 0x0302) {
       static uint32_t s_trace0302Restored = 0;
       bool mismatch = (m_cpu.getSegReg(cpu::SS) != savedSegs[cpu::SS]) ||
@@ -1059,6 +1072,7 @@ void DPMI::handleTranslation() {
                  " mismatch=", mismatch ? 1 : 0);
       }
     }
+    #endif
     break;
   }
   case 0x0303: { // Allocate Real Mode Callback Address

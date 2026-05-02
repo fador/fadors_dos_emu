@@ -4,6 +4,11 @@ project(FadorsDOSEmulator VERSION 1.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF) # Ensure strict standard C++
+
+option(FADOR_ENABLE_DEBUG_DIAGNOSTICS
+    "Enable temporary investigation diagnostics"
+    OFF)
+
 # Optional SDL2 graphics backend
 find_package(SDL2 QUIET)
 
@@ -54,6 +59,8 @@ list(APPEND SRC_FILES "${SRC_DIR}/memory/himem/HIMEM.cpp")
 # Define an internal static library for the emulator core
 add_library(fadors_core STATIC ${SRC_FILES})
 target_include_directories(fadors_core PUBLIC ${SRC_DIR})
+target_compile_definitions(fadors_core PUBLIC
+    FADOR_ENABLE_DEBUG_DIAGNOSTICS=$<BOOL:${FADOR_ENABLE_DEBUG_DIAGNOSTICS}>)
 
 if(SDL2_FOUND)
     target_compile_definitions(fadors_core PUBLIC HAVE_SDL2=1)

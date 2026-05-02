@@ -132,52 +132,6 @@ bool BIOS::handleInterrupt(uint8_t vector) {
     // Send EOI to master PIC so the ISR bit is cleared and future
     // timer ticks can be delivered.
     m_pic.write8(0x20, 0x20);
-    {
-      static int s_timerLog = 0;
-      if (s_timerLog < 20 || (s_timerLog % 100 == 0 && s_timerLog < 1000)) {
-        LOG_INFO("TIMER-TICK #", s_timerLog, " counter=", lo);
-      }
-      // Check Watcom RTL table at tick #100 — dump all 8 slots
-      if (s_timerLog == 100) {
-        for (int slot = 0; slot < 8; slot++) {
-          uint32_t base = 0x26D3E0 + slot * 64;
-          uint32_t handler = m_memory.read32(base);
-          if (handler != 0) {
-            char buf[512];
-            snprintf(buf, sizeof(buf),
-              "WATCOM-ISR slot[%d] @%06X: handler=%08X bytes=%02X %02X %02X %02X "
-              "+8=%08X +12=%08X +16=%08X +20=%08X +24=%08X +28=%08X +32=%08X +36=%08X",
-              slot, base, handler,
-              m_memory.read8(base+4), m_memory.read8(base+5),
-              m_memory.read8(base+6), m_memory.read8(base+7),
-              m_memory.read32(base+8), m_memory.read32(base+12),
-              m_memory.read32(base+16), m_memory.read32(base+20),
-              m_memory.read32(base+24), m_memory.read32(base+28),
-              m_memory.read32(base+32), m_memory.read32(base+36));
-            LOG_ERROR(buf);
-            // Dump I_TimerISR code at handler address
-            snprintf(buf, sizeof(buf),
-              "HANDLER-CODE @%08X: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
-              handler,
-              m_memory.read8(handler), m_memory.read8(handler+1),
-              m_memory.read8(handler+2), m_memory.read8(handler+3),
-              m_memory.read8(handler+4), m_memory.read8(handler+5),
-              m_memory.read8(handler+6), m_memory.read8(handler+7),
-              m_memory.read8(handler+8), m_memory.read8(handler+9),
-              m_memory.read8(handler+10), m_memory.read8(handler+11),
-              m_memory.read8(handler+12), m_memory.read8(handler+13),
-              m_memory.read8(handler+14), m_memory.read8(handler+15));
-            LOG_ERROR(buf);
-          }
-        }
-        uint32_t ivt8_raw = m_memory.read32(8 * 4);
-        char ivtbuf[128];
-        snprintf(ivtbuf, sizeof(ivtbuf), "IVT[8] raw=%08X (seg=%04X off=%04X)",
-                 ivt8_raw, ivt8_raw >> 16, ivt8_raw & 0xFFFF);
-        LOG_ERROR(ivtbuf);
-      }
-      s_timerLog++;
-    }
     return true;
   }
   case 0x1B: // Ctrl-Break

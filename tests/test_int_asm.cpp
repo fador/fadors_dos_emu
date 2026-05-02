@@ -957,6 +957,67 @@ TEST_CASE("INT 33h AX=0007h/0008h Set bounds via asm", "[int][asm][mouse]") {
     REQUIRE(e.cpu.getReg16(cpu::DX) == 0x64); // 100 (within bounds)
 }
 
+TEST_CASE("IRQ1 INT 9 dispatch via asm-installed RM handler", "[int][asm][kbd][irq]") {
+    IntTestEnv e;
+
+    e.iobus.registerDevice(0x20, 0x21, &e.pic);
+    e.iobus.registerDevice(0x60, 0x60, &e.kbd);
+
+    e.pic.write8(0x20, 0x11);
+    e.pic.write8(0x21, 0x08);
+    e.pic.write8(0x21, 0x04);
+    e.pic.write8(0x21, 0x01);
+    e.pic.write8(0x21, 0x00);
+
+    constexpr uint16_t callerCs = 0x1234;
+    constexpr uint16_t callerIp = 0x0100;
+
+    e.cpu.setCR(0, 0);
+    e.decoder.loadSegment(cpu::CS, callerCs);
+    e.decoder.loadSegment(cpu::DS, 0x0000);
+    e.decoder.loadSegment(cpu::SS, 0x0000);
+    e.cpu.setReg16(cpu::SP, 0x0200);
+    e.cpu.setEIP(callerIp);
+
+    e.mem.write16(0x09 * 4, IntTestEnv::CODE_OFF);
+    e.mem.write16(0x09 * 4 + 2, IntTestEnv::CODE_SEG);
+
+    e.assemble(
+        "PUSH AX\n"
+        "PUSH BX\n"
+        "IN AL, 60h\n"
+        "MOV BX, 0500h\n"
+        "MOV [BX], AL\n"
+        "MOV AL, 20h\n"
+        "OUT 20h, AL\n"
+        "POP BX\n"
+        "POP AX\n"
+        "IRET"
+    );
+
+    e.kbd.pushMakeKey('a', 0x1E);
+    REQUIRE(e.kbd.checkPendingIRQ());
+    e.pic.raiseIRQ(1);
+    REQUIRE(e.pic.getPendingInterrupt() == 0x09);
+    e.pic.acknowledgeInterrupt();
+
+    e.decoder.injectHardwareInterrupt(0x09);
+
+    REQUIRE(e.cpu.getSegReg(cpu::CS) == IntTestEnv::CODE_SEG);
+    REQUIRE(e.cpu.getEIP() == IntTestEnv::CODE_OFF);
+    REQUIRE(e.cpu.getReg16(cpu::SP) == 0x01FA);
+
+    e.run(10);
+
+    REQUIRE(e.mem.read8(0x0500) == 0x1E);
+    REQUIRE(e.cpu.getSegReg(cpu::CS) == callerCs);
+    REQUIRE(e.cpu.getEIP() == callerIp);
+    REQUIRE(e.cpu.getReg16(cpu::SP) == 0x0200);
+
+    e.pic.raiseIRQ(1);
+    REQUIRE(e.pic.getPendingInterrupt() == 0x09);
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 //  INT 16h — Extended Keyboard BIOS
 // ════════════════════════════════════════════════════════════════════════════

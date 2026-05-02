@@ -866,9 +866,7 @@ TEST_CASE("Keyboard: peekKey does not remove from buffer", "[KBD]") {
     REQUIRE(!kbd.hasKey());
 }
 
-TEST_CASE("Keyboard: INT 9 injected HLE handles keyboard IRQ", "[KBD][IRQ]") {
-    // Setup PM environment to test that keyboard IRQ injection
-    // gets HLE'd safely (D-bit guard) and doesn't crash
+TEST_CASE("Keyboard: INT 9 injected in RM dispatches through IVT handler", "[KBD][IRQ]") {
     cpu::CPU cpu;
     memory::MemoryBus mem;
     hw::IOBus iobus;
@@ -890,27 +888,55 @@ TEST_CASE("Keyboard: INT 9 injected HLE handles keyboard IRQ", "[KBD][IRQ]") {
     pic.write8(0x21, 0x01);
     pic.write8(0x21, 0x00);
 
-    // Push a key to the HW buffer and raise IRQ1 using pushMakeKey
+    cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
+    cpu.setCR(0, 0);
+    cpu.setSegReg(cpu::CS, 0x1000);
+    cpu.setSegReg(cpu::DS, 0x0000);
+    cpu.setSegReg(cpu::SS, 0x0000);
+    cpu.setReg16(cpu::SP, 0x0200);
+    cpu.setEIP(0x0100);
+
+    // Hook INT 9 to a tiny real-mode handler which records execution,
+    // consumes the scancode, sends EOI, and returns.
+    mem.write16(0x09 * 4, 0x0300);
+    mem.write16(0x09 * 4 + 2, 0x2000);
+
+    const uint32_t handlerPhys = (0x2000u << 4) + 0x0300u;
+    const uint8_t handler[] = {
+        0x50,                   // PUSH AX
+        0xE4, 0x60,             // IN AL,60h
+        0xA2, 0x00, 0x05,       // MOV [0500h],AL
+        0xB0, 0x20,             // MOV AL,20h
+        0xE6, 0x20,             // OUT 20h,AL
+        0x58,                   // POP AX
+        0xCF                    // IRET
+    };
+    for (size_t i = 0; i < sizeof(handler); ++i)
+        mem.write8(handlerPhys + static_cast<uint32_t>(i), handler[i]);
+
     kbd.pushMakeKey('a', 0x1E);
     REQUIRE(kbd.checkPendingIRQ());
     pic.raiseIRQ(1);
-
-    int pending = pic.getPendingInterrupt();
-    REQUIRE(pending == 0x09);
-
-    // Ack and try to inject — since we're in RM, should go through HLE path
+    REQUIRE(pic.getPendingInterrupt() == 0x09);
     pic.acknowledgeInterrupt();
 
-    cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
-    cpu.setSegReg(cpu::CS, 0xF000);
-    cpu.setEIP(0x0100);
-
-    uint32_t eipBefore = cpu.getEIP();
     decoder.injectHardwareInterrupt(0x09);
 
-    // Even though we don't have a full PM environment, the HLE path
-    // should handle keyboard IRQ gracefully
-    (void)eipBefore;
+    REQUIRE(cpu.getSegReg(cpu::CS) == 0x2000);
+    REQUIRE(cpu.getEIP() == 0x0300);
+    REQUIRE(cpu.getReg16(cpu::SP) == 0x01FA);
+
+    for (int i = 0; i < 7; ++i)
+        decoder.step();
+
+    REQUIRE(mem.read8(0x0500) == 0x1E);
+    REQUIRE(cpu.getSegReg(cpu::CS) == 0x1000);
+    REQUIRE(cpu.getEIP() == 0x0100);
+    REQUIRE(cpu.getReg16(cpu::SP) == 0x0200);
+
+    // The handler's EOI should unblock future IRQ1 delivery.
+    pic.raiseIRQ(1);
+    REQUIRE(pic.getPendingInterrupt() == 0x09);
 }
 
 // ═══════════════════════════════════════════════════════════════════════

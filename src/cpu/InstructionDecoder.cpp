@@ -756,6 +756,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
         LOG_CPU("IRET popHLEFrameByPhysAddr: addr=0x", std::hex, iretPhysAddr,
           " popped=", popped, " hleStackSize=", m_cpu.hleStackSize());
 
+#if FADOR_ENABLE_DEBUG_DIAGNOSTICS
         // TEMP DIAG: log when HLE frames are deep
         if (m_cpu.hleStackSize() > 4) {
           uint16_t iretCS = m_cpu.getSegReg(CS);
@@ -771,6 +772,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                       " useIretd=", useIretd);
           }
         }
+#endif
         // Fallback: if the physical-address match failed, check if the IRET
         // returned to a CS:EIP that matches a dpmiStackSwitch frame's saved
         // origCS:origEIP.  The DOS/4GW thunk rearranges its internal stack
@@ -4035,6 +4037,7 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
       uint8_t targetVec = m_cpu.getReg8(BL);
       uint16_t targetSel = m_cpu.getReg16(CX);
       uint32_t targetOff = m_cpu.getReg32(EDX);
+#if FADOR_ENABLE_DEBUG_DIAGNOSTICS
       static int s_appVecLog = 0;
       if (s_appVecLog < 300) {
         ++s_appVecLog;
@@ -4045,6 +4048,7 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
                  " idtCS=", cs,
                  " isOrig=", isOrig ? 1 : 0);
       }
+#endif
       // Capture if caller is a 32-bit flat code segment (the app itself),
       // not the thunk (0x8F) or DOS/4GW internal code (0x57, 0x0F).
       // The app uses its own code selector (e.g., 0x016F for DOOM).
@@ -4052,10 +4056,12 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
         m_appPMVectors[targetVec].selector = targetSel;
         m_appPMVectors[targetVec].offset = targetOff;
         m_appPMVectors[targetVec].valid = true;
+#if FADOR_ENABLE_DEBUG_DIAGNOSTICS
         LOG_INFO("APP-PM-VEC-SAVED: vec=0x", std::hex,
                  static_cast<uint32_t>(targetVec),
                  " -> ", targetSel, ":", targetOff,
                  " callerCS=", oldCs);
+#endif
       }
     }
 
@@ -4232,7 +4238,10 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
         }
       }
     } else {
-      useHLE = true;
+      // In real mode, only hardware IRQs with explicit BIOS HLE behavior
+      // should short-circuit here. Other IRQs must dispatch through the IVT
+      // so guest-installed handlers (or the BIOS machine-code handler) run.
+      useHLE = (vector == 0x08);
     }
     if (useHLE && m_bios.handleInterrupt(vector)) {
       // After HLE, if the vector is hooked by a DOS extender thunk and we're
