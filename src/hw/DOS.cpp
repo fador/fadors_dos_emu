@@ -59,8 +59,8 @@ bool DOS::handleInterrupt(uint8_t vector) {
     return true;
   case 0x3F: { // Overlay Manager / Generic Proxy (VROOMM)
     uint16_t cs = m_cpu.getSegReg(cpu::CS);
-    uint32_t eip = m_cpu.getEIP();
-    uint32_t addr = m_cpu.getSegBase(cpu::CS) + eip;
+
+    uint32_t addr = m_cpu.getSegBase(cpu::CS) + m_cpu.getEIP();
 
     // Metadata follows INT 3F: [uint16_t offset, uint16_t segmentIndex]
     uint16_t targetOffset = m_memory.read16(addr);
@@ -87,17 +87,17 @@ bool DOS::handleInterrupt(uint8_t vector) {
       return true;
     }
 
-    // Patch the thunk at [CS:EIP-2] with a JMP FAR (EA OO OO SS SS)
-    uint32_t thunkStart = m_cpu.getSegBase(cpu::CS) + (eip - 2);
+    // Patch the thunk at [CS:InstructionStartEIP] with a JMP FAR (EA OO OO SS SS)
+    uint32_t thunkStart = m_cpu.getSegBase(cpu::CS) + m_cpu.getInstructionStartEIP();
     m_memory.write8(thunkStart, 0xEA); // JMP far
     m_memory.write16(thunkStart + 1, targetOffset);
     m_memory.write16(thunkStart + 3, loadedSeg);
 
-    LOG_DOS("DOS: Thunk at ", std::hex, cs, ":", (eip - 2), " patched to JMP ",
+    LOG_DOS("DOS: Thunk at ", std::hex, cs, ":", m_cpu.getInstructionStartEIP(), " patched to JMP ",
             loadedSeg, ":", targetOffset);
 
     // Rewind EIP to re-execute the patched instruction
-    m_cpu.setEIP(eip - 2);
+    m_cpu.setEIP(m_cpu.getInstructionStartEIP());
     return true;
   }
   case 0x2F: { // Multiplex
@@ -170,7 +170,7 @@ void DOS::handleDOSService() {
       if (m_pollInput)
         m_pollInput();
       if (!m_kbd || !m_kbd->hasKey()) {
-        m_cpu.setEIP(m_cpu.getEIP() - 2);
+        m_cpu.setEIP(m_cpu.getInstructionStartEIP());
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         return;
       }
@@ -212,7 +212,7 @@ void DOS::handleDOSService() {
       if (m_pollInput)
         m_pollInput();
       if (!m_kbd || !m_kbd->hasKey()) {
-        m_cpu.setEIP(m_cpu.getEIP() - 2);
+        m_cpu.setEIP(m_cpu.getInstructionStartEIP());
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         return;
       }
@@ -649,21 +649,37 @@ std::string DOS::dosToHostPath(const std::string &dosPath) {
 }
 
 std::string DOS::resolvePath(const std::string &path) {
+  std::string resolvedStr;
   // Check for DOS drive letter prefix (e.g. "C:\foo")
   if (path.size() >= 2 && std::isalpha(static_cast<unsigned char>(path[0])) &&
       path[1] == ':') {
-    return dosToHostPath(path);
+    resolvedStr = dosToHostPath(path);
   }
   // Check for DOS backslash paths
-  if (!path.empty() && path[0] == '\\') {
-    return dosToHostPath(path);
+  else if (!path.empty() && path[0] == '\\') {
+    resolvedStr = dosToHostPath(path);
   }
-  // If path is already an absolute host path, use as-is
-  fs::path p(path);
-  if (p.is_absolute())
-    return path;
-  // Resolve relative to m_currentDir
-  return (fs::path(m_currentDir) / p).string();
+  else {
+    // If path is already an absolute host path, use as-is
+    fs::path p(path);
+    if (p.is_absolute())
+      resolvedStr = path;
+    else
+      // Resolve relative to m_currentDir
+      resolvedStr = (fs::path(m_currentDir) / p).string();
+  }
+
+  // Security check: ensure the resolved path stays within m_hostRootDir
+  fs::path resolvedPath = fs::weakly_canonical(fs::absolute(resolvedStr));
+  fs::path rootPath = fs::weakly_canonical(fs::absolute(m_hostRootDir));
+
+  auto [rootEnd, nothing] = std::mismatch(rootPath.begin(), rootPath.end(), resolvedPath.begin(), resolvedPath.end());
+  if (rootEnd != rootPath.end()) {
+      LOG_WARN("DOS: Path traversal attempt blocked: ", path);
+      return rootPath.string();
+  }
+
+  return resolvedPath.string();
 }
 
 void DOS::writeCharToVRAM(uint8_t c) {
