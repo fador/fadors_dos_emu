@@ -48,6 +48,29 @@ static constexpr uint32_t FLAG_INTERRUPT = 0x0200;
 static constexpr uint32_t FLAG_DIRECTION = 0x0400;
 static constexpr uint32_t FLAG_OVERFLOW = 0x0800;
 
+static constexpr uint16_t FPU_CONTROL_DEFAULT = 0x037F;
+static constexpr uint16_t FPU_STATUS_IE = 0x0001;
+static constexpr uint16_t FPU_STATUS_DE = 0x0002;
+static constexpr uint16_t FPU_STATUS_ZE = 0x0004;
+static constexpr uint16_t FPU_STATUS_OE = 0x0008;
+static constexpr uint16_t FPU_STATUS_UE = 0x0010;
+static constexpr uint16_t FPU_STATUS_PE = 0x0020;
+static constexpr uint16_t FPU_STATUS_SF = 0x0040;
+static constexpr uint16_t FPU_STATUS_ES = 0x0080;
+static constexpr uint16_t FPU_STATUS_C0 = 0x0100;
+static constexpr uint16_t FPU_STATUS_C1 = 0x0200;
+static constexpr uint16_t FPU_STATUS_C2 = 0x0400;
+static constexpr uint16_t FPU_STATUS_TOP_MASK = 0x3800;
+static constexpr uint16_t FPU_STATUS_C3 = 0x4000;
+static constexpr uint16_t FPU_STATUS_BUSY = 0x8000;
+
+enum FPUTagValue : uint8_t {
+  FPU_TAG_VALID = 0,
+  FPU_TAG_ZERO = 1,
+  FPU_TAG_SPECIAL = 2,
+  FPU_TAG_EMPTY = 3,
+};
+
 struct DescriptorRegister {
   uint16_t limit;
   uint32_t base;
@@ -342,9 +365,38 @@ public:
   uint16_t getTRSelector() const { return m_trSelector; }
   void setTRSelector(uint16_t val) { m_trSelector = val; }
 
+  void resetFPU();
+  uint16_t getFPUControlWord() const { return m_fpuControlWord; }
+  void setFPUControlWord(uint16_t val) { m_fpuControlWord = val; }
+  uint16_t getFPUStatusWord() const { return m_fpuStatusWord; }
+  void setFPUStatusWord(uint16_t val) { m_fpuStatusWord = val; }
+  void setFPUStatusBits(uint16_t mask) { m_fpuStatusWord |= mask; }
+  void clearFPUStatusBits(uint16_t mask) {
+    m_fpuStatusWord = static_cast<uint16_t>(m_fpuStatusWord & ~mask);
+  }
+  uint16_t getFPUTagWord() const;
+  void setFPUTagWord(uint16_t val);
+  uint8_t getFPUTop() const {
+    return static_cast<uint8_t>((m_fpuStatusWord >> 11) & 0x7);
+  }
+  void setFPUTop(uint8_t top) {
+    m_fpuStatusWord = static_cast<uint16_t>((m_fpuStatusWord & ~FPU_STATUS_TOP_MASK) |
+                                            ((top & 0x7) << 11));
+  }
+  bool isFPURegisterEmpty(uint8_t logicalIndex) const;
+  double getFPURegister(uint8_t logicalIndex) const;
+  void setFPURegister(uint8_t logicalIndex, double value);
+  void freeFPURegister(uint8_t logicalIndex);
+  bool pushFPU(double value);
+  bool popFPU();
+
   void setMemoryBus(fador::memory::MemoryBus *memory) { m_memory = memory; }
 
 private:
+  uint8_t fpuPhysicalIndex(uint8_t logicalIndex) const {
+    return static_cast<uint8_t>((getFPUTop() + (logicalIndex & 0x7)) & 0x7);
+  }
+
   uint64_t m_cycles{0};
   fador::memory::MemoryBus *m_memory{nullptr};
   std::array<uint32_t, 8> m_regs{};    // EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI
@@ -367,6 +419,10 @@ private:
   DescriptorRegister m_tr{0xFFFF, 0};
   uint16_t m_ldtrSelector{0};
   uint16_t m_trSelector{0};
+  std::array<double, 8> m_fpuRegs{};
+  std::array<uint8_t, 8> m_fpuTags{};
+  uint16_t m_fpuControlWord{FPU_CONTROL_DEFAULT};
+  uint16_t m_fpuStatusWord{0};
 
   std::vector<HLEFrame> m_hleStack;
 };

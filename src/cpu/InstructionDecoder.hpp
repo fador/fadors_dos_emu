@@ -90,6 +90,7 @@ private:
   uint32_t fetch32();
   void syncSegmentCacheIfNeeded();
   bool tryFastRepMovs(uint32_t elementSize);
+  bool currentOperandSize32() const;
 
 public:
   ModRM decodeModRM(uint8_t byte);
@@ -104,6 +105,19 @@ private:
   void writeModRM32(const ModRM &modrm, uint32_t value);
   void writeModRM16(const ModRM &modrm, uint16_t value);
   void writeModRM8(const ModRM &modrm, uint8_t value);
+  void executeFPUOpcode(uint8_t opcode);
+  float readFloat32(uint32_t address) const;
+  double readFloat64(uint32_t address) const;
+  double readFloat80(uint32_t address) const;
+  void writeFloat32(uint32_t address, double value);
+  void writeFloat64(uint32_t address, double value);
+  void writeFloat80(uint32_t address, double value);
+  int64_t readInt64(uint32_t address) const;
+  void writeInt64(uint32_t address, int64_t value);
+  double roundFPUValue(double value) const;
+  int64_t convertFPUToInt(double value, int bits, bool &invalid) const;
+  void setFPUCompareStatus(double lhs, double rhs);
+  void setFPUCompareFlags(double lhs, double rhs);
 
   // General ALU operation evaluator covering Math and Logic EFLAGS
   uint32_t aluOp(uint8_t op, uint32_t dest, uint32_t src, int size);

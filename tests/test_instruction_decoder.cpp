@@ -9,6 +9,9 @@
 #include "hw/KeyboardController.hpp"
 #include "hw/PIT8254.hpp"
 
+#include <cmath>
+#include <cstring>
+
 using namespace fador;
 
 TEST_CASE("CPU Instruction Execution", "[Decoder]") {
@@ -264,6 +267,90 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
 
         REQUIRE(cpu.getReg32(cpu::Reg32Index::EAX) == 0x44332211);
         REQUIRE(cpu.getEIP() == 0x102);
+    }
+
+    SECTION("x87: FLD1, FADDP, FSTP m64") {
+        auto readDouble = [&](uint32_t address) {
+            uint64_t bits = static_cast<uint64_t>(mem.read32(address)) |
+                            (static_cast<uint64_t>(mem.read32(address + 4)) << 32);
+            double value = 0.0;
+            std::memcpy(&value, &bits, sizeof(value));
+            return value;
+        };
+
+        mem.write8(0x100, 0xD9); mem.write8(0x101, 0xE8); // FLD1
+        mem.write8(0x102, 0xD9); mem.write8(0x103, 0xE8); // FLD1
+        mem.write8(0x104, 0xDE); mem.write8(0x105, 0xC1); // FADDP ST1, ST0
+        mem.write8(0x106, 0xDD); mem.write8(0x107, 0x1E); // FSTP qword ptr [2000h]
+        mem.write16(0x108, 0x2000);
+
+        decoder.step();
+        decoder.step();
+        decoder.step();
+        decoder.step();
+
+        REQUIRE(std::fabs(readDouble(0x2000) - 2.0) < 1e-12);
+        REQUIRE(cpu.isFPURegisterEmpty(0));
+    }
+
+    SECTION("x87: FLDCW, FLD m32, FRNDINT, FSTP m32") {
+        auto writeFloat = [&](uint32_t address, float value) {
+            uint32_t bits = 0;
+            std::memcpy(&bits, &value, sizeof(bits));
+            mem.write32(address, bits);
+        };
+        auto readFloat = [&](uint32_t address) {
+            uint32_t bits = mem.read32(address);
+            float value = 0.0f;
+            std::memcpy(&value, &bits, sizeof(value));
+            return value;
+        };
+
+        writeFloat(0x2300, 1.75f);
+        mem.write16(0x2310, 0x0F7F);
+
+        mem.write8(0x100, 0xD9); mem.write8(0x101, 0x2E); // FLDCW [2310h]
+        mem.write16(0x102, 0x2310);
+        mem.write8(0x104, 0xD9); mem.write8(0x105, 0x06); // FLD dword ptr [2300h]
+        mem.write16(0x106, 0x2300);
+        mem.write8(0x108, 0xD9); mem.write8(0x109, 0xFC); // FRNDINT
+        mem.write8(0x10A, 0xD9); mem.write8(0x10B, 0x1E); // FSTP dword ptr [2304h]
+        mem.write16(0x10C, 0x2304);
+
+        decoder.step();
+        decoder.step();
+        decoder.step();
+        decoder.step();
+
+        REQUIRE(std::fabs(readFloat(0x2304) - 1.0f) < 1e-6f);
+    }
+
+    SECTION("x87: FILD and FISTP m16") {
+        mem.write16(0x2400, 7);
+
+        mem.write8(0x100, 0xDF); mem.write8(0x101, 0x06); // FILD word ptr [2400h]
+        mem.write16(0x102, 0x2400);
+        mem.write8(0x104, 0xDF); mem.write8(0x105, 0x1E); // FISTP word ptr [2402h]
+        mem.write16(0x106, 0x2402);
+
+        decoder.step();
+        decoder.step();
+
+        REQUIRE(mem.read16(0x2402) == 7);
+        REQUIRE(cpu.isFPURegisterEmpty(0));
+    }
+
+    SECTION("x87: FNINIT resets stack and control word") {
+        mem.write8(0x100, 0xD9); mem.write8(0x101, 0xE8); // FLD1
+        mem.write8(0x102, 0xDB); mem.write8(0x103, 0xE3); // FNINIT
+
+        decoder.step();
+        REQUIRE(!cpu.isFPURegisterEmpty(0));
+
+        decoder.step();
+        REQUIRE(cpu.isFPURegisterEmpty(0));
+        REQUIRE(cpu.getFPUControlWord() == cpu::FPU_CONTROL_DEFAULT);
+        REQUIRE(cpu.getFPUStatusWord() == 0);
     }
 
     SECTION("String Operations: REP STOSW") {

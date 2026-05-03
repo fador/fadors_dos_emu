@@ -3,9 +3,48 @@
 #include "../hw/DOS.hpp"
 #include "../hw/IOBus.hpp"
 #include "../utils/Logger.hpp"
+
+#include <cmath>
 #include <cstring>
+#include <limits>
 
 namespace fador::cpu {
+
+namespace {
+
+uint64_t read64(memory::MemoryBus &memory, uint32_t address) {
+  return static_cast<uint64_t>(memory.read32(address)) |
+         (static_cast<uint64_t>(memory.read32(address + 4)) << 32);
+}
+
+void write64(memory::MemoryBus &memory, uint32_t address, uint64_t value) {
+  memory.write32(address, static_cast<uint32_t>(value & 0xFFFFFFFFu));
+  memory.write32(address + 4, static_cast<uint32_t>(value >> 32));
+}
+
+double roundNearestEven(double value) {
+  if (!std::isfinite(value)) {
+    return value;
+  }
+
+  double integral = 0.0;
+  double fractional = std::modf(value, &integral);
+  double magnitude = std::fabs(fractional);
+  if (magnitude < 0.5) {
+    return integral;
+  }
+  if (magnitude > 0.5) {
+    return integral + std::copysign(1.0, value);
+  }
+
+  const double evenCheck = std::fmod(std::fabs(integral), 2.0);
+  if (evenCheck == 0.0) {
+    return integral;
+  }
+  return integral + std::copysign(1.0, value);
+}
+
+} // namespace
 
 InstructionDecoder::InstructionDecoder(CPU &cpu, memory::MemoryBus &memory,
                                        hw::IOBus &iobus, hw::BIOS &bios,
@@ -112,6 +151,10 @@ bool InstructionDecoder::tryFastRepMovs(uint32_t elementSize) {
     m_cpu.setEIP(m_instrStartEIP);
   }
   return true;
+}
+
+bool InstructionDecoder::currentOperandSize32() const {
+  return m_hasPrefix66 ? !m_cpu.is32BitCode() : m_cpu.is32BitCode();
 }
 
 SIB InstructionDecoder::decodeSIB(uint8_t byte) {
@@ -269,6 +312,661 @@ void InstructionDecoder::writeModRM8(const ModRM &modrm, uint8_t value) {
     m_memory.write8(m_hasPrefix67 ? getEffectiveAddress32(modrm)
                                   : getEffectiveAddress16(modrm),
                     value);
+}
+
+float InstructionDecoder::readFloat32(uint32_t address) const {
+  const uint32_t bits = m_memory.read32(address);
+  float value = 0.0f;
+  std::memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+double InstructionDecoder::readFloat64(uint32_t address) const {
+  const uint64_t bits = read64(const_cast<memory::MemoryBus &>(m_memory), address);
+  double value = 0.0;
+  std::memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+double InstructionDecoder::readFloat80(uint32_t address) const {
+  const uint64_t mantissa = read64(const_cast<memory::MemoryBus &>(m_memory), address);
+  const uint16_t signExponent = m_memory.read16(address + 8);
+  const uint16_t exponent = static_cast<uint16_t>(signExponent & 0x7FFF);
+  const bool negative = (signExponent & 0x8000) != 0;
+
+  if (exponent == 0 && mantissa == 0) {
+    return negative ? -0.0 : 0.0;
+  }
+  if (exponent == 0x7FFF) {
+    if ((mantissa & 0x7FFFFFFFFFFFFFFFull) == 0) {
+      return negative ? -std::numeric_limits<double>::infinity()
+                      : std::numeric_limits<double>::infinity();
+    }
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+
+  const double significand = static_cast<double>(mantissa) /
+                             static_cast<double>(0x8000000000000000ull);
+  const double value = std::ldexp(significand, exponent - 16383);
+  return negative ? -value : value;
+}
+
+void InstructionDecoder::writeFloat32(uint32_t address, double value) {
+  const float narrowed = static_cast<float>(value);
+  uint32_t bits = 0;
+  std::memcpy(&bits, &narrowed, sizeof(bits));
+  m_memory.write32(address, bits);
+}
+
+void InstructionDecoder::writeFloat64(uint32_t address, double value) {
+  uint64_t bits = 0;
+  std::memcpy(&bits, &value, sizeof(bits));
+  write64(m_memory, address, bits);
+}
+
+void InstructionDecoder::writeFloat80(uint32_t address, double value) {
+  uint64_t mantissa = 0;
+  uint16_t signExponent = 0;
+
+  if (std::isnan(value)) {
+    mantissa = 0xC000000000000000ull;
+    signExponent = 0x7FFF;
+  } else if (std::isinf(value)) {
+    mantissa = 0x8000000000000000ull;
+    signExponent = static_cast<uint16_t>(0x7FFF | (std::signbit(value) ? 0x8000 : 0));
+  } else if (value != 0.0) {
+    const bool negative = std::signbit(value);
+    int exponent = 0;
+    const double fraction = std::frexp(std::fabs(value), &exponent);
+    const double scaled = std::ldexp(fraction, 64);
+    mantissa = static_cast<uint64_t>(scaled);
+    signExponent = static_cast<uint16_t>((exponent - 1 + 16383) & 0x7FFF);
+    if (negative) {
+      signExponent = static_cast<uint16_t>(signExponent | 0x8000);
+    }
+  }
+
+  write64(m_memory, address, mantissa);
+  m_memory.write16(address + 8, signExponent);
+}
+
+int64_t InstructionDecoder::readInt64(uint32_t address) const {
+  return static_cast<int64_t>(read64(const_cast<memory::MemoryBus &>(m_memory), address));
+}
+
+void InstructionDecoder::writeInt64(uint32_t address, int64_t value) {
+  write64(m_memory, address, static_cast<uint64_t>(value));
+}
+
+double InstructionDecoder::roundFPUValue(double value) const {
+  switch ((m_cpu.getFPUControlWord() >> 10) & 0x3) {
+  case 0:
+    return roundNearestEven(value);
+  case 1:
+    return std::floor(value);
+  case 2:
+    return std::ceil(value);
+  default:
+    return std::trunc(value);
+  }
+}
+
+int64_t InstructionDecoder::convertFPUToInt(double value, int bits,
+                                            bool &invalid) const {
+  invalid = !std::isfinite(value);
+  if (invalid) {
+    return 0;
+  }
+
+  const double rounded = roundFPUValue(value);
+  switch (bits) {
+  case 16:
+    if (rounded < static_cast<double>(std::numeric_limits<int16_t>::min()) ||
+        rounded > static_cast<double>(std::numeric_limits<int16_t>::max())) {
+      invalid = true;
+      return 0;
+    }
+    return static_cast<int16_t>(rounded);
+  case 32:
+    if (rounded < static_cast<double>(std::numeric_limits<int32_t>::min()) ||
+        rounded > static_cast<double>(std::numeric_limits<int32_t>::max())) {
+      invalid = true;
+      return 0;
+    }
+    return static_cast<int32_t>(rounded);
+  default:
+    if (rounded < static_cast<double>(std::numeric_limits<int64_t>::min()) ||
+        rounded > static_cast<double>(std::numeric_limits<int64_t>::max())) {
+      invalid = true;
+      return 0;
+    }
+    return static_cast<int64_t>(rounded);
+  }
+}
+
+void InstructionDecoder::setFPUCompareStatus(double lhs, double rhs) {
+  m_cpu.clearFPUStatusBits(FPU_STATUS_C0 | FPU_STATUS_C1 |
+                           FPU_STATUS_C2 | FPU_STATUS_C3);
+  if (std::isnan(lhs) || std::isnan(rhs)) {
+    m_cpu.setFPUStatusBits(FPU_STATUS_C0 | FPU_STATUS_C2 | FPU_STATUS_C3);
+    return;
+  }
+  if (lhs < rhs) {
+    m_cpu.setFPUStatusBits(FPU_STATUS_C0);
+  } else if (lhs == rhs) {
+    m_cpu.setFPUStatusBits(FPU_STATUS_C3);
+  }
+}
+
+void InstructionDecoder::setFPUCompareFlags(double lhs, double rhs) {
+  uint32_t eflags = m_cpu.getEFLAGS();
+  eflags &= ~(FLAG_CARRY | FLAG_PARITY | FLAG_ZERO |
+              FLAG_OVERFLOW | FLAG_SIGN | FLAG_AUX);
+  if (std::isnan(lhs) || std::isnan(rhs)) {
+    eflags |= FLAG_CARRY | FLAG_PARITY | FLAG_ZERO;
+  } else if (lhs < rhs) {
+    eflags |= FLAG_CARRY;
+  } else if (lhs == rhs) {
+    eflags |= FLAG_ZERO;
+  }
+  m_cpu.setEFLAGS(eflags);
+}
+
+void InstructionDecoder::executeFPUOpcode(uint8_t opcode) {
+  const uint8_t modrmByte = fetch8();
+  const ModRM modrm = decodeModRM(modrmByte);
+
+  auto effectiveAddress = [&]() {
+    return m_hasPrefix67 ? getEffectiveAddress32(modrm)
+                         : getEffectiveAddress16(modrm);
+  };
+  auto st = [&](uint8_t index) {
+    if (m_cpu.isFPURegisterEmpty(index)) {
+      m_cpu.setFPUStatusBits(FPU_STATUS_IE | FPU_STATUS_SF);
+      return 0.0;
+    }
+    return m_cpu.getFPURegister(index);
+  };
+  auto writeSt = [&](uint8_t index, double value) {
+    m_cpu.setFPURegister(index, value);
+  };
+  auto compareStatus = [&](double lhs, double rhs, bool setFlags, bool popCount,
+                           bool invalidOnNaN) {
+    if (invalidOnNaN && (std::isnan(lhs) || std::isnan(rhs))) {
+      m_cpu.setFPUStatusBits(FPU_STATUS_IE);
+    }
+    setFPUCompareStatus(lhs, rhs);
+    if (setFlags) {
+      setFPUCompareFlags(lhs, rhs);
+    }
+    if (popCount) {
+      m_cpu.popFPU();
+    }
+  };
+  auto binaryArithmetic = [&](double lhs, double rhs, uint8_t opKind) {
+    switch (opKind) {
+    case 0:
+      return lhs + rhs;
+    case 1:
+      return lhs * rhs;
+    case 4:
+      return lhs - rhs;
+    case 5:
+      return rhs - lhs;
+    case 6:
+      return lhs / rhs;
+    case 7:
+      return rhs / lhs;
+    default:
+      return lhs;
+    }
+  };
+
+  switch (opcode) {
+  case 0xD8:
+  case 0xDC: {
+    const bool use64 = opcode == 0xDC;
+    if (modrm.mod != 3) {
+      const uint32_t addr = effectiveAddress();
+      const double src = use64 ? readFloat64(addr)
+                               : static_cast<double>(readFloat32(addr));
+      const double lhs = st(0);
+      if (modrm.reg == 2) {
+        compareStatus(lhs, src, false, false, true);
+      } else if (modrm.reg == 3) {
+        compareStatus(lhs, src, false, true, true);
+      } else {
+        writeSt(0, binaryArithmetic(lhs, src, modrm.reg));
+      }
+      return;
+    }
+
+    const double lhs = st(0);
+    const double rhs = st(modrm.rm);
+    if (modrm.reg == 2) {
+      compareStatus(lhs, rhs, false, false, true);
+      return;
+    }
+    if (modrm.reg == 3) {
+      compareStatus(lhs, rhs, false, true, true);
+      return;
+    }
+
+    if (opcode == 0xD8) {
+      writeSt(0, binaryArithmetic(lhs, rhs, modrm.reg));
+    } else {
+      switch (modrm.reg) {
+      case 0:
+      case 1:
+        writeSt(modrm.rm, binaryArithmetic(rhs, lhs, modrm.reg));
+        break;
+      case 4:
+        writeSt(modrm.rm, lhs - rhs);
+        break;
+      case 5:
+        writeSt(modrm.rm, rhs - lhs);
+        break;
+      case 6:
+        writeSt(modrm.rm, lhs / rhs);
+        break;
+      case 7:
+        writeSt(modrm.rm, rhs / lhs);
+        break;
+      default:
+        break;
+      }
+    }
+    return;
+  }
+  case 0xD9: {
+    if (modrm.mod != 3) {
+      const uint32_t addr = effectiveAddress();
+      switch (modrm.reg) {
+      case 0:
+        m_cpu.pushFPU(static_cast<double>(readFloat32(addr)));
+        return;
+      case 2:
+        writeFloat32(addr, st(0));
+        return;
+      case 3:
+        writeFloat32(addr, st(0));
+        m_cpu.popFPU();
+        return;
+      case 5:
+        m_cpu.setFPUControlWord(m_memory.read16(addr));
+        return;
+      case 7:
+        m_memory.write16(addr, m_cpu.getFPUControlWord());
+        return;
+      default:
+        LOG_WARN("Unimplemented x87 opcode D9 /", std::hex,
+                 static_cast<int>(modrm.reg));
+        return;
+      }
+    }
+
+    if (modrm.reg == 0) {
+      m_cpu.pushFPU(st(modrm.rm));
+      return;
+    }
+    if (modrm.reg == 1) {
+      const double lhs = st(0);
+      writeSt(0, st(modrm.rm));
+      writeSt(modrm.rm, lhs);
+      return;
+    }
+
+    switch (modrmByte) {
+    case 0xE0:
+      writeSt(0, -st(0));
+      return;
+    case 0xE1:
+      writeSt(0, std::fabs(st(0)));
+      return;
+    case 0xE4:
+      setFPUCompareStatus(st(0), 0.0);
+      return;
+    case 0xE8:
+      m_cpu.pushFPU(1.0);
+      return;
+    case 0xE9:
+      m_cpu.pushFPU(std::log2(10.0));
+      return;
+    case 0xEA:
+      m_cpu.pushFPU(std::log2(std::exp(1.0)));
+      return;
+    case 0xEB:
+      m_cpu.pushFPU(std::acos(-1.0));
+      return;
+    case 0xEC:
+      m_cpu.pushFPU(std::log10(2.0));
+      return;
+    case 0xED:
+      m_cpu.pushFPU(std::log(2.0));
+      return;
+    case 0xEE:
+      m_cpu.pushFPU(0.0);
+      return;
+    case 0xF0:
+      writeSt(0, std::exp2(st(0)) - 1.0);
+      return;
+    case 0xF1:
+      writeSt(1, st(1) * std::log2(st(0)));
+      m_cpu.popFPU();
+      return;
+    case 0xF2: {
+      const double tangent = std::tan(st(0));
+      writeSt(0, tangent);
+      m_cpu.pushFPU(1.0);
+      return;
+    }
+    case 0xF3:
+      writeSt(1, std::atan2(st(1), st(0)));
+      m_cpu.popFPU();
+      return;
+    case 0xF4: {
+      int exponent = 0;
+      const double significand = std::frexp(st(0), &exponent);
+      writeSt(0, static_cast<double>(exponent));
+      m_cpu.pushFPU(significand);
+      return;
+    }
+    case 0xF5:
+      writeSt(0, std::remainder(st(0), st(1)));
+      m_cpu.clearFPUStatusBits(FPU_STATUS_C0 | FPU_STATUS_C1 |
+                               FPU_STATUS_C2 | FPU_STATUS_C3);
+      return;
+    case 0xF6:
+      m_cpu.setFPUTop(static_cast<uint8_t>((m_cpu.getFPUTop() - 1) & 0x7));
+      return;
+    case 0xF7:
+      m_cpu.setFPUTop(static_cast<uint8_t>((m_cpu.getFPUTop() + 1) & 0x7));
+      return;
+    case 0xF8:
+      writeSt(0, std::fmod(st(0), st(1)));
+      m_cpu.clearFPUStatusBits(FPU_STATUS_C0 | FPU_STATUS_C1 |
+                               FPU_STATUS_C2 | FPU_STATUS_C3);
+      return;
+    case 0xF9:
+      writeSt(1, st(1) * std::log2(st(0) + 1.0));
+      m_cpu.popFPU();
+      return;
+    case 0xFA:
+      writeSt(0, std::sqrt(st(0)));
+      return;
+    case 0xFB: {
+      const double sine = std::sin(st(0));
+      const double cosine = std::cos(st(0));
+      writeSt(0, sine);
+      m_cpu.pushFPU(cosine);
+      return;
+    }
+    case 0xFC:
+      writeSt(0, roundFPUValue(st(0)));
+      return;
+    case 0xFD:
+      writeSt(0, std::ldexp(st(0), static_cast<int>(std::trunc(st(1)))));
+      return;
+    case 0xFE:
+      writeSt(0, std::sin(st(0)));
+      return;
+    case 0xFF:
+      writeSt(0, std::cos(st(0)));
+      return;
+    default:
+      LOG_WARN("Unimplemented x87 register opcode D9 ", std::hex,
+               static_cast<int>(modrmByte));
+      return;
+    }
+  }
+  case 0xDA:
+  case 0xDE: {
+    if (modrm.mod != 3) {
+      const uint32_t addr = effectiveAddress();
+      const double src = static_cast<double>(opcode == 0xDA
+                                                 ? static_cast<int32_t>(m_memory.read32(addr))
+                                                 : static_cast<int16_t>(m_memory.read16(addr)));
+      const double lhs = st(0);
+      if (modrm.reg == 2) {
+        compareStatus(lhs, src, false, false, true);
+      } else if (modrm.reg == 3) {
+        compareStatus(lhs, src, false, true, true);
+      } else {
+        writeSt(0, binaryArithmetic(lhs, src, modrm.reg));
+      }
+      return;
+    }
+
+    if (opcode == 0xDA) {
+      if (modrmByte == 0xE9) {
+        compareStatus(st(0), st(1), false, true, false);
+        m_cpu.popFPU();
+        return;
+      }
+      LOG_WARN("Unimplemented x87 register opcode DA ", std::hex,
+               static_cast<int>(modrmByte));
+      return;
+    }
+
+    switch (modrm.reg) {
+    case 0:
+    case 1:
+      writeSt(modrm.rm, binaryArithmetic(st(modrm.rm), st(0), modrm.reg));
+      m_cpu.popFPU();
+      return;
+    case 4:
+      writeSt(modrm.rm, st(0) - st(modrm.rm));
+      m_cpu.popFPU();
+      return;
+    case 5:
+      writeSt(modrm.rm, st(modrm.rm) - st(0));
+      m_cpu.popFPU();
+      return;
+    case 6:
+      writeSt(modrm.rm, st(0) / st(modrm.rm));
+      m_cpu.popFPU();
+      return;
+    case 7:
+      writeSt(modrm.rm, st(modrm.rm) / st(0));
+      m_cpu.popFPU();
+      return;
+    default:
+      if (modrmByte == 0xD9) {
+        compareStatus(st(0), st(1), false, true, true);
+        m_cpu.popFPU();
+      } else {
+        LOG_WARN("Unimplemented x87 register opcode DE ", std::hex,
+                 static_cast<int>(modrmByte));
+      }
+      return;
+    }
+  }
+  case 0xDB:
+  case 0xDF: {
+    if (modrm.mod != 3) {
+      const uint32_t addr = effectiveAddress();
+      if (opcode == 0xDB) {
+        switch (modrm.reg) {
+        case 0:
+          m_cpu.pushFPU(static_cast<double>(static_cast<int32_t>(m_memory.read32(addr))));
+          return;
+        case 2: {
+          bool invalid = false;
+          const int32_t converted = static_cast<int32_t>(convertFPUToInt(st(0), 32, invalid));
+          if (invalid) {
+            m_cpu.setFPUStatusBits(FPU_STATUS_IE);
+          }
+          m_memory.write32(addr, static_cast<uint32_t>(converted));
+          return;
+        }
+        case 3: {
+          bool invalid = false;
+          const int32_t converted = static_cast<int32_t>(convertFPUToInt(st(0), 32, invalid));
+          if (invalid) {
+            m_cpu.setFPUStatusBits(FPU_STATUS_IE);
+          }
+          m_memory.write32(addr, static_cast<uint32_t>(converted));
+          m_cpu.popFPU();
+          return;
+        }
+        case 5:
+          m_cpu.pushFPU(readFloat80(addr));
+          return;
+        case 7:
+          writeFloat80(addr, st(0));
+          m_cpu.popFPU();
+          return;
+        default:
+          LOG_WARN("Unimplemented x87 memory opcode DB /", std::hex,
+                   static_cast<int>(modrm.reg));
+          return;
+        }
+      }
+
+      switch (modrm.reg) {
+      case 0:
+        m_cpu.pushFPU(static_cast<double>(static_cast<int16_t>(m_memory.read16(addr))));
+        return;
+      case 2: {
+        bool invalid = false;
+        const int16_t converted = static_cast<int16_t>(convertFPUToInt(st(0), 16, invalid));
+        if (invalid) {
+          m_cpu.setFPUStatusBits(FPU_STATUS_IE);
+        }
+        m_memory.write16(addr, static_cast<uint16_t>(converted));
+        return;
+      }
+      case 3: {
+        bool invalid = false;
+        const int16_t converted = static_cast<int16_t>(convertFPUToInt(st(0), 16, invalid));
+        if (invalid) {
+          m_cpu.setFPUStatusBits(FPU_STATUS_IE);
+        }
+        m_memory.write16(addr, static_cast<uint16_t>(converted));
+        m_cpu.popFPU();
+        return;
+      }
+      case 5:
+        m_cpu.pushFPU(static_cast<double>(readInt64(addr)));
+        return;
+      case 7: {
+        bool invalid = false;
+        const int64_t converted = convertFPUToInt(st(0), 64, invalid);
+        if (invalid) {
+          m_cpu.setFPUStatusBits(FPU_STATUS_IE);
+        }
+        writeInt64(addr, converted);
+        m_cpu.popFPU();
+        return;
+      }
+      default:
+        LOG_WARN("Unimplemented x87 memory opcode DF /", std::hex,
+                 static_cast<int>(modrm.reg));
+        return;
+      }
+    }
+
+    if (opcode == 0xDB) {
+      switch (modrmByte) {
+      case 0xE2:
+        m_cpu.clearFPUStatusBits(FPU_STATUS_IE | FPU_STATUS_DE |
+                                 FPU_STATUS_ZE | FPU_STATUS_OE |
+                                 FPU_STATUS_UE | FPU_STATUS_PE |
+                                 FPU_STATUS_SF | FPU_STATUS_ES |
+                                 FPU_STATUS_BUSY);
+        return;
+      case 0xE3:
+        m_cpu.resetFPU();
+        return;
+      default:
+        if (modrmByte >= 0xE8 && modrmByte <= 0xEF) {
+          compareStatus(st(0), st(modrm.rm), true, false, false);
+          return;
+        }
+        if (modrmByte >= 0xF0 && modrmByte <= 0xF7) {
+          compareStatus(st(0), st(modrm.rm), true, false, true);
+          return;
+        }
+        LOG_WARN("Unimplemented x87 register opcode DB ", std::hex,
+                 static_cast<int>(modrmByte));
+        return;
+      }
+    }
+
+    if (modrmByte >= 0xC0 && modrmByte <= 0xC7) {
+      m_cpu.freeFPURegister(modrm.rm);
+      m_cpu.popFPU();
+      return;
+    }
+    if (modrmByte == 0xE0) {
+      m_cpu.setReg16(AX, m_cpu.getFPUStatusWord());
+      return;
+    }
+    if (modrmByte >= 0xE8 && modrmByte <= 0xEF) {
+      compareStatus(st(0), st(modrm.rm), true, true, false);
+      return;
+    }
+    if (modrmByte >= 0xF0 && modrmByte <= 0xF7) {
+      compareStatus(st(0), st(modrm.rm), true, true, true);
+      return;
+    }
+    LOG_WARN("Unimplemented x87 register opcode DF ", std::hex,
+             static_cast<int>(modrmByte));
+    return;
+  }
+  case 0xDD: {
+    if (modrm.mod != 3) {
+      const uint32_t addr = effectiveAddress();
+      switch (modrm.reg) {
+      case 0:
+        m_cpu.pushFPU(readFloat64(addr));
+        return;
+      case 2:
+        writeFloat64(addr, st(0));
+        return;
+      case 3:
+        writeFloat64(addr, st(0));
+        m_cpu.popFPU();
+        return;
+      case 7:
+        m_memory.write16(addr, m_cpu.getFPUStatusWord());
+        return;
+      default:
+        LOG_WARN("Unimplemented x87 memory opcode DD /", std::hex,
+                 static_cast<int>(modrm.reg));
+        return;
+      }
+    }
+
+    if (modrmByte >= 0xC0 && modrmByte <= 0xC7) {
+      m_cpu.freeFPURegister(modrm.rm);
+      return;
+    }
+    if (modrmByte >= 0xD0 && modrmByte <= 0xD7) {
+      writeSt(modrm.rm, st(0));
+      return;
+    }
+    if (modrmByte >= 0xD8 && modrmByte <= 0xDF) {
+      writeSt(modrm.rm, st(0));
+      m_cpu.popFPU();
+      return;
+    }
+    if (modrmByte >= 0xE0 && modrmByte <= 0xE7) {
+      compareStatus(st(0), st(modrm.rm), false, false, false);
+      return;
+    }
+    if (modrmByte >= 0xE8 && modrmByte <= 0xEF) {
+      compareStatus(st(0), st(modrm.rm), false, true, false);
+      return;
+    }
+    LOG_WARN("Unimplemented x87 register opcode DD ", std::hex,
+             static_cast<int>(modrmByte));
+    return;
+  }
+  default:
+    LOG_WARN("Unhandled x87 opcode 0x", std::hex, static_cast<int>(opcode));
+    return;
+  }
 }
 
 uint32_t InstructionDecoder::aluOp(uint8_t op, uint32_t dest, uint32_t src,
@@ -1987,16 +2685,9 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
   case 0xDC:
   case 0xDD:
   case 0xDE:
-  case 0xDF: { // FPU op stubs
-    ModRM modrm = decodeModRM(fetch8());
-    if (modrm.mod != 3) {
-      if (m_hasPrefix67)
-        getEffectiveAddress32(modrm);
-      else
-        getEffectiveAddress16(modrm);
-    }
+  case 0xDF:
+    executeFPUOpcode(opcode);
     break;
-  }
   case 0xA4: { // MOVSB
     LOG_CPU("MOVSB");
     uint8_t srcSeg = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
