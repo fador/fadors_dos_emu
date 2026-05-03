@@ -1070,6 +1070,14 @@ AsmResult Assembler::assembleLine(const std::string& line, uint32_t origin) cons
             return r;
         }
 
+        if (mnem == "BSWAP") {
+            if (op1.kind == OpKind::Reg32 && !hasOp2) {
+                r.bytes.push_back(0x0F);
+                r.bytes.push_back(static_cast<uint8_t>(0xC8 + op1.reg));
+            } else { r.error = "BSWAP requires one 32-bit register operand"; }
+            return r;
+        }
+
         // ── SHLD/SHRD ──
         if (mnem == "SHLD" || mnem == "SHRD") {
             r.bytes.push_back(0x0F);

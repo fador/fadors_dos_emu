@@ -33,9 +33,74 @@ bool isEMSDeviceProbe(const std::string &filename) {
 
 constexpr uint16_t kEMSPrivateApiOffset = 0x0070;
 constexpr uint16_t kEMSPrivateApiSegment = 0xF000;
+constexpr uint16_t kEMSDeviceHeaderOffset = 0x0000;
 constexpr uint32_t kEMSImportRecordPhys = 0xF1100;
 constexpr uint8_t kEMSImportMajorVersion = 0x01;
 constexpr uint8_t kEMSImportMinorVersion = 0x10;
+
+constexpr uint16_t kListOfListsSeg = 0x0050;
+constexpr uint16_t kListOfListsOff = 0x0020;
+constexpr uint16_t kDos5NulHeaderOff = kListOfListsOff + 0x22;
+constexpr uint16_t kClockDeviceHeaderOff = 0x0100;
+constexpr uint16_t kConDeviceHeaderOff = 0x0120;
+constexpr uint16_t kDeviceRetfStubOff = 0x0180;
+
+constexpr uint16_t kNulDeviceAttr = 0x8004;
+constexpr uint16_t kClockDeviceAttr = 0x8008;
+constexpr uint16_t kConDeviceAttr = 0x8013;
+
+uint32_t farPtr(uint16_t seg, uint16_t off) {
+  return (static_cast<uint32_t>(seg) << 16) | off;
+}
+
+void writeBlankPaddedDeviceName(memory::MemoryBus &memory, uint32_t physAddr,
+                                const std::string &name) {
+  for (size_t index = 0; index < 8; ++index) {
+    const uint8_t value = index < name.size()
+                              ? static_cast<uint8_t>(name[index])
+                              : static_cast<uint8_t>(' ');
+    memory.write8(physAddr + 0x0A + static_cast<uint32_t>(index), value);
+  }
+}
+
+void writeCharacterDeviceHeader(memory::MemoryBus &memory, uint16_t seg,
+                                uint16_t off, uint32_t nextDriver,
+                                uint16_t attributes, uint16_t entryOff,
+                                const std::string &name) {
+  const uint32_t phys = (static_cast<uint32_t>(seg) << 4) + off;
+  memory.write32(phys + 0x00, nextDriver);
+  memory.write16(phys + 0x04, attributes);
+  memory.write16(phys + 0x06, entryOff);
+  memory.write16(phys + 0x08, entryOff);
+  writeBlankPaddedDeviceName(memory, phys, name);
+}
+
+void initializeDOSListOfLists(memory::MemoryBus &memory, uint16_t firstMCBSegment) {
+  const uint32_t listPhys =
+      (static_cast<uint32_t>(kListOfListsSeg) << 4) + kListOfListsOff;
+
+  if (uint8_t *listData = memory.directAccess(listPhys)) {
+    std::fill_n(listData, 0x80, 0);
+  }
+
+  memory.write16(listPhys - 2, firstMCBSegment);
+  memory.write32(listPhys + 0x08, farPtr(kListOfListsSeg, kClockDeviceHeaderOff));
+  memory.write32(listPhys + 0x0C, farPtr(kListOfListsSeg, kConDeviceHeaderOff));
+  memory.write8(listPhys + 0x21, 3); // local drives A:-C:
+
+  memory.write8((static_cast<uint32_t>(kListOfListsSeg) << 4) + kDeviceRetfStubOff,
+                0xCB);
+
+  writeCharacterDeviceHeader(memory, kListOfListsSeg, kDos5NulHeaderOff,
+                             farPtr(kListOfListsSeg, kClockDeviceHeaderOff),
+                             kNulDeviceAttr, kDeviceRetfStubOff, "NUL");
+  writeCharacterDeviceHeader(memory, kListOfListsSeg, kClockDeviceHeaderOff,
+                             farPtr(kListOfListsSeg, kConDeviceHeaderOff),
+                             kClockDeviceAttr, kDeviceRetfStubOff, "CLOCK$");
+  writeCharacterDeviceHeader(memory, kListOfListsSeg, kConDeviceHeaderOff,
+                             farPtr(kEMSPrivateApiSegment, kEMSDeviceHeaderOffset),
+                             kConDeviceAttr, kDeviceRetfStubOff, "CON");
+}
 
 } // namespace
 
@@ -62,9 +127,7 @@ void DOS::initialize() {
     psp.name[i] = 0;
   writeMCB(FIRST_MCB_SEGMENT, psp);
 
-  // Initialize List of Lists pointer
-  // LoL is at 0070:0000 (0x0700). MCB pointer is at LoL-2 (0x06FE)
-  m_memory.write16(0x06FE, FIRST_MCB_SEGMENT);
+  initializeDOSListOfLists(m_memory, FIRST_MCB_SEGMENT);
 
   LOG_INFO("DOS: Initial MCB chain setup. PSP block at 0x", std::hex,
            m_pspSegment, " size 0x", std::hex, psp.size);
@@ -628,20 +691,11 @@ void DOS::handleDOSService() {
     break;
   }
   case 0x52: { // "Get List of Lists" (SYSVARS)
-    // Pointer to first MCB is at [ES:BX-2]
-    // We'll put the LoL at 0x0050:0020
-    uint16_t lolSeg = 0x0050;
-    uint16_t lolOff = 0x0020;
-    m_cpu.setSegReg(cpu::ES, lolSeg);
-    m_cpu.setReg16(cpu::BX, lolOff);
-
-    uint32_t lolPhys = (lolSeg << 4) + lolOff;
-    // Set first MCB segment at [LoL-2]
-    m_memory.write16(lolPhys - 2, FIRST_MCB_SEGMENT);
-    // Other fields (mostly dummy for now)
-    // DPB, SFT, etc. - DOS extenders usually only need the MCB pointer.
-    LOG_DOS("DOS: Get List of Lists at ", std::hex, lolSeg, ":", lolOff,
-            " (First MCB: ", FIRST_MCB_SEGMENT, ")");
+      initializeDOSListOfLists(m_memory, FIRST_MCB_SEGMENT);
+      m_cpu.setSegReg(cpu::ES, kListOfListsSeg);
+      m_cpu.setReg16(cpu::BX, kListOfListsOff);
+      LOG_DOS("DOS: Get List of Lists at ", std::hex, kListOfListsSeg, ":",
+        kListOfListsOff, " (First MCB: ", FIRST_MCB_SEGMENT, ")");
     break;
   }
   default:

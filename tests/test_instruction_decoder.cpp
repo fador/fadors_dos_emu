@@ -255,6 +255,17 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
         REQUIRE(cpu.getReg16(cpu::Reg16Index::DI) == 0x2008);
     }
 
+    SECTION("0F-prefix: BSWAP EAX") {
+        cpu.setReg32(cpu::Reg32Index::EAX, 0x11223344);
+        mem.write8(0x100, 0x0F);
+        mem.write8(0x101, 0xC8);
+
+        decoder.step();
+
+        REQUIRE(cpu.getReg32(cpu::Reg32Index::EAX) == 0x44332211);
+        REQUIRE(cpu.getEIP() == 0x102);
+    }
+
     SECTION("String Operations: REP STOSW") {
         cpu.setReg16(cpu::Reg16Index::DI, 0x3000);
         cpu.setReg16(cpu::Reg16Index::CX, 3);

@@ -662,6 +662,11 @@ std::string Disassembler::disasmOpcode0F(Cursor& c, uint8_t op, bool p66, bool p
     if (op == 0xBC) { ModRM m = decodeModRM(c.read8()); return "BSF " + std::string(regW(m.reg)) + ", " + formatRM(c, m, opSize16, p67, segOvr); }
     if (op == 0xBD) { ModRM m = decodeModRM(c.read8()); return "BSR " + std::string(regW(m.reg)) + ", " + formatRM(c, m, opSize16, p67, segOvr); }
 
+    // ── BSWAP ──
+    if (op >= 0xC8 && op <= 0xCF) {
+        return "BSWAP " + std::string(reg32Name(op & 0x7));
+    }
+
     // ── LSS/LFS/LGS ──
     if (op == 0xB2) { ModRM m = decodeModRM(c.read8()); return "LSS " + std::string(regW(m.reg)) + ", " + formatRM(c, m, opSize16, p67, segOvr); }
     if (op == 0xB4) { ModRM m = decodeModRM(c.read8()); return "LFS " + std::string(regW(m.reg)) + ", " + formatRM(c, m, opSize16, p67, segOvr); }

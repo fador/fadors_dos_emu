@@ -47,6 +47,18 @@ TEST_CASE("Disassembler - Single Instructions", "[Disassembler]") {
         REQUIRE(instr.mnemonic == "MOV AX, 1234h");
         REQUIRE(instr.hexBytes == "B8 34 12");
     }
+
+    SECTION("disassembleAt: BSWAP EAX") {
+        mem.write8(0x100, 0x0F);
+        mem.write8(0x101, 0xC8);
+
+        auto instr = disasm.disassembleAt(0x100);
+
+        REQUIRE(instr.address == 0x100);
+        REQUIRE(instr.length == 2);
+        REQUIRE(instr.mnemonic == "BSWAP EAX");
+        REQUIRE(instr.hexBytes == "0F C8");
+    }
 }
 
 TEST_CASE("Disassembler - Range", "[Disassembler]") {

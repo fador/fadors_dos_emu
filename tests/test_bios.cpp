@@ -217,6 +217,29 @@ TEST_CASE("BIOS EMS services allocate, map, remap, and release", "[BIOS][EMS]") 
     REQUIRE(cpu.getReg8(cpu::AH) == 0x00);
     REQUIRE(cpu.getReg16(cpu::BX) == hw::BIOS::EMS_PAGE_FRAME_SEGMENT);
 
+    cpu.setSegReg(cpu::ES, 0x7000);
+    cpu.setSegBase(cpu::ES, 0x70000);
+    cpu.setReg16(cpu::DI, 0x0000);
+    cpu.setReg8(cpu::AH, 0x58);
+    cpu.setReg8(cpu::AL, 0x01);
+    bios.handleInterrupt(0x67);
+    REQUIRE(cpu.getReg8(cpu::AH) == 0x00);
+    REQUIRE(cpu.getReg16(cpu::CX) == hw::BIOS::EMS_PHYSICAL_PAGE_COUNT);
+
+    cpu.setReg8(cpu::AH, 0x58);
+    cpu.setReg8(cpu::AL, 0x00);
+    bios.handleInterrupt(0x67);
+    REQUIRE(cpu.getReg8(cpu::AH) == 0x00);
+    REQUIRE(cpu.getReg16(cpu::CX) == hw::BIOS::EMS_PHYSICAL_PAGE_COUNT);
+    REQUIRE(mem.read16(0x70000) == 0xD000);
+    REQUIRE(mem.read16(0x70002) == 0x0000);
+    REQUIRE(mem.read16(0x70004) == 0xD400);
+    REQUIRE(mem.read16(0x70006) == 0x0001);
+    REQUIRE(mem.read16(0x70008) == 0xD800);
+    REQUIRE(mem.read16(0x7000A) == 0x0002);
+    REQUIRE(mem.read16(0x7000C) == 0xDC00);
+    REQUIRE(mem.read16(0x7000E) == 0x0003);
+
     cpu.setReg8(cpu::AH, 0x43);
     cpu.setReg16(cpu::BX, 2);
     bios.handleInterrupt(0x67);

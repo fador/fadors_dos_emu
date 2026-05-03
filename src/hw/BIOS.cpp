@@ -1890,6 +1890,36 @@ void BIOS::handleEMSService() {
     break;
   }
 
+  case 0x58: { // Get Mappable Physical Address Array
+    const uint8_t subfunction = m_cpu.getReg8(cpu::AL);
+    if (subfunction == 0x01) {
+      m_cpu.setReg16(cpu::CX, EMS_PHYSICAL_PAGE_COUNT);
+      m_cpu.setReg8(cpu::AH, 0x00);
+      break;
+    }
+
+    if (subfunction != 0x00) {
+      fail(0x8F);
+      break;
+    }
+
+    uint32_t outAddr = m_cpu.getSegBase(cpu::ES) + m_cpu.getReg16(cpu::DI);
+    for (uint8_t physicalPage = 0; physicalPage < EMS_PHYSICAL_PAGE_COUNT;
+         ++physicalPage) {
+      const uint16_t physicalSegment = static_cast<uint16_t>(
+          EMS_PAGE_FRAME_SEGMENT +
+          static_cast<uint16_t>(physicalPage) * (EMS_PAGE_SIZE >> 4));
+      m_memory.write16(outAddr + static_cast<uint32_t>(physicalPage) * 4u + 0,
+                       physicalSegment);
+      m_memory.write16(outAddr + static_cast<uint32_t>(physicalPage) * 4u + 2,
+                       physicalPage);
+    }
+
+    m_cpu.setReg16(cpu::CX, EMS_PHYSICAL_PAGE_COUNT);
+    m_cpu.setReg8(cpu::AH, 0x00);
+    break;
+  }
+
   default:
     fail(0x84); // Undefined function
     break;

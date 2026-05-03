@@ -356,6 +356,10 @@ TEST_CASE("Assembler - MOVZX/MOVSX", "[assembler]") {
     expectBytes("MOVSX CX, DL", {0x0F, 0xBE, 0xCA});
 }
 
+TEST_CASE("Assembler - BSWAP", "[assembler]") {
+    expectBytes("BSWAP EAX", {0x0F, 0xC8});
+}
+
 // ============================================================================
 //  BT family
 // ============================================================================

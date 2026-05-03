@@ -3533,6 +3533,24 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
     break;
   }
 
+  case 0xC8:
+  case 0xC9:
+  case 0xCA:
+  case 0xCB:
+  case 0xCC:
+  case 0xCD:
+  case 0xCE:
+  case 0xCF: { // BSWAP r32
+    const uint8_t reg = opcode & 0x07;
+    const uint32_t value = m_cpu.getReg32(reg);
+    const uint32_t swapped = ((value & 0x000000FFu) << 24) |
+                             ((value & 0x0000FF00u) << 8) |
+                             ((value & 0x00FF0000u) >> 8) |
+                             ((value & 0xFF000000u) >> 24);
+    m_cpu.setReg32(reg, swapped);
+    break;
+  }
+
   case 0xB2: { // LSS r16/32, m16:16
     ModRM modrm = decodeModRM(fetch8());
     uint32_t addr = m_hasPrefix67 ? getEffectiveAddress32(modrm)

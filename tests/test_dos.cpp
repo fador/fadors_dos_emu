@@ -36,6 +36,16 @@ uint8_t emsPattern(uint16_t logicalPage, size_t offset) {
                                  static_cast<uint16_t>(offset >> 8)) & 0xFFu);
 }
 
+std::string readBlankPaddedName(memory::MemoryBus &mem, uint32_t physAddr,
+                                size_t length) {
+    std::string value;
+    for (size_t i = 0; i < length; ++i)
+        value.push_back(static_cast<char>(mem.read8(physAddr + i)));
+    while (!value.empty() && value.back() == ' ')
+        value.pop_back();
+    return value;
+}
+
 } // namespace
 
 TEST_CASE("DOS Emulation and Program Loading", "[DOS]") {
@@ -519,6 +529,58 @@ TEST_CASE("DOS: EMMXXXX0 opens as EMS device and reports EMM386 records", "[DOS]
     cpu.setReg16(cpu::BX, handle);
     dos.handleInterrupt(0x21);
     REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+}
+
+TEST_CASE("DOS: List of Lists exposes NUL and EMS device chain", "[DOS][EMS]") {
+    constexpr uint16_t kFirstMCBSegment = 0x0800;
+
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    bios.initialize();
+    dos.initialize();
+
+    cpu.setReg8(cpu::AH, 0x30);
+    dos.handleInterrupt(0x21);
+    REQUIRE(cpu.getReg8(cpu::AL) == 5);
+
+    cpu.setReg8(cpu::AH, 0x52);
+    dos.handleInterrupt(0x21);
+
+    const uint16_t listSeg = cpu.getSegReg(cpu::ES);
+    const uint16_t listOff = cpu.getReg16(cpu::BX);
+    const uint32_t listPhys = (static_cast<uint32_t>(listSeg) << 4) + listOff;
+
+    REQUIRE(mem.read16(listPhys - 2) == kFirstMCBSegment);
+
+    const uint32_t nulHeader = listPhys + 0x22;
+    REQUIRE(readBlankPaddedName(mem, nulHeader + 0x0A, 8) == "NUL");
+    REQUIRE(mem.read16(nulHeader + 0x04) & 0x8000);
+    REQUIRE(mem.read16(nulHeader + 0x04) & 0x0004);
+
+    REQUIRE(mem.read32(listPhys + 0x08) != 0x00000000u);
+    REQUIRE(mem.read32(listPhys + 0x08) != 0xFFFFFFFFu);
+    REQUIRE(mem.read32(listPhys + 0x0C) != 0x00000000u);
+    REQUIRE(mem.read32(listPhys + 0x0C) != 0xFFFFFFFFu);
+
+    uint32_t currentHeader = mem.read32(nulHeader + 0x00);
+    bool foundEMS = false;
+    for (int depth = 0; depth < 8 && currentHeader != 0xFFFFFFFFu; ++depth) {
+        const uint16_t headerOff = static_cast<uint16_t>(currentHeader & 0xFFFFu);
+        const uint16_t headerSeg = static_cast<uint16_t>(currentHeader >> 16);
+        const uint32_t headerPhys = (static_cast<uint32_t>(headerSeg) << 4) + headerOff;
+        if (readBlankPaddedName(mem, headerPhys + 0x0A, 8) == "EMMXXXX0") {
+            foundEMS = true;
+            break;
+        }
+        currentHeader = mem.read32(headerPhys + 0x00);
+    }
+
+    REQUIRE(foundEMS);
 }
 
 TEST_CASE("EMS compatibility: EMSTEST main flow", "[DOS][EMS][BIOS]") {
