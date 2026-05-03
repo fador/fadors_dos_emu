@@ -7,10 +7,6 @@ namespace fador::memory {
 
 namespace {
 
-constexpr uint32_t A20_MASK = 0xFFFFF;
-constexpr uint32_t VGA_PLANAR_START = 0xA0000;
-constexpr uint32_t VGA_PLANAR_END = 0xB0000;
-
 bool intersectsRange(uint32_t start, uint32_t size, uint32_t rangeStart,
                      uint32_t rangeEnd) {
   if (size == 0) {
@@ -57,12 +53,10 @@ MemoryBus::MemoryBus() {
   LOG_INFO("MemoryBus initialized with ", MEMORY_SIZE, " bytes");
 }
 
-uint8_t MemoryBus::read8(uint32_t address) const {
-  uint32_t effectiveAddress = m_a20Enabled ? address : (address & 0xFFFFF);
+uint8_t MemoryBus::read8Slow(uint32_t address, uint32_t effectiveAddress) const {
   if (effectiveAddress < MEMORY_SIZE) {
-    // VGA plane-aware read for the A0000-AFFFF window
-    if (m_vga && effectiveAddress >= 0xA0000 && effectiveAddress < 0xB0000) {
-      return m_vga->planeRead8(effectiveAddress - 0xA0000);
+    if (needsPlaneRead8(effectiveAddress)) {
+      return m_vga->planeRead8(effectiveAddress - VGA_PLANAR_START);
     }
     return m_ram[effectiveAddress];
   }
@@ -71,8 +65,8 @@ uint8_t MemoryBus::read8(uint32_t address) const {
   return 0xFF;
 }
 
-uint16_t MemoryBus::read16(uint32_t address) const {
-  uint32_t effectiveAddress = m_a20Enabled ? address : (address & 0xFFFFF);
+uint16_t MemoryBus::read16Slow(uint32_t address,
+                               uint32_t effectiveAddress) const {
   if (effectiveAddress + 1 < MEMORY_SIZE) {
     return m_ram[effectiveAddress] | (m_ram[effectiveAddress + 1] << 8);
   }
@@ -81,8 +75,8 @@ uint16_t MemoryBus::read16(uint32_t address) const {
   return 0xFFFF;
 }
 
-uint32_t MemoryBus::read32(uint32_t address) const {
-  uint32_t effectiveAddress = m_a20Enabled ? address : (address & 0xFFFFF);
+uint32_t MemoryBus::read32Slow(uint32_t address,
+                               uint32_t effectiveAddress) const {
   if (effectiveAddress + 3 < MEMORY_SIZE) {
     return m_ram[effectiveAddress] | (m_ram[effectiveAddress + 1] << 8) |
            (m_ram[effectiveAddress + 2] << 16) |
@@ -93,20 +87,18 @@ uint32_t MemoryBus::read32(uint32_t address) const {
   return 0xFFFFFFFF;
 }
 
-void MemoryBus::write8(uint32_t address, uint8_t value) {
-  uint32_t effectiveAddress = m_a20Enabled ? address : (address & 0xFFFFF);
+void MemoryBus::write8Slow(uint32_t address, uint32_t effectiveAddress,
+                           uint8_t value) {
   if (effectiveAddress < MEMORY_SIZE) {
     if (effectiveAddress < 0x400) {
       LOG_DEBUG("IVT WRITE8 at 0x", std::hex, effectiveAddress, " val: 0x",
                 static_cast<int>(value));
     }
     m_ram[effectiveAddress] = value;
-    // VGA plane-aware write for the A0000-AFFFF window
-    if (m_vga && effectiveAddress >= 0xA0000 && effectiveAddress < 0xB0000) {
-      m_vga->planeWrite8(effectiveAddress - 0xA0000, value);
+    if (needsPlaneWrite8(effectiveAddress)) {
+      m_vga->planeWrite8(effectiveAddress - VGA_PLANAR_START, value);
     }
-    // Simple hook for CGA/VGA text mode (0xB8000 - 0xBFFFF)
-    if (effectiveAddress >= 0xB8000 && effectiveAddress < 0xBFFFF) {
+    if (needsTextVramLog(effectiveAddress)) {
       LOG_VIDEO("VRAM WRITE at 0x", std::hex, effectiveAddress, " val: 0x",
                 static_cast<int>(value), " ('",
                 (char)(value >= 32 && value < 127 ? value : '.'), "')");
@@ -118,8 +110,8 @@ void MemoryBus::write8(uint32_t address, uint8_t value) {
   }
 }
 
-void MemoryBus::write16(uint32_t address, uint16_t value) {
-  uint32_t effectiveAddress = m_a20Enabled ? address : (address & 0xFFFFF);
+void MemoryBus::write16Slow(uint32_t address, uint32_t effectiveAddress,
+                            uint16_t value) {
   if (effectiveAddress + 1 < MEMORY_SIZE) {
     if (effectiveAddress < 0x400) {
       LOG_DEBUG("IVT WRITE16 at 0x", std::hex, effectiveAddress, " val: 0x",
@@ -127,12 +119,12 @@ void MemoryBus::write16(uint32_t address, uint16_t value) {
     }
     m_ram[effectiveAddress] = value & 0xFF;
     m_ram[effectiveAddress + 1] = (value >> 8) & 0xFF;
-    // VGA plane-aware writes for the A0000-AFFFF window
-    if (m_vga && effectiveAddress >= 0xA0000 && effectiveAddress + 1 < 0xB0000) {
-      m_vga->planeWrite8(effectiveAddress - 0xA0000, value & 0xFF);
-      m_vga->planeWrite8(effectiveAddress - 0xA0000 + 1, (value >> 8) & 0xFF);
+    if (needsPlaneWrite16(effectiveAddress)) {
+      m_vga->planeWrite8(effectiveAddress - VGA_PLANAR_START, value & 0xFF);
+      m_vga->planeWrite8(effectiveAddress - VGA_PLANAR_START + 1,
+                         (value >> 8) & 0xFF);
     }
-    if (effectiveAddress >= 0xB8000 && effectiveAddress < 0xBFFFF) {
+    if (needsTextVramLog(effectiveAddress)) {
       uint8_t c1 = value & 0xFF;
       LOG_VIDEO("VRAM WRITE16 at 0x", std::hex, effectiveAddress, " val: 0x",
                 value, " ('", (char)(c1 >= 32 && c1 < 127 ? c1 : '.'), "')");
@@ -143,21 +135,23 @@ void MemoryBus::write16(uint32_t address, uint16_t value) {
   }
 }
 
-void MemoryBus::write32(uint32_t address, uint32_t value) {
-  uint32_t effectiveAddress = m_a20Enabled ? address : (address & 0xFFFFF);
+void MemoryBus::write32Slow(uint32_t address, uint32_t effectiveAddress,
+                            uint32_t value) {
   if (effectiveAddress + 3 < MEMORY_SIZE) {
     m_ram[effectiveAddress] = value & 0xFF;
     m_ram[effectiveAddress + 1] = (value >> 8) & 0xFF;
     m_ram[effectiveAddress + 2] = (value >> 16) & 0xFF;
     m_ram[effectiveAddress + 3] = (value >> 24) & 0xFF;
-    // VGA plane-aware writes for the A0000-AFFFF window
-    if (m_vga && effectiveAddress >= 0xA0000 && effectiveAddress + 3 < 0xB0000) {
-      m_vga->planeWrite8(effectiveAddress - 0xA0000, value & 0xFF);
-      m_vga->planeWrite8(effectiveAddress - 0xA0000 + 1, (value >> 8) & 0xFF);
-      m_vga->planeWrite8(effectiveAddress - 0xA0000 + 2, (value >> 16) & 0xFF);
-      m_vga->planeWrite8(effectiveAddress - 0xA0000 + 3, (value >> 24) & 0xFF);
+    if (needsPlaneWrite32(effectiveAddress)) {
+      m_vga->planeWrite8(effectiveAddress - VGA_PLANAR_START, value & 0xFF);
+      m_vga->planeWrite8(effectiveAddress - VGA_PLANAR_START + 1,
+                         (value >> 8) & 0xFF);
+      m_vga->planeWrite8(effectiveAddress - VGA_PLANAR_START + 2,
+                         (value >> 16) & 0xFF);
+      m_vga->planeWrite8(effectiveAddress - VGA_PLANAR_START + 3,
+                         (value >> 24) & 0xFF);
     }
-    if (effectiveAddress >= 0xB8000 && effectiveAddress < 0xBFFFF) {
+    if (needsTextVramLog(effectiveAddress)) {
       uint8_t c1 = value & 0xFF;
       uint8_t c2 = (value >> 16) & 0xFF;
       LOG_VIDEO("VRAM WRITE32 at 0x", std::hex, effectiveAddress, " val: 0x",
