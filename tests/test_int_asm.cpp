@@ -4,6 +4,7 @@
 
 #include "test_framework.hpp"
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include "cpu/CPU.hpp"
 #include "cpu/InstructionDecoder.hpp"
@@ -810,6 +811,36 @@ TEST_CASE("INT 21h AH=43h Get File Attributes via asm", "[int][asm][dos][file]")
     REQUIRE((attr & 0x20) == 0x20); // Archive bit
 
     std::remove(fname);
+}
+
+TEST_CASE("INT 21h AH=41h Delete File via asm", "[int][asm][dos][file]") {
+    IntTestEnv e;
+    const char* fname = "asm_delete_test.txt";
+    { std::ofstream ofs(fname); ofs << "delete me"; }
+
+    REQUIRE(std::filesystem::exists(fname));
+
+    e.writeString(0x200, fname);
+    e.assemble("MOV AH, 41h\nMOV DX, 200h\nINT 21h");
+    e.run(3);
+
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    const bool existsAfterDelete = std::filesystem::exists(fname);
+    std::remove(fname);
+    REQUIRE(!existsAfterDelete);
+}
+
+TEST_CASE("INT 21h AH=41h Delete missing file reports DOS error", "[int][asm][dos][file]") {
+    IntTestEnv e;
+    const char* fname = "asm_delete_missing.txt";
+    std::remove(fname);
+
+    e.writeString(0x200, fname);
+    e.assemble("MOV AH, 41h\nMOV DX, 200h\nINT 21h");
+    e.run(3);
+
+    REQUIRE(e.cpu.getEFLAGS() & cpu::FLAG_CARRY);
+    REQUIRE(e.cpu.getReg16(cpu::AX) == 0x02);
 }
 
 // ════════════════════════════════════════════════════════════════════════════

@@ -476,6 +476,7 @@ void DOS::handleDOSService() {
   case 0x3E: // Close File
   case 0x3F: // Read File/Device
   case 0x40: // Write File/Device
+  case 0x41: // Delete File
   case 0x42: // Move File Pointer
   case 0x43: // Get/Set File Attributes
   case 0x56: // Rename File
@@ -1584,6 +1585,36 @@ void DOS::handleFileService() {
     } else {
       m_cpu.setReg16(cpu::AX, 0x06); // Invalid handle
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+    }
+  } else if (ah == 0x41) { // Delete File
+    uint16_t dx = m_cpu.getReg16(cpu::DX);
+    uint32_t nameAddr = m_cpu.getSegBase(cpu::DS) + dx;
+    std::string filename = readFilename(nameAddr);
+    std::string hostPath = resolvePath(filename);
+    fs::path targetPath(hostPath);
+    fs::path parentPath = targetPath.parent_path();
+    std::error_code ec;
+
+    if (!fs::exists(targetPath, ec)) {
+      const bool parentExists =
+          parentPath.empty() || fs::exists(parentPath, ec);
+      m_cpu.setReg16(cpu::AX, parentExists ? 0x02 : 0x03);
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      LOG_DOS("DOS: Delete file failed for '", hostPath,
+              "' (missing target)");
+    } else if (fs::is_directory(targetPath, ec)) {
+      m_cpu.setReg16(cpu::AX, 0x05); // Access denied
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      LOG_DOS("DOS: Delete file rejected directory '", hostPath, "'");
+    } else if (fs::remove(targetPath, ec)) {
+      m_cpu.setReg16(cpu::AX, 0x0000);
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      LOG_DOS("DOS: Deleted file '", hostPath, "'");
+    } else {
+      m_cpu.setReg16(cpu::AX, 0x05); // Access denied / delete failure
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      LOG_ERROR("DOS: Failed to delete file '", hostPath,
+                "' error=", ec.message());
     }
   } else if (ah == 0x42) { // Move File Pointer (Seek)
     uint16_t handle = m_cpu.getReg16(cpu::BX);
