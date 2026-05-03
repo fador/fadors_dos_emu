@@ -149,8 +149,8 @@ bool BIOS::handleInterrupt(uint8_t vector) {
   case 0xE0: // XMS far-call dispatch (our internal HLE vector)
     handleXMSDispatch();
     return true;
-  case 0x67:                      // EMS (Stub)
-    m_cpu.setReg8(cpu::AH, 0x80); // EMS not installed / internal error
+  case 0x67: // EMS / EMM386
+    handleEMSService();
     return true;
   }
   return false;
@@ -1223,12 +1223,163 @@ void BIOS::initialize() {
     m_memory.write8(phys, 0xCB); // RETF (no state to save/restore)
   }
 
+  initializeEMS();
+
   // IRETD trampoline at physical 0xF0300 — used by the HW interrupt
   // reflection path so that a PM handler called via near CALL can return
   // to the interrupted code through IRETD.
   m_memory.write8(0xF0300, 0xCF); // IRETD (in a D=1 segment, 0xCF = IRETD)
 
   LOG_INFO("BIOS: BDA and IVT initialized.");
+}
+
+void BIOS::initializeEMS() {
+  m_emsHandles.clear();
+  std::fill(m_emsMappings.begin(), m_emsMappings.end(), EMSMapping{});
+
+  static constexpr char kEMMSignature[] =
+      "COMPAQ EXPANDED MEMORY MANAGER 386";
+  m_memory.write16((static_cast<uint32_t>(HLE_STUB_SEG) << 4) + 0x0012,
+                   EMS_PRIVATE_API_OFFSET);
+  const uint32_t sigPhys = (static_cast<uint32_t>(HLE_STUB_SEG) << 4) + 0x0014;
+  for (size_t index = 0; index < sizeof(kEMMSignature); ++index) {
+    m_memory.write8(sigPhys + static_cast<uint32_t>(index),
+                    static_cast<uint8_t>(kEMMSignature[index]));
+  }
+
+  const uint32_t apiPhys =
+      (static_cast<uint32_t>(HLE_STUB_SEG) << 4) + EMS_PRIVATE_API_OFFSET;
+  m_memory.write8(apiPhys, 0xCB); // RETF: private API stub returns immediately
+
+  if (uint8_t *pageFrame =
+          m_memory.directAccess(static_cast<uint32_t>(EMS_PAGE_FRAME_SEGMENT)
+                                << 4)) {
+    std::fill_n(pageFrame,
+                static_cast<size_t>(EMS_PAGE_SIZE) * EMS_PHYSICAL_PAGE_COUNT,
+                0);
+  }
+
+  updateEMSImportRecord();
+}
+
+void BIOS::flushEMSPhysicalPage(uint8_t physicalPage) {
+  if (physicalPage >= EMS_PHYSICAL_PAGE_COUNT)
+    return;
+
+  const EMSMapping &mapping = m_emsMappings[physicalPage];
+  if (mapping.handle == 0 || mapping.handle > m_emsHandles.size())
+    return;
+
+  EMSHandle &handle = m_emsHandles[mapping.handle - 1];
+  if (!handle.allocated || mapping.logicalPage >= handle.pages.size())
+    return;
+
+  uint8_t *frame = m_memory.directAccess(
+      (static_cast<uint32_t>(EMS_PAGE_FRAME_SEGMENT) << 4) +
+      static_cast<uint32_t>(physicalPage) * EMS_PAGE_SIZE);
+  if (!frame)
+    return;
+
+  std::copy_n(frame, EMS_PAGE_SIZE, handle.pages[mapping.logicalPage].begin());
+}
+
+void BIOS::loadEMSPhysicalPage(uint8_t physicalPage) {
+  if (physicalPage >= EMS_PHYSICAL_PAGE_COUNT)
+    return;
+
+  uint8_t *frame = m_memory.directAccess(
+      (static_cast<uint32_t>(EMS_PAGE_FRAME_SEGMENT) << 4) +
+      static_cast<uint32_t>(physicalPage) * EMS_PAGE_SIZE);
+  if (!frame)
+    return;
+
+  const EMSMapping &mapping = m_emsMappings[physicalPage];
+  if (mapping.handle == 0 || mapping.handle > m_emsHandles.size()) {
+    std::fill_n(frame, EMS_PAGE_SIZE, 0);
+    return;
+  }
+
+  const EMSHandle &handle = m_emsHandles[mapping.handle - 1];
+  if (!handle.allocated || mapping.logicalPage >= handle.pages.size()) {
+    std::fill_n(frame, EMS_PAGE_SIZE, 0);
+    return;
+  }
+
+  std::copy(handle.pages[mapping.logicalPage].begin(),
+            handle.pages[mapping.logicalPage].end(), frame);
+}
+
+size_t BIOS::countEMSAllocatedPages() const {
+  size_t allocatedPages = 0;
+  for (const EMSHandle &handle : m_emsHandles) {
+    if (handle.allocated)
+      allocatedPages += handle.pages.size();
+  }
+  return allocatedPages;
+}
+
+void BIOS::updateEMSImportRecord() {
+  static constexpr uint16_t kImportRecordSize = 0x198;
+  static constexpr uint16_t kFrameStatusOffset = 0x000A;
+  static constexpr uint16_t kFrameStatusSize = 6;
+  static constexpr uint16_t kHandleCountOffset = 0x018C;
+  static constexpr uint16_t kVersion110Offset = 0x018D;
+
+  for (uint16_t offset = 0; offset < kImportRecordSize; ++offset) {
+    m_memory.write8(EMS_IMPORT_RECORD_PHYS + offset, 0);
+  }
+
+  m_memory.write16(EMS_IMPORT_RECORD_PHYS + 0x02, kImportRecordSize);
+  m_memory.write16(EMS_IMPORT_RECORD_PHYS + 0x04, 0x0110);
+
+  for (uint16_t index = 0; index < 64; ++index) {
+    const uint32_t recordAddr = EMS_IMPORT_RECORD_PHYS + kFrameStatusOffset +
+                                static_cast<uint32_t>(index) * kFrameStatusSize;
+    m_memory.write8(recordAddr + 0, 0x00);
+    m_memory.write8(recordAddr + 1, 0xFF);
+    m_memory.write16(recordAddr + 2, 0xFFFF);
+    m_memory.write8(recordAddr + 4, 0xFF);
+    m_memory.write8(recordAddr + 5, 0x00);
+  }
+
+  const uint16_t firstFrameRecord = EMS_PAGE_FRAME_SEGMENT >> 10;
+  for (uint8_t physicalPage = 0; physicalPage < EMS_PHYSICAL_PAGE_COUNT;
+       ++physicalPage) {
+    const uint16_t recordIndex = firstFrameRecord + physicalPage;
+    const uint32_t recordAddr = EMS_IMPORT_RECORD_PHYS + kFrameStatusOffset +
+                                static_cast<uint32_t>(recordIndex) *
+                                    kFrameStatusSize;
+    const EMSMapping &mapping = m_emsMappings[physicalPage];
+
+    m_memory.write8(recordAddr + 0, 0x03); // EMS frame in standard 64K page frame
+    m_memory.write8(recordAddr + 1,
+                    mapping.handle == 0
+                        ? 0xFF
+                        : static_cast<uint8_t>(mapping.handle & 0x00FF));
+    m_memory.write16(recordAddr + 2,
+                     mapping.handle == 0 ? 0x7FFF : mapping.logicalPage);
+    m_memory.write8(recordAddr + 4, physicalPage);
+    m_memory.write8(recordAddr + 5, 0x00);
+  }
+
+  m_memory.write8(EMS_IMPORT_RECORD_PHYS + 0x018A,
+                  static_cast<uint8_t>(EMS_PHYSICAL_PAGE_COUNT * 3 + 4));
+  m_memory.write8(EMS_IMPORT_RECORD_PHYS + 0x018B, 0x00); // No UMB descriptors
+  m_memory.write8(EMS_IMPORT_RECORD_PHYS + kHandleCountOffset,
+                  0x00); // Handle info records omitted for now
+
+  m_memory.write16(EMS_IMPORT_RECORD_PHYS + kVersion110Offset + 0,
+                   m_originalIVT[0x67].first);
+  m_memory.write16(EMS_IMPORT_RECORD_PHYS + kVersion110Offset + 2,
+                   m_originalIVT[0x67].second);
+  m_memory.write32(EMS_IMPORT_RECORD_PHYS + kVersion110Offset + 4,
+                   0x00000000);
+  m_memory.write8(EMS_IMPORT_RECORD_PHYS + kVersion110Offset + 8,
+                  0x00); // Free page entry count
+  m_memory.write8(EMS_IMPORT_RECORD_PHYS + kVersion110Offset + 9,
+                  0x00); // XMS handle count
+  m_memory.write8(EMS_IMPORT_RECORD_PHYS + kVersion110Offset + 10,
+                  0x00); // Free UMB info count
 }
 
 bool BIOS::isOriginalIVT(uint8_t vector, uint16_t cs, uint32_t eip) const {
@@ -1488,6 +1639,167 @@ void BIOS::handleSystemService() {
     LOG_DEBUG("BIOS INT 15h: Unknown function AH=0x", std::hex, (int)ah);
     m_cpu.setReg8(cpu::AH, 0x86); // Function not supported
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+    break;
+  }
+}
+
+void BIOS::handleEMSService() {
+  const uint8_t function = m_cpu.getReg8(cpu::AH);
+
+  auto fail = [this](uint8_t status) { m_cpu.setReg8(cpu::AH, status); };
+  auto validHandle = [this](uint16_t handle) {
+    return handle >= 1 && handle <= m_emsHandles.size() &&
+           m_emsHandles[handle - 1].allocated;
+  };
+
+  switch (function) {
+  case 0x40: // Get Status
+    m_cpu.setReg8(cpu::AH, 0x00);
+    break;
+
+  case 0x41: // Get Page Frame Address
+    m_cpu.setReg16(cpu::BX, EMS_PAGE_FRAME_SEGMENT);
+    m_cpu.setReg8(cpu::AH, 0x00);
+    break;
+
+  case 0x42: { // Get Unallocated and Total Page Counts
+    const uint16_t availablePages = static_cast<uint16_t>(
+        EMS_TOTAL_PAGES - static_cast<uint16_t>(countEMSAllocatedPages()));
+    m_cpu.setReg16(cpu::BX, availablePages);
+    m_cpu.setReg16(cpu::DX, EMS_TOTAL_PAGES);
+    m_cpu.setReg8(cpu::AH, 0x00);
+    break;
+  }
+
+  case 0x43: { // Allocate Pages
+    const uint16_t requestedPages = m_cpu.getReg16(cpu::BX);
+    const uint16_t availablePages = static_cast<uint16_t>(
+        EMS_TOTAL_PAGES - static_cast<uint16_t>(countEMSAllocatedPages()));
+
+    if (requestedPages == 0) {
+      fail(0x89);
+      break;
+    }
+    if (requestedPages > availablePages) {
+      fail(0x88);
+      break;
+    }
+
+    size_t handleIndex = 0;
+    while (handleIndex < m_emsHandles.size() && m_emsHandles[handleIndex].allocated)
+      ++handleIndex;
+    if (handleIndex == m_emsHandles.size()) {
+      if (handleIndex >= 0xFF) {
+        fail(0x85);
+        break;
+      }
+      m_emsHandles.emplace_back();
+    }
+
+    EMSHandle &handle = m_emsHandles[handleIndex];
+    handle.allocated = true;
+    handle.pages.assign(requestedPages,
+                        std::vector<uint8_t>(EMS_PAGE_SIZE, 0));
+
+    m_cpu.setReg16(cpu::DX, static_cast<uint16_t>(handleIndex + 1));
+    m_cpu.setReg8(cpu::AH, 0x00);
+    updateEMSImportRecord();
+    break;
+  }
+
+  case 0x44: { // Map / Unmap Handle Page
+    const uint8_t physicalPage = m_cpu.getReg8(cpu::AL);
+    const uint16_t logicalPage = m_cpu.getReg16(cpu::BX);
+    const uint16_t handleId = m_cpu.getReg16(cpu::DX);
+
+    if (physicalPage >= EMS_PHYSICAL_PAGE_COUNT) {
+      fail(0x8B);
+      break;
+    }
+
+    flushEMSPhysicalPage(physicalPage);
+
+    if (logicalPage == 0xFFFF) {
+      m_emsMappings[physicalPage] = {};
+      loadEMSPhysicalPage(physicalPage);
+      m_cpu.setReg8(cpu::AH, 0x00);
+      updateEMSImportRecord();
+      break;
+    }
+
+    if (!validHandle(handleId)) {
+      fail(0x83);
+      break;
+    }
+
+    const EMSHandle &handle = m_emsHandles[handleId - 1];
+    if (logicalPage >= handle.pages.size()) {
+      fail(0x8A);
+      break;
+    }
+
+    m_emsMappings[physicalPage] = {handleId, logicalPage};
+    loadEMSPhysicalPage(physicalPage);
+    m_cpu.setReg8(cpu::AH, 0x00);
+    updateEMSImportRecord();
+    break;
+  }
+
+  case 0x45: { // Deallocate Pages
+    const uint16_t handleId = m_cpu.getReg16(cpu::DX);
+    if (!validHandle(handleId)) {
+      fail(0x83);
+      break;
+    }
+
+    for (uint8_t physicalPage = 0; physicalPage < EMS_PHYSICAL_PAGE_COUNT;
+         ++physicalPage) {
+      if (m_emsMappings[physicalPage].handle == handleId) {
+        flushEMSPhysicalPage(physicalPage);
+        m_emsMappings[physicalPage] = {};
+        loadEMSPhysicalPage(physicalPage);
+      }
+    }
+
+    EMSHandle &handle = m_emsHandles[handleId - 1];
+    handle.pages.clear();
+    handle.allocated = false;
+
+    m_cpu.setReg8(cpu::AH, 0x00);
+    updateEMSImportRecord();
+    break;
+  }
+
+  case 0x46: // Get EMM Version
+    m_cpu.setReg8(cpu::AL, 0x40); // EMS 4.0
+    m_cpu.setReg8(cpu::AH, 0x00);
+    break;
+
+  case 0x4B: { // Get Number of Open Handles
+    uint16_t openHandles = 0;
+    for (const EMSHandle &handle : m_emsHandles) {
+      if (handle.allocated)
+        ++openHandles;
+    }
+    m_cpu.setReg16(cpu::BX, openHandles);
+    m_cpu.setReg8(cpu::AH, 0x00);
+    break;
+  }
+
+  case 0x4C: { // Get Pages Owned by Handle
+    const uint16_t handleId = m_cpu.getReg16(cpu::DX);
+    if (!validHandle(handleId)) {
+      fail(0x83);
+      break;
+    }
+    m_cpu.setReg16(cpu::BX,
+                   static_cast<uint16_t>(m_emsHandles[handleId - 1].pages.size()));
+    m_cpu.setReg8(cpu::AH, 0x00);
+    break;
+  }
+
+  default:
+    fail(0x84); // Undefined function
     break;
   }
 }

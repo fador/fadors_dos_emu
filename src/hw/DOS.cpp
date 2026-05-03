@@ -5,6 +5,7 @@
 #include "DPMI.hpp"
 #include "KeyboardController.hpp"
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -14,6 +15,29 @@
 namespace fs = std::filesystem;
 
 namespace fador::hw {
+
+namespace {
+
+std::string upperASCII(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char ch) {
+                   return static_cast<char>(std::toupper(ch));
+                 });
+  return value;
+}
+
+bool isEMSDeviceProbe(const std::string &filename) {
+  const std::string leaf = upperASCII(fs::path(filename).filename().string());
+  return leaf == "EMMXXXX0" || leaf == "EMMQXXX0";
+}
+
+constexpr uint16_t kEMSPrivateApiOffset = 0x0070;
+constexpr uint16_t kEMSPrivateApiSegment = 0xF000;
+constexpr uint32_t kEMSImportRecordPhys = 0xF1100;
+constexpr uint8_t kEMSImportMajorVersion = 0x01;
+constexpr uint8_t kEMSImportMinorVersion = 0x10;
+
+} // namespace
 
 DOS::DOS(cpu::CPU &cpu, memory::MemoryBus &memory)
     : m_cpu(cpu), m_memory(memory) {
@@ -462,10 +486,14 @@ void DOS::handleDOSService() {
       else if (bx == 2)
         info = 0x80 | 0x02; // STDERR - char device
       else if (bx >= 5 && bx - 5 < m_fileHandles.size() &&
-               m_fileHandles[bx - 5])
-        // Disk file: bit7=0 (file), bit11=1 (media not removable),
-        // bits 5-0 = drive number (0=A:,2=C:).
-        info = 0x0802;
+               m_fileHandles[bx - 5]) {
+        if (m_fileHandles[bx - 5]->isEMSDevice())
+          info = 0x0080; // Character device
+        else
+          // Disk file: bit7=0 (file), bit11=1 (media not removable),
+          // bits 5-0 = drive number (0=A:,2=C:).
+          info = 0x0802;
+      }
       else {
         m_cpu.setReg16(cpu::AX, 0x06); // Invalid handle
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
@@ -476,6 +504,57 @@ void DOS::handleDOSService() {
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
       LOG_DOS("DOS: IOCTL Get Device Info handle=", bx, " info=0x", std::hex,
               info);
+    } else if (al == 0x02) { // IOCTL Read from character device
+      const uint16_t cx = m_cpu.getReg16(cpu::CX);
+      const uint32_t bufAddr =
+          m_cpu.getSegBase(cpu::DS) + m_cpu.getReg16(cpu::DX);
+
+      if (!(bx >= 5 && bx - 5 < m_fileHandles.size() &&
+            m_fileHandles[bx - 5])) {
+        m_cpu.setReg16(cpu::AX, 0x06); // Invalid handle
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+        break;
+      }
+
+      const auto &fh = m_fileHandles[bx - 5];
+      if (!fh->isEMSDevice()) {
+        m_cpu.setReg16(cpu::AX, 0x01); // Function not supported
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+        LOG_DOS("DOS: IOCTL Read handle=", bx,
+                " unsupported for non-device file");
+        break;
+      }
+
+      if (cx < 6) {
+        m_cpu.setReg16(cpu::AX, 0x0D); // Invalid data
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+        LOG_DOS("DOS: EMS IOCTL buffer too small, CX=", cx);
+        break;
+      }
+
+      const uint8_t subfn = m_memory.read8(bufAddr);
+      if (subfn == 0x00) {
+        m_memory.write16(bufAddr + 0, 0x0025);
+        m_memory.write16(bufAddr + 2, kEMSPrivateApiOffset);
+        m_memory.write16(bufAddr + 4, kEMSPrivateApiSegment);
+        m_cpu.setReg16(cpu::AX, 0x0006);
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+        LOG_DOS("DOS: EMS IOCTL subfn 00h -> API entry ", std::hex,
+                kEMSPrivateApiSegment, ":", kEMSPrivateApiOffset);
+      } else if (subfn == 0x01) {
+        m_memory.write32(bufAddr + 0, kEMSImportRecordPhys);
+        m_memory.write8(bufAddr + 4, kEMSImportMajorVersion);
+        m_memory.write8(bufAddr + 5, kEMSImportMinorVersion);
+        m_cpu.setReg16(cpu::AX, 0x0006);
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+        LOG_DOS("DOS: EMS IOCTL subfn 01h -> import record phys=0x", std::hex,
+                kEMSImportRecordPhys);
+      } else {
+        m_cpu.setReg16(cpu::AX, 0x01); // Function not supported
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+        LOG_DOS("DOS: EMS IOCTL subfn=0x", std::hex, (int)subfn,
+                " not implemented");
+      }
     } else {
       // Other IOCTL subfunction – stub as unsupported
       m_cpu.setReg16(cpu::AX, 0x01); // Function not supported
@@ -1562,6 +1641,21 @@ void DOS::handleFileService() {
         m_cpu.getReg8(cpu::AL) & 0x03; // 0=Read, 1=Write, 2=Read/Write
     uint32_t nameAddr = m_cpu.getSegBase(cpu::DS) + dx;
     std::string filename = readFilename(nameAddr);
+
+    if (isEMSDeviceProbe(filename)) {
+      auto fh = std::make_shared<FileHandle>();
+      fh->path = upperASCII(fs::path(filename).filename().string());
+      fh->kind = FileHandle::Kind::EMSDevice;
+      m_fileHandles.push_back(std::move(fh));
+      m_cpu.setReg16(cpu::AX,
+                     static_cast<uint16_t>(m_fileHandles.size() - 1 + 5));
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      LOG_DOS("DOS: Opened EMS device '",
+              m_fileHandles.back()->path, "' handle=",
+              m_fileHandles.size() - 1 + 5);
+      return;
+    }
+
     std::string hostPath = resolvePath(filename);
 
     auto fh = std::make_shared<FileHandle>();
@@ -1599,7 +1693,7 @@ void DOS::handleFileService() {
       LOG_DOS("DOS: Opened file '", hostPath,
               "' handle=", m_fileHandles.size() - 1 + 5);
     } else {
-      m_cpu.setReg16(cpu::AX, 0x02); // File not found
+      m_cpu.setReg16(cpu::AX, 0x02); // File/device not found (EMS absent)
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
       LOG_ERROR("DOS: Failed to open file '", hostPath, "'");
     }
@@ -1607,7 +1701,8 @@ void DOS::handleFileService() {
     uint16_t handle = m_cpu.getReg16(cpu::BX);
     if (handle >= 5 && handle - 5 < m_fileHandles.size() &&
         m_fileHandles[handle - 5]) {
-      if (m_fileHandles[handle - 5].use_count() == 1)
+      if (m_fileHandles[handle - 5].use_count() == 1 &&
+          !m_fileHandles[handle - 5]->isEMSDevice())
         m_fileHandles[handle - 5]->stream.close();
       m_fileHandles[handle - 5].reset(); // Free slot
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
@@ -1647,6 +1742,14 @@ void DOS::handleFileService() {
     if (handle >= 5 && handle - 5 < m_fileHandles.size() &&
         m_fileHandles[handle - 5]) {
       auto &fh = m_fileHandles[handle - 5];
+      if (fh->isEMSDevice()) {
+        m_cpu.setReg16(cpu::AX, 0x0000);
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+        LOG_DOS("DOS: Read from EMS device handle=", handle,
+                " returned 0 bytes");
+        return;
+      }
+
       std::vector<char> buf(bytesToRead);
       fh->stream.read(buf.data(), bytesToRead);
       std::streamsize bytesRead = fh->stream.gcount();
@@ -1680,6 +1783,14 @@ void DOS::handleFileService() {
     } else if (handle >= 5 && handle - 5 < m_fileHandles.size() &&
                m_fileHandles[handle - 5]) {
       auto &fh = m_fileHandles[handle - 5];
+      if (fh->isEMSDevice()) {
+        m_cpu.setReg16(cpu::AX, bytesToWrite);
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+        LOG_DOS("DOS: Ignored write of ", bytesToWrite,
+                " bytes to EMS device handle=", handle);
+        return;
+      }
+
       std::vector<char> buf(bytesToWrite);
       for (uint16_t i = 0; i < bytesToWrite; ++i) {
         buf[i] = m_memory.read8(bufAddr + i);
@@ -1738,6 +1849,13 @@ void DOS::handleFileService() {
     if (handle >= 5 && handle - 5 < m_fileHandles.size() &&
         m_fileHandles[handle - 5]) {
       auto &fh = m_fileHandles[handle - 5];
+      if (fh->isEMSDevice()) {
+        m_cpu.setReg16(cpu::AX, 0x01); // Invalid function for device
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+        LOG_DOS("DOS: Seek not supported on EMS device handle=", handle);
+        return;
+      }
+
       std::ios_base::seekdir dir;
       if (method == 0)
         dir = std::ios::beg;

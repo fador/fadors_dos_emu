@@ -181,3 +181,89 @@ TEST_CASE("BIOS Emulation Services", "[BIOS]") {
         std::remove("test_floppy.img");
     }
 }
+
+TEST_CASE("BIOS EMS services allocate, map, remap, and release", "[BIOS][EMS]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::DOS dos(cpu, mem);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    bios.initialize();
+    dos.initialize();
+
+    const uint32_t pageFrameBase =
+        static_cast<uint32_t>(hw::BIOS::EMS_PAGE_FRAME_SEGMENT) << 4;
+
+    REQUIRE(mem.read16(0xF0012) == hw::BIOS::EMS_PRIVATE_API_OFFSET);
+    REQUIRE(mem.read8(0xF0014) == 'C');
+
+    cpu.setReg8(cpu::AH, 0x46);
+    bios.handleInterrupt(0x67);
+    REQUIRE(cpu.getReg8(cpu::AH) == 0x00);
+    REQUIRE(cpu.getReg8(cpu::AL) == 0x40);
+
+    cpu.setReg8(cpu::AH, 0x41);
+    bios.handleInterrupt(0x67);
+    REQUIRE(cpu.getReg8(cpu::AH) == 0x00);
+    REQUIRE(cpu.getReg16(cpu::BX) == hw::BIOS::EMS_PAGE_FRAME_SEGMENT);
+
+    cpu.setReg8(cpu::AH, 0x43);
+    cpu.setReg16(cpu::BX, 2);
+    bios.handleInterrupt(0x67);
+    REQUIRE(cpu.getReg8(cpu::AH) == 0x00);
+    const uint16_t emsHandle = cpu.getReg16(cpu::DX);
+    REQUIRE(emsHandle != 0);
+
+    cpu.setReg8(cpu::AH, 0x44);
+    cpu.setReg8(cpu::AL, 0);
+    cpu.setReg16(cpu::BX, 0);
+    cpu.setReg16(cpu::DX, emsHandle);
+    bios.handleInterrupt(0x67);
+    REQUIRE(cpu.getReg8(cpu::AH) == 0x00);
+
+    mem.write8(pageFrameBase + 0, 0x11);
+    mem.write8(pageFrameBase + 1, 0x22);
+
+    cpu.setReg8(cpu::AH, 0x44);
+    cpu.setReg8(cpu::AL, 0);
+    cpu.setReg16(cpu::BX, 1);
+    cpu.setReg16(cpu::DX, emsHandle);
+    bios.handleInterrupt(0x67);
+    REQUIRE(cpu.getReg8(cpu::AH) == 0x00);
+    REQUIRE(mem.read8(pageFrameBase + 0) == 0x00);
+    REQUIRE(mem.read8(pageFrameBase + 1) == 0x00);
+
+    mem.write8(pageFrameBase + 0, 0x33);
+    mem.write8(pageFrameBase + 1, 0x44);
+
+    cpu.setReg8(cpu::AH, 0x44);
+    cpu.setReg8(cpu::AL, 0);
+    cpu.setReg16(cpu::BX, 0);
+    cpu.setReg16(cpu::DX, emsHandle);
+    bios.handleInterrupt(0x67);
+    REQUIRE(cpu.getReg8(cpu::AH) == 0x00);
+    REQUIRE(mem.read8(pageFrameBase + 0) == 0x11);
+    REQUIRE(mem.read8(pageFrameBase + 1) == 0x22);
+
+    cpu.setReg8(cpu::AH, 0x44);
+    cpu.setReg8(cpu::AL, 0);
+    cpu.setReg16(cpu::BX, 1);
+    cpu.setReg16(cpu::DX, emsHandle);
+    bios.handleInterrupt(0x67);
+    REQUIRE(cpu.getReg8(cpu::AH) == 0x00);
+    REQUIRE(mem.read8(pageFrameBase + 0) == 0x33);
+    REQUIRE(mem.read8(pageFrameBase + 1) == 0x44);
+
+    cpu.setReg8(cpu::AH, 0x45);
+    cpu.setReg16(cpu::DX, emsHandle);
+    bios.handleInterrupt(0x67);
+    REQUIRE(cpu.getReg8(cpu::AH) == 0x00);
+
+    cpu.setReg8(cpu::AH, 0x42);
+    bios.handleInterrupt(0x67);
+    REQUIRE(cpu.getReg8(cpu::AH) == 0x00);
+    REQUIRE(cpu.getReg16(cpu::BX) == hw::BIOS::EMS_TOTAL_PAGES);
+    REQUIRE(cpu.getReg16(cpu::DX) == hw::BIOS::EMS_TOTAL_PAGES);
+}

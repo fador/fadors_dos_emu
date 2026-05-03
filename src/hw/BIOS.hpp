@@ -69,6 +69,12 @@ public:
     // XMS entry point stub location in ROM (F000:XMS_ENTRY_OFFSET)
     // Code at this address: INT E0h; RETF
     static constexpr uint16_t XMS_ENTRY_OFFSET = 0x0040;
+    static constexpr uint16_t EMS_PAGE_FRAME_SEGMENT = 0xD000;
+    static constexpr uint16_t EMS_PAGE_SIZE = 0x4000;
+    static constexpr uint8_t EMS_PHYSICAL_PAGE_COUNT = 4;
+    static constexpr uint16_t EMS_TOTAL_PAGES = 256;
+    static constexpr uint16_t EMS_PRIVATE_API_OFFSET = 0x0070;
+    static constexpr uint32_t EMS_IMPORT_RECORD_PHYS = 0xF1100;
 
 private:
     // Original IVT entries written during initialize().
@@ -100,9 +106,27 @@ private:
     void handleTimeService();       // INT 1Ah
     void handleDiskService();       // INT 13h
     void handleSystemService();     // INT 15h
+    void handleEMSService();        // INT 67h
     void handleXMSDispatch();       // INT E0h (XMS far-call entry)
 
+    struct EMSHandle {
+        bool allocated = false;
+        std::vector<std::vector<uint8_t>> pages;
+    };
+    struct EMSMapping {
+        uint16_t handle = 0;
+        uint16_t logicalPage = 0xFFFF;
+    };
+
+    void initializeEMS();
+    void flushEMSPhysicalPage(uint8_t physicalPage);
+    void loadEMSPhysicalPage(uint8_t physicalPage);
+    size_t countEMSAllocatedPages() const;
+    void updateEMSImportRecord();
+
     memory::HIMEM* m_himem = nullptr;
+    std::vector<EMSHandle> m_emsHandles;
+    std::array<EMSMapping, EMS_PHYSICAL_PAGE_COUNT> m_emsMappings{};
 };
 
 } // namespace fador::hw

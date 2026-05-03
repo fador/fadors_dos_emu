@@ -106,8 +106,16 @@ private:
 
   // File handle emulation
   struct FileHandle {
+    enum class Kind {
+      File,
+      EMSDevice,
+    };
+
     std::string path;
+    Kind kind = Kind::File;
     std::fstream stream;
+
+    bool isEMSDevice() const { return kind == Kind::EMSDevice; }
   };
   std::vector<std::shared_ptr<FileHandle>> m_fileHandles;
 

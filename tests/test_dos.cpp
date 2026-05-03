@@ -428,6 +428,76 @@ TEST_CASE("DOS: Duplicate file handle survives closing original", "[DOS][File]")
     std::remove("duphandle.txt");
 }
 
+TEST_CASE("DOS: EMMXXXX0 opens as EMS device and reports EMM386 records", "[DOS][EMS]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    bios.initialize();
+    dos.initialize();
+
+    const std::string deviceName = "EMMXXXX0";
+    const uint32_t nameAddr = 0x70000;
+    for (size_t i = 0; i < deviceName.size(); ++i)
+        mem.write8(nameAddr + i, deviceName[i]);
+    mem.write8(nameAddr + deviceName.size(), 0);
+
+    cpu.setSegReg(cpu::DS, 0x7000);
+    cpu.setSegBase(cpu::DS, 0x70000);
+    cpu.setReg16(cpu::DX, 0x0000);
+    cpu.setReg8(cpu::AH, 0x3D);
+    cpu.setReg8(cpu::AL, 0x00);
+    dos.handleInterrupt(0x21);
+    REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    const uint16_t handle = cpu.getReg16(cpu::AX);
+    REQUIRE(handle >= 5);
+
+    cpu.setReg8(cpu::AH, 0x44);
+    cpu.setReg8(cpu::AL, 0x00);
+    cpu.setReg16(cpu::BX, handle);
+    dos.handleInterrupt(0x21);
+    REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(cpu.getReg16(cpu::DX) & 0x0080);
+
+    cpu.setSegReg(cpu::DS, 0x7100);
+    cpu.setSegBase(cpu::DS, 0x71000);
+    mem.write8(0x71000, 0x00);
+    cpu.setReg8(cpu::AH, 0x44);
+    cpu.setReg8(cpu::AL, 0x02);
+    cpu.setReg16(cpu::BX, handle);
+    cpu.setReg16(cpu::CX, 6);
+    cpu.setReg16(cpu::DX, 0x0000);
+    dos.handleInterrupt(0x21);
+    REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(cpu.getReg16(cpu::AX) == 6);
+    REQUIRE(mem.read16(0x71000) == 0x0025);
+    REQUIRE(mem.read16(0x71002) == 0x0070);
+    REQUIRE(mem.read16(0x71004) == 0xF000);
+
+    cpu.setSegReg(cpu::DS, 0x7200);
+    cpu.setSegBase(cpu::DS, 0x72000);
+    mem.write8(0x72000, 0x01);
+    cpu.setReg8(cpu::AH, 0x44);
+    cpu.setReg8(cpu::AL, 0x02);
+    cpu.setReg16(cpu::BX, handle);
+    cpu.setReg16(cpu::CX, 6);
+    cpu.setReg16(cpu::DX, 0x0000);
+    dos.handleInterrupt(0x21);
+    REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(cpu.getReg16(cpu::AX) == 6);
+    REQUIRE(mem.read32(0x72000) == 0x000F1100);
+    REQUIRE(mem.read8(0x72004) == 0x01);
+    REQUIRE(mem.read8(0x72005) == 0x10);
+
+    cpu.setReg8(cpu::AH, 0x3E);
+    cpu.setReg16(cpu::BX, handle);
+    dos.handleInterrupt(0x21);
+    REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // DOS Date/Time & Misc Services Edge Cases
 // ═══════════════════════════════════════════════════════════════════════════
