@@ -35,6 +35,7 @@ enum class BenchmarkKind {
   None,
   DecoderLoop,
   RepMovsb,
+  RepMovsd,
 };
 
 BenchmarkKind parseBenchmarkKind(const std::string &name) {
@@ -42,6 +43,8 @@ BenchmarkKind parseBenchmarkKind(const std::string &name) {
     return BenchmarkKind::DecoderLoop;
   if (name == "rep-movsb")
     return BenchmarkKind::RepMovsb;
+  if (name == "rep-movsd")
+    return BenchmarkKind::RepMovsd;
   return BenchmarkKind::None;
 }
 
@@ -51,6 +54,8 @@ const char *benchmarkName(BenchmarkKind kind) {
     return "decoder-loop";
   case BenchmarkKind::RepMovsb:
     return "rep-movsb";
+  case BenchmarkKind::RepMovsd:
+    return "rep-movsd";
   case BenchmarkKind::None:
     break;
   }
@@ -341,7 +346,8 @@ int main(int argc, char *argv[]) {
       if (!benchmarkArg.empty()) {
         if (benchmark == BenchmarkKind::None) {
           LOG_ERROR("Unknown benchmark: ", benchmarkArg,
-                    ". Use --bench=decoder-loop or --bench=rep-movsb");
+                    ". Use --bench=decoder-loop, --bench=rep-movsb, or "
+                    "--bench=rep-movsd");
           return 1;
         }
 
@@ -376,6 +382,31 @@ int main(int argc, char *argv[]) {
           for (uint16_t i = 0; i < 64; ++i) {
             memory.write8(kBenchBase + 0x0200u + i,
                           static_cast<uint8_t>((i * 17u + 3u) & 0xFF));
+          }
+          prepareBenchmark = [&]() {
+            cpu.loadSegment(fador::cpu::DS, kBenchSeg);
+            cpu.loadSegment(fador::cpu::ES, kBenchSeg);
+            cpu.setEIP(origin - cpu.getSegBase(fador::cpu::CS));
+            syncSegmentsAndCaches();
+          };
+          break;
+        }
+        case BenchmarkKind::RepMovsd: {
+          static constexpr uint8_t kRepMovsdLoop[] = {
+              0xBE, 0x00, 0x02, // MOV SI,0200h
+              0xBF, 0x00, 0x04, // MOV DI,0400h
+              0xB9, 0x40, 0x00, // MOV CX,0040h
+              0xF3, 0x66, 0xA5, // REP MOVSD
+              0xEB, 0xF2        // JMP short loop start
+          };
+          constexpr uint16_t kBenchSeg = 0x1000;
+          constexpr uint32_t kBenchBase = static_cast<uint32_t>(kBenchSeg) << 4;
+          for (size_t i = 0; i < sizeof(kRepMovsdLoop); ++i) {
+            memory.write8(origin + static_cast<uint32_t>(i), kRepMovsdLoop[i]);
+          }
+          for (uint16_t i = 0; i < 64; ++i) {
+            memory.write32(kBenchBase + 0x0200u + static_cast<uint32_t>(i) * 4u,
+                           0x01020304u * (static_cast<uint32_t>(i) + 1u));
           }
           prepareBenchmark = [&]() {
             cpu.loadSegment(fador::cpu::DS, kBenchSeg);
@@ -429,7 +460,7 @@ int main(int argc, char *argv[]) {
       LOG_WARN(
           "No program specified. Use: fadors_emu [--himem] [--sdl|--no-sdl] "
           "[--debug=cpu,video,dos] [--stop-after=N] [--dump-on-exit] "
-          "[--bench=decoder-loop|rep-movsb] [--bench-steps=N] "
+          "[--bench=decoder-loop|rep-movsb|rep-movsd] [--bench-steps=N] "
           "[--bench-warmup=N] [--exec=\"asm\"] <program.com|exe> "
           "[program-args...]");
 

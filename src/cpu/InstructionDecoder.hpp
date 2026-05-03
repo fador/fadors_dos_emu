@@ -89,7 +89,7 @@ private:
   uint16_t fetch16();
   uint32_t fetch32();
   void syncSegmentCacheIfNeeded();
-  bool tryFastRepMovsb();
+  bool tryFastRepMovs(uint32_t elementSize);
 
 public:
   ModRM decodeModRM(uint8_t byte);

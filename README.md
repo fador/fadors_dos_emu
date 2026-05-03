@@ -41,7 +41,7 @@ cmake --build .
 | `--himem` | Enable high memory (HMA/XMS) support |
 | `--stop-after=N` | Stop execution after N instruction cycles and dump CPU state |
 | `--dump-on-exit` | Dump CPU state when the program terminates |
-| `--bench=decoder-loop\|rep-movsb` | Run an in-process benchmark without loading a program |
+| `--bench=decoder-loop\|rep-movsb\|rep-movsd` | Run an in-process benchmark without loading a program |
 | `--bench-steps=N` | Number of measured instruction steps for `--bench` |
 | `--bench-warmup=N` | Number of warmup instruction steps before `--bench` timing |
 | `--exec="asm"` | Assemble and execute instructions without loading a program (semicolons separate lines) |
@@ -66,6 +66,9 @@ cmake --build .
 
 # Benchmark REP MOVSB throughput with the current interpreter
 ./fadors_emu --no-sdl --bench=rep-movsb --bench-warmup=500000 --bench-steps=5000000
+
+# Benchmark REP MOVSD throughput with the width-aware MOVS fast path
+./fadors_emu --no-sdl --bench=rep-movsd --bench-warmup=500000 --bench-steps=5000000
 
 # Launch interactive debugger (no program)
 ./fadors_emu

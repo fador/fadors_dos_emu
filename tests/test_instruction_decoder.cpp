@@ -210,6 +210,51 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
         REQUIRE(cpu.getReg16(cpu::Reg16Index::DI) == 0x2003);
     }
 
+    SECTION("String Operations: REP MOVSW") {
+        cpu.setReg16(cpu::Reg16Index::SI, 0x1000);
+        cpu.setReg16(cpu::Reg16Index::DI, 0x2000);
+        cpu.setReg16(cpu::Reg16Index::CX, 3);
+        cpu.setSegReg(cpu::SegRegIndex::DS, 0x0000);
+        cpu.setSegReg(cpu::SegRegIndex::ES, 0x0000);
+        mem.write16(0x1000, 0x1122);
+        mem.write16(0x1002, 0x3344);
+        mem.write16(0x1004, 0x5566);
+
+        // REP (0xF3) MOVSW (0xA5)
+        mem.write8(0x100, 0xF3);
+        mem.write8(0x101, 0xA5);
+        decoder.step();
+
+        REQUIRE(mem.read16(0x2000) == 0x1122);
+        REQUIRE(mem.read16(0x2002) == 0x3344);
+        REQUIRE(mem.read16(0x2004) == 0x5566);
+        REQUIRE(cpu.getReg16(cpu::Reg16Index::CX) == 0);
+        REQUIRE(cpu.getReg16(cpu::Reg16Index::SI) == 0x1006);
+        REQUIRE(cpu.getReg16(cpu::Reg16Index::DI) == 0x2006);
+    }
+
+    SECTION("String Operations: REP MOVSD") {
+        cpu.setReg32(cpu::Reg16Index::SI, 0x00001000);
+        cpu.setReg32(cpu::Reg16Index::DI, 0x00002000);
+        cpu.setReg16(cpu::Reg16Index::CX, 2);
+        cpu.setSegReg(cpu::SegRegIndex::DS, 0x0000);
+        cpu.setSegReg(cpu::SegRegIndex::ES, 0x0000);
+        mem.write32(0x1000, 0x11223344);
+        mem.write32(0x1004, 0x55667788);
+
+        // REP (0xF3) operand-size override (0x66) MOVSD (0xA5)
+        mem.write8(0x100, 0xF3);
+        mem.write8(0x101, 0x66);
+        mem.write8(0x102, 0xA5);
+        decoder.step();
+
+        REQUIRE(mem.read32(0x2000) == 0x11223344);
+        REQUIRE(mem.read32(0x2004) == 0x55667788);
+        REQUIRE(cpu.getReg16(cpu::Reg16Index::CX) == 0);
+        REQUIRE(cpu.getReg16(cpu::Reg16Index::SI) == 0x1008);
+        REQUIRE(cpu.getReg16(cpu::Reg16Index::DI) == 0x2008);
+    }
+
     SECTION("String Operations: REP STOSW") {
         cpu.setReg16(cpu::Reg16Index::DI, 0x3000);
         cpu.setReg16(cpu::Reg16Index::CX, 3);
@@ -265,6 +310,30 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
         REQUIRE(cpu.getReg16(cpu::Reg16Index::CX) == 0);
         REQUIRE(cpu.getReg16(cpu::Reg16Index::SI) == 0x0FFF);
         REQUIRE(cpu.getReg16(cpu::Reg16Index::DI) == 0x1FFF);
+    }
+
+    SECTION("String Operations: REP MOVSW with Direction Flag") {
+        cpu.setReg16(cpu::Reg16Index::SI, 0x1004);
+        cpu.setReg16(cpu::Reg16Index::DI, 0x2004);
+        cpu.setReg16(cpu::Reg16Index::CX, 3);
+        cpu.setSegReg(cpu::SegRegIndex::DS, 0x0000);
+        cpu.setSegReg(cpu::SegRegIndex::ES, 0x0000);
+        cpu.setEFLAGS(cpu.getEFLAGS() | cpu::FLAG_DIRECTION);
+        mem.write16(0x1000, 0x1122);
+        mem.write16(0x1002, 0x3344);
+        mem.write16(0x1004, 0x5566);
+
+        // REP (0xF3) MOVSW (0xA5)
+        mem.write8(0x100, 0xF3);
+        mem.write8(0x101, 0xA5);
+        decoder.step();
+
+        REQUIRE(mem.read16(0x2000) == 0x1122);
+        REQUIRE(mem.read16(0x2002) == 0x3344);
+        REQUIRE(mem.read16(0x2004) == 0x5566);
+        REQUIRE(cpu.getReg16(cpu::Reg16Index::CX) == 0);
+        REQUIRE(cpu.getReg16(cpu::Reg16Index::SI) == 0x0FFE);
+        REQUIRE(cpu.getReg16(cpu::Reg16Index::DI) == 0x1FFE);
     }
 
     SECTION("SHRD r/m32, r32, imm8 sets ZF correctly for 32-bit result") {

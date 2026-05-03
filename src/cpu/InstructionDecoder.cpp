@@ -52,7 +52,7 @@ void InstructionDecoder::syncSegmentCacheIfNeeded() {
   }
 }
 
-bool InstructionDecoder::tryFastRepMovsb() {
+bool InstructionDecoder::tryFastRepMovs(uint32_t elementSize) {
   uint32_t count = m_hasPrefix67 ? m_cpu.getReg32(ECX) : m_cpu.getReg16(CX);
   if (count == 0) {
     return true;
@@ -66,48 +66,46 @@ bool InstructionDecoder::tryFastRepMovsb() {
   bool decrement = (m_cpu.getEFLAGS() & FLAG_DIRECTION) != 0;
   uint32_t srcStart = srcOff;
   uint32_t dstStart = dstOff;
+  uint64_t startSpan =
+      static_cast<uint64_t>(elementSize) * static_cast<uint64_t>(iterations - 1);
 
   if (decrement) {
-    uint32_t span = iterations - 1;
-    if (span > srcOff || span > dstOff) {
+    if (startSpan > srcOff || startSpan > dstOff) {
       return false;
     }
-    srcStart -= span;
-    dstStart -= span;
-  } else if (!m_hasPrefix67) {
-    uint32_t span = iterations - 1;
-    if (srcOff + span > 0xFFFFu || dstOff + span > 0xFFFFu) {
-      return false;
-    }
+    srcStart -= static_cast<uint32_t>(startSpan);
+    dstStart -= static_cast<uint32_t>(startSpan);
   } else {
-    uint64_t span = static_cast<uint64_t>(iterations) - 1;
-    if (static_cast<uint64_t>(srcOff) + span > 0xFFFFFFFFull ||
-        static_cast<uint64_t>(dstOff) + span > 0xFFFFFFFFull) {
+    uint64_t addressLimit = m_hasPrefix67 ? 0xFFFFFFFFull : 0xFFFFull;
+    if (static_cast<uint64_t>(srcOff) + startSpan > addressLimit ||
+        static_cast<uint64_t>(dstOff) + startSpan > addressLimit) {
       return false;
     }
   }
 
+  uint32_t byteCount = iterations * elementSize;
+
   uint8_t *srcPtr =
-      m_memory.contiguousAccess(m_segBase[srcSeg] + srcStart, iterations);
+      m_memory.contiguousAccess(m_segBase[srcSeg] + srcStart, byteCount);
   uint8_t *dstPtr =
-      m_memory.contiguousAccess(m_segBase[ES] + dstStart, iterations);
+      m_memory.contiguousAccess(m_segBase[ES] + dstStart, byteCount);
   if (srcPtr == nullptr || dstPtr == nullptr) {
     return false;
   }
 
-  std::memmove(dstPtr, srcPtr, iterations);
+  std::memmove(dstPtr, srcPtr, byteCount);
 
   uint32_t remaining = count - iterations;
   if (m_hasPrefix67) {
     m_cpu.setReg32(ECX, remaining);
-    m_cpu.setReg32(ESI, decrement ? srcOff - iterations : srcOff + iterations);
-    m_cpu.setReg32(EDI, decrement ? dstOff - iterations : dstOff + iterations);
+    m_cpu.setReg32(ESI, decrement ? srcOff - byteCount : srcOff + byteCount);
+    m_cpu.setReg32(EDI, decrement ? dstOff - byteCount : dstOff + byteCount);
   } else {
     m_cpu.setReg16(CX, static_cast<uint16_t>(remaining));
-    m_cpu.setReg16(SI, static_cast<uint16_t>(decrement ? srcOff - iterations
-                                                       : srcOff + iterations));
-    m_cpu.setReg16(DI, static_cast<uint16_t>(decrement ? dstOff - iterations
-                                                       : dstOff + iterations));
+    m_cpu.setReg16(SI, static_cast<uint16_t>(decrement ? srcOff - byteCount
+                                                       : srcOff + byteCount));
+    m_cpu.setReg16(DI, static_cast<uint16_t>(decrement ? dstOff - byteCount
+                                                       : dstOff + byteCount));
   }
 
   if (remaining != 0) {
@@ -514,7 +512,13 @@ void InstructionDecoder::step() {
         // needs to run periodically for SDL event polling, rendering,
         // and audio generation.
         constexpr int MAX_REP_BATCH = 4096;
-        if (opcode == 0xA4 && tryFastRepMovsb()) {
+        uint32_t movsElementSize = 0;
+        if (opcode == 0xA4) {
+          movsElementSize = 1;
+        } else if (opcode == 0xA5) {
+          movsElementSize = m_hasPrefix66 ? 4u : 2u;
+        }
+        if (movsElementSize != 0 && tryFastRepMovs(movsElementSize)) {
           return;
         }
 
