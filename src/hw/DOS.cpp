@@ -57,7 +57,7 @@ bool DOS::handleInterrupt(uint8_t vector) {
   case 0x21: // DOS API
     handleDOSService();
     return true;
-  case 0x3F: { // Overlay Manager / Generic Proxy (VROOMM)
+  case 0x3F: { // Overlay Manager / Generic Proxy (VROOMM / FBOV)
     uint16_t cs = m_cpu.getSegReg(cpu::CS);
 
     uint32_t addr = m_cpu.getSegBase(cpu::CS) + m_cpu.getEIP();
@@ -71,19 +71,32 @@ bool DOS::handleInterrupt(uint8_t vector) {
     LOG_DOS("DOS: VROOMM interpreted: segIndex=", std::dec, segIndex, " (0x",
             std::hex, segIndex, ") offset=0x", targetOffset);
 
-    // Borland thunks natively use 1-based segment indices (same as NE specs)
-    // Segment 1 is often resident, thunks usually refer to segments 2+
-    uint16_t internalSegIdx = (segIndex > 0) ? segIndex - 1 : 0;
-    if (internalSegIdx >= m_neSegments.size()) {
-      LOG_ERROR("DOS: VROOMM invalid segment index ", std::dec, segIndex,
-                " (max=", m_neSegments.size(), ")");
-      return true;
+    uint16_t loadedSeg = 0;
+    if (segIndex == 0) {
+      if (!m_neSegments.empty())
+        loadedSeg = loadOverlaySegment(0);
+    } else {
+      const uint16_t internalSegIdx = static_cast<uint16_t>(segIndex - 1);
+      if (internalSegIdx < m_neSegments.size()) {
+        loadedSeg = loadOverlaySegment(internalSegIdx);
+      } else {
+        auto it = std::find_if(
+            m_fbovOverlays.begin(), m_fbovOverlays.end(),
+            [segIndex](const FBOVOverlay &overlay) {
+              return overlay.overlayId == segIndex;
+            });
+        if (it != m_fbovOverlays.end()) {
+          loadedSeg =
+              loadFBOVOverlay(static_cast<size_t>(std::distance(
+                  m_fbovOverlays.begin(), it)));
+        }
+      }
     }
 
-    uint16_t loadedSeg = loadOverlaySegment(internalSegIdx);
     if (loadedSeg == 0) {
-      LOG_ERROR("DOS: VROOMM failed to load segment index ", std::dec,
-                segIndex);
+      LOG_ERROR("DOS: VROOMM/FBOV failed to resolve overlay id ", std::dec,
+                segIndex, " (NE segments=", m_neSegments.size(),
+                " FBOV blocks=", m_fbovOverlays.size(), ")");
       return true;
     }
 
@@ -1254,6 +1267,14 @@ void DOS::dumpMCBChain() {
   }
 }
 
+void DOS::clearOverlayInfo() {
+  m_programPath.clear();
+  m_neAlignShift = 0;
+  m_neInitialLoadSegment = 0;
+  m_neSegments.clear();
+  m_fbovOverlays.clear();
+}
+
 void DOS::setNEInfo(const std::string &path, uint16_t alignShift,
                     const std::vector<NESegment> &segments,
                     uint16_t initialLoadSegment) {
@@ -1271,6 +1292,21 @@ void DOS::setNEInfo(const std::string &path, uint16_t alignShift,
 
   LOG_INFO("DOS: VROOMM Registered ", segments.size(), " segments. Initial: 0x",
            std::hex, initialLoadSegment, " AlignShift: ", alignShift);
+}
+
+void DOS::setFBOVInfo(const std::string &path,
+                      const std::vector<FBOVOverlay> &overlays) {
+  m_programPath = path;
+  m_fbovOverlays = overlays;
+
+  LOG_INFO("DOS: FBOV Registered ", overlays.size(), " overlay blocks for ",
+           path);
+  for (const auto &overlay : m_fbovOverlays) {
+    LOG_DOS("DOS: FBOV overlay id=", std::dec, overlay.overlayId,
+            " fileOff=0x", std::hex, overlay.fileOffset, " size=0x",
+            overlay.fileSize, " auxOff=0x", overlay.auxOffset,
+            " auxCount=0x", overlay.auxCount);
+  }
 }
 
 uint16_t DOS::loadOverlaySegment(uint16_t segIndex) {
@@ -1436,6 +1472,69 @@ uint16_t DOS::loadOverlaySegment(uint16_t segIndex) {
 
   LOG_DOS("DOS: Loaded overlay segment ", std::dec, segIndex + 1, " to 0x",
           std::hex, targetSegment);
+  return targetSegment;
+}
+
+uint16_t DOS::loadFBOVOverlay(size_t overlayIndex) {
+  LOG_DEBUG("DOS: loadFBOVOverlay(", std::dec, overlayIndex, ")");
+  if (overlayIndex >= m_fbovOverlays.size()) {
+    LOG_ERROR("DOS: loadFBOVOverlay out of bounds: ", overlayIndex);
+    return 0;
+  }
+
+  auto &overlay = m_fbovOverlays[overlayIndex];
+  if (overlay.loadedSegment != 0)
+    return overlay.loadedSegment;
+  if (overlay.fileSize == 0) {
+    LOG_ERROR("DOS: FBOV overlay id ", std::dec, overlay.overlayId,
+              " has zero size");
+    return 0;
+  }
+
+  const uint16_t paragraphs =
+      static_cast<uint16_t>((overlay.fileSize + 15u) / 16u);
+
+  m_cpu.setReg8(cpu::AH, 0x48);
+  m_cpu.setReg16(cpu::BX, paragraphs);
+  handleMemoryManagement();
+
+  if (m_cpu.getEFLAGS() & cpu::FLAG_CARRY) {
+    LOG_ERROR("DOS: Failed to allocate memory (", std::dec, paragraphs,
+              " paras) for FBOV overlay id ", overlay.overlayId);
+    return 0;
+  }
+
+  const uint16_t targetSegment = static_cast<uint16_t>(m_cpu.getReg16(cpu::AX));
+  overlay.loadedSegment = targetSegment;
+
+  std::ifstream file(m_programPath, std::ios::binary);
+  if (!file) {
+    LOG_ERROR("DOS: Failed to open program file for FBOV loading: ",
+              m_programPath);
+    overlay.loadedSegment = 0;
+    return 0;
+  }
+
+  file.seekg(static_cast<std::streamoff>(overlay.fileOffset), std::ios::beg);
+  std::vector<uint8_t> buffer(static_cast<size_t>(paragraphs) * 16u, 0);
+  file.read(reinterpret_cast<char *>(buffer.data()),
+            static_cast<std::streamsize>(overlay.fileSize));
+  if (static_cast<uint32_t>(file.gcount()) != overlay.fileSize) {
+    LOG_ERROR("DOS: Failed to read FBOV overlay id ", std::dec,
+              overlay.overlayId, " size=0x", std::hex, overlay.fileSize,
+              " from file offset 0x", overlay.fileOffset);
+    overlay.loadedSegment = 0;
+    return 0;
+  }
+
+  const uint32_t targetAddr = static_cast<uint32_t>(targetSegment) << 4u;
+  for (uint32_t i = 0; i < buffer.size(); ++i) {
+    m_memory.write8(targetAddr + i, buffer[i]);
+  }
+
+  LOG_DOS("DOS: Loaded FBOV overlay id ", std::dec, overlay.overlayId,
+          " from 0x", std::hex, overlay.fileOffset, " to 0x",
+          targetSegment);
   return targetSegment;
 }
 

@@ -54,9 +54,20 @@ public:
     uint16_t minAlloc;      // Minimum paragraphs to allocate
     uint16_t loadedSegment; // Actual emulated segment, 0 if not loaded
   };
+  struct FBOVOverlay {
+    uint16_t overlayId;     // Borland overlay identifier used by INT 3Fh
+    uint32_t fileOffset;    // Absolute file offset of the FBOV block
+    uint32_t fileSize;      // Size of the FBOV block in bytes
+    uint32_t auxOffset;     // FBOV header auxiliary offset field
+    uint32_t auxCount;      // FBOV header auxiliary count field
+    uint16_t loadedSegment; // Actual emulated segment, 0 if not loaded
+  };
+  void clearOverlayInfo();
   void setNEInfo(const std::string &path, uint16_t alignShift,
                  const std::vector<NESegment> &segments,
                  uint16_t initialLoadSegment);
+  void setFBOVInfo(const std::string &path,
+                   const std::vector<FBOVOverlay> &overlays);
 
   // Set the working directory to the program's parent directory
   void setProgramDir(const std::string &programPath);
@@ -88,8 +99,10 @@ private:
   uint16_t m_neAlignShift = 0;
   uint16_t m_neInitialLoadSegment = 0;
   std::vector<NESegment> m_neSegments;
+  std::vector<FBOVOverlay> m_fbovOverlays;
 
   uint16_t loadOverlaySegment(uint16_t segIndex);
+  uint16_t loadFBOVOverlay(size_t overlayIndex);
 
   // File handle emulation
   struct FileHandle {

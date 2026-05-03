@@ -247,6 +247,102 @@ TEST_CASE("DOS: File SEEK to end", "[DOS][File]") {
     std::remove("seektest.txt");
 }
 
+TEST_CASE("ProgramLoader parses FBOV overlays and INT 3F loads them", "[DOS][Overlay][FBOV]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    bios.initialize();
+    dos.initialize();
+    hw::ProgramLoader loader(cpu, mem, dos.getHIMEM());
+
+    const char* fname = "fbov_test.exe";
+    {
+        std::vector<uint8_t> exe(48 + 24, 0);
+        auto write16 = [&exe](size_t offset, uint16_t value) {
+            exe[offset + 0] = static_cast<uint8_t>(value & 0xFF);
+            exe[offset + 1] = static_cast<uint8_t>((value >> 8) & 0xFF);
+        };
+        auto write32 = [&exe](size_t offset, uint32_t value) {
+            exe[offset + 0] = static_cast<uint8_t>(value & 0xFF);
+            exe[offset + 1] = static_cast<uint8_t>((value >> 8) & 0xFF);
+            exe[offset + 2] = static_cast<uint8_t>((value >> 16) & 0xFF);
+            exe[offset + 3] = static_cast<uint8_t>((value >> 24) & 0xFF);
+        };
+
+        exe[0] = 'M';
+        exe[1] = 'Z';
+        write16(2, 48);      // Last page size
+        write16(4, 1);       // Number of pages
+        write16(6, 0);       // Relocations
+        write16(8, 2);       // Header size paragraphs (32 bytes)
+        write16(10, 0);      // minAlloc
+        write16(12, 0);      // maxAlloc
+        write16(14, 0);      // SS
+        write16(16, 0xFFFE); // SP
+        write16(18, 0);      // checksum
+        write16(20, 0);      // IP
+        write16(22, 0);      // CS
+        write16(24, 0x001C); // relocation table offset
+        write16(26, 0);      // overlay number
+
+        exe[32] = 0x90;
+        exe[33] = 0x90;
+        exe[34] = 0xCD;
+        exe[35] = 0x20;
+
+        exe[48] = 'F';
+        exe[49] = 'B';
+        exe[50] = 'O';
+        exe[51] = 'V';
+        write16(52, 24);     // FBOV block size
+        write16(54, 2);      // Overlay id
+        write32(56, 0);      // aux offset
+        write32(60, 0);      // aux count
+        exe[64] = 'O';
+        exe[65] = 'V';
+        exe[66] = 'R';
+        exe[67] = 'D';
+        exe[68] = 'A';
+        exe[69] = 'T';
+        exe[70] = 'A';
+        exe[71] = '!';
+
+        std::ofstream ofs(fname, std::ios::binary);
+        ofs.write(reinterpret_cast<const char*>(exe.data()), static_cast<std::streamsize>(exe.size()));
+    }
+
+    REQUIRE(loader.loadEXE(fname, dos.getPSPSegment(), dos));
+
+    cpu.setSegReg(cpu::CS, 0x2000);
+    cpu.setSegBase(cpu::CS, 0x20000);
+    cpu.setEIP(0x0102);
+    cpu.setInstructionStartEIP(0x0100);
+
+    mem.write8(0x20100, 0xCD);
+    mem.write8(0x20101, 0x3F);
+    mem.write16(0x20102, 0x1234);
+    mem.write16(0x20104, 0x0002);
+
+    REQUIRE(dos.handleInterrupt(0x3F));
+    REQUIRE(mem.read8(0x20100) == 0xEA);
+    REQUIRE(mem.read16(0x20101) == 0x1234);
+
+    const uint16_t overlaySeg = mem.read16(0x20103);
+    REQUIRE(overlaySeg != 0);
+
+    const uint32_t overlayAddr = static_cast<uint32_t>(overlaySeg) << 4;
+    REQUIRE(mem.read8(overlayAddr + 0) == 'F');
+    REQUIRE(mem.read8(overlayAddr + 1) == 'B');
+    REQUIRE(mem.read8(overlayAddr + 2) == 'O');
+    REQUIRE(mem.read8(overlayAddr + 3) == 'V');
+
+    std::remove(fname);
+}
+
 TEST_CASE("DOS: Close invalid file handle returns error", "[DOS][File]") {
     cpu::CPU cpu;
     memory::MemoryBus mem;

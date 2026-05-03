@@ -2,6 +2,8 @@
 #include "../memory/himem/HIMEM.hpp"
 #include "../utils/Logger.hpp"
 #include "DOS.hpp"
+#include <algorithm>
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <vector>
@@ -9,6 +11,79 @@
 namespace fador::hw { extern memory::HIMEM *g_himem; }
 
 namespace fador::hw {
+
+namespace {
+
+constexpr std::array<uint8_t, 4> kFBOVSignature{{'F', 'B', 'O', 'V'}};
+
+uint16_t readLE16(const uint8_t *data) {
+  return static_cast<uint16_t>(data[0]) |
+         (static_cast<uint16_t>(data[1]) << 8);
+}
+
+uint32_t readLE32(const uint8_t *data) {
+  return static_cast<uint32_t>(data[0]) |
+         (static_cast<uint32_t>(data[1]) << 8) |
+         (static_cast<uint32_t>(data[2]) << 16) |
+         (static_cast<uint32_t>(data[3]) << 24);
+}
+
+struct FBOVHeader {
+  uint16_t blockSize;
+  uint16_t overlayId;
+  uint32_t auxOffset;
+  uint32_t auxCount;
+};
+
+std::vector<DOS::FBOVOverlay>
+parseFBOVOverlays(std::ifstream &file, uint32_t startOffset, uint32_t fileSize) {
+  std::vector<DOS::FBOVOverlay> overlays;
+  if (fileSize <= startOffset || fileSize - startOffset < 16u)
+    return overlays;
+
+  std::vector<uint8_t> tail(fileSize - startOffset);
+  file.clear();
+  file.seekg(static_cast<std::streamoff>(startOffset), std::ios::beg);
+  if (!file.read(reinterpret_cast<char *>(tail.data()),
+                 static_cast<std::streamsize>(tail.size()))) {
+    file.clear();
+    return overlays;
+  }
+
+  auto it = std::search(tail.begin(), tail.end(), kFBOVSignature.begin(),
+                        kFBOVSignature.end());
+  while (it != tail.end()) {
+    const size_t relOffset =
+        static_cast<size_t>(std::distance(tail.begin(), it));
+    if (tail.size() - relOffset < 16u)
+      break;
+
+    const uint8_t *headerData = tail.data() + relOffset + kFBOVSignature.size();
+    const FBOVHeader header{readLE16(headerData + 0), readLE16(headerData + 2),
+                            readLE32(headerData + 4), readLE32(headerData + 8)};
+    const uint32_t absOffset = startOffset + static_cast<uint32_t>(relOffset);
+
+    const bool valid =
+        header.blockSize >= 16u && header.overlayId != 0 &&
+        absOffset + header.blockSize <= fileSize;
+    if (valid) {
+      overlays.push_back({header.overlayId, absOffset, header.blockSize,
+                          header.auxOffset, header.auxCount, 0});
+    }
+
+    auto next = it + 1;
+    if (valid) {
+      next = tail.begin() + static_cast<std::ptrdiff_t>(relOffset + header.blockSize);
+    }
+    it = std::search(next, tail.end(), kFBOVSignature.begin(),
+                     kFBOVSignature.end());
+  }
+
+  file.clear();
+  return overlays;
+}
+
+} // namespace
 
 ProgramLoader::ProgramLoader(cpu::CPU &cpu, memory::MemoryBus &memory,
                              memory::HIMEM *himem)
@@ -66,6 +141,12 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
     LOG_ERROR("ProgramLoader: Failed to open .EXE file: ", path);
     return false;
   }
+
+  file.seekg(0, std::ios::end);
+  const uint32_t fileSize = static_cast<uint32_t>(file.tellg());
+  file.seekg(0, std::ios::beg);
+
+  dos.clearOverlayInfo();
 
   struct MZHeader {
     uint16_t signature; // 'MZ'
@@ -247,6 +328,7 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
   uint32_t imageSize = mzImageBytes - imageOffset;
 
   bool isNEExe = false;
+  std::vector<DOS::FBOVOverlay> fbovOverlays;
   if (neOffset > 0) {
     file.seekg(neOffset, std::ios::beg);
     uint16_t neSig2 = 0;
@@ -255,6 +337,15 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
       isNEExe = true;
       LOG_INFO("ProgramLoader: NE exe: loading only MZ stub (0x", std::hex,
                imageSize, " bytes); overlay segments loaded on demand");
+    }
+  }
+
+  if (!isNEExe) {
+    fbovOverlays = parseFBOVOverlays(file, mzImageBytes, fileSize);
+    if (!fbovOverlays.empty()) {
+      dos.setFBOVInfo(path, fbovOverlays);
+      LOG_INFO("ProgramLoader: FBOV overlay info set. Blocks: ", std::dec,
+               fbovOverlays.size());
     }
   }
 
@@ -267,6 +358,7 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
   uint32_t loadAddr = (loadSegment << 4);
 
   std::vector<uint8_t> buffer(imageSize);
+  file.clear();
   file.seekg(imageOffset, std::ios::beg);
   if (!file.read(reinterpret_cast<char *>(buffer.data()), imageSize)) {
     LOG_ERROR("ProgramLoader: Failed to read EXE image");
@@ -318,11 +410,11 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
     // sentinel matches; zeroing this area causes premature table
     // termination and broken initialisation paths.
 
-    // For NE executables, the PSP MCB was sized at 0x7000 paragraphs in
-    // DOS::initialize().  Now that we only loaded the MZ stub, shrink the
-    // MCB to the actual stub footprint so the remaining conventional memory
-    // is available as a free block for overlay segment allocations.
-    if (isNEExe) {
+    // For executables with demand-loaded overlays, the PSP MCB was sized to
+    // consume all conventional memory in DOS::initialize(). Shrink the loaded
+    // block to the actual resident image so the remainder is available for
+    // overlay allocations.
+    if (isNEExe || !fbovOverlays.empty()) {
       // PSP (16 para) + MZ stub (rounded up to paragraph boundary)
       uint16_t stubParas = static_cast<uint16_t>((imageSize + 15u) / 16u);
       uint16_t loadedParas = 0x10u + stubParas;                // PSP + stub
@@ -343,9 +435,9 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
       for (int k = 0; k < 8; ++k)
         m_memory.write8(freeMcbAddr + 8u + k, 0u);
 
-      LOG_INFO("ProgramLoader: NE MCB updated – PSP block 0x", std::hex,
-               loadedParas, " paras; free block at seg 0x", freeMcbSeg,
-               " size 0x", freeSize, " paras");
+      LOG_INFO("ProgramLoader: Overlay-capable MCB updated – PSP block 0x",
+               std::hex, loadedParas, " paras; free block at seg 0x",
+               freeMcbSeg, " size 0x", freeSize, " paras");
     }
   }
 
