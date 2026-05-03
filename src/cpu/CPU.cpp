@@ -4,6 +4,19 @@
 
 namespace fador::cpu {
 
+namespace {
+
+uint32_t decodeSegmentBase(uint32_t low, uint32_t high) {
+  return ((low >> 16) & 0xFFFF) | ((high & 0x000000FF) << 16) |
+         (high & 0xFF000000);
+}
+
+bool decodeSegmentIs32Bit(uint32_t high) {
+  return (high & 0x00400000u) != 0;
+}
+
+} // namespace
+
 CPU::CPU() { reset(); }
 
 void CPU::reset() {
@@ -24,6 +37,8 @@ void CPU::reset() {
   for (int i = 0; i < 6; i++) {
     m_segBase[i] = static_cast<uint32_t>(m_segRegs[i]) << 4;
   }
+  m_segmentStateVersion = 1;
+  m_dirtySegmentMask = 0;
 
   LOG_INFO("CPU Reset: CS:EIP = 0x", std::hex, m_segRegs[CS], ":0x", m_eip);
 }
@@ -67,43 +82,62 @@ void CPU::setReg8(uint8_t index, uint8_t value) {
   }
 }
 
-void CPU::push16(uint16_t value) {
-  bool use32Stack = m_is32BitStack;
-  uint32_t stackBase = m_segBase[SS];
-  if ((m_cr[0] & 1) && !(m_eflags & 0x00020000) && m_memory) {
-    uint16_t ss = m_segRegs[SS];
-    bool descValid = false;
-    if (ss != 0) {
-      const auto &table = (ss & 0x04) ? m_ldtr : m_gdtr;
-      uint32_t index = static_cast<uint32_t>(ss & ~7);
-      if (table.base != 0 && index + 7 <= table.limit) {
-        uint32_t entry = table.base + index;
-        uint32_t high = m_memory->read32(entry + 4);
-        bool present = (high & 0x00008000u) != 0;
-        bool codeOrData = (high & 0x00001000u) != 0;
-        if (present && codeOrData) {
-          descValid = true;
-          use32Stack = (high & 0x00400000u) != 0;
-        } else {
-          use32Stack = false;
-        }
-      } else {
-        use32Stack = false;
+void CPU::loadSegment(SegRegIndex segIndex, uint16_t value) {
+  uint8_t seg = static_cast<uint8_t>(segIndex);
+  uint8_t mask = static_cast<uint8_t>(1u << seg);
+  m_segRegs[seg] = value;
+
+  bool isRealMode = !(m_cr[0] & 1) || (m_eflags & 0x00020000);
+  if (isRealMode) {
+    m_segBase[seg] = static_cast<uint32_t>(value) << 4;
+    if (seg == CS) {
+      m_is32BitCode = false;
+    }
+    if (seg == SS) {
+      m_is32BitStack = false;
+    }
+  } else if (value == 0 && seg != CS && seg != SS) {
+    m_segBase[seg] = 0;
+  } else if (!m_memory) {
+    m_segBase[seg] = static_cast<uint32_t>(value) << 4;
+    if (seg == CS) {
+      m_is32BitCode = false;
+    }
+    if (seg == SS) {
+      m_is32BitStack = false;
+    }
+  } else {
+    const auto &table = (value & 0x04) ? m_ldtr : m_gdtr;
+    uint32_t entryOffset = static_cast<uint32_t>(value & ~7u);
+    if (table.base == 0 || entryOffset + 7 > table.limit) {
+      m_segBase[seg] = static_cast<uint32_t>(value) << 4;
+      if (seg == CS) {
+        m_is32BitCode = false;
+      }
+      if (seg == SS) {
+        m_is32BitStack = false;
       }
     } else {
-      use32Stack = false;
-    }
-    if (!descValid && ss != 0) {
-      // Fallback for transient RM-style selector states under PE.
-      stackBase = static_cast<uint32_t>(ss) << 4;
-      // Keep cached SS base in sync with the fallback so other code
-      // that reads `m_segBase[SS]` (e.g. InstructionDecoder) sees the
-      // same effective base used for the push/pop memory accesses.
-      m_segBase[SS] = stackBase;
-      use32Stack = false;
+      uint32_t entryAddr = table.base + entryOffset;
+      uint32_t low = m_memory->read32(entryAddr);
+      uint32_t high = m_memory->read32(entryAddr + 4);
+      m_segBase[seg] = decodeSegmentBase(low, high);
+      if (seg == CS) {
+        m_is32BitCode = decodeSegmentIs32Bit(high);
+      }
+      if (seg == SS) {
+        m_is32BitStack = decodeSegmentIs32Bit(high);
+      }
     }
   }
-  if (use32Stack) {
+
+  m_dirtySegmentMask = static_cast<uint8_t>(m_dirtySegmentMask & ~mask);
+  ++m_segmentStateVersion;
+}
+
+void CPU::push16(uint16_t value) {
+  uint32_t stackBase = m_segBase[SS];
+  if (m_is32BitStack) {
     uint32_t esp = getReg32(ESP) - 2;
     setReg32(ESP, esp);
     if (m_memory)
@@ -117,39 +151,8 @@ void CPU::push16(uint16_t value) {
 }
 
 void CPU::push32(uint32_t value) {
-  bool use32Stack = m_is32BitStack;
   uint32_t stackBase = m_segBase[SS];
-  if ((m_cr[0] & 1) && !(m_eflags & 0x00020000) && m_memory) {
-    uint16_t ss = m_segRegs[SS];
-    bool descValid = false;
-    if (ss != 0) {
-      const auto &table = (ss & 0x04) ? m_ldtr : m_gdtr;
-      uint32_t index = static_cast<uint32_t>(ss & ~7);
-      if (table.base != 0 && index + 7 <= table.limit) {
-        uint32_t entry = table.base + index;
-        uint32_t high = m_memory->read32(entry + 4);
-        bool present = (high & 0x00008000u) != 0;
-        bool codeOrData = (high & 0x00001000u) != 0;
-        if (present && codeOrData) {
-          descValid = true;
-          use32Stack = (high & 0x00400000u) != 0;
-        } else {
-          use32Stack = false;
-        }
-      } else {
-        use32Stack = false;
-      }
-    } else {
-      use32Stack = false;
-    }
-    if (!descValid && ss != 0) {
-      // Fallback for transient RM-style selector states under PE.
-      stackBase = static_cast<uint32_t>(ss) << 4;
-      m_segBase[SS] = stackBase;
-      use32Stack = false;
-    }
-  }
-  if (use32Stack) {
+  if (m_is32BitStack) {
     uint32_t esp = getReg32(ESP) - 4;
     setReg32(ESP, esp);
     if (m_memory)
@@ -164,39 +167,8 @@ void CPU::push32(uint32_t value) {
 
 uint16_t CPU::pop16() {
   uint16_t value = 0;
-  bool use32Stack = m_is32BitStack;
   uint32_t stackBase = m_segBase[SS];
-  if ((m_cr[0] & 1) && !(m_eflags & 0x00020000) && m_memory) {
-    uint16_t ss = m_segRegs[SS];
-    bool descValid = false;
-    if (ss != 0) {
-      const auto &table = (ss & 0x04) ? m_ldtr : m_gdtr;
-      uint32_t index = static_cast<uint32_t>(ss & ~7);
-      if (table.base != 0 && index + 7 <= table.limit) {
-        uint32_t entry = table.base + index;
-        uint32_t high = m_memory->read32(entry + 4);
-        bool present = (high & 0x00008000u) != 0;
-        bool codeOrData = (high & 0x00001000u) != 0;
-        if (present && codeOrData) {
-          descValid = true;
-          use32Stack = (high & 0x00400000u) != 0;
-        } else {
-          use32Stack = false;
-        }
-      } else {
-        use32Stack = false;
-      }
-    } else {
-      use32Stack = false;
-    }
-    if (!descValid && ss != 0) {
-      // Fallback for transient RM-style selector states under PE.
-      stackBase = static_cast<uint32_t>(ss) << 4;
-      m_segBase[SS] = stackBase;
-      use32Stack = false;
-    }
-  }
-  if (use32Stack) {
+  if (m_is32BitStack) {
     uint32_t esp = getReg32(ESP);
     if (m_memory)
       value = m_memory->read16(stackBase + esp);
@@ -216,39 +188,8 @@ void CPU::setEIP(uint32_t val) {
 
 uint32_t CPU::pop32() {
   uint32_t value = 0;
-  bool use32Stack = m_is32BitStack;
   uint32_t stackBase = m_segBase[SS];
-  if ((m_cr[0] & 1) && !(m_eflags & 0x00020000) && m_memory) {
-    uint16_t ss = m_segRegs[SS];
-    bool descValid = false;
-    if (ss != 0) {
-      const auto &table = (ss & 0x04) ? m_ldtr : m_gdtr;
-      uint32_t index = static_cast<uint32_t>(ss & ~7);
-      if (table.base != 0 && index + 7 <= table.limit) {
-        uint32_t entry = table.base + index;
-        uint32_t high = m_memory->read32(entry + 4);
-        bool present = (high & 0x00008000u) != 0;
-        bool codeOrData = (high & 0x00001000u) != 0;
-        if (present && codeOrData) {
-          descValid = true;
-          use32Stack = (high & 0x00400000u) != 0;
-        } else {
-          use32Stack = false;
-        }
-      } else {
-        use32Stack = false;
-      }
-    } else {
-      use32Stack = false;
-    }
-    if (!descValid && ss != 0) {
-      // Fallback for transient RM-style selector states under PE.
-       stackBase = static_cast<uint32_t>(ss) << 4;
-       m_segBase[SS] = stackBase;
-      use32Stack = false;
-    }
-  }
-  if (use32Stack) {
+  if (m_is32BitStack) {
     uint32_t esp = getReg32(ESP);
     if (m_memory)
       value = m_memory->read32(stackBase + esp);

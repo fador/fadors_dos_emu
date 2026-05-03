@@ -5,6 +5,25 @@
 
 namespace fador::memory {
 
+namespace {
+
+constexpr uint32_t A20_MASK = 0xFFFFF;
+constexpr uint32_t VGA_PLANAR_START = 0xA0000;
+constexpr uint32_t VGA_PLANAR_END = 0xB0000;
+
+bool intersectsRange(uint32_t start, uint32_t size, uint32_t rangeStart,
+                     uint32_t rangeEnd) {
+  if (size == 0) {
+    return false;
+  }
+
+  return start < rangeEnd &&
+         static_cast<uint64_t>(start) + static_cast<uint64_t>(size) >
+             rangeStart;
+}
+
+} // namespace
+
 MemoryBus::MemoryBus() {
   m_ram.resize(MEMORY_SIZE, 0);
 
@@ -156,6 +175,34 @@ uint8_t *MemoryBus::directAccess(uint32_t address) {
     return &m_ram[address];
   }
   return nullptr;
+}
+
+uint8_t *MemoryBus::contiguousAccess(uint32_t address, uint32_t size) {
+  uint32_t effectiveAddress = m_a20Enabled ? address : (address & A20_MASK);
+
+  if (size == 0) {
+    return effectiveAddress < MEMORY_SIZE ? &m_ram[effectiveAddress] : nullptr;
+  }
+
+  if (!m_a20Enabled && size - 1 > A20_MASK - effectiveAddress) {
+    return nullptr;
+  }
+
+  if (effectiveAddress >= MEMORY_SIZE || size > MEMORY_SIZE - effectiveAddress) {
+    return nullptr;
+  }
+
+  if (m_vga &&
+      intersectsRange(effectiveAddress, size, VGA_PLANAR_START, VGA_PLANAR_END)) {
+    return nullptr;
+  }
+
+  return &m_ram[effectiveAddress];
+}
+
+const uint8_t *MemoryBus::contiguousAccess(uint32_t address,
+                                           uint32_t size) const {
+  return const_cast<MemoryBus *>(this)->contiguousAccess(address, size);
 }
 
 } // namespace fador::memory

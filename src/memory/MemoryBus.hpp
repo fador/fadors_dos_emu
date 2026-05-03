@@ -28,6 +28,11 @@ public:
   // address or video
   uint8_t *directAccess(uint32_t address);
 
+  // Returns a direct pointer only when the effective range is contiguous RAM
+  // with no VGA plane side effects.
+  uint8_t *contiguousAccess(uint32_t address, uint32_t size);
+  const uint8_t *contiguousAccess(uint32_t address, uint32_t size) const;
+
   void setA20(bool enabled) {
     m_a20Enabled = enabled;
     LOG_DEBUG("Memory: A20 Gate ", enabled ? "Enabled" : "Disabled");

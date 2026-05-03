@@ -25,7 +25,39 @@
 #endif
 
 #include <chrono>
+#include <cstdint>
+#include <functional>
 #include <thread>
+
+namespace {
+
+enum class BenchmarkKind {
+  None,
+  DecoderLoop,
+  RepMovsb,
+};
+
+BenchmarkKind parseBenchmarkKind(const std::string &name) {
+  if (name == "decoder-loop")
+    return BenchmarkKind::DecoderLoop;
+  if (name == "rep-movsb")
+    return BenchmarkKind::RepMovsb;
+  return BenchmarkKind::None;
+}
+
+const char *benchmarkName(BenchmarkKind kind) {
+  switch (kind) {
+  case BenchmarkKind::DecoderLoop:
+    return "decoder-loop";
+  case BenchmarkKind::RepMovsb:
+    return "rep-movsb";
+  case BenchmarkKind::None:
+    break;
+  }
+  return "none";
+}
+
+} // namespace
 
 int main(int argc, char *argv[]) {
   try {
@@ -196,6 +228,10 @@ int main(int argc, char *argv[]) {
     bool dumpOnExit = false;
     uint64_t stopAfterCycles = 0; // 0 = disabled
     std::string execAsm;          // --exec="asm instructions"
+    std::string benchmarkArg;
+    BenchmarkKind benchmark = BenchmarkKind::None;
+    uint64_t benchmarkSteps = 5000000;
+    uint64_t benchmarkWarmup = 500000;
 #ifdef HAVE_SDL2
     bool useSDL = true; // Default to SDL when available
 #else
@@ -226,6 +262,13 @@ int main(int argc, char *argv[]) {
         stopAfterCycles = std::stoull(arg.substr(13));
       } else if (arg.find("--exec=") == 0) {
         execAsm = arg.substr(7);
+      } else if (arg.find("--bench=") == 0) {
+        benchmarkArg = arg.substr(8);
+        benchmark = parseBenchmarkKind(benchmarkArg);
+      } else if (arg.find("--bench-steps=") == 0) {
+        benchmarkSteps = std::stoull(arg.substr(14));
+      } else if (arg.find("--bench-warmup=") == 0) {
+        benchmarkWarmup = std::stoull(arg.substr(15));
       } else if (arg == "--sdl") {
 #ifdef HAVE_SDL2
         useSDL = true;
@@ -280,10 +323,115 @@ int main(int argc, char *argv[]) {
       dos.setProgramDir(path);
       decoder.syncSegments();
     } else {
+      auto runExecLoop = [&](uint64_t steps) {
+        for (uint64_t i = 0; i < steps; ++i) {
+          decoder.step();
+          cpu.addCycles(4);
+          pit.addCycles(4);
+          if (dos.isTerminated())
+            return false;
+        }
+        return true;
+      };
+
+      auto syncSegmentsAndCaches = [&]() {
+        decoder.syncSegments();
+      };
+
+      if (!benchmarkArg.empty()) {
+        if (benchmark == BenchmarkKind::None) {
+          LOG_ERROR("Unknown benchmark: ", benchmarkArg,
+                    ". Use --bench=decoder-loop or --bench=rep-movsb");
+          return 1;
+        }
+
+        uint32_t origin = (cpu.getSegReg(fador::cpu::CS) << 4) + cpu.getEIP();
+        std::function<void()> prepareBenchmark = [&]() {};
+
+        switch (benchmark) {
+        case BenchmarkKind::DecoderLoop: {
+          static constexpr uint8_t kDecoderLoop[] = {0x90, 0xEB, 0xFD};
+          for (size_t i = 0; i < sizeof(kDecoderLoop); ++i) {
+            memory.write8(origin + static_cast<uint32_t>(i), kDecoderLoop[i]);
+          }
+          prepareBenchmark = [&]() {
+            cpu.setEIP(origin - cpu.getSegBase(fador::cpu::CS));
+            syncSegmentsAndCaches();
+          };
+          break;
+        }
+        case BenchmarkKind::RepMovsb: {
+          static constexpr uint8_t kRepMovsbLoop[] = {
+              0xBE, 0x00, 0x02, // MOV SI,0200h
+              0xBF, 0x00, 0x04, // MOV DI,0400h
+              0xB9, 0x40, 0x00, // MOV CX,0040h
+              0xF3, 0xA4,       // REP MOVSB
+              0xEB, 0xF3        // JMP short loop start
+          };
+          constexpr uint16_t kBenchSeg = 0x1000;
+          constexpr uint32_t kBenchBase = static_cast<uint32_t>(kBenchSeg) << 4;
+          for (size_t i = 0; i < sizeof(kRepMovsbLoop); ++i) {
+            memory.write8(origin + static_cast<uint32_t>(i), kRepMovsbLoop[i]);
+          }
+          for (uint16_t i = 0; i < 64; ++i) {
+            memory.write8(kBenchBase + 0x0200u + i,
+                          static_cast<uint8_t>((i * 17u + 3u) & 0xFF));
+          }
+          prepareBenchmark = [&]() {
+            cpu.loadSegment(fador::cpu::DS, kBenchSeg);
+            cpu.loadSegment(fador::cpu::ES, kBenchSeg);
+            cpu.setEIP(origin - cpu.getSegBase(fador::cpu::CS));
+            syncSegmentsAndCaches();
+          };
+          break;
+        }
+        case BenchmarkKind::None:
+          break;
+        }
+
+        LOG_INFO("Running benchmark ", benchmarkName(benchmark),
+                 " warmup_steps=", benchmarkWarmup,
+                 " measured_steps=", benchmarkSteps);
+
+        prepareBenchmark();
+        if (benchmarkWarmup > 0 && !runExecLoop(benchmarkWarmup)) {
+          LOG_ERROR("Benchmark warmup terminated unexpectedly");
+          return 1;
+        }
+
+        prepareBenchmark();
+        auto start = std::chrono::steady_clock::now();
+        if (!runExecLoop(benchmarkSteps)) {
+          LOG_ERROR("Benchmark terminated unexpectedly during measured run");
+          return 1;
+        }
+        auto end = std::chrono::steady_clock::now();
+
+        double elapsedMs =
+            std::chrono::duration<double, std::milli>(end - start).count();
+        double elapsedSec = elapsedMs / 1000.0;
+        double stepsPerSec =
+            elapsedSec > 0.0 ? static_cast<double>(benchmarkSteps) / elapsedSec
+                              : 0.0;
+        double nsPerStep =
+            benchmarkSteps > 0 ? (elapsedSec * 1'000'000'000.0) /
+                                     static_cast<double>(benchmarkSteps)
+                               : 0.0;
+
+        LOG_INFO("Benchmark result name=", benchmarkName(benchmark),
+                 " elapsed_ms=", elapsedMs,
+                 " ns_per_step=", nsPerStep,
+                 " steps_per_sec=", stepsPerSec,
+                 " mips=", (stepsPerSec / 1'000'000.0));
+        return 0;
+      }
+
       LOG_WARN(
           "No program specified. Use: fadors_emu [--himem] [--sdl|--no-sdl] "
           "[--debug=cpu,video,dos] [--stop-after=N] [--dump-on-exit] "
-          "[--exec=\"asm\"] <program.com|exe> [program-args...]");
+          "[--bench=decoder-loop|rep-movsb] [--bench-steps=N] "
+          "[--bench-warmup=N] [--exec=\"asm\"] <program.com|exe> "
+          "[program-args...]");
 
       // --exec mode: assemble, write to CS:IP, run, dump state
       if (!execAsm.empty()) {
@@ -306,16 +454,10 @@ int main(int argc, char *argv[]) {
         }
         LOG_INFO("Assembled ", result.bytes.size(), " bytes at ", std::hex,
                  origin);
-        decoder.syncSegments();
+        syncSegmentsAndCaches();
 
         uint64_t maxCycles = stopAfterCycles > 0 ? stopAfterCycles : 100000;
-        for (uint64_t i = 0; i < maxCycles; ++i) {
-          decoder.step();
-          cpu.addCycles(4);
-          pit.addCycles(4);
-          if (dos.isTerminated())
-            break;
-        }
+        runExecLoop(maxCycles);
         debugger.dumpState();
         return 0;
       }

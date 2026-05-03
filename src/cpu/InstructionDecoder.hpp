@@ -65,6 +65,7 @@ private:
   bool m_hasRepz;
   uint8_t m_segmentOverride; // SegRegIndex or 0xFF for none
   uint32_t m_segBase[6];     // Cached bases for ES, CS, SS, DS, FS, GS
+  uint64_t m_cachedSegStateVersion;
 
   // App-level PM interrupt vectors captured from INT 31h/0205h calls
   // that are intercepted by DOS extender thunks before reaching the DPMI host.
@@ -87,6 +88,8 @@ private:
   uint8_t fetch8();
   uint16_t fetch16();
   uint32_t fetch32();
+  void syncSegmentCacheIfNeeded();
+  bool tryFastRepMovsb();
 
 public:
   ModRM decodeModRM(uint8_t byte);

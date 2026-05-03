@@ -187,6 +187,29 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
         REQUIRE(cpu.getReg16(cpu::Reg16Index::DI) == 0x2001);
     }
 
+    SECTION("String Operations: REP MOVSB") {
+        cpu.setReg16(cpu::Reg16Index::SI, 0x1000);
+        cpu.setReg16(cpu::Reg16Index::DI, 0x2000);
+        cpu.setReg16(cpu::Reg16Index::CX, 3);
+        cpu.setSegReg(cpu::SegRegIndex::DS, 0x0000);
+        cpu.setSegReg(cpu::SegRegIndex::ES, 0x0000);
+        mem.write8(0x1000, 0x11);
+        mem.write8(0x1001, 0x22);
+        mem.write8(0x1002, 0x33);
+
+        // REP (0xF3) MOVSB (0xA4)
+        mem.write8(0x100, 0xF3);
+        mem.write8(0x101, 0xA4);
+        decoder.step();
+
+        REQUIRE(mem.read8(0x2000) == 0x11);
+        REQUIRE(mem.read8(0x2001) == 0x22);
+        REQUIRE(mem.read8(0x2002) == 0x33);
+        REQUIRE(cpu.getReg16(cpu::Reg16Index::CX) == 0);
+        REQUIRE(cpu.getReg16(cpu::Reg16Index::SI) == 0x1003);
+        REQUIRE(cpu.getReg16(cpu::Reg16Index::DI) == 0x2003);
+    }
+
     SECTION("String Operations: REP STOSW") {
         cpu.setReg16(cpu::Reg16Index::DI, 0x3000);
         cpu.setReg16(cpu::Reg16Index::CX, 3);
@@ -216,6 +239,30 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
         decoder.step();
         
         REQUIRE(mem.read8(0x2000) == 0xAA);
+        REQUIRE(cpu.getReg16(cpu::Reg16Index::SI) == 0x0FFF);
+        REQUIRE(cpu.getReg16(cpu::Reg16Index::DI) == 0x1FFF);
+    }
+
+    SECTION("String Operations: REP MOVSB with Direction Flag") {
+        cpu.setReg16(cpu::Reg16Index::SI, 0x1002);
+        cpu.setReg16(cpu::Reg16Index::DI, 0x2002);
+        cpu.setReg16(cpu::Reg16Index::CX, 3);
+        cpu.setSegReg(cpu::SegRegIndex::DS, 0x0000);
+        cpu.setSegReg(cpu::SegRegIndex::ES, 0x0000);
+        cpu.setEFLAGS(cpu.getEFLAGS() | cpu::FLAG_DIRECTION);
+        mem.write8(0x1000, 0x11);
+        mem.write8(0x1001, 0x22);
+        mem.write8(0x1002, 0x33);
+
+        // REP (0xF3) MOVSB (0xA4)
+        mem.write8(0x100, 0xF3);
+        mem.write8(0x101, 0xA4);
+        decoder.step();
+
+        REQUIRE(mem.read8(0x2000) == 0x11);
+        REQUIRE(mem.read8(0x2001) == 0x22);
+        REQUIRE(mem.read8(0x2002) == 0x33);
+        REQUIRE(cpu.getReg16(cpu::Reg16Index::CX) == 0);
         REQUIRE(cpu.getReg16(cpu::Reg16Index::SI) == 0x0FFF);
         REQUIRE(cpu.getReg16(cpu::Reg16Index::DI) == 0x1FFF);
     }

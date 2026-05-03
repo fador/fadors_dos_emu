@@ -3,6 +3,7 @@
 #include "../hw/DOS.hpp"
 #include "../hw/IOBus.hpp"
 #include "../utils/Logger.hpp"
+#include <cstring>
 
 namespace fador::cpu {
 
@@ -12,15 +13,10 @@ InstructionDecoder::InstructionDecoder(CPU &cpu, memory::MemoryBus &memory,
     : m_cpu(cpu), m_memory(memory), m_iobus(iobus), m_bios(bios), m_dos(dos),
       m_stepCount(0), m_hasPrefix66(false), m_hasPrefix67(false),
       m_hasRepnz(false), m_hasRepz(false), m_segmentOverride(0xFF),
+      m_cachedSegStateVersion(0),
       m_currentEA(0), m_currentOffset(0), m_eaResolved(false) {
   m_cpu.setMemoryBus(&m_memory);
-
-  // Initialise segment bases for Real Mode
-  for (int i = 0; i < 6; i++) {
-    m_segBase[i] =
-        static_cast<uint32_t>(m_cpu.getSegReg(static_cast<SegRegIndex>(i)))
-        << 4;
-  }
+  syncSegments();
 }
 
 uint8_t InstructionDecoder::fetch8() {
@@ -48,6 +44,76 @@ ModRM InstructionDecoder::decodeModRM(uint8_t byte) {
   return {static_cast<uint8_t>((byte >> 6) & 0x03),
           static_cast<uint8_t>((byte >> 3) & 0x07),
           static_cast<uint8_t>(byte & 0x07)};
+}
+
+void InstructionDecoder::syncSegmentCacheIfNeeded() {
+  if (m_cachedSegStateVersion != m_cpu.getSegmentStateVersion()) {
+    syncSegments();
+  }
+}
+
+bool InstructionDecoder::tryFastRepMovsb() {
+  uint32_t count = m_hasPrefix67 ? m_cpu.getReg32(ECX) : m_cpu.getReg16(CX);
+  if (count == 0) {
+    return true;
+  }
+
+  constexpr uint32_t MAX_REP_BATCH = 4096;
+  uint32_t iterations = count > MAX_REP_BATCH ? MAX_REP_BATCH : count;
+  uint8_t srcSeg = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
+  uint32_t srcOff = m_hasPrefix67 ? m_cpu.getReg32(ESI) : m_cpu.getReg16(SI);
+  uint32_t dstOff = m_hasPrefix67 ? m_cpu.getReg32(EDI) : m_cpu.getReg16(DI);
+  bool decrement = (m_cpu.getEFLAGS() & FLAG_DIRECTION) != 0;
+  uint32_t srcStart = srcOff;
+  uint32_t dstStart = dstOff;
+
+  if (decrement) {
+    uint32_t span = iterations - 1;
+    if (span > srcOff || span > dstOff) {
+      return false;
+    }
+    srcStart -= span;
+    dstStart -= span;
+  } else if (!m_hasPrefix67) {
+    uint32_t span = iterations - 1;
+    if (srcOff + span > 0xFFFFu || dstOff + span > 0xFFFFu) {
+      return false;
+    }
+  } else {
+    uint64_t span = static_cast<uint64_t>(iterations) - 1;
+    if (static_cast<uint64_t>(srcOff) + span > 0xFFFFFFFFull ||
+        static_cast<uint64_t>(dstOff) + span > 0xFFFFFFFFull) {
+      return false;
+    }
+  }
+
+  uint8_t *srcPtr =
+      m_memory.contiguousAccess(m_segBase[srcSeg] + srcStart, iterations);
+  uint8_t *dstPtr =
+      m_memory.contiguousAccess(m_segBase[ES] + dstStart, iterations);
+  if (srcPtr == nullptr || dstPtr == nullptr) {
+    return false;
+  }
+
+  std::memmove(dstPtr, srcPtr, iterations);
+
+  uint32_t remaining = count - iterations;
+  if (m_hasPrefix67) {
+    m_cpu.setReg32(ECX, remaining);
+    m_cpu.setReg32(ESI, decrement ? srcOff - iterations : srcOff + iterations);
+    m_cpu.setReg32(EDI, decrement ? dstOff - iterations : dstOff + iterations);
+  } else {
+    m_cpu.setReg16(CX, static_cast<uint16_t>(remaining));
+    m_cpu.setReg16(SI, static_cast<uint16_t>(decrement ? srcOff - iterations
+                                                       : srcOff + iterations));
+    m_cpu.setReg16(DI, static_cast<uint16_t>(decrement ? dstOff - iterations
+                                                       : dstOff + iterations));
+  }
+
+  if (remaining != 0) {
+    m_cpu.setEIP(m_instrStartEIP);
+  }
+  return true;
 }
 
 SIB InstructionDecoder::decodeSIB(uint8_t byte) {
@@ -350,28 +416,8 @@ bool InstructionDecoder::checkCondition(uint8_t cond) {
 
 void InstructionDecoder::step() {
   m_stepCount++;
-
-  // Keep decoder segment-base cache coherent when other subsystems
-  // (e.g., DPMI host) mutate CPU segment state directly.
-  for (int i = 0; i < 6; ++i) {
-    m_segBase[i] = m_cpu.getSegBase(static_cast<SegRegIndex>(i));
-  }
-
+  syncSegmentCacheIfNeeded();
   bool default32 = m_cpu.is32BitCode();
-  if ((m_cpu.getCR(0) & 1) && !(m_cpu.getEFLAGS() & 0x00020000)) {
-    uint16_t cs = m_cpu.getSegReg(CS);
-    if (cs != 0) {
-      uint32_t tableBase = (cs & 0x04) ? m_cpu.getLDTR().base
-                                       : m_cpu.getGDTR().base;
-      uint32_t entryAddr = tableBase + (cs & ~7);
-      uint32_t low = m_memory.read32(entryAddr);
-      uint32_t high = m_memory.read32(entryAddr + 4);
-      Descriptor desc = decodeDescriptor(low, high);
-      if (desc.isPresent && !desc.isSystem && (desc.type & 0x08)) {
-        default32 = desc.is32Bit;
-      }
-    }
-  }
 
   m_hasPrefix66 = default32;
   m_hasPrefix67 = default32;
@@ -468,6 +514,10 @@ void InstructionDecoder::step() {
         // needs to run periodically for SDL event polling, rendering,
         // and audio generation.
         constexpr int MAX_REP_BATCH = 4096;
+        if (opcode == 0xA4 && tryFastRepMovsb()) {
+          return;
+        }
+
         int batchCount = 0;
         while (true) {
           uint32_t cx =
@@ -4192,6 +4242,8 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
 }
 
 void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
+  syncSegmentCacheIfNeeded();
+
   // HLE fast-path: if the BIOS can handle this vector entirely in HLE,
   // just call the handler and skip the full interrupt dispatch.
   // For hooked vectors (like INT 8 under DOS/4GW), we MUST dispatch
@@ -4425,9 +4477,14 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
 }
 
 void InstructionDecoder::syncSegments() {
+  uint8_t dirtyMask = m_cpu.getDirtySegmentMask();
   for (int i = 0; i < 6; ++i) {
-    loadSegment(static_cast<SegRegIndex>(i), m_cpu.getSegReg(i));
+    if (dirtyMask & (1u << i)) {
+      m_cpu.loadSegment(static_cast<SegRegIndex>(i), m_cpu.getSegReg(i));
+    }
+    m_segBase[i] = m_cpu.getSegBase(static_cast<SegRegIndex>(i));
   }
+  m_cachedSegStateVersion = m_cpu.getSegmentStateVersion();
 }
 
 InstructionDecoder::Descriptor
@@ -4456,52 +4513,8 @@ InstructionDecoder::decodeDescriptor(uint32_t low, uint32_t high) {
 }
 
 void InstructionDecoder::loadSegment(SegRegIndex seg, uint16_t selector) {
-  m_cpu.setSegReg(seg, selector);
-
-  bool isRealMode = !(m_cpu.getCR(0) & 1) || (m_cpu.getEFLAGS() & 0x00020000);
-
-  if (isRealMode) {
-    // Real Mode or Virtual 8086 Mode
-    m_segBase[seg] = static_cast<uint32_t>(selector) << 4;
-    m_cpu.setSegBase(seg, m_segBase[seg]);
-    if (seg == CS) {
-      m_cpu.setIs32BitCode(false);
-    }
-    if (seg == SS) {
-      m_cpu.setIs32BitStack(false);
-    }
-  } else {
-    // Protected Mode (Simplified)
-    if (selector == 0 && seg != CS && seg != SS) {
-      m_segBase[seg] = 0; // Null segment
-      m_cpu.setSegBase(seg, 0);
-      return;
-    }
-
-    uint32_t tableBase =
-        (selector & 0x04) ? m_cpu.getLDTR().base : m_cpu.getGDTR().base;
-    uint32_t entryAddr = tableBase + (selector & ~7);
-
-    // Read descriptor (8 bytes)
-    uint32_t low = m_memory.read32(entryAddr);
-    uint32_t high = m_memory.read32(entryAddr + 4);
-
-    Descriptor desc = decodeDescriptor(low, high);
-
-    m_segBase[seg] = desc.base;
-    m_cpu.setSegBase(seg, desc.base);
-
-    if (seg == CS) {
-      m_cpu.setIs32BitCode(desc.is32Bit);
-    }
-    if (seg == SS) {
-      m_cpu.setIs32BitStack(desc.is32Bit);
-    }
-
-    LOG_DEBUG("PM Load Segment ", (int)seg, " selector: 0x", std::hex, selector,
-              " base: 0x", desc.base, " limit: 0x", desc.limit,
-              " 32bit:", desc.is32Bit);
-  }
+  m_cpu.loadSegment(seg, selector);
+  syncSegments();
 }
 
 } // namespace fador::cpu

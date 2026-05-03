@@ -67,12 +67,21 @@ public:
 
   uint16_t getSegReg(uint8_t index) const { return m_segRegs[index % 6]; }
   void setSegReg(uint8_t index, uint16_t value) {
-    m_segRegs[index % 6] = value;
+    uint8_t seg = index % 6;
+    m_segRegs[seg] = value;
+    m_dirtySegmentMask |= static_cast<uint8_t>(1u << seg);
+    ++m_segmentStateVersion;
   }
+
+  void loadSegment(SegRegIndex index, uint16_t value);
 
   uint32_t getSegBase(uint8_t index) const { return m_segBase[index % 6]; }
   void setSegBase(uint8_t index, uint32_t value) {
-    m_segBase[index % 6] = value;
+    uint8_t seg = index % 6;
+    uint8_t mask = static_cast<uint8_t>(1u << seg);
+    m_segBase[seg] = value;
+    m_dirtySegmentMask = static_cast<uint8_t>(m_dirtySegmentMask & ~mask);
+    ++m_segmentStateVersion;
   }
 
   bool is32BitCode() const { return m_is32BitCode; }
@@ -302,6 +311,9 @@ public:
   const uint64_t &getCyclesRef() const { return m_cycles; }
   void addCycles(uint32_t c) { m_cycles += c; }
 
+  uint64_t getSegmentStateVersion() const { return m_segmentStateVersion; }
+  uint8_t getDirtySegmentMask() const { return m_dirtySegmentMask; }
+
   uint32_t getEIP() const { return m_eip; }
   void setEIP(uint32_t val);
 
@@ -340,6 +352,8 @@ private:
   std::array<uint32_t, 6> m_segBase{}; // Cached bases for PM/RM
   bool m_is32BitCode{false};           // CS D/B bit status
   bool m_is32BitStack{false};          // SS B bit status
+  uint64_t m_segmentStateVersion{1};
+  uint8_t m_dirtySegmentMask{0};
   uint32_t m_eip{0};
   uint32_t m_instructionStartEIP{0};
   uint32_t m_eflags{0x00000002}; // bit 1 is always reserved as 1
