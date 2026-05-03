@@ -109,7 +109,7 @@ private:
     std::string path;
     std::fstream stream;
   };
-  std::vector<std::unique_ptr<FileHandle>> m_fileHandles;
+  std::vector<std::shared_ptr<FileHandle>> m_fileHandles;
 
   // Memory Control Block (MCB)
   struct MCB {

@@ -492,6 +492,7 @@ void DOS::handleDOSService() {
   case 0x41: // Delete File
   case 0x42: // Move File Pointer
   case 0x43: // Get/Set File Attributes
+  case 0x45: // Duplicate File Handle
   case 0x56: // Rename File
   case 0x57: // Get/Set File Date and Time
     handleFileService();
@@ -512,14 +513,6 @@ void DOS::handleDOSService() {
     m_cpu.setReg8(cpu::CL, 0);  // Minute
     m_cpu.setReg8(cpu::DH, 0);  // Second
     m_cpu.setReg8(cpu::DL, 0);  // 1/100 second
-    break;
-  }
-
-  case 0x45: { // Unknown function - stub
-    // For compatibility with apps probing this function, return success
-    m_cpu.setReg16(cpu::AX, 0x0000);
-    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-    LOG_DOS("DOS: INT 21h AH=45h: Unknown function stubbed");
     break;
   }
 
@@ -1546,7 +1539,7 @@ void DOS::handleFileService() {
     std::string filename = readFilename(nameAddr);
     std::string hostPath = resolvePath(filename);
 
-    auto fh = std::make_unique<FileHandle>();
+    auto fh = std::make_shared<FileHandle>();
     fh->path = hostPath;
     fh->stream.open(hostPath, std::ios::out | std::ios::binary |
                                   std::ios::trunc | std::ios::in);
@@ -1571,7 +1564,7 @@ void DOS::handleFileService() {
     std::string filename = readFilename(nameAddr);
     std::string hostPath = resolvePath(filename);
 
-    auto fh = std::make_unique<FileHandle>();
+    auto fh = std::make_shared<FileHandle>();
     fh->path = hostPath;
 
     // DOS extenders (e.g., DOS/4GW) may reopen their own EXE by a truncated
@@ -1614,7 +1607,8 @@ void DOS::handleFileService() {
     uint16_t handle = m_cpu.getReg16(cpu::BX);
     if (handle >= 5 && handle - 5 < m_fileHandles.size() &&
         m_fileHandles[handle - 5]) {
-      m_fileHandles[handle - 5]->stream.close();
+      if (m_fileHandles[handle - 5].use_count() == 1)
+        m_fileHandles[handle - 5]->stream.close();
       m_fileHandles[handle - 5].reset(); // Free slot
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
       LOG_DOS("DOS: Closed file handle=", handle);
@@ -1624,6 +1618,25 @@ void DOS::handleFileService() {
     } else {
       m_cpu.setReg16(cpu::AX, 0x06); // Invalid handle
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+    }
+  } else if (ah == 0x45) { // Duplicate File Handle
+    uint16_t handle = m_cpu.getReg16(cpu::BX);
+    if (handle >= 5 && handle - 5 < m_fileHandles.size() &&
+        m_fileHandles[handle - 5]) {
+      m_fileHandles.push_back(m_fileHandles[handle - 5]);
+      m_cpu.setReg16(cpu::AX,
+                     static_cast<uint16_t>(m_fileHandles.size() - 1 + 5));
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      LOG_DOS("DOS: Duplicated handle=", handle, " -> ",
+              m_fileHandles.size() - 1 + 5);
+    } else if (handle < 5) {
+      m_cpu.setReg16(cpu::AX, handle);
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      LOG_DOS("DOS: Duplicated standard handle=", handle);
+    } else {
+      m_cpu.setReg16(cpu::AX, 0x06); // Invalid handle
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      LOG_DOS("DOS: Duplicate handle failed for invalid handle=", handle);
     }
   } else if (ah == 0x3F) { // Read from File or Device
     uint16_t handle = m_cpu.getReg16(cpu::BX);

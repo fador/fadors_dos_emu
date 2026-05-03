@@ -361,6 +361,73 @@ TEST_CASE("DOS: Close invalid file handle returns error", "[DOS][File]") {
     REQUIRE(cpu.getEFLAGS() & cpu::FLAG_CARRY);
 }
 
+TEST_CASE("DOS: Duplicate file handle survives closing original", "[DOS][File]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    bios.initialize();
+    dos.initialize();
+
+    {
+        std::ofstream ofs("duphandle.txt", std::ios::binary);
+        ofs << "duplicate";
+    }
+
+    const std::string fname = "DUPHANDLE.TXT";
+    const uint32_t fnameAddr = 0x70000;
+    for (size_t i = 0; i < fname.size(); ++i)
+        mem.write8(fnameAddr + i, fname[i]);
+    mem.write8(fnameAddr + fname.size(), 0);
+
+    cpu.setSegReg(cpu::DS, 0x7000);
+    cpu.setSegBase(cpu::DS, 0x70000);
+    cpu.setReg16(cpu::DX, 0x0000);
+    cpu.setReg8(cpu::AH, 0x3D);
+    cpu.setReg8(cpu::AL, 0x00);
+    dos.handleInterrupt(0x21);
+    REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    const uint16_t handle = cpu.getReg16(cpu::AX);
+
+    cpu.setReg8(cpu::AH, 0x45);
+    cpu.setReg16(cpu::BX, handle);
+    dos.handleInterrupt(0x21);
+    REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    const uint16_t dupHandle = cpu.getReg16(cpu::AX);
+    REQUIRE(dupHandle >= 5);
+    REQUIRE(dupHandle != handle);
+
+    cpu.setReg8(cpu::AH, 0x3E);
+    cpu.setReg16(cpu::BX, handle);
+    dos.handleInterrupt(0x21);
+    REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+
+    cpu.setSegReg(cpu::DS, 0x8000);
+    cpu.setSegBase(cpu::DS, 0x80000);
+    cpu.setReg16(cpu::DX, 0x0000);
+    cpu.setReg8(cpu::AH, 0x3F);
+    cpu.setReg16(cpu::BX, dupHandle);
+    cpu.setReg16(cpu::CX, 9);
+    dos.handleInterrupt(0x21);
+    REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(cpu.getReg16(cpu::AX) == 9);
+
+    std::string readStr;
+    for (int i = 0; i < 9; ++i)
+        readStr += static_cast<char>(mem.read8(0x80000 + i));
+    REQUIRE(readStr == "duplicate");
+
+    cpu.setReg8(cpu::AH, 0x3E);
+    cpu.setReg16(cpu::BX, dupHandle);
+    dos.handleInterrupt(0x21);
+    REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+
+    std::remove("duphandle.txt");
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // DOS Date/Time & Misc Services Edge Cases
 // ═══════════════════════════════════════════════════════════════════════════
