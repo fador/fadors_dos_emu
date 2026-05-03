@@ -57,6 +57,25 @@ TEST_CASE("Hardware: PIC8259A", "[HW]") {
         pic.raiseIRQ(1); // Masked
         REQUIRE(pic.getPendingInterrupt() == 0x20);
     }
+
+    SECTION("Repeated IRQ edges survive acknowledge and EOI") {
+        pic.write8(0x20, 0x11); // ICW1
+        pic.write8(0x21, 0x20); // ICW2: Vector 0x20
+        pic.write8(0x21, 0x04); // ICW3
+        pic.write8(0x21, 0x01); // ICW4
+        pic.write8(0x21, 0x00); // Unmask all
+
+        pic.raiseIRQ(0);
+        pic.raiseIRQ(0);
+
+        REQUIRE(pic.getPendingInterrupt() == 0x20);
+
+        pic.acknowledgeInterrupt();
+        REQUIRE(pic.getPendingInterrupt() == -1);
+
+        pic.write8(0x20, 0x20); // EOI
+        REQUIRE(pic.getPendingInterrupt() == 0x20);
+    }
 }
 
 TEST_CASE("Hardware: PIT8254", "[HW]") {

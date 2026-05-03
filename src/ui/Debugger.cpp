@@ -146,6 +146,14 @@ void Debugger::disassemble(uint32_t address, uint32_t count) {
 void Debugger::dumpState(uint32_t contextLines) {
     std::cout << "\n=== CPU State Dump ==="  << std::endl;
     printRegisters();
+    uint32_t biosTicks = static_cast<uint32_t>(m_memory.read16(0x46C)) |
+                         (static_cast<uint32_t>(m_memory.read16(0x46E)) << 16);
+    uint8_t videoMode = m_memory.read8(0x449);
+    std::cout << "\n--- BIOS State ---" << std::endl;
+    std::cout << std::hex << std::setfill('0')
+              << "Ticks: " << std::setw(8) << biosTicks
+              << "  Video Mode: " << std::setw(2)
+              << static_cast<unsigned>(videoMode) << std::dec << std::endl;
     std::cout << "\n--- Stack (SS:SP, 32 bytes) ---" << std::endl;
     uint32_t stackAddr = (m_cpu.getSegReg(cpu::SS) << 4) + (m_cpu.getReg16(cpu::SP));
     dumpMemory(stackAddr, 32);

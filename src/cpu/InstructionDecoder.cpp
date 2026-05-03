@@ -5211,9 +5211,15 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
       // In real mode, only hardware IRQs with explicit BIOS HLE behavior
       // should short-circuit here. Other IRQs must dispatch through the IVT
       // so guest-installed handlers (or the BIOS machine-code handler) run.
-      useHLE = (vector == 0x08);
+      uint16_t ivtOff = m_memory.read16(vector * 4);
+      uint16_t ivtSeg = m_memory.read16(vector * 4 + 2);
+      useHLE = (vector == 0x08) && m_bios.isOriginalIVT(vector, ivtSeg, ivtOff);
     }
     if (useHLE && m_bios.handleInterrupt(vector)) {
+      if (!(m_cpu.getCR(0) & 1) && vector == 0x08) {
+        triggerInterrupt(0x1C);
+      }
+
       // After HLE, if the vector is hooked by a DOS extender thunk and we're
       // in 32-bit PM code, also dispatch to the app's registered PM callback
       // (if any).  The Watcom C/C++ RTL maintains an internal ISR table;

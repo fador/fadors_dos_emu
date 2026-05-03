@@ -53,9 +53,10 @@ void PIC8259::write8(uint16_t port, uint8_t value) {
 }
 
 void PIC8259::raiseIRQ(uint8_t irq) {
-    if (!(m_mask & (1 << irq))) {
-        m_request |= (1 << irq);
-    }
+    if (irq >= 8) return;
+
+    ++m_requestCounts[irq];
+    m_request |= static_cast<uint8_t>(1u << irq);
 }
 
 int PIC8259::getPendingInterrupt() {
@@ -86,8 +87,13 @@ void PIC8259::acknowledgeInterrupt() {
     }
     
     if (irq != -1) {
-        m_request &= ~(1 << irq);
-        m_service |= (1 << irq);
+        if (m_requestCounts[irq] > 0) {
+            --m_requestCounts[irq];
+        }
+        if (m_requestCounts[irq] == 0) {
+            m_request &= static_cast<uint8_t>(~(1u << irq));
+        }
+        m_service |= static_cast<uint8_t>(1u << irq);
     }
 }
 

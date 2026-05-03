@@ -429,6 +429,8 @@ struct PMIRQTestEnv {
     }
 
     void enterPM() {
+        mem.setA20(true);
+
         // Set CR0 PE bit
         cpu.setCR(0, cpu.getCR(0) | 1);
         // Load flat 32-bit segments

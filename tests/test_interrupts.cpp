@@ -9,6 +9,7 @@
 #include "hw/DPMI.hpp"
 #include "hw/KeyboardController.hpp"
 #include "hw/PIT8254.hpp"
+#include <chrono>
 
 using namespace fador;
 
@@ -661,4 +662,229 @@ TEST_CASE("Blocking INT 21h AH=01 rewinds properly for 0F FF", "[Interrupts][DOS
 
     // EIP should now advance past the 3-byte instruction
 
+}
+
+TEST_CASE("Timer IRQ pipeline delivers every elapsed realtime pulse", "[Interrupts][Timer]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::IOBus iobus;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::DOS dos(cpu, mem);
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    bios.initialize();
+    dos.initialize();
+    cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
+
+    cpu.setCR(0, 0);
+    cpu.setSegReg(cpu::CS, 0x1000);
+    cpu.setSegBase(cpu::CS, 0x10000);
+    cpu.setSegReg(cpu::DS, 0x0000);
+    cpu.setSegBase(cpu::DS, 0x0000);
+    cpu.setSegReg(cpu::SS, 0x0000);
+    cpu.setSegBase(cpu::SS, 0x0000);
+    cpu.setReg16(cpu::SP, 0x0200);
+    cpu.setEIP(0x0100);
+    cpu.setEFLAGS(cpu.getEFLAGS() | cpu::FLAG_INTERRUPT);
+
+    pit.write8(0x43, 0x36);
+    pit.write8(0x40, 0x50);
+    pit.write8(0x40, 0xC3); // Reload = 50000 -> about 41.9 ms per IRQ0
+    pit.advanceTime(std::chrono::milliseconds(126));
+
+    while (pit.checkPendingIRQ0()) {
+        pic.raiseIRQ(0);
+    }
+
+    int delivered = 0;
+    while (true) {
+        int pending = pic.getPendingInterrupt();
+        if (pending == -1) {
+            break;
+        }
+
+        REQUIRE(pending == 0x08);
+        pic.acknowledgeInterrupt();
+        decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
+        ++delivered;
+    }
+
+    REQUIRE(delivered == 3);
+    REQUIRE(mem.read32(0x46C) == 3);
+}
+
+TEST_CASE("Real-mode timer IRQ dispatch respects hooked INT 8 vector", "[Interrupts][Timer]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::IOBus iobus;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::DOS dos(cpu, mem);
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    bios.initialize();
+    dos.initialize();
+    cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
+
+    cpu.setCR(0, 0);
+    cpu.setSegReg(cpu::CS, 0x1000);
+    cpu.setSegBase(cpu::CS, 0x10000);
+    cpu.setSegReg(cpu::DS, 0x0000);
+    cpu.setSegBase(cpu::DS, 0x0000);
+    cpu.setSegReg(cpu::SS, 0x0000);
+    cpu.setSegBase(cpu::SS, 0x0000);
+    cpu.setReg16(cpu::SP, 0x0200);
+    cpu.setEIP(0x0100);
+
+    mem.write16(0x08 * 4, 0x0300);
+    mem.write16(0x08 * 4 + 2, 0x2000);
+
+    uint32_t handlerPhys = (0x2000u << 4) + 0x0300u;
+    const uint8_t handler[] = {
+        0xB0, 0x01,             // MOV AL,01h
+        0xA2, 0x00, 0x05,       // MOV [0500h],AL
+        0xB0, 0x20,             // MOV AL,20h
+        0xE6, 0x20,             // OUT 20h,AL
+        0xCF                    // IRET
+    };
+    for (size_t i = 0; i < sizeof(handler); ++i) {
+        mem.write8(handlerPhys + static_cast<uint32_t>(i), handler[i]);
+    }
+
+    uint16_t timerBefore = mem.read16(0x46C);
+
+    decoder.injectHardwareInterrupt(0x08);
+
+    REQUIRE(cpu.getSegReg(cpu::CS) == 0x2000);
+    REQUIRE(cpu.getEIP() == 0x0300);
+    REQUIRE(mem.read16(0x46C) == timerBefore);
+
+    for (int step = 0; step < 5; ++step) {
+        decoder.step();
+    }
+
+    REQUIRE(mem.read8(0x0500) == 1);
+    REQUIRE(cpu.getSegReg(cpu::CS) == 0x1000);
+    REQUIRE(cpu.getEIP() == 0x0100);
+}
+
+TEST_CASE("Real-mode timer IRQ HLE still dispatches guest INT 1Ch hook", "[Interrupts][Timer]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::IOBus iobus;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::DOS dos(cpu, mem);
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    bios.initialize();
+    dos.initialize();
+    cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
+
+    cpu.setCR(0, 0);
+    cpu.setSegReg(cpu::CS, 0x1000);
+    cpu.setSegBase(cpu::CS, 0x10000);
+    cpu.setSegReg(cpu::DS, 0x0000);
+    cpu.setSegBase(cpu::DS, 0x0000);
+    cpu.setSegReg(cpu::SS, 0x0000);
+    cpu.setSegBase(cpu::SS, 0x0000);
+    cpu.setReg16(cpu::SP, 0x0200);
+    cpu.setEIP(0x0100);
+
+    mem.write16(0x1C * 4, 0x0300);
+    mem.write16(0x1C * 4 + 2, 0x2000);
+
+    uint32_t handlerPhys = (0x2000u << 4) + 0x0300u;
+    const uint8_t handler[] = {
+        0xB0, 0x01,             // MOV AL,01h
+        0xA2, 0x00, 0x05,       // MOV [0500h],AL
+        0xCF                    // IRET
+    };
+    for (size_t i = 0; i < sizeof(handler); ++i) {
+        mem.write8(handlerPhys + static_cast<uint32_t>(i), handler[i]);
+    }
+
+    uint16_t timerBefore = mem.read16(0x46C);
+
+    decoder.injectHardwareInterrupt(0x08);
+
+    REQUIRE(cpu.getSegReg(cpu::CS) == 0x2000);
+    REQUIRE(cpu.getEIP() == 0x0300);
+    REQUIRE(mem.read16(0x46C) == timerBefore + 1);
+
+    for (int step = 0; step < 3; ++step) {
+        decoder.step();
+    }
+
+    REQUIRE(mem.read8(0x0500) == 1);
+    REQUIRE(cpu.getSegReg(cpu::CS) == 0x1000);
+    REQUIRE(cpu.getEIP() == 0x0100);
+}
+
+TEST_CASE("BIOS timer tick count grows over one second in live loop", "[Interrupts][Timer][Integration]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::IOBus iobus;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::DOS dos(cpu, mem);
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    bios.initialize();
+    dos.initialize();
+    cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
+
+    cpu.setCR(0, 0);
+    cpu.setSegReg(cpu::CS, 0x1000);
+    cpu.setSegBase(cpu::CS, 0x10000);
+    cpu.setSegReg(cpu::DS, 0x0000);
+    cpu.setSegBase(cpu::DS, 0x0000);
+    cpu.setSegReg(cpu::SS, 0x0000);
+    cpu.setSegBase(cpu::SS, 0x0000);
+    cpu.setReg16(cpu::SP, 0x0200);
+    cpu.setEIP(0x0100);
+    cpu.setEFLAGS(cpu.getEFLAGS() | cpu::FLAG_INTERRUPT);
+
+    // Tiny program loop: NOP; JMP short -3
+    mem.write8(0x10100, 0x90);
+    mem.write8(0x10101, 0xEB);
+    mem.write8(0x10102, 0xFD);
+
+    const uint32_t tickStart = mem.read32(0x46C);
+    constexpr auto slice = std::chrono::milliseconds(10);
+    constexpr int sliceCount = 100;
+    constexpr int instructionsPerSlice = 0x400;
+    constexpr uint32_t expectedTicks = 18;
+
+    for (int sliceIndex = 0; sliceIndex < sliceCount; ++sliceIndex) {
+        for (int instruction = 0; instruction < instructionsPerSlice; ++instruction) {
+            decoder.step();
+            cpu.addCycles(4);
+        }
+
+        pit.advanceTime(slice);
+
+        while (pit.checkPendingIRQ0()) {
+            pic.raiseIRQ(0);
+        }
+        if (kbd.checkPendingIRQ()) {
+            pic.raiseIRQ(1);
+        }
+
+        if (cpu.getEFLAGS() & cpu::FLAG_INTERRUPT) {
+            while (true) {
+                int pending = pic.getPendingInterrupt();
+                if (pending == -1) {
+                    break;
+                }
+
+                pic.acknowledgeInterrupt();
+                decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
+            }
+        }
+    }
+
+    REQUIRE(mem.read32(0x46C) - tickStart == expectedTicks);
+    REQUIRE(pic.getPendingInterrupt() == -1);
 }

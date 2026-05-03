@@ -1,5 +1,6 @@
 #pragma once
 #include "IODevice.hpp"
+#include <array>
 #include <cstdint>
 
 namespace fador::hw {
@@ -23,6 +24,7 @@ private:
     uint8_t m_mask;
     uint8_t m_request;
     uint8_t m_service;
+    std::array<uint32_t, 8> m_requestCounts{};
     
     // Initialization state machine
     uint8_t m_icwStep;

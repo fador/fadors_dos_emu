@@ -507,7 +507,7 @@ int main(int argc, char *argv[]) {
       bios.setIdleCallback([&sdlRenderer, &pit, &cpu, &decoder, &kbd, &pic]() {
         cpu.addCycles(64);
         pit.update();
-        if (pit.checkPendingIRQ0()) {
+        while (pit.checkPendingIRQ0()) {
           pic.raiseIRQ(0);
         }
         if (kbd.checkPendingIRQ()) {
@@ -533,7 +533,7 @@ int main(int argc, char *argv[]) {
       dos.setIdleCallback([&pit, &cpu, &decoder, &kbd, &pic]() {
         cpu.addCycles(64);
         pit.update();
-        if (pit.checkPendingIRQ0()) { pic.raiseIRQ(0); }
+        while (pit.checkPendingIRQ0()) { pic.raiseIRQ(0); }
         if (kbd.checkPendingIRQ()) { pic.raiseIRQ(1); }
         if (cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) {
           int pending = pic.getPendingInterrupt();
@@ -633,7 +633,7 @@ int main(int argc, char *argv[]) {
           sdlRenderer.pollInput();
           pit.update();
 
-          if (pit.checkPendingIRQ0()) {
+          while (pit.checkPendingIRQ0()) {
             pic.raiseIRQ(0);
           }
           if (kbd.checkPendingIRQ()) {
@@ -688,7 +688,7 @@ int main(int argc, char *argv[]) {
       bios.setInputPollCallback([&input]() { input.pollInput(); });
       bios.setIdleCallback([&renderer, &pit, &cpu, &decoder, &kbd, &pic]() {
         pit.update();
-        if (pit.checkPendingIRQ0()) {
+        while (pit.checkPendingIRQ0()) {
           pic.raiseIRQ(0);
         }
         if (kbd.checkPendingIRQ()) {
@@ -713,7 +713,7 @@ int main(int argc, char *argv[]) {
       dos.setInputPollCallback([&input]() { input.pollInput(); });
       dos.setIdleCallback([&pit, &cpu, &decoder, &kbd, &pic]() {
         pit.update();
-        if (pit.checkPendingIRQ0()) { pic.raiseIRQ(0); }
+        while (pit.checkPendingIRQ0()) { pic.raiseIRQ(0); }
         if (kbd.checkPendingIRQ()) { pic.raiseIRQ(1); }
         if (cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) {
           int pending = pic.getPendingInterrupt();
@@ -738,7 +738,7 @@ int main(int argc, char *argv[]) {
         if ((instrCount & 0x3FF) == 0) {
           pit.update();
 
-          if (pit.checkPendingIRQ0()) {
+          while (pit.checkPendingIRQ0()) {
             pic.raiseIRQ(0);
           }
           if (kbd.checkPendingIRQ()) {
@@ -801,7 +801,7 @@ int main(int argc, char *argv[]) {
           input.pollInput();
           pit.update();
 
-          if (pit.checkPendingIRQ0()) {
+          while (pit.checkPendingIRQ0()) {
             pic.raiseIRQ(0);
           }
           if (kbd.checkPendingIRQ()) {
