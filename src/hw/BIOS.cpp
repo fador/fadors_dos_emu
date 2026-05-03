@@ -1751,6 +1751,18 @@ void BIOS::handleEMSService() {
       break;
     }
 
+    for (uint8_t otherPhysicalPage = 0;
+         otherPhysicalPage < EMS_PHYSICAL_PAGE_COUNT; ++otherPhysicalPage) {
+      if (otherPhysicalPage == physicalPage)
+        continue;
+
+      const EMSMapping &otherMapping = m_emsMappings[otherPhysicalPage];
+      if (otherMapping.handle == handleId &&
+          otherMapping.logicalPage == logicalPage) {
+        flushEMSPhysicalPage(otherPhysicalPage);
+      }
+    }
+
     m_emsMappings[physicalPage] = {handleId, logicalPage};
     loadEMSPhysicalPage(physicalPage);
     m_cpu.setReg8(cpu::AH, 0x00);

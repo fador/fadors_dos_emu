@@ -295,6 +295,18 @@ TEST_CASE("BIOS EMS services allocate, map, remap, and release", "[BIOS][EMS]") 
     REQUIRE(mem.read8(pageFrameBase + 0) == 0x33);
     REQUIRE(mem.read8(pageFrameBase + 1) == 0x44);
 
+    mem.write8(pageFrameBase + 0, 0x55);
+    mem.write8(pageFrameBase + 1, 0x66);
+
+    cpu.setReg8(cpu::AH, 0x44);
+    cpu.setReg8(cpu::AL, 1);
+    cpu.setReg16(cpu::BX, 1);
+    cpu.setReg16(cpu::DX, emsHandle);
+    bios.handleInterrupt(0x67);
+    REQUIRE(cpu.getReg8(cpu::AH) == 0x00);
+    REQUIRE(mem.read8(pageFrameBase + hw::BIOS::EMS_PAGE_SIZE + 0) == 0x55);
+    REQUIRE(mem.read8(pageFrameBase + hw::BIOS::EMS_PAGE_SIZE + 1) == 0x66);
+
     cpu.setReg8(cpu::AH, 0x45);
     cpu.setReg16(cpu::DX, emsHandle);
     bios.handleInterrupt(0x67);
