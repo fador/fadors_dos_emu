@@ -198,6 +198,17 @@ TEST_CASE("Assembler - MUL/DIV", "[assembler]") {
     expectBytes("IDIV DX", {0xF7, 0xFA});
 }
 
+TEST_CASE("Assembler - x87 env/state save-restore", "[assembler]") {
+    expectBytes("FNSTENV [3000h]", {0xD9, 0x36, 0x00, 0x30});
+    expectBytes("FLDENV [3000h]",  {0xD9, 0x26, 0x00, 0x30});
+    expectBytes("FNSAVE [3100h]",  {0xDD, 0x36, 0x00, 0x31});
+    expectBytes("FRSTOR [3100h]",  {0xDD, 0x26, 0x00, 0x31});
+    expectBytes("FNSTENV DWORD [3000h]", {0x66, 0xD9, 0x36, 0x00, 0x30});
+    expectBytes("FLDENV DWORD [3000h]",  {0x66, 0xD9, 0x26, 0x00, 0x30});
+    expectBytes("FNSAVE DWORD [3100h]",  {0x66, 0xDD, 0x36, 0x00, 0x31});
+    expectBytes("FRSTOR DWORD [3100h]",  {0x66, 0xDD, 0x26, 0x00, 0x31});
+}
+
 // ============================================================================
 //  Jumps
 // ============================================================================

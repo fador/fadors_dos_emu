@@ -332,7 +332,6 @@ int main(int argc, char *argv[]) {
         for (uint64_t i = 0; i < steps; ++i) {
           decoder.step();
           cpu.addCycles(4);
-          pit.addCycles(4);
           if (dos.isTerminated())
             return false;
         }
@@ -507,7 +506,7 @@ int main(int argc, char *argv[]) {
       bios.setInputPollCallback([&sdlRenderer]() { sdlRenderer.pollInput(); });
       bios.setIdleCallback([&sdlRenderer, &pit, &cpu, &decoder, &kbd, &pic]() {
         cpu.addCycles(64);
-        pit.addCycles(64);
+        pit.update();
         if (pit.checkPendingIRQ0()) {
           pic.raiseIRQ(0);
         }
@@ -533,7 +532,7 @@ int main(int argc, char *argv[]) {
       dos.setInputPollCallback([&sdlRenderer]() { sdlRenderer.pollInput(); });
       dos.setIdleCallback([&pit, &cpu, &decoder, &kbd, &pic]() {
         cpu.addCycles(64);
-        pit.addCycles(64);
+        pit.update();
         if (pit.checkPendingIRQ0()) { pic.raiseIRQ(0); }
         if (kbd.checkPendingIRQ()) { pic.raiseIRQ(1); }
         if (cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) {
@@ -554,7 +553,6 @@ int main(int argc, char *argv[]) {
       while (running) {
         decoder.step();
         cpu.addCycles(4);
-        pit.addCycles(4);
         instrCount++;
 
         // Periodic EIP sample for progress tracking
@@ -583,7 +581,6 @@ int main(int argc, char *argv[]) {
             LOG_INFO(buf);
             decoder.step();
             cpu.addCycles(4);
-            pit.addCycles(4);
           }
           LOG_INFO("Stopped after ", instrCount, " cycles (--stop-after)");
           debugger.dumpState();
@@ -690,7 +687,7 @@ int main(int argc, char *argv[]) {
       input.setBIOS(bios);
       bios.setInputPollCallback([&input]() { input.pollInput(); });
       bios.setIdleCallback([&renderer, &pit, &cpu, &decoder, &kbd, &pic]() {
-        pit.addCycles(64);
+        pit.update();
         if (pit.checkPendingIRQ0()) {
           pic.raiseIRQ(0);
         }
@@ -715,7 +712,7 @@ int main(int argc, char *argv[]) {
       dos.setKeyboard(kbd);
       dos.setInputPollCallback([&input]() { input.pollInput(); });
       dos.setIdleCallback([&pit, &cpu, &decoder, &kbd, &pic]() {
-        pit.addCycles(64);
+        pit.update();
         if (pit.checkPendingIRQ0()) { pic.raiseIRQ(0); }
         if (kbd.checkPendingIRQ()) { pic.raiseIRQ(1); }
         if (cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) {
@@ -736,7 +733,6 @@ int main(int argc, char *argv[]) {
       while (running) {
         decoder.step();
         cpu.addCycles(4);
-        pit.addCycles(4);
         instrCount++;
 
         if ((instrCount & 0x3FF) == 0) {

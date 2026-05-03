@@ -3,6 +3,7 @@
 #include "hw/PIC8259.hpp"
 #include "hw/PIT8254.hpp"
 #include "hw/KeyboardController.hpp"
+#include <chrono>
 
 using namespace fador::hw;
 
@@ -65,6 +66,19 @@ TEST_CASE("Hardware: PIT8254", "[HW]") {
         pit.write8(0x43, 0x36); // Ch0, LSB/MSB, Mode 3
         pit.write8(0x40, 0x00);
         pit.write8(0x40, 0x10); // Reload = 0x1000
+    }
+
+    SECTION("Realtime pulse accumulation keeps every elapsed IRQ0 pulse") {
+        pit.write8(0x43, 0x36); // Ch0, LSB/MSB, Mode 3
+        pit.write8(0x40, 0x50);
+        pit.write8(0x40, 0xC3); // Reload = 50000
+
+        pit.advanceTime(std::chrono::milliseconds(126));
+
+        REQUIRE(pit.checkPendingIRQ0());
+        REQUIRE(pit.checkPendingIRQ0());
+        REQUIRE(pit.checkPendingIRQ0());
+        REQUIRE(!pit.checkPendingIRQ0());
     }
 }
 

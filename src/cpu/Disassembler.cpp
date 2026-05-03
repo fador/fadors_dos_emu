@@ -486,9 +486,33 @@ std::string Disassembler::disasmOpcode(Cursor& c, uint8_t op, bool p66, bool p67
     // ── XLAT ──
     if (op == 0xD7) return "XLAT";
 
-    // ── FPU stubs ──
+    // ── FPU partial decoding ──
     if (op >= 0xD8 && op <= 0xDF) {
         ModRM m = decodeModRM(c.read8());
+
+        auto formatMemNoSize = [&](const ModRM& modrm) {
+            std::string rm = formatRM(c, modrm, p67 ? 32 : 16, p67, segOvr);
+            static const char* sizeTags[] = {"BYTE PTR ", "WORD PTR ", "DWORD PTR "};
+            for (const char* sizeTag : sizeTags) {
+                if (rm.rfind(sizeTag, 0) == 0) {
+                    rm.erase(0, std::strlen(sizeTag));
+                    break;
+                }
+            }
+            return rm;
+        };
+
+        if (m.mod != 3) {
+            if (op == 0xD9) {
+                if (m.reg == 4) return "FLDENV " + formatMemNoSize(m);
+                if (m.reg == 6) return "FNSTENV " + formatMemNoSize(m);
+            }
+            if (op == 0xDD) {
+                if (m.reg == 4) return "FRSTOR " + formatMemNoSize(m);
+                if (m.reg == 6) return "FNSAVE " + formatMemNoSize(m);
+            }
+        }
+
         (void)formatRM(c, m, 32, p67, segOvr); // consume any displacement
         std::ostringstream s; s << "FPU_" << std::hex << (int)op;
         return s.str();

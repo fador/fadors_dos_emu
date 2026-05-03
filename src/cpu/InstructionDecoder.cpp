@@ -53,7 +53,8 @@ InstructionDecoder::InstructionDecoder(CPU &cpu, memory::MemoryBus &memory,
       m_stepCount(0), m_hasPrefix66(false), m_hasPrefix67(false),
       m_hasRepnz(false), m_hasRepz(false), m_segmentOverride(0xFF),
       m_cachedSegStateVersion(0),
-      m_currentEA(0), m_currentOffset(0), m_eaResolved(false) {
+      m_currentEA(0), m_currentOffset(0), m_currentEASegment(DS),
+      m_eaResolved(false) {
   m_cpu.setMemoryBus(&m_memory);
   syncSegments();
 }
@@ -212,6 +213,7 @@ uint32_t InstructionDecoder::getEffectiveAddress16(const ModRM &modrm) {
 
   uint8_t seg = (m_segmentOverride != 0xFF) ? m_segmentOverride : defaultSeg;
   m_currentOffset = addr;
+  m_currentEASegment = seg;
   m_currentEA = m_segBase[seg] + m_currentOffset;
   m_eaResolved = true;
   return m_currentEA;
@@ -260,6 +262,7 @@ uint32_t InstructionDecoder::getEffectiveAddress32(const ModRM &modrm) {
 
   uint8_t seg = (m_segmentOverride != 0xFF) ? m_segmentOverride : defaultSeg;
   m_currentOffset = addr;
+  m_currentEASegment = seg;
   m_currentEA = m_segBase[seg] + m_currentOffset;
   m_eaResolved = true;
   return m_currentEA;
@@ -398,9 +401,25 @@ void InstructionDecoder::writeInt64(uint32_t address, int64_t value) {
   write64(m_memory, address, static_cast<uint64_t>(value));
 }
 
+namespace {
+
+uint32_t encodeRealModeFPUAddress(uint32_t pointer, uint16_t selector) {
+  if (selector != 0 || pointer <= 0xFFFFu) {
+    return ((static_cast<uint32_t>(selector) << 4) +
+            (pointer & 0xFFFFu)) &
+           0xFFFFFu;
+  }
+  return pointer & 0xFFFFFu;
+}
+
+}
+
 void InstructionDecoder::storeFPUEnvironment(uint32_t address,
                                              bool operandSize32,
                                              bool maskExceptions) {
+  const bool realModeLayout =
+      !(m_cpu.getCR(0) & 1) || (m_cpu.getEFLAGS() & 0x00020000u);
+
   if (operandSize32) {
     m_memory.write32(address + 0, m_cpu.getFPUControlWord());
     m_memory.write32(address + 4, m_cpu.getFPUStatusWord());
@@ -411,6 +430,27 @@ void InstructionDecoder::storeFPUEnvironment(uint32_t address,
                          (static_cast<uint32_t>(m_cpu.getFPULastOpcode()) << 16));
     m_memory.write32(address + 20, m_cpu.getFPUDataPointer());
     m_memory.write32(address + 24, m_cpu.getFPUDataSelector());
+  } else if (realModeLayout) {
+    const uint32_t instructionPointer =
+        encodeRealModeFPUAddress(m_cpu.getFPUInstructionPointer(),
+                                 m_cpu.getFPUInstructionSelector());
+    const uint32_t dataPointer =
+        encodeRealModeFPUAddress(m_cpu.getFPUDataPointer(),
+                                 m_cpu.getFPUDataSelector());
+
+    m_memory.write16(address + 0, m_cpu.getFPUControlWord());
+    m_memory.write16(address + 2, m_cpu.getFPUStatusWord());
+    m_memory.write16(address + 4, m_cpu.getFPUTagWord());
+    m_memory.write16(address + 6,
+                     static_cast<uint16_t>(instructionPointer & 0xFFFFu));
+    m_memory.write16(
+        address + 8,
+        static_cast<uint16_t>(((instructionPointer >> 16) & 0xFu) << 12) |
+            static_cast<uint16_t>(m_cpu.getFPULastOpcode() & 0x07FFu));
+    m_memory.write16(address + 10,
+                     static_cast<uint16_t>(dataPointer & 0xFFFFu));
+    m_memory.write16(address + 12,
+                     static_cast<uint16_t>(((dataPointer >> 16) & 0xFu) << 12));
   } else {
     m_memory.write16(address + 0, m_cpu.getFPUControlWord());
     m_memory.write16(address + 2, m_cpu.getFPUStatusWord());
@@ -431,6 +471,9 @@ void InstructionDecoder::storeFPUEnvironment(uint32_t address,
 
 void InstructionDecoder::loadFPUEnvironment(uint32_t address,
                                             bool operandSize32) {
+  const bool realModeLayout =
+      !(m_cpu.getCR(0) & 1) || (m_cpu.getEFLAGS() & 0x00020000u);
+
   if (operandSize32) {
     m_cpu.setFPUControlWord(static_cast<uint16_t>(m_memory.read32(address + 0)));
     m_cpu.setFPUStatusWord(static_cast<uint16_t>(m_memory.read32(address + 4)));
@@ -441,6 +484,28 @@ void InstructionDecoder::loadFPUEnvironment(uint32_t address,
     m_cpu.setFPULastOpcode(static_cast<uint16_t>(selectorOpcode >> 16));
     m_cpu.setFPUDataPointer(m_memory.read32(address + 20));
     m_cpu.setFPUDataSelector(static_cast<uint16_t>(m_memory.read32(address + 24)));
+    return;
+  }
+
+  if (realModeLayout) {
+    const uint16_t instructionLow = m_memory.read16(address + 6);
+    const uint16_t instructionHighOpcode = m_memory.read16(address + 8);
+    const uint16_t dataLow = m_memory.read16(address + 10);
+    const uint16_t dataHigh = m_memory.read16(address + 12);
+
+    m_cpu.setFPUControlWord(m_memory.read16(address + 0));
+    m_cpu.setFPUStatusWord(m_memory.read16(address + 2));
+    m_cpu.setFPUTagWord(m_memory.read16(address + 4));
+    m_cpu.setFPUInstructionPointer(
+        static_cast<uint32_t>(instructionLow) |
+        ((static_cast<uint32_t>(instructionHighOpcode >> 12) & 0xFu) << 16));
+    m_cpu.setFPUInstructionSelector(0);
+    m_cpu.setFPULastOpcode(
+        static_cast<uint16_t>(instructionHighOpcode & 0x07FFu));
+    m_cpu.setFPUDataPointer(static_cast<uint32_t>(dataLow) |
+                            ((static_cast<uint32_t>(dataHigh >> 12) & 0xFu)
+                             << 16));
+    m_cpu.setFPUDataSelector(0);
     return;
   }
 
@@ -552,6 +617,27 @@ void InstructionDecoder::setFPUCompareFlags(double lhs, double rhs) {
 void InstructionDecoder::executeFPUOpcode(uint8_t opcode) {
   const uint8_t modrmByte = fetch8();
   const ModRM modrm = decodeModRM(modrmByte);
+  const bool skipInstructionTracking =
+      (opcode == 0xD9 && modrm.mod != 3 && (modrm.reg == 4 || modrm.reg == 6)) ||
+      (opcode == 0xDD && modrm.mod != 3 && (modrm.reg == 4 || modrm.reg == 6)) ||
+      (opcode == 0xDB && modrm.mod == 3 &&
+       (modrmByte == 0xE2 || modrmByte == 0xE3));
+
+  auto trackInstructionMetadata = [&]() {
+    m_cpu.setFPUInstructionPointer(m_instrStartEIP);
+    m_cpu.setFPUInstructionSelector(m_cpu.getSegReg(CS));
+    m_cpu.setFPULastOpcode(
+        static_cast<uint16_t>(((opcode & 0x07u) << 8) | modrmByte));
+  };
+  auto trackDataMetadata = [&]() {
+    m_cpu.setFPUDataPointer(m_currentOffset);
+    m_cpu.setFPUDataSelector(
+        m_cpu.getSegReg(static_cast<SegRegIndex>(m_currentEASegment)));
+  };
+
+  if (!skipInstructionTracking) {
+    trackInstructionMetadata();
+  }
 
   auto effectiveAddress = [&]() {
     return m_hasPrefix67 ? getEffectiveAddress32(modrm)
@@ -605,6 +691,7 @@ void InstructionDecoder::executeFPUOpcode(uint8_t opcode) {
     const bool use64 = opcode == 0xDC;
     if (modrm.mod != 3) {
       const uint32_t addr = effectiveAddress();
+      trackDataMetadata();
       const double src = use64 ? readFloat64(addr)
                                : static_cast<double>(readFloat32(addr));
       const double lhs = st(0);
@@ -661,12 +748,15 @@ void InstructionDecoder::executeFPUOpcode(uint8_t opcode) {
       const bool operandSize32 = currentOperandSize32();
       switch (modrm.reg) {
       case 0:
+        trackDataMetadata();
         m_cpu.pushFPU(static_cast<double>(readFloat32(addr)));
         return;
       case 2:
+        trackDataMetadata();
         writeFloat32(addr, st(0));
         return;
       case 3:
+        trackDataMetadata();
         writeFloat32(addr, st(0));
         m_cpu.popFPU();
         return;
@@ -674,12 +764,14 @@ void InstructionDecoder::executeFPUOpcode(uint8_t opcode) {
         loadFPUEnvironment(addr, operandSize32);
         return;
       case 5:
+        trackDataMetadata();
         m_cpu.setFPUControlWord(m_memory.read16(addr));
         return;
       case 6:
         storeFPUEnvironment(addr, operandSize32, true);
         return;
       case 7:
+        trackDataMetadata();
         m_memory.write16(addr, m_cpu.getFPUControlWord());
         return;
       default:
@@ -822,6 +914,7 @@ void InstructionDecoder::executeFPUOpcode(uint8_t opcode) {
   case 0xDE: {
     if (modrm.mod != 3) {
       const uint32_t addr = effectiveAddress();
+      trackDataMetadata();
       const double src = static_cast<double>(opcode == 0xDA
                                                  ? static_cast<int32_t>(m_memory.read32(addr))
                                                  : static_cast<int16_t>(m_memory.read16(addr)));
@@ -884,6 +977,7 @@ void InstructionDecoder::executeFPUOpcode(uint8_t opcode) {
   case 0xDF: {
     if (modrm.mod != 3) {
       const uint32_t addr = effectiveAddress();
+      trackDataMetadata();
       if (opcode == 0xDB) {
         switch (modrm.reg) {
         case 0:
@@ -1019,12 +1113,15 @@ void InstructionDecoder::executeFPUOpcode(uint8_t opcode) {
       const bool operandSize32 = currentOperandSize32();
       switch (modrm.reg) {
       case 0:
+        trackDataMetadata();
         m_cpu.pushFPU(readFloat64(addr));
         return;
       case 2:
+        trackDataMetadata();
         writeFloat64(addr, st(0));
         return;
       case 3:
+        trackDataMetadata();
         writeFloat64(addr, st(0));
         m_cpu.popFPU();
         return;
@@ -1036,6 +1133,7 @@ void InstructionDecoder::executeFPUOpcode(uint8_t opcode) {
         m_cpu.resetFPU();
         return;
       case 7:
+        trackDataMetadata();
         m_memory.write16(addr, m_cpu.getFPUStatusWord());
         return;
       default:

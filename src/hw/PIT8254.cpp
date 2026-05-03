@@ -3,7 +3,7 @@
 
 namespace fador::hw {
 
-PIT8254::PIT8254() : m_irq0Pending(false) {
+PIT8254::PIT8254() : m_lastUpdate(std::chrono::steady_clock::now()) {
     for (int i = 0; i < 3; ++i) {
         m_channels[i].reload = 0xFFFF;
         m_channels[i].count = 0xFFFF;
@@ -15,6 +15,8 @@ PIT8254::PIT8254() : m_irq0Pending(false) {
 }
 
 uint8_t PIT8254::read8(uint16_t port) {
+    syncToRealtime();
+
     uint8_t channelIdx = port & 3;
     if (channelIdx > 2) return 0xFF;
 
@@ -40,6 +42,8 @@ uint8_t PIT8254::read8(uint16_t port) {
 }
 
 void PIT8254::write8(uint16_t port, uint8_t value) {
+    syncToRealtime();
+
     uint8_t channelIdx = port & 3;
     if (channelIdx == 3) { // Control Word
         uint8_t target = (value >> 6) & 3;
@@ -77,41 +81,59 @@ void PIT8254::write8(uint16_t port, uint8_t value) {
 }
 
 void PIT8254::addCycles(uint32_t cycles) {
-    m_cycleAccum += cycles;
-    if (m_cycleAccum >= CYCLES_PER_PIT_TICK) {
-        uint32_t pitTicks = m_cycleAccum / CYCLES_PER_PIT_TICK;
-        m_cycleAccum %= CYCLES_PER_PIT_TICK;
-        advanceTicks(pitTicks);
-    }
+    static_cast<void>(cycles);
+    syncToRealtime();
 }
 
-void PIT8254::advanceTicks(uint32_t ticks) {
+void PIT8254::advanceTime(std::chrono::nanoseconds elapsed) {
+    if (elapsed.count() <= 0) return;
+
+    const uint64_t scaledTicks =
+        m_subTickRemainder + static_cast<uint64_t>(elapsed.count()) * BASE_FREQ_HZ;
+    const uint64_t wholeTicks = scaledTicks / NANOS_PER_SECOND;
+    m_subTickRemainder = scaledTicks % NANOS_PER_SECOND;
+    advanceTicks(wholeTicks);
+}
+
+void PIT8254::advanceTicks(uint64_t ticks) {
     if (ticks == 0) return;
 
     for (int i = 0; i < 3; ++i) {
         auto& ch = m_channels[i];
-        uint32_t reload = ch.reload ? ch.reload : 0x10000;
-        uint32_t count = ch.count ? ch.count : 0x10000;
+        const uint32_t reload = ch.reload ? ch.reload : 0x10000;
+        const uint32_t count = ch.count ? ch.count : 0x10000;
 
         if (ticks >= count) {
-            if (i == 0) m_irq0Pending = true;
-            uint32_t remaining = (ticks - count) % reload;
+            const uint64_t expirations = 1 + ((ticks - count) / reload);
+            const uint64_t remaining = (ticks - count) % reload;
+            if (i == 0) {
+                m_pendingIRQ0 += expirations;
+            }
             ch.count = static_cast<uint16_t>(reload - remaining);
         } else {
-            ch.count = static_cast<uint16_t>(count - ticks);
+            ch.count = static_cast<uint16_t>(count - static_cast<uint32_t>(ticks));
         }
     }
 }
 
 void PIT8254::update() {
-    // This method is kept for backward compatibility but the cycle-based
-    // addCycles() is now the primary timing mechanism.
+    syncToRealtime();
 }
 
 bool PIT8254::checkPendingIRQ0() {
-    bool ret = m_irq0Pending;
-    m_irq0Pending = false;
-    return ret;
+    syncToRealtime();
+    if (m_pendingIRQ0 == 0) {
+        return false;
+    }
+
+    --m_pendingIRQ0;
+    return true;
+}
+
+void PIT8254::syncToRealtime() {
+    const auto now = std::chrono::steady_clock::now();
+    advanceTime(std::chrono::duration_cast<std::chrono::nanoseconds>(now - m_lastUpdate));
+    m_lastUpdate = now;
 }
 
 } // namespace fador::hw

@@ -82,6 +82,7 @@ private:
   // Caching for EA to avoid double-fetching displacement in RMW instructions
   uint32_t m_currentEA;
   uint32_t m_currentOffset; // Holds isolated offset (critical for 0x8D LEA)
+  uint8_t m_currentEASegment;
   bool m_eaResolved;
 
   // Fetches next byte from memory through CS:EIP

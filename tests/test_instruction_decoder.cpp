@@ -48,6 +48,21 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
         mem.write32(address + 4, static_cast<uint32_t>(bits >> 32));
     };
 
+    auto writeDescriptor = [&](uint32_t address,
+                               uint32_t base,
+                               uint32_t limit,
+                               uint8_t access,
+                               uint8_t flags) {
+        uint32_t low = (limit & 0xFFFFu) | ((base & 0xFFFFu) << 16);
+        uint32_t high = ((base >> 16) & 0xFFu) |
+                        (static_cast<uint32_t>(access) << 8) |
+                        (((limit >> 16) & 0x0Fu) << 16) |
+                        ((static_cast<uint32_t>(flags) & 0x0Fu) << 20) |
+                        (base & 0xFF000000u);
+        mem.write32(address, low);
+        mem.write32(address + 4, high);
+    };
+
     SECTION("decodeModRM boundary conditions") {
         auto check_modrm = [&](uint8_t byte, uint8_t exp_mod, uint8_t exp_reg, uint8_t exp_rm) {
             cpu::ModRM modrm = decoder.decodeModRM(byte);
@@ -368,6 +383,338 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
         REQUIRE(cpu.getFPUStatusWord() == 0);
     }
 
+    SECTION("x87: real FNSTENV stores provenance from prior memory op") {
+        float source = 1.25f;
+        uint32_t bits = 0;
+        std::memcpy(&bits, &source, sizeof(bits));
+        mem.write32(0x2300, bits);
+
+        mem.write8(0x100, 0xD9); mem.write8(0x101, 0x06); // FLD dword ptr [2300h]
+        mem.write16(0x102, 0x2300);
+        mem.write8(0x104, 0x66);
+        mem.write8(0x105, 0xD9); mem.write8(0x106, 0x36); // FNSTENV [3000h]
+        mem.write16(0x107, 0x3000);
+
+        decoder.step();
+
+        REQUIRE(cpu.getFPUInstructionPointer() == 0x100);
+        REQUIRE(cpu.getFPUInstructionSelector() == 0x0000);
+        REQUIRE(cpu.getFPULastOpcode() == 0x0106);
+        REQUIRE(cpu.getFPUDataPointer() == 0x2300);
+        REQUIRE(cpu.getFPUDataSelector() == 0x0000);
+
+        decoder.step();
+
+        REQUIRE(mem.read32(0x300C) == 0x00000100);
+        REQUIRE(mem.read32(0x3010) == 0x01060000u);
+        REQUIRE(mem.read32(0x3014) == 0x00002300);
+        REQUIRE(mem.read32(0x3018) == 0x00000000);
+    }
+
+    SECTION("x87: real 32-bit FNSTENV stores offsets with real-mode selectors") {
+        cpu.loadSegment(cpu::SegRegIndex::CS, 0x1234);
+        cpu.loadSegment(cpu::SegRegIndex::DS, 0x4321);
+        cpu.setEIP(0x100);
+
+        constexpr uint32_t codeAddress = 0x12340 + 0x100;
+        constexpr uint32_t sourceAddress = 0x43210 + 0x2300;
+        constexpr uint32_t saveAddress = 0x43210 + 0x3000;
+
+        float source = 1.25f;
+        uint32_t bits = 0;
+        std::memcpy(&bits, &source, sizeof(bits));
+        mem.write32(sourceAddress, bits);
+
+        mem.write8(codeAddress + 0, 0xD9); mem.write8(codeAddress + 1, 0x06); // FLD dword ptr [2300h]
+        mem.write16(codeAddress + 2, 0x2300);
+        mem.write8(codeAddress + 4, 0x66);
+        mem.write8(codeAddress + 5, 0xD9); mem.write8(codeAddress + 6, 0x36); // FNSTENV [3000h]
+        mem.write16(codeAddress + 7, 0x3000);
+
+        decoder.step();
+
+        REQUIRE(cpu.getFPUInstructionPointer() == 0x100);
+        REQUIRE(cpu.getFPUInstructionSelector() == 0x1234);
+        REQUIRE(cpu.getFPULastOpcode() == 0x0106);
+        REQUIRE(cpu.getFPUDataPointer() == 0x2300);
+        REQUIRE(cpu.getFPUDataSelector() == 0x4321);
+
+        decoder.step();
+
+        REQUIRE(mem.read32(saveAddress + 12) == 0x00000100);
+        REQUIRE(mem.read32(saveAddress + 16) == 0x01061234u);
+        REQUIRE(mem.read32(saveAddress + 20) == 0x00002300);
+        REQUIRE(mem.read32(saveAddress + 24) == 0x00004321);
+    }
+
+    SECTION("x87: real 32-bit FNSAVE stores offsets with real-mode selectors") {
+        cpu.loadSegment(cpu::SegRegIndex::CS, 0x1357);
+        cpu.loadSegment(cpu::SegRegIndex::DS, 0x2468);
+        cpu.setEIP(0x100);
+
+        constexpr uint32_t codeAddress = 0x13570 + 0x100;
+        constexpr uint32_t sourceAddress = 0x24680 + 0x2300;
+        constexpr uint32_t saveAddress = 0x24680 + 0x3100;
+
+        float source = 1.25f;
+        uint32_t bits = 0;
+        std::memcpy(&bits, &source, sizeof(bits));
+        mem.write32(sourceAddress, bits);
+
+        mem.write8(codeAddress + 0, 0xD9); mem.write8(codeAddress + 1, 0x06); // FLD dword ptr [2300h]
+        mem.write16(codeAddress + 2, 0x2300);
+        mem.write8(codeAddress + 4, 0x66);
+        mem.write8(codeAddress + 5, 0xDD); mem.write8(codeAddress + 6, 0x36); // FNSAVE [3100h]
+        mem.write16(codeAddress + 7, 0x3100);
+
+        decoder.step();
+        decoder.step();
+
+        REQUIRE(mem.read32(saveAddress + 12) == 0x00000100);
+        REQUIRE(mem.read32(saveAddress + 16) == 0x01061357u);
+        REQUIRE(mem.read32(saveAddress + 20) == 0x00002300);
+        REQUIRE(mem.read32(saveAddress + 24) == 0x00002468);
+        REQUIRE(cpu.getFPUControlWord() == cpu::FPU_CONTROL_DEFAULT);
+        REQUIRE(cpu.getFPUStatusWord() == 0);
+        REQUIRE(cpu.isFPURegisterEmpty(0));
+    }
+
+    SECTION("x87: 16-bit protected-mode FNSTENV and FLDENV use selector words without opcode") {
+        constexpr uint32_t gdtBase = 0x1800;
+        constexpr uint32_t codeBase = 0x22000;
+        constexpr uint32_t dataBase = 0x34000;
+        constexpr uint16_t codeSel = 0x0008;
+        constexpr uint16_t dataSel = 0x0010;
+
+        writeDescriptor(gdtBase + 0x08, codeBase, 0xFFFF, 0x9A, 0x0);
+        writeDescriptor(gdtBase + 0x10, dataBase, 0xFFFF, 0x92, 0x0);
+
+        cpu.setGDTR({0x17, gdtBase});
+        cpu.setCR(0, cpu.getCR(0) | 0x1);
+        cpu.setEFLAGS(cpu.getEFLAGS() & ~0x00020000u);
+        cpu.loadSegment(cpu::SegRegIndex::CS, codeSel);
+        cpu.loadSegment(cpu::SegRegIndex::DS, dataSel);
+        cpu.setEIP(0x100);
+
+        float source = 1.25f;
+        uint32_t bits = 0;
+        std::memcpy(&bits, &source, sizeof(bits));
+        mem.write32(dataBase + 0x2300, bits);
+
+        mem.write8(codeBase + 0x100, 0xD9); mem.write8(codeBase + 0x101, 0x06); // FLD dword ptr [2300h]
+        mem.write16(codeBase + 0x102, 0x2300);
+        mem.write8(codeBase + 0x104, 0xD9); mem.write8(codeBase + 0x105, 0x36); // FNSTENV [3000h]
+        mem.write16(codeBase + 0x106, 0x3000);
+        mem.write8(codeBase + 0x108, 0xD9); mem.write8(codeBase + 0x109, 0x26); // FLDENV [3000h]
+        mem.write16(codeBase + 0x10A, 0x3000);
+
+        decoder.step();
+
+        REQUIRE(cpu.getFPUInstructionPointer() == 0x100);
+        REQUIRE(cpu.getFPUInstructionSelector() == codeSel);
+        REQUIRE(cpu.getFPULastOpcode() == 0x0106);
+        REQUIRE(cpu.getFPUDataPointer() == 0x2300);
+        REQUIRE(cpu.getFPUDataSelector() == dataSel);
+
+        decoder.step();
+
+        REQUIRE(mem.read16(dataBase + 0x3000) == cpu.getFPUControlWord());
+        REQUIRE(mem.read16(dataBase + 0x3006) == 0x0100);
+        REQUIRE(mem.read16(dataBase + 0x3008) == codeSel);
+        REQUIRE(mem.read16(dataBase + 0x300A) == 0x2300);
+        REQUIRE(mem.read16(dataBase + 0x300C) == dataSel);
+
+        cpu.setFPUControlWord(cpu::FPU_CONTROL_DEFAULT);
+        cpu.setFPUStatusWord(0);
+        cpu.setFPUTagWord(0xFFFF);
+        cpu.setFPUInstructionPointer(0);
+        cpu.setFPUInstructionSelector(0);
+        cpu.setFPULastOpcode(0x07FF);
+        cpu.setFPUDataPointer(0);
+        cpu.setFPUDataSelector(0);
+
+        decoder.step();
+
+        REQUIRE(cpu.getFPUInstructionPointer() == 0x0100);
+        REQUIRE(cpu.getFPUInstructionSelector() == codeSel);
+        REQUIRE(cpu.getFPULastOpcode() == 0x0000);
+        REQUIRE(cpu.getFPUDataPointer() == 0x2300);
+        REQUIRE(cpu.getFPUDataSelector() == dataSel);
+    }
+
+    SECTION("x87: 16-bit protected-mode FNSAVE and FRSTOR clear opcode on restore") {
+        constexpr uint32_t gdtBase = 0x1A00;
+        constexpr uint32_t codeBase = 0x26000;
+        constexpr uint32_t dataBase = 0x38000;
+        constexpr uint16_t codeSel = 0x0008;
+        constexpr uint16_t dataSel = 0x0010;
+
+        writeDescriptor(gdtBase + 0x08, codeBase, 0xFFFF, 0x9A, 0x0);
+        writeDescriptor(gdtBase + 0x10, dataBase, 0xFFFF, 0x92, 0x0);
+
+        cpu.setGDTR({0x17, gdtBase});
+        cpu.setCR(0, cpu.getCR(0) | 0x1);
+        cpu.setEFLAGS(cpu.getEFLAGS() & ~0x00020000u);
+        cpu.loadSegment(cpu::SegRegIndex::CS, codeSel);
+        cpu.loadSegment(cpu::SegRegIndex::DS, dataSel);
+        cpu.setEIP(0x100);
+
+        float source = 1.25f;
+        uint32_t bits = 0;
+        std::memcpy(&bits, &source, sizeof(bits));
+        mem.write32(dataBase + 0x2300, bits);
+
+        mem.write8(codeBase + 0x100, 0xD9); mem.write8(codeBase + 0x101, 0x06); // FLD dword ptr [2300h]
+        mem.write16(codeBase + 0x102, 0x2300);
+        mem.write8(codeBase + 0x104, 0xDD); mem.write8(codeBase + 0x105, 0x36); // FNSAVE [3100h]
+        mem.write16(codeBase + 0x106, 0x3100);
+        mem.write8(codeBase + 0x108, 0xDD); mem.write8(codeBase + 0x109, 0x26); // FRSTOR [3100h]
+        mem.write16(codeBase + 0x10A, 0x3100);
+
+        decoder.step();
+        decoder.step();
+
+        REQUIRE(mem.read16(dataBase + 0x3106) == 0x0100);
+        REQUIRE(mem.read16(dataBase + 0x3108) == codeSel);
+        REQUIRE(mem.read16(dataBase + 0x310A) == 0x2300);
+        REQUIRE(mem.read16(dataBase + 0x310C) == dataSel);
+        REQUIRE(cpu.getFPUControlWord() == cpu::FPU_CONTROL_DEFAULT);
+        REQUIRE(cpu.getFPUStatusWord() == 0);
+        REQUIRE(cpu.isFPURegisterEmpty(0));
+
+        cpu.setFPULastOpcode(0x07FF);
+
+        decoder.step();
+
+        REQUIRE(cpu.getFPUInstructionPointer() == 0x0100);
+        REQUIRE(cpu.getFPUInstructionSelector() == codeSel);
+        REQUIRE(cpu.getFPULastOpcode() == 0x0000);
+        REQUIRE(cpu.getFPUDataPointer() == 0x2300);
+        REQUIRE(cpu.getFPUDataSelector() == dataSel);
+    }
+
+    SECTION("x87: 32-bit protected-mode FNSTENV and FLDENV preserve selector and opcode") {
+        constexpr uint32_t gdtBase = 0x1C00;
+        constexpr uint32_t codeBase = 0x2A000;
+        constexpr uint32_t dataBase = 0x3C000;
+        constexpr uint16_t codeSel = 0x0008;
+        constexpr uint16_t dataSel = 0x0010;
+
+        writeDescriptor(gdtBase + 0x08, codeBase, 0xFFFF, 0x9A, 0x4);
+        writeDescriptor(gdtBase + 0x10, dataBase, 0xFFFF, 0x92, 0x4);
+
+        cpu.setGDTR({0x17, gdtBase});
+        cpu.setCR(0, cpu.getCR(0) | 0x1);
+        cpu.setEFLAGS(cpu.getEFLAGS() & ~0x00020000u);
+        cpu.loadSegment(cpu::SegRegIndex::CS, codeSel);
+        cpu.loadSegment(cpu::SegRegIndex::DS, dataSel);
+        cpu.setEIP(0x100);
+
+        float source = 1.25f;
+        uint32_t bits = 0;
+        std::memcpy(&bits, &source, sizeof(bits));
+        mem.write32(dataBase + 0x2300, bits);
+
+        mem.write8(codeBase + 0x100, 0xD9); mem.write8(codeBase + 0x101, 0x05); // FLD dword ptr [2300h]
+        mem.write32(codeBase + 0x102, 0x00002300);
+        mem.write8(codeBase + 0x106, 0xD9); mem.write8(codeBase + 0x107, 0x35); // FNSTENV [3000h]
+        mem.write32(codeBase + 0x108, 0x00003000);
+        mem.write8(codeBase + 0x10C, 0xD9); mem.write8(codeBase + 0x10D, 0x25); // FLDENV [3000h]
+        mem.write32(codeBase + 0x10E, 0x00003000);
+
+        decoder.step();
+
+        REQUIRE(cpu.is32BitCode());
+        REQUIRE(cpu.getFPUInstructionPointer() == 0x100);
+        REQUIRE(cpu.getFPUInstructionSelector() == codeSel);
+        REQUIRE(cpu.getFPULastOpcode() == 0x0105);
+        REQUIRE(cpu.getFPUDataPointer() == 0x2300);
+        REQUIRE(cpu.getFPUDataSelector() == dataSel);
+
+        decoder.step();
+
+        REQUIRE(mem.read32(dataBase + 0x3000) == cpu.getFPUControlWord());
+        REQUIRE(mem.read32(dataBase + 0x300C) == 0x00000100);
+        REQUIRE(mem.read32(dataBase + 0x3010) == 0x01050008u);
+        REQUIRE(mem.read32(dataBase + 0x3014) == 0x00002300);
+        REQUIRE(mem.read32(dataBase + 0x3018) == 0x00000010u);
+
+        cpu.setFPUControlWord(cpu::FPU_CONTROL_DEFAULT);
+        cpu.setFPUStatusWord(0);
+        cpu.setFPUTagWord(0xFFFF);
+        cpu.setFPUInstructionPointer(0);
+        cpu.setFPUInstructionSelector(0);
+        cpu.setFPULastOpcode(0);
+        cpu.setFPUDataPointer(0);
+        cpu.setFPUDataSelector(0);
+
+        decoder.step();
+
+        REQUIRE(cpu.getFPUInstructionPointer() == 0x0100);
+        REQUIRE(cpu.getFPUInstructionSelector() == codeSel);
+        REQUIRE(cpu.getFPULastOpcode() == 0x0105);
+        REQUIRE(cpu.getFPUDataPointer() == 0x2300);
+        REQUIRE(cpu.getFPUDataSelector() == dataSel);
+    }
+
+    SECTION("x87: 32-bit protected-mode FNSAVE and FRSTOR preserve selector and opcode") {
+        constexpr uint32_t gdtBase = 0x1E00;
+        constexpr uint32_t codeBase = 0x2E000;
+        constexpr uint32_t dataBase = 0x40000;
+        constexpr uint16_t codeSel = 0x0008;
+        constexpr uint16_t dataSel = 0x0010;
+
+        writeDescriptor(gdtBase + 0x08, codeBase, 0xFFFF, 0x9A, 0x4);
+        writeDescriptor(gdtBase + 0x10, dataBase, 0xFFFF, 0x92, 0x4);
+
+        cpu.setGDTR({0x17, gdtBase});
+        cpu.setCR(0, cpu.getCR(0) | 0x1);
+        cpu.setEFLAGS(cpu.getEFLAGS() & ~0x00020000u);
+        cpu.loadSegment(cpu::SegRegIndex::CS, codeSel);
+        cpu.loadSegment(cpu::SegRegIndex::DS, dataSel);
+        cpu.setEIP(0x100);
+
+        float source = 1.25f;
+        uint32_t bits = 0;
+        std::memcpy(&bits, &source, sizeof(bits));
+        mem.write32(dataBase + 0x2300, bits);
+
+        mem.write8(codeBase + 0x100, 0xD9); mem.write8(codeBase + 0x101, 0x05); // FLD dword ptr [2300h]
+        mem.write32(codeBase + 0x102, 0x00002300);
+        mem.write8(codeBase + 0x106, 0xDD); mem.write8(codeBase + 0x107, 0x35); // FNSAVE [3100h]
+        mem.write32(codeBase + 0x108, 0x00003100);
+        mem.write8(codeBase + 0x10C, 0xDD); mem.write8(codeBase + 0x10D, 0x25); // FRSTOR [3100h]
+        mem.write32(codeBase + 0x10E, 0x00003100);
+        mem.write8(codeBase + 0x112, 0xDD); mem.write8(codeBase + 0x113, 0x1D); // FSTP qword ptr [3300h]
+        mem.write32(codeBase + 0x114, 0x00003300);
+
+        decoder.step();
+        decoder.step();
+
+        REQUIRE(mem.read32(dataBase + 0x310C) == 0x00000100);
+        REQUIRE(mem.read32(dataBase + 0x3110) == 0x01050008u);
+        REQUIRE(mem.read32(dataBase + 0x3114) == 0x00002300);
+        REQUIRE(mem.read32(dataBase + 0x3118) == 0x00000010u);
+        REQUIRE(cpu.getFPUControlWord() == cpu::FPU_CONTROL_DEFAULT);
+        REQUIRE(cpu.getFPUStatusWord() == 0);
+        REQUIRE(cpu.isFPURegisterEmpty(0));
+
+        cpu.setFPULastOpcode(0);
+
+        decoder.step();
+
+        REQUIRE(cpu.getFPUInstructionPointer() == 0x0100);
+        REQUIRE(cpu.getFPUInstructionSelector() == codeSel);
+        REQUIRE(cpu.getFPULastOpcode() == 0x0105);
+        REQUIRE(cpu.getFPUDataPointer() == 0x2300);
+        REQUIRE(cpu.getFPUDataSelector() == dataSel);
+
+        decoder.step();
+
+        REQUIRE(std::fabs(readF64(dataBase + 0x3300) - 1.25) < 1e-12);
+        REQUIRE(cpu.isFPURegisterEmpty(0));
+    }
+
     SECTION("x87: FNSTENV and FLDENV roundtrip 16-bit environment") {
         cpu.setFPUControlWord(0x0240);
         cpu.setFPUStatusWord(static_cast<uint16_t>(cpu::FPU_STATUS_C0 |
@@ -376,6 +723,7 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
         cpu.setFPUTagWord(0xA55A);
         cpu.setFPUInstructionPointer(0x1234);
         cpu.setFPUInstructionSelector(0x5678);
+        cpu.setFPULastOpcode(0x0321);
         cpu.setFPUDataPointer(0x9ABC);
         cpu.setFPUDataSelector(0xDEF0);
 
@@ -391,10 +739,10 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
                                                             cpu::FPU_STATUS_C3 |
                                                             (5u << 11)));
         REQUIRE(mem.read16(0x3004) == 0xA55A);
-        REQUIRE(mem.read16(0x3006) == 0x1234);
-        REQUIRE(mem.read16(0x3008) == 0x5678);
-        REQUIRE(mem.read16(0x300A) == 0x9ABC);
-        REQUIRE(mem.read16(0x300C) == 0xDEF0);
+        REQUIRE(mem.read16(0x3006) == 0x79B4);
+        REQUIRE(mem.read16(0x3008) == 0x5321);
+        REQUIRE(mem.read16(0x300A) == 0x89BC);
+        REQUIRE(mem.read16(0x300C) == 0xE000);
         REQUIRE((cpu.getFPUControlWord() & 0x003F) == 0x003F);
 
         cpu.setFPUControlWord(cpu::FPU_CONTROL_DEFAULT);
@@ -402,6 +750,7 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
         cpu.setFPUTagWord(0xFFFF);
         cpu.setFPUInstructionPointer(0);
         cpu.setFPUInstructionSelector(0);
+        cpu.setFPULastOpcode(0);
         cpu.setFPUDataPointer(0);
         cpu.setFPUDataSelector(0);
 
@@ -412,10 +761,65 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
                                                                 cpu::FPU_STATUS_C3 |
                                                                 (5u << 11)));
         REQUIRE(cpu.getFPUTagWord() == 0xA55A);
-        REQUIRE(cpu.getFPUInstructionPointer() == 0x1234);
-        REQUIRE(cpu.getFPUInstructionSelector() == 0x5678);
-        REQUIRE(cpu.getFPUDataPointer() == 0x9ABC);
-        REQUIRE(cpu.getFPUDataSelector() == 0xDEF0);
+        REQUIRE(cpu.getFPUInstructionPointer() == 0x579B4);
+        REQUIRE(cpu.getFPUInstructionSelector() == 0);
+        REQUIRE(cpu.getFPULastOpcode() == 0x0321);
+        REQUIRE(cpu.getFPUDataPointer() == 0xE89BC);
+        REQUIRE(cpu.getFPUDataSelector() == 0);
+    }
+
+    SECTION("x87: FNSAVE and FRSTOR roundtrip 16-bit real-mode state") {
+        cpu.setFPUControlWord(0x027F);
+        cpu.setFPUStatusWord(static_cast<uint16_t>(cpu::FPU_STATUS_C2 |
+                                                   (6u << 11)));
+        cpu.setFPUTagWord(0x00F0);
+        cpu.setFPUInstructionPointer(0x1234);
+        cpu.setFPUInstructionSelector(0x5678);
+        cpu.setFPULastOpcode(0x0321);
+        cpu.setFPUDataPointer(0x9ABC);
+        cpu.setFPUDataSelector(0xDEF0);
+        cpu.pushFPU(3.5);
+        cpu.pushFPU(-2.25);
+
+        mem.write8(0x100, 0xDD); mem.write8(0x101, 0x36); // FNSAVE [3100h]
+        mem.write16(0x102, 0x3100);
+        mem.write8(0x104, 0xDD); mem.write8(0x105, 0x26); // FRSTOR [3100h]
+        mem.write16(0x106, 0x3100);
+        mem.write8(0x108, 0xDD); mem.write8(0x109, 0x1E); // FSTP qword ptr [3200h]
+        mem.write16(0x10A, 0x3200);
+        mem.write8(0x10C, 0xDD); mem.write8(0x10D, 0x1E); // FSTP qword ptr [3208h]
+        mem.write16(0x10E, 0x3208);
+
+        decoder.step();
+
+        REQUIRE(mem.read16(0x3100) == 0x027F);
+        REQUIRE(mem.read16(0x3102) == static_cast<uint16_t>(cpu::FPU_STATUS_C2 |
+                                                            (6u << 11)));
+        REQUIRE(mem.read16(0x3104) == 0x00F0);
+        REQUIRE(mem.read16(0x3106) == 0x79B4);
+        REQUIRE(mem.read16(0x3108) == 0x5321);
+        REQUIRE(mem.read16(0x310A) == 0x89BC);
+        REQUIRE(mem.read16(0x310C) == 0xE000);
+        REQUIRE(cpu.getFPUControlWord() == cpu::FPU_CONTROL_DEFAULT);
+        REQUIRE(cpu.getFPUStatusWord() == 0);
+        REQUIRE(cpu.isFPURegisterEmpty(0));
+
+        decoder.step();
+        decoder.step();
+        decoder.step();
+
+        REQUIRE(cpu.getFPUControlWord() == 0x027F);
+        REQUIRE(cpu.getFPUStatusWord() == static_cast<uint16_t>(cpu::FPU_STATUS_C2 |
+                                                                (6u << 11)));
+        REQUIRE(cpu.getFPUTagWord() == 0x00F0);
+        REQUIRE(cpu.getFPUInstructionPointer() == 0x579B4);
+        REQUIRE(cpu.getFPUInstructionSelector() == 0);
+        REQUIRE(cpu.getFPULastOpcode() == 0x0321);
+        REQUIRE(cpu.getFPUDataPointer() == 0xE89BC);
+        REQUIRE(cpu.getFPUDataSelector() == 0);
+        REQUIRE(std::fabs(readF64(0x3200) - (-2.25)) < 1e-12);
+        REQUIRE(std::fabs(readF64(0x3208) - 3.5) < 1e-12);
+        REQUIRE(cpu.isFPURegisterEmpty(0));
     }
 
     SECTION("x87: FNSAVE and FRSTOR roundtrip 32-bit state") {

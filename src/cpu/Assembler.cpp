@@ -1026,6 +1026,36 @@ AsmResult Assembler::assembleLine(const std::string& line, uint32_t origin) cons
             return r;
         }
 
+        // ── x87 environment/state save-restore ──
+        if (mnem == "FLDENV" || mnem == "FNSTENV" || mnem == "FRSTOR" || mnem == "FNSAVE") {
+            if (op1.kind != OpKind::Mem || hasOp2) {
+                r.error = mnem + " requires one memory operand";
+                return r;
+            }
+
+            if (op1.sizeHint == 4) {
+                r.bytes.push_back(0x66);
+            } else if (op1.sizeHint != 0 && op1.sizeHint != 2) {
+                r.error = mnem + " supports WORD (16-bit env/state) or DWORD (32-bit env/state) memory operands";
+                return r;
+            }
+
+            if (mnem == "FLDENV") {
+                r.bytes.push_back(0xD9);
+                encodeModRM(op1, 4, r.bytes);
+            } else if (mnem == "FNSTENV") {
+                r.bytes.push_back(0xD9);
+                encodeModRM(op1, 6, r.bytes);
+            } else if (mnem == "FRSTOR") {
+                r.bytes.push_back(0xDD);
+                encodeModRM(op1, 4, r.bytes);
+            } else {
+                r.bytes.push_back(0xDD);
+                encodeModRM(op1, 6, r.bytes);
+            }
+            return r;
+        }
+
         // ── MOVZX/MOVSX (0F Bx) ──
         if (mnem == "MOVZX") {
             if (op1.kind == OpKind::Reg16 && (op2.kind == OpKind::Reg8 || op2.kind == OpKind::Mem)) {

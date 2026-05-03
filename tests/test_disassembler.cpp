@@ -59,6 +59,79 @@ TEST_CASE("Disassembler - Single Instructions", "[Disassembler]") {
         REQUIRE(instr.mnemonic == "BSWAP EAX");
         REQUIRE(instr.hexBytes == "0F C8");
     }
+
+    SECTION("disassembleAt: FNSTENV [3000h]") {
+        mem.write8(0x100, 0xD9);
+        mem.write8(0x101, 0x36);
+        mem.write8(0x102, 0x00);
+        mem.write8(0x103, 0x30);
+
+        auto instr = disasm.disassembleAt(0x100);
+
+        REQUIRE(instr.address == 0x100);
+        REQUIRE(instr.length == 4);
+        REQUIRE(instr.mnemonic == "FNSTENV [3000h]");
+        REQUIRE(instr.hexBytes == "D9 36 00 30");
+    }
+
+    SECTION("disassembleAt: FLDENV [3000h]") {
+        mem.write8(0x100, 0xD9);
+        mem.write8(0x101, 0x26);
+        mem.write8(0x102, 0x00);
+        mem.write8(0x103, 0x30);
+
+        auto instr = disasm.disassembleAt(0x100);
+
+        REQUIRE(instr.address == 0x100);
+        REQUIRE(instr.length == 4);
+        REQUIRE(instr.mnemonic == "FLDENV [3000h]");
+        REQUIRE(instr.hexBytes == "D9 26 00 30");
+    }
+
+    SECTION("disassembleAt: FNSAVE [3100h]") {
+        mem.write8(0x100, 0xDD);
+        mem.write8(0x101, 0x36);
+        mem.write8(0x102, 0x00);
+        mem.write8(0x103, 0x31);
+
+        auto instr = disasm.disassembleAt(0x100);
+
+        REQUIRE(instr.address == 0x100);
+        REQUIRE(instr.length == 4);
+        REQUIRE(instr.mnemonic == "FNSAVE [3100h]");
+        REQUIRE(instr.hexBytes == "DD 36 00 31");
+    }
+
+    SECTION("disassembleAt: FRSTOR [3100h]") {
+        mem.write8(0x100, 0xDD);
+        mem.write8(0x101, 0x26);
+        mem.write8(0x102, 0x00);
+        mem.write8(0x103, 0x31);
+
+        auto instr = disasm.disassembleAt(0x100);
+
+        REQUIRE(instr.address == 0x100);
+        REQUIRE(instr.length == 4);
+        REQUIRE(instr.mnemonic == "FRSTOR [3100h]");
+        REQUIRE(instr.hexBytes == "DD 26 00 31");
+    }
+
+    SECTION("disassembleAt: FNSTENV [00003000h] with 32-bit addressing") {
+        mem.write8(0x100, 0x67);
+        mem.write8(0x101, 0xD9);
+        mem.write8(0x102, 0x35);
+        mem.write8(0x103, 0x00);
+        mem.write8(0x104, 0x30);
+        mem.write8(0x105, 0x00);
+        mem.write8(0x106, 0x00);
+
+        auto instr = disasm.disassembleAt(0x100);
+
+        REQUIRE(instr.address == 0x100);
+        REQUIRE(instr.length == 7);
+        REQUIRE(instr.mnemonic == "FNSTENV [00003000h]");
+        REQUIRE(instr.hexBytes == "67 D9 35 00 30 00 00");
+    }
 }
 
 TEST_CASE("Disassembler - Range", "[Disassembler]") {
