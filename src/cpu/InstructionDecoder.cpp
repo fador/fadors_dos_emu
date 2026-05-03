@@ -398,6 +398,83 @@ void InstructionDecoder::writeInt64(uint32_t address, int64_t value) {
   write64(m_memory, address, static_cast<uint64_t>(value));
 }
 
+void InstructionDecoder::storeFPUEnvironment(uint32_t address,
+                                             bool operandSize32,
+                                             bool maskExceptions) {
+  if (operandSize32) {
+    m_memory.write32(address + 0, m_cpu.getFPUControlWord());
+    m_memory.write32(address + 4, m_cpu.getFPUStatusWord());
+    m_memory.write32(address + 8, m_cpu.getFPUTagWord());
+    m_memory.write32(address + 12, m_cpu.getFPUInstructionPointer());
+    m_memory.write32(address + 16,
+                     static_cast<uint32_t>(m_cpu.getFPUInstructionSelector()) |
+                         (static_cast<uint32_t>(m_cpu.getFPULastOpcode()) << 16));
+    m_memory.write32(address + 20, m_cpu.getFPUDataPointer());
+    m_memory.write32(address + 24, m_cpu.getFPUDataSelector());
+  } else {
+    m_memory.write16(address + 0, m_cpu.getFPUControlWord());
+    m_memory.write16(address + 2, m_cpu.getFPUStatusWord());
+    m_memory.write16(address + 4, m_cpu.getFPUTagWord());
+    m_memory.write16(address + 6,
+                     static_cast<uint16_t>(m_cpu.getFPUInstructionPointer()));
+    m_memory.write16(address + 8, m_cpu.getFPUInstructionSelector());
+    m_memory.write16(address + 10,
+                     static_cast<uint16_t>(m_cpu.getFPUDataPointer()));
+    m_memory.write16(address + 12, m_cpu.getFPUDataSelector());
+  }
+
+  if (maskExceptions) {
+    m_cpu.setFPUControlWord(
+        static_cast<uint16_t>(m_cpu.getFPUControlWord() | 0x003F));
+  }
+}
+
+void InstructionDecoder::loadFPUEnvironment(uint32_t address,
+                                            bool operandSize32) {
+  if (operandSize32) {
+    m_cpu.setFPUControlWord(static_cast<uint16_t>(m_memory.read32(address + 0)));
+    m_cpu.setFPUStatusWord(static_cast<uint16_t>(m_memory.read32(address + 4)));
+    m_cpu.setFPUTagWord(static_cast<uint16_t>(m_memory.read32(address + 8)));
+    m_cpu.setFPUInstructionPointer(m_memory.read32(address + 12));
+    const uint32_t selectorOpcode = m_memory.read32(address + 16);
+    m_cpu.setFPUInstructionSelector(static_cast<uint16_t>(selectorOpcode));
+    m_cpu.setFPULastOpcode(static_cast<uint16_t>(selectorOpcode >> 16));
+    m_cpu.setFPUDataPointer(m_memory.read32(address + 20));
+    m_cpu.setFPUDataSelector(static_cast<uint16_t>(m_memory.read32(address + 24)));
+    return;
+  }
+
+  m_cpu.setFPUControlWord(m_memory.read16(address + 0));
+  m_cpu.setFPUStatusWord(m_memory.read16(address + 2));
+  m_cpu.setFPUTagWord(m_memory.read16(address + 4));
+  m_cpu.setFPUInstructionPointer(m_memory.read16(address + 6));
+  m_cpu.setFPUInstructionSelector(m_memory.read16(address + 8));
+  m_cpu.setFPULastOpcode(0);
+  m_cpu.setFPUDataPointer(m_memory.read16(address + 10));
+  m_cpu.setFPUDataSelector(m_memory.read16(address + 12));
+}
+
+void InstructionDecoder::storeFPUState(uint32_t address, bool operandSize32) {
+  storeFPUEnvironment(address, operandSize32, false);
+  const uint32_t registerBase = address + (operandSize32 ? 28u : 14u);
+  for (uint8_t index = 0; index < 8; ++index) {
+    const double value = m_cpu.isFPURegisterEmpty(index)
+                             ? 0.0
+                             : m_cpu.getFPURegister(index);
+    writeFloat80(registerBase + index * 10u, value);
+  }
+}
+
+void InstructionDecoder::loadFPUState(uint32_t address, bool operandSize32) {
+  loadFPUEnvironment(address, operandSize32);
+  const uint16_t restoredTagWord = m_cpu.getFPUTagWord();
+  const uint32_t registerBase = address + (operandSize32 ? 28u : 14u);
+  for (uint8_t index = 0; index < 8; ++index) {
+    m_cpu.setFPURegister(index, readFloat80(registerBase + index * 10u));
+  }
+  m_cpu.setFPUTagWord(restoredTagWord);
+}
+
 double InstructionDecoder::roundFPUValue(double value) const {
   switch ((m_cpu.getFPUControlWord() >> 10) & 0x3) {
   case 0:
@@ -581,6 +658,7 @@ void InstructionDecoder::executeFPUOpcode(uint8_t opcode) {
   case 0xD9: {
     if (modrm.mod != 3) {
       const uint32_t addr = effectiveAddress();
+      const bool operandSize32 = currentOperandSize32();
       switch (modrm.reg) {
       case 0:
         m_cpu.pushFPU(static_cast<double>(readFloat32(addr)));
@@ -592,8 +670,14 @@ void InstructionDecoder::executeFPUOpcode(uint8_t opcode) {
         writeFloat32(addr, st(0));
         m_cpu.popFPU();
         return;
+      case 4:
+        loadFPUEnvironment(addr, operandSize32);
+        return;
       case 5:
         m_cpu.setFPUControlWord(m_memory.read16(addr));
+        return;
+      case 6:
+        storeFPUEnvironment(addr, operandSize32, true);
         return;
       case 7:
         m_memory.write16(addr, m_cpu.getFPUControlWord());
@@ -655,7 +739,14 @@ void InstructionDecoder::executeFPUOpcode(uint8_t opcode) {
       m_cpu.popFPU();
       return;
     case 0xF2: {
-      const double tangent = std::tan(st(0));
+      const double input = st(0);
+      if (!std::isfinite(input) ||
+          std::fabs(input) >= std::ldexp(1.0, 63)) {
+        m_cpu.setFPUStatusBits(FPU_STATUS_C2);
+        return;
+      }
+      m_cpu.clearFPUStatusBits(FPU_STATUS_C2);
+      const double tangent = std::tan(input);
       writeSt(0, tangent);
       m_cpu.pushFPU(1.0);
       return;
@@ -666,8 +757,9 @@ void InstructionDecoder::executeFPUOpcode(uint8_t opcode) {
       return;
     case 0xF4: {
       int exponent = 0;
-      const double significand = std::frexp(st(0), &exponent);
-      writeSt(0, static_cast<double>(exponent));
+      double significand = std::frexp(st(0), &exponent);
+      significand = std::ldexp(significand, 1);
+      writeSt(0, static_cast<double>(exponent - 1));
       m_cpu.pushFPU(significand);
       return;
     }
@@ -695,8 +787,15 @@ void InstructionDecoder::executeFPUOpcode(uint8_t opcode) {
       writeSt(0, std::sqrt(st(0)));
       return;
     case 0xFB: {
-      const double sine = std::sin(st(0));
-      const double cosine = std::cos(st(0));
+      const double input = st(0);
+      if (!std::isfinite(input) ||
+          std::fabs(input) >= std::ldexp(1.0, 63)) {
+        m_cpu.setFPUStatusBits(FPU_STATUS_C2);
+        return;
+      }
+      m_cpu.clearFPUStatusBits(FPU_STATUS_C2);
+      const double sine = std::sin(input);
+      const double cosine = std::cos(input);
       writeSt(0, sine);
       m_cpu.pushFPU(cosine);
       return;
@@ -917,6 +1016,7 @@ void InstructionDecoder::executeFPUOpcode(uint8_t opcode) {
   case 0xDD: {
     if (modrm.mod != 3) {
       const uint32_t addr = effectiveAddress();
+      const bool operandSize32 = currentOperandSize32();
       switch (modrm.reg) {
       case 0:
         m_cpu.pushFPU(readFloat64(addr));
@@ -927,6 +1027,13 @@ void InstructionDecoder::executeFPUOpcode(uint8_t opcode) {
       case 3:
         writeFloat64(addr, st(0));
         m_cpu.popFPU();
+        return;
+      case 4:
+        loadFPUState(addr, operandSize32);
+        return;
+      case 6:
+        storeFPUState(addr, operandSize32);
+        m_cpu.resetFPU();
         return;
       case 7:
         m_memory.write16(addr, m_cpu.getFPUStatusWord());

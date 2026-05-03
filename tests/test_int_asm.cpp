@@ -886,6 +886,36 @@ TEST_CASE("INT 21h AH=4Ah Resize Memory via asm", "[int][asm][dos][mem]") {
     REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
 }
 
+TEST_CASE("INT 21h AH=4Ah Resize Memory returns max block on failure via asm", "[int][asm][dos][mem]") {
+    IntTestEnv e;
+
+    e.assemble("MOV AH, 48h\nMOV BX, 10h\nINT 21h");
+    e.run(3);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+
+    const uint16_t allocSeg = e.cpu.getReg16(cpu::AX);
+    const uint16_t mcbSeg = static_cast<uint16_t>(allocSeg - 1);
+    const uint32_t mcbAddr = static_cast<uint32_t>(mcbSeg) << 4;
+    const uint16_t initialSize = e.mem.read16(mcbAddr + 3);
+    const uint16_t nextSeg = static_cast<uint16_t>(mcbSeg + initialSize + 1);
+    const uint32_t nextMcbAddr = static_cast<uint32_t>(nextSeg) << 4;
+    const uint16_t maxPossible = static_cast<uint16_t>(
+        initialSize + 1 + e.mem.read16(nextMcbAddr + 3));
+
+    REQUIRE(e.mem.read16(nextMcbAddr + 1) == 0);
+
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.decoder.loadSegment(cpu::ES, allocSeg);
+    e.assemble("MOV AH, 4Ah\nMOV BX, 0FFFFh\nINT 21h");
+    e.run(3);
+
+    REQUIRE(e.cpu.getEFLAGS() & cpu::FLAG_CARRY);
+    REQUIRE(e.cpu.getReg16(cpu::AX) == 0x0008);
+    REQUIRE(e.cpu.getReg16(cpu::BX) == maxPossible);
+    REQUIRE(e.mem.read16(mcbAddr + 3) == maxPossible);
+    REQUIRE(e.mem.read8(mcbAddr) == 'Z');
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 //  INT 21h – Directory Operations
 // ════════════════════════════════════════════════════════════════════════════

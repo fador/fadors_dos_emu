@@ -1022,6 +1022,25 @@ void DOS::handleMemoryManagement() {
     uint16_t mcbSeg = segment - 1;
     MCB mcb = readMCB(mcbSeg);
 
+    auto coalesceFollowingFreeBlocks = [&](MCB &block) {
+      while (block.type == 'M') {
+        const uint32_t nextSeg32 =
+            static_cast<uint32_t>(mcbSeg) + block.size + 1u;
+        if (nextSeg32 > LAST_PARA) {
+          break;
+        }
+
+        const uint16_t nextSeg = static_cast<uint16_t>(nextSeg32);
+        const MCB next = readMCB(nextSeg);
+        if (next.owner != 0) {
+          break;
+        }
+
+        block.type = next.type;
+        block.size = static_cast<uint16_t>(block.size + 1u + next.size);
+      }
+    };
+
     if (mcb.size >= requested) { // Shrink
       if (mcb.size > requested + 1) {
         // Compute the size of the new free block
@@ -1057,39 +1076,35 @@ void DOS::handleMemoryManagement() {
       LOG_DEBUG("DOS: Shrunk segment ", std::hex, segment, " to ", requested,
                 " paras");
     } else {
-      // Expand (only if next is free)
-      if (mcb.type == 'M') {
-        uint16_t nextSeg = mcbSeg + mcb.size + 1;
-        MCB next = readMCB(nextSeg);
-        if (next.owner == 0 && (mcb.size + 1 + next.size) >= requested) {
-          uint16_t combinedSize = mcb.size + 1 + next.size;
-          if (combinedSize > requested + 1) {
-            MCB newNext;
-            newNext.type = next.type;
-            newNext.owner = 0;
-            newNext.size = combinedSize - requested - 1;
+      MCB expanded = mcb;
+      coalesceFollowingFreeBlocks(expanded);
 
-            mcb.type = 'M';
-            mcb.size = requested;
-            writeMCB(mcbSeg, mcb);
-            writeMCB(static_cast<uint16_t>(mcbSeg + requested + 1), newNext);
-          } else {
-            mcb.type = next.type;
-            mcb.size = static_cast<uint16_t>(combinedSize);
-            writeMCB(mcbSeg, mcb);
-          }
-          m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-          LOG_DEBUG("DOS: Expanded segment ", std::hex, segment, " to ",
-                    requested, " paras");
-          return;
+      if (expanded.size >= requested) {
+        if (expanded.size > requested + 1) {
+          MCB newNext;
+          newNext.type = expanded.type;
+          newNext.owner = 0;
+          newNext.size = static_cast<uint16_t>(expanded.size - requested - 1);
+
+          expanded.type = 'M';
+          expanded.size = requested;
+          writeMCB(mcbSeg, expanded);
+          writeMCB(static_cast<uint16_t>(mcbSeg + requested + 1), newNext);
+        } else {
+          writeMCB(mcbSeg, expanded);
         }
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+        LOG_DEBUG("DOS: Expanded segment ", std::hex, segment, " to ",
+                  requested, " paras");
+        return;
       }
+
+      if (expanded.size != mcb.size || expanded.type != mcb.type) {
+        writeMCB(mcbSeg, expanded);
+      }
+
       m_cpu.setReg16(cpu::AX, 0x08); // Insufficient memory
-      uint16_t nextSeg = mcbSeg + mcb.size + 1;
-      MCB next = readMCB(nextSeg);
-      uint16_t maxPossible = mcb.size;
-      if (next.owner == 0)
-        maxPossible += 1 + next.size;
+      uint16_t maxPossible = expanded.size;
       m_cpu.setReg16(cpu::BX, maxPossible);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
       LOG_WARN("DOS: Failed to expand segment ", std::hex, segment, " to ",

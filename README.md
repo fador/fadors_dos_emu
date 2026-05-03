@@ -1,24 +1,25 @@
 # Fador's DOS Emulator
 
-!note! This software is more or less AI hallucination, work in progress.
+Work in progress. The emulator surface is expanding quickly and some subsystems are still incomplete.
 
 ## Overview
-Fador's DOS Emulator is a multiplatform MS-DOS emulator written in modern C++20. The primary goal is to support all Intel 80386 instructions and most standard BIOS and DOS interrupts.
+Fador's DOS Emulator is a multiplatform MS-DOS emulator written in modern C++20. The project targets real-mode DOS software, 80386 protected-mode workloads, and DOS extenders while keeping CPU, memory, hardware devices, and UI frontends decoupled.
 
 ## Features
-- **CPU Emulation:** Full Intel 80386 instruction set support, encompassing both 16-bit Real Mode and 32-bit Protected Mode execution environments.
-- **Protected Mode & DOS Extenders:** Capable of natively running built-in Extended DOS applications (like DOS/4GW). Supports Global/Interrupt Descriptor Tables (GDT/IDT), 32-bit Segment alignments, hardware IRQ remapping via the PIC, and Mode Control instructions (`LMSW`, `SGDT`, `LIDT`, etc).
-- **System Emulation:** Comprehensive support for PC architecture, memory mapping, and I/O ports.
-- **Realistic Memory Model:** Expanded conventional and extended memory reaching up to 32MB physical limits. Conventional memory (0x500–0x9FFFF) is pre-filled with a deterministic pseudo-random LCG pattern (seed 0xCC, `val = val * 141 + 3`) to simulate dirty DOS RAM. IVT/BDA (0x000–0x4FF) remains zero-filled so BIOS can write proper values. This prevents programs that rely on non-zero far-heap contents (e.g. Turbo C 2.01 Turbo Vision) from misbehaving.
-- **BIOS & DOS APIs:** Extensive support for INT 10h, INT 13h, INT 15h, INT 16h, INT 1Ah, INT 21h, and more. Refer to the `docs/` folder (Ralph Brown's interrupt list) for specifications.
-- **Hardware Devices:** Programmable Interrupt Controller (PIC 8259) supporting dynamic hardware IRQ remapping, Programmable Interval Timer (PIT 8254), Keyboard Controller (8042), VGA controller with text-mode VRAM.
-- **Program Loaders:** `.COM` and MZ `.EXE` file loading with full relocation support, PSP construction, and MCB-based memory management. Includes stub execution environments capable of launching embedded 32-bit payloads.
-- **Built-in Disassembler:** Read-only x86 real-mode disassembler that produces human-readable assembly from memory without modifying CPU state. Supports single-byte and two-byte (`0F`) opcodes, all prefix combinations, ModR/M and SIB addressing.
-- **Built-in Assembler:** x86 real-mode assembler (`src/cpu/Assembler.{hpp,cpp}`) that converts assembly text into machine code bytes. Supports ALU ops, MOV, shifts, jumps (short/near), Jcc, CALL/RET, PUSH/POP, INC/DEC, NOT/NEG, MUL/DIV, IN/OUT, string ops, segment overrides, MOVZX/MOVSX, BT family, LEA, LES/LDS, ENTER/LEAVE, INT, XCHG, TEST, and more. Used by the interactive debugger and `--exec` CLI mode.
-- **Interactive Debugger:** Step through instructions, inspect registers, dump memory, disassemble code, and assemble instructions directly into memory.
-- **Cycle-limited Execution:** Stop emulation after a configurable number of instruction cycles and automatically dump CPU registers and surrounding disassembly.
-- **Cross-Platform Interface:** Initially implemented as a text-mode console application with ANSI terminal rendering.
-- **Decoupled Architecture:** Designed to easily integrate a separate graphical view (e.g., SDL2, OpenGL) in the future without changing the core emulator logic.
+- **CPU Emulation:** 16-bit Real Mode and 32-bit Protected Mode execution, descriptor-table and control-register instructions, string operations, and REP fast paths. The emulator now also includes a substantial x87 implementation covering stack management, 32/64/80-bit loads and stores, integer conversion, arithmetic, comparisons, rounding, transcendental helpers (`FSIN`, `FCOS`, `FSINCOS`, `FPTAN`, `FPATAN`, `FYL2X`, `F2XM1`, etc.), and x87 environment/state save-restore (`FLDENV`, `FNSTENV`, `FNSAVE`, `FRSTOR`).
+- **Protected Mode & DOS Extenders:** DPMI host support for protected-mode DOS extenders such as DOS/4GW, including GDT/IDT handling, mode-switch entry points, segment reload callbacks, and app/host interrupt plumbing.
+- **Memory Model:** Up to 32 MB of physical memory with deterministic dirty-RAM initialization above the IVT/BDA. DOS conventional memory is managed through an MCB chain with DOS-compatible allocation, free, and resize behavior.
+- **Expanded and Extended Memory:** EMS services via `INT 67h` with an `EMMXXXX0` device, page-frame mappings, and private API stubs, plus optional HIMEM/XMS support wired through `INT 2Fh` and far-call dispatch stubs.
+- **BIOS & DOS APIs:** Support for core BIOS and DOS interrupts including `INT 10h`, `INT 13h`, `INT 15h`, `INT 16h`, `INT 1Ah`, `INT 21h`, `INT 2Fh`, `INT 31h`, `INT 33h`, and `INT 67h`. Refer to the `docs/` folder (Ralph Brown's interrupt list) for specifications.
+- **Hardware Devices:** PIC 8259, PIT 8254, DMA 8237, keyboard controller, joystick, VGA text-mode controller, AdLib (OPL2), and Sound Blaster DSP emulation.
+- **Program Loading and Overlays:** `.COM` and MZ `.EXE` loading with relocation support, PSP/environment block creation, MCB-backed program memory, embedded 32-bit payload launching, and VROOMM/FBOV overlay loading for segmented applications.
+- **Built-in Disassembler:** Read-only x86 real-mode disassembler that produces human-readable assembly from memory without modifying CPU state. Supports prefixes, ModR/M and SIB decoding, and one-byte plus `0F` opcode forms.
+- **Built-in Assembler:** x86 real-mode assembler (`src/cpu/Assembler.{hpp,cpp}`) used by the interactive debugger and `--exec` CLI mode. Supports ALU ops, MOV, shifts, jumps, Jcc, CALL/RET, PUSH/POP, INC/DEC, NOT/NEG, MUL/DIV, IN/OUT, string ops, segment overrides, MOVZX/MOVSX, BT family, LEA, LES/LDS, ENTER/LEAVE, INT, XCHG, TEST, and more.
+- **Interactive Debugger and CLI Tooling:** Single-step execution, register and memory inspection, disassembly, inline assembly, `--exec` for one-shot assembly execution, and `--stop-after` / `--dump-on-exit` state dumps.
+- **Benchmark Modes:** Built-in `decoder-loop`, `rep-movsb`, and `rep-movsd` benchmarks for measuring interpreter hot paths without full guest startup noise.
+- **Frontends:** Text-mode terminal rendering by default, with optional SDL rendering when the project is built with SDL2.
+- **Test Coverage:** Custom unit tests cover CPU execution, instruction decoding, assembler/disassembler behavior, BIOS/DOS/DPMI services, memory managers, interrupts, and hardware devices.
+- **Decoupled Architecture:** CPU, memory, devices, and UI frontends remain separated so rendering backends can change without rewriting the emulation core.
 
 ## Build Instructions
 The project uses CMake for cross-platform building. A C++20 compatible compiler is required.
@@ -38,7 +39,9 @@ cmake --build .
 ### Options
 | Flag | Description |
 |------|-------------|
-| `--himem` | Enable high memory (HMA/XMS) support |
+| `--himem` | Enable HIMEM/XMS support |
+| `--sdl` | Force the SDL frontend when SDL2 support is available |
+| `--no-sdl` | Force headless/text-mode execution even in SDL builds |
 | `--stop-after=N` | Stop execution after N instruction cycles and dump CPU state |
 | `--dump-on-exit` | Dump CPU state when the program terminates |
 | `--bench=decoder-loop\|rep-movsb\|rep-movsd` | Run an in-process benchmark without loading a program |
@@ -51,6 +54,12 @@ cmake --build .
 ```bash
 # Run a COM file
 ./fadors_emu game.com
+
+# Run headless with HIMEM/XMS enabled
+./fadors_emu --himem --no-sdl program.exe
+
+# Use the SDL frontend when it is available in the build
+./fadors_emu --sdl program.exe
 
 # Stop after 5000 cycles and inspect state
 ./fadors_emu --stop-after=5000 program.com

@@ -114,6 +114,11 @@ private:
   void writeFloat80(uint32_t address, double value);
   int64_t readInt64(uint32_t address) const;
   void writeInt64(uint32_t address, int64_t value);
+  void storeFPUEnvironment(uint32_t address, bool operandSize32,
+                           bool maskExceptions);
+  void loadFPUEnvironment(uint32_t address, bool operandSize32);
+  void storeFPUState(uint32_t address, bool operandSize32);
+  void loadFPUState(uint32_t address, bool operandSize32);
   double roundFPUValue(double value) const;
   int64_t convertFPUToInt(double value, int bits, bool &invalid) const;
   void setFPUCompareStatus(double lhs, double rhs);

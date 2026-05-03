@@ -33,6 +33,21 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
     cpu.setSegReg(cpu::SegRegIndex::SS, 0x0000);
     cpu.setEIP(0x100);
 
+    auto readF64 = [&](uint32_t address) {
+        uint64_t bits = static_cast<uint64_t>(mem.read32(address)) |
+                        (static_cast<uint64_t>(mem.read32(address + 4)) << 32);
+        double value = 0.0;
+        std::memcpy(&value, &bits, sizeof(value));
+        return value;
+    };
+
+    auto writeF64 = [&](uint32_t address, double value) {
+        uint64_t bits = 0;
+        std::memcpy(&bits, &value, sizeof(bits));
+        mem.write32(address, static_cast<uint32_t>(bits & 0xFFFFFFFFull));
+        mem.write32(address + 4, static_cast<uint32_t>(bits >> 32));
+    };
+
     SECTION("decodeModRM boundary conditions") {
         auto check_modrm = [&](uint8_t byte, uint8_t exp_mod, uint8_t exp_reg, uint8_t exp_rm) {
             cpu::ModRM modrm = decoder.decodeModRM(byte);
@@ -351,6 +366,241 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
         REQUIRE(cpu.isFPURegisterEmpty(0));
         REQUIRE(cpu.getFPUControlWord() == cpu::FPU_CONTROL_DEFAULT);
         REQUIRE(cpu.getFPUStatusWord() == 0);
+    }
+
+    SECTION("x87: FNSTENV and FLDENV roundtrip 16-bit environment") {
+        cpu.setFPUControlWord(0x0240);
+        cpu.setFPUStatusWord(static_cast<uint16_t>(cpu::FPU_STATUS_C0 |
+                                                   cpu::FPU_STATUS_C3 |
+                                                   (5u << 11)));
+        cpu.setFPUTagWord(0xA55A);
+        cpu.setFPUInstructionPointer(0x1234);
+        cpu.setFPUInstructionSelector(0x5678);
+        cpu.setFPUDataPointer(0x9ABC);
+        cpu.setFPUDataSelector(0xDEF0);
+
+        mem.write8(0x100, 0xD9); mem.write8(0x101, 0x36); // FNSTENV [3000h]
+        mem.write16(0x102, 0x3000);
+        mem.write8(0x104, 0xD9); mem.write8(0x105, 0x26); // FLDENV [3000h]
+        mem.write16(0x106, 0x3000);
+
+        decoder.step();
+
+        REQUIRE(mem.read16(0x3000) == 0x0240);
+        REQUIRE(mem.read16(0x3002) == static_cast<uint16_t>(cpu::FPU_STATUS_C0 |
+                                                            cpu::FPU_STATUS_C3 |
+                                                            (5u << 11)));
+        REQUIRE(mem.read16(0x3004) == 0xA55A);
+        REQUIRE(mem.read16(0x3006) == 0x1234);
+        REQUIRE(mem.read16(0x3008) == 0x5678);
+        REQUIRE(mem.read16(0x300A) == 0x9ABC);
+        REQUIRE(mem.read16(0x300C) == 0xDEF0);
+        REQUIRE((cpu.getFPUControlWord() & 0x003F) == 0x003F);
+
+        cpu.setFPUControlWord(cpu::FPU_CONTROL_DEFAULT);
+        cpu.setFPUStatusWord(0);
+        cpu.setFPUTagWord(0xFFFF);
+        cpu.setFPUInstructionPointer(0);
+        cpu.setFPUInstructionSelector(0);
+        cpu.setFPUDataPointer(0);
+        cpu.setFPUDataSelector(0);
+
+        decoder.step();
+
+        REQUIRE(cpu.getFPUControlWord() == 0x0240);
+        REQUIRE(cpu.getFPUStatusWord() == static_cast<uint16_t>(cpu::FPU_STATUS_C0 |
+                                                                cpu::FPU_STATUS_C3 |
+                                                                (5u << 11)));
+        REQUIRE(cpu.getFPUTagWord() == 0xA55A);
+        REQUIRE(cpu.getFPUInstructionPointer() == 0x1234);
+        REQUIRE(cpu.getFPUInstructionSelector() == 0x5678);
+        REQUIRE(cpu.getFPUDataPointer() == 0x9ABC);
+        REQUIRE(cpu.getFPUDataSelector() == 0xDEF0);
+    }
+
+    SECTION("x87: FNSAVE and FRSTOR roundtrip 32-bit state") {
+        cpu.setFPUControlWord(0x027F);
+        cpu.setFPUInstructionPointer(0x12345678);
+        cpu.setFPUInstructionSelector(0x1357);
+        cpu.setFPULastOpcode(0x0321);
+        cpu.setFPUDataPointer(0x87654321);
+        cpu.setFPUDataSelector(0x2468);
+        cpu.pushFPU(3.5);
+        cpu.pushFPU(-2.25);
+        cpu.setFPUStatusBits(cpu::FPU_STATUS_C2);
+
+        mem.write8(0x100, 0x66);
+        mem.write8(0x101, 0xDD); mem.write8(0x102, 0x36); // FNSAVE [3100h]
+        mem.write16(0x103, 0x3100);
+        mem.write8(0x105, 0x66);
+        mem.write8(0x106, 0xDD); mem.write8(0x107, 0x26); // FRSTOR [3100h]
+        mem.write16(0x108, 0x3100);
+        mem.write8(0x10A, 0xDD); mem.write8(0x10B, 0x1E); // FSTP qword ptr [3200h]
+        mem.write16(0x10C, 0x3200);
+        mem.write8(0x10E, 0xDD); mem.write8(0x10F, 0x1E); // FSTP qword ptr [3208h]
+        mem.write16(0x110, 0x3208);
+
+        decoder.step();
+
+        REQUIRE(mem.read32(0x3100) == 0x027F);
+        REQUIRE(mem.read32(0x3104) == (cpu::FPU_STATUS_C2 | (6u << 11)));
+        REQUIRE(mem.read32(0x3108) == 0x00F0);
+        REQUIRE(mem.read32(0x310C) == 0x12345678);
+        REQUIRE(mem.read32(0x3110) == ((static_cast<uint32_t>(0x0321) << 16) | 0x1357));
+        REQUIRE(mem.read32(0x3114) == 0x87654321);
+        REQUIRE(mem.read32(0x3118) == 0x2468);
+        REQUIRE(cpu.getFPUControlWord() == cpu::FPU_CONTROL_DEFAULT);
+        REQUIRE(cpu.getFPUStatusWord() == 0);
+        REQUIRE(cpu.isFPURegisterEmpty(0));
+
+        decoder.step();
+        decoder.step();
+        decoder.step();
+
+        REQUIRE(cpu.getFPUControlWord() == 0x027F);
+        REQUIRE(cpu.getFPUStatusWord() == static_cast<uint16_t>(cpu::FPU_STATUS_C2 |
+                                                                (6u << 11)));
+        REQUIRE(cpu.getFPUTagWord() == 0x00F0);
+        REQUIRE(cpu.getFPUInstructionPointer() == 0x12345678);
+        REQUIRE(cpu.getFPUInstructionSelector() == 0x1357);
+        REQUIRE(cpu.getFPULastOpcode() == 0x0321);
+        REQUIRE(cpu.getFPUDataPointer() == 0x87654321);
+        REQUIRE(cpu.getFPUDataSelector() == 0x2468);
+        REQUIRE(std::fabs(readF64(0x3200) - (-2.25)) < 1e-12);
+        REQUIRE(std::fabs(readF64(0x3208) - 3.5) < 1e-12);
+        REQUIRE(cpu.isFPURegisterEmpty(0));
+    }
+
+    SECTION("x87: FPTAN on zero pushes 1 then tan") {
+        cpu.setFPUStatusWord(cpu::FPU_STATUS_C2);
+
+        mem.write8(0x100, 0xD9); mem.write8(0x101, 0xEE); // FLDZ
+        mem.write8(0x102, 0xD9); mem.write8(0x103, 0xF2); // FPTAN
+        mem.write8(0x104, 0xDD); mem.write8(0x105, 0x1E); // FSTP qword ptr [2500h]
+        mem.write16(0x106, 0x2500);
+        mem.write8(0x108, 0xDD); mem.write8(0x109, 0x1E); // FSTP qword ptr [2508h]
+        mem.write16(0x10A, 0x2508);
+
+        decoder.step();
+        decoder.step();
+        decoder.step();
+        decoder.step();
+
+        REQUIRE(std::fabs(readF64(0x2500) - 1.0) < 1e-12);
+        REQUIRE(std::fabs(readF64(0x2508) - 0.0) < 1e-12);
+        REQUIRE((cpu.getFPUStatusWord() & cpu::FPU_STATUS_C2) == 0);
+        REQUIRE(cpu.isFPURegisterEmpty(0));
+    }
+
+    SECTION("x87: FSINCOS on zero pushes cosine above sine") {
+        cpu.setFPUStatusWord(cpu::FPU_STATUS_C2);
+
+        mem.write8(0x100, 0xD9); mem.write8(0x101, 0xEE); // FLDZ
+        mem.write8(0x102, 0xD9); mem.write8(0x103, 0xFB); // FSINCOS
+        mem.write8(0x104, 0xDD); mem.write8(0x105, 0x1E); // FSTP qword ptr [2600h]
+        mem.write16(0x106, 0x2600);
+        mem.write8(0x108, 0xDD); mem.write8(0x109, 0x1E); // FSTP qword ptr [2608h]
+        mem.write16(0x10A, 0x2608);
+
+        decoder.step();
+        decoder.step();
+        decoder.step();
+        decoder.step();
+
+        REQUIRE(std::fabs(readF64(0x2600) - 1.0) < 1e-12);
+        REQUIRE(std::fabs(readF64(0x2608) - 0.0) < 1e-12);
+        REQUIRE((cpu.getFPUStatusWord() & cpu::FPU_STATUS_C2) == 0);
+        REQUIRE(cpu.isFPURegisterEmpty(0));
+    }
+
+    SECTION("x87: FPTAN out of range sets C2 and leaves stack unchanged") {
+        writeF64(0x2550, std::ldexp(1.0, 70));
+
+        mem.write8(0x100, 0xDD); mem.write8(0x101, 0x06); // FLD qword ptr [2550h]
+        mem.write16(0x102, 0x2550);
+        mem.write8(0x104, 0xD9); mem.write8(0x105, 0xF2); // FPTAN
+        mem.write8(0x106, 0xDD); mem.write8(0x107, 0x1E); // FSTP qword ptr [2558h]
+        mem.write16(0x108, 0x2558);
+
+        decoder.step();
+        decoder.step();
+        decoder.step();
+
+        REQUIRE((cpu.getFPUStatusWord() & cpu::FPU_STATUS_C2) != 0);
+        REQUIRE(std::fabs(readF64(0x2558) - std::ldexp(1.0, 70)) < 1.0);
+        REQUIRE(cpu.isFPURegisterEmpty(0));
+    }
+
+    SECTION("x87: FPATAN returns atan2 and pops") {
+        mem.write8(0x100, 0xD9); mem.write8(0x101, 0xE8); // FLD1
+        mem.write8(0x102, 0xD9); mem.write8(0x103, 0xE8); // FLD1
+        mem.write8(0x104, 0xD9); mem.write8(0x105, 0xF3); // FPATAN
+        mem.write8(0x106, 0xDD); mem.write8(0x107, 0x1E); // FSTP qword ptr [2700h]
+        mem.write16(0x108, 0x2700);
+
+        decoder.step();
+        decoder.step();
+        decoder.step();
+        decoder.step();
+
+        REQUIRE(std::fabs(readF64(0x2700) - (std::acos(-1.0) / 4.0)) < 1e-12);
+        REQUIRE(cpu.isFPURegisterEmpty(0));
+    }
+
+    SECTION("x87: FXTRACT separates finite exponent and significand") {
+        writeF64(0x2800, 8.0);
+
+        mem.write8(0x100, 0xDD); mem.write8(0x101, 0x06); // FLD qword ptr [2800h]
+        mem.write16(0x102, 0x2800);
+        mem.write8(0x104, 0xD9); mem.write8(0x105, 0xF4); // FXTRACT
+        mem.write8(0x106, 0xDD); mem.write8(0x107, 0x1E); // FSTP qword ptr [2810h]
+        mem.write16(0x108, 0x2810);
+        mem.write8(0x10A, 0xDD); mem.write8(0x10B, 0x1E); // FSTP qword ptr [2818h]
+        mem.write16(0x10C, 0x2818);
+
+        decoder.step();
+        decoder.step();
+        decoder.step();
+        decoder.step();
+
+        REQUIRE(std::fabs(readF64(0x2810) - 1.0) < 1e-12);
+        REQUIRE(std::fabs(readF64(0x2818) - 3.0) < 1e-12);
+        REQUIRE(cpu.isFPURegisterEmpty(0));
+    }
+
+    SECTION("x87: FTST updates status word and FNSTSW AX reads it") {
+        mem.write8(0x100, 0xD9); mem.write8(0x101, 0xEE); // FLDZ
+        mem.write8(0x102, 0xD9); mem.write8(0x103, 0xE4); // FTST
+        mem.write8(0x104, 0xDF); mem.write8(0x105, 0xE0); // FNSTSW AX
+
+        decoder.step();
+        decoder.step();
+        decoder.step();
+
+        REQUIRE((cpu.getReg16(cpu::Reg16Index::AX) & cpu::FPU_STATUS_C3) != 0);
+        REQUIRE((cpu.getReg16(cpu::Reg16Index::AX) & cpu::FPU_STATUS_C0) == 0);
+        REQUIRE((cpu.getReg16(cpu::Reg16Index::AX) & cpu::FPU_STATUS_C2) == 0);
+    }
+
+    SECTION("x87: tbyte roundtrip preserves finite value") {
+        writeF64(0x2900, 3.5);
+
+        mem.write8(0x100, 0xDD); mem.write8(0x101, 0x06); // FLD qword ptr [2900h]
+        mem.write16(0x102, 0x2900);
+        mem.write8(0x104, 0xDB); mem.write8(0x105, 0x3E); // FSTP tbyte ptr [2910h]
+        mem.write16(0x106, 0x2910);
+        mem.write8(0x108, 0xDB); mem.write8(0x109, 0x2E); // FLD tbyte ptr [2910h]
+        mem.write16(0x10A, 0x2910);
+        mem.write8(0x10C, 0xDD); mem.write8(0x10D, 0x1E); // FSTP qword ptr [2920h]
+        mem.write16(0x10E, 0x2920);
+
+        decoder.step();
+        decoder.step();
+        decoder.step();
+        decoder.step();
+
+        REQUIRE(std::fabs(readF64(0x2920) - 3.5) < 1e-12);
+        REQUIRE(cpu.isFPURegisterEmpty(0));
     }
 
     SECTION("String Operations: REP STOSW") {

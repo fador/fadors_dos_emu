@@ -383,6 +383,18 @@ public:
     m_fpuStatusWord = static_cast<uint16_t>((m_fpuStatusWord & ~FPU_STATUS_TOP_MASK) |
                                             ((top & 0x7) << 11));
   }
+  uint32_t getFPUInstructionPointer() const { return m_fpuInstructionPointer; }
+  void setFPUInstructionPointer(uint32_t val) { m_fpuInstructionPointer = val; }
+  uint16_t getFPUInstructionSelector() const { return m_fpuInstructionSelector; }
+  void setFPUInstructionSelector(uint16_t val) { m_fpuInstructionSelector = val; }
+  uint16_t getFPULastOpcode() const { return m_fpuLastOpcode; }
+  void setFPULastOpcode(uint16_t val) {
+    m_fpuLastOpcode = static_cast<uint16_t>(val & 0x07FF);
+  }
+  uint32_t getFPUDataPointer() const { return m_fpuDataPointer; }
+  void setFPUDataPointer(uint32_t val) { m_fpuDataPointer = val; }
+  uint16_t getFPUDataSelector() const { return m_fpuDataSelector; }
+  void setFPUDataSelector(uint16_t val) { m_fpuDataSelector = val; }
   bool isFPURegisterEmpty(uint8_t logicalIndex) const;
   double getFPURegister(uint8_t logicalIndex) const;
   void setFPURegister(uint8_t logicalIndex, double value);
@@ -423,6 +435,11 @@ private:
   std::array<uint8_t, 8> m_fpuTags{};
   uint16_t m_fpuControlWord{FPU_CONTROL_DEFAULT};
   uint16_t m_fpuStatusWord{0};
+  uint32_t m_fpuInstructionPointer{0};
+  uint16_t m_fpuInstructionSelector{0};
+  uint16_t m_fpuLastOpcode{0};
+  uint32_t m_fpuDataPointer{0};
+  uint16_t m_fpuDataSelector{0};
 
   std::vector<HLEFrame> m_hleStack;
 };

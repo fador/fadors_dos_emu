@@ -221,6 +221,11 @@ void CPU::resetFPU() {
   m_fpuTags.fill(FPU_TAG_EMPTY);
   m_fpuControlWord = FPU_CONTROL_DEFAULT;
   m_fpuStatusWord = 0;
+  m_fpuInstructionPointer = 0;
+  m_fpuInstructionSelector = 0;
+  m_fpuLastOpcode = 0;
+  m_fpuDataPointer = 0;
+  m_fpuDataSelector = 0;
 }
 
 uint16_t CPU::getFPUTagWord() const {
