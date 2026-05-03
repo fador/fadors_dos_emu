@@ -752,6 +752,36 @@ TEST_CASE("DPMI 0400h get version", "[dpmi][version]") {
     REQUIRE(env.cpu.getReg8(cpu::DL) == 0x70);    // PIC slave (IRQ8=INT 70h)
 }
 
+TEST_CASE("DPMI 0E00h/0E01h coprocessor status and emulation flags", "[dpmi][version]") {
+    DPMITestEnv env;
+
+    env.cpu.setReg16(cpu::AX, 0x0E00);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+    REQUIRE((env.cpu.getReg16(cpu::AX) & 0x0001) == 0x0001);
+    REQUIRE((env.cpu.getReg16(cpu::AX) & 0x0008) == 0x0008);
+
+    env.cpu.setReg16(cpu::AX, 0x0E01);
+    env.cpu.setReg16(cpu::BX, 0x0002);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+
+    env.cpu.setReg16(cpu::AX, 0x0E00);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+    REQUIRE((env.cpu.getReg16(cpu::AX) & 0x0003) == 0x0002);
+
+    env.cpu.setReg16(cpu::AX, 0x0E01);
+    env.cpu.setReg16(cpu::BX, 0x0004);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(env.carrySet());
+    REQUIRE(env.cpu.getReg16(cpu::AX) == 0x8026);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Memory Info (INT 31h AX=0500h..0503h)
 // ═══════════════════════════════════════════════════════════════════════════

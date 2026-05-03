@@ -666,9 +666,16 @@ void DOS::handleDOSService() {
   case 0x48: // Allocate Memory
   case 0x49: // Free Memory
   case 0x4A: // Resize Block
-    LOG_WARN("DOS: Memory management AH=0x", std::hex, (int)ah, " ES=0x",
-             m_cpu.getSegReg(cpu::ES), " BX=0x", m_cpu.getReg16(cpu::BX));
+  case 0x58: // Get/Set Allocation Strategy
+    LOG_DEBUG("DOS: Memory management AH=0x", std::hex, (int)ah, " ES=0x",
+              m_cpu.getSegReg(cpu::ES), " BX=0x", m_cpu.getReg16(cpu::BX));
     handleMemoryManagement();
+    break;
+  case 0x71:
+    m_cpu.setReg16(cpu::AX, 0x7100);
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+    LOG_DOS("DOS: LFN AX=0x", std::hex, m_cpu.getReg16(cpu::AX),
+            " not supported");
     break;
 
   case 0x39: // Create Directory (mkdir)
@@ -1749,7 +1756,7 @@ void DOS::handleFileService() {
     } else {
       m_cpu.setReg16(cpu::AX, 0x02); // File/device not found (EMS absent)
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
-      LOG_ERROR("DOS: Failed to open file '", hostPath, "'");
+      LOG_DOS("DOS: Failed to open file '", hostPath, "'");
     }
   } else if (ah == 0x3E) { // Close File
     uint16_t handle = m_cpu.getReg16(cpu::BX);

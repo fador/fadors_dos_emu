@@ -224,6 +224,7 @@ bool DPMI::handleInt31() {
 
   uint16_t ax = m_cpu.getReg16(cpu::AX);
   uint8_t ah = ax >> 8;
+  constexpr uint16_t kDPMIHostCoprocessorStatus = 0x0008;
 
   switch (ah) {
   case 0x00:
@@ -259,6 +260,30 @@ bool DPMI::handleInt31() {
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
     m_cpu.setReg16(cpu::AX, 0x8001);
     return true;
+  case 0x0E:
+    switch (ax) {
+    case 0x0E00:
+      m_cpu.setReg16(cpu::AX, static_cast<uint16_t>(
+                                   kDPMIHostCoprocessorStatus |
+                                   m_coprocessorClientFlags));
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      return true;
+    case 0x0E01: {
+      const uint16_t flags = m_cpu.getReg16(cpu::BX);
+      if ((flags & 0xFFFCu) != 0) {
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+        m_cpu.setReg16(cpu::AX, 0x8026);
+        return true;
+      }
+      m_coprocessorClientFlags = static_cast<uint16_t>(flags & 0x0003u);
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      return true;
+    }
+    default:
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      m_cpu.setReg16(cpu::AX, 0x8001);
+      return true;
+    }
   default:
     LOG_WARN("DPMI: Unhandled INT 31h AX=0x", std::hex, ax);
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);

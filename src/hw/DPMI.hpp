@@ -100,6 +100,7 @@ private:
 
   // Virtual interrupt flag
   bool m_virtualIF = true;
+  uint16_t m_coprocessorClientFlags = 0x0001;
 
   // State
   bool m_active = false;

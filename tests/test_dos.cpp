@@ -186,6 +186,55 @@ TEST_CASE("DOS: File open non-existent file returns error", "[DOS][File]") {
     REQUIRE(cpu.getEFLAGS() & cpu::FLAG_CARRY);
 }
 
+TEST_CASE("DOS: AH=58h allocation strategy is dispatched", "[DOS][Memory]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    bios.initialize();
+    dos.initialize();
+
+    cpu.setReg16(cpu::AX, 0x5800);
+    cpu.setEFLAGS(cpu.getEFLAGS() | cpu::FLAG_CARRY);
+    dos.handleInterrupt(0x21);
+    REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(cpu.getReg16(cpu::AX) == 0x0000);
+
+    cpu.setReg16(cpu::AX, 0x5801);
+    cpu.setReg16(cpu::BX, 0x0002);
+    cpu.setEFLAGS(cpu.getEFLAGS() | cpu::FLAG_CARRY);
+    dos.handleInterrupt(0x21);
+    REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+
+    cpu.setReg16(cpu::AX, 0x5800);
+    cpu.setEFLAGS(cpu.getEFLAGS() | cpu::FLAG_CARRY);
+    dos.handleInterrupt(0x21);
+    REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(cpu.getReg16(cpu::AX) == 0x0002);
+}
+
+TEST_CASE("DOS: AH=71h returns unsupported LFN error", "[DOS][LFN]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    bios.initialize();
+    dos.initialize();
+
+    cpu.setReg16(cpu::AX, 0x71A0);
+    cpu.setEFLAGS(cpu.getEFLAGS() | cpu::FLAG_CARRY);
+    dos.handleInterrupt(0x21);
+
+    REQUIRE(cpu.getEFLAGS() & cpu::FLAG_CARRY);
+    REQUIRE(cpu.getReg16(cpu::AX) == 0x7100);
+}
+
 TEST_CASE("DOS: File read with zero bytes", "[DOS][File]") {
     cpu::CPU cpu;
     memory::MemoryBus mem;
