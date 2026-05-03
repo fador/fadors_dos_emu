@@ -114,3 +114,17 @@ TEST_CASE("MemoryBus: Direct Access", "[MemoryBus]") {
         REQUIRE(ptr == nullptr);
     }
 }
+
+TEST_CASE("MemoryBus: Contiguous Access Honors A20 Wrap", "[MemoryBus]") {
+    MemoryBus bus;
+
+    SECTION("With A20 disabled, a range crossing 1MB is rejected") {
+        bus.setA20(false);
+        REQUIRE(bus.contiguousAccess(0x0FFFFF, 2) == nullptr);
+    }
+
+    SECTION("With A20 enabled, the same range stays contiguous") {
+        bus.setA20(true);
+        REQUIRE(bus.contiguousAccess(0x0FFFFF, 2) != nullptr);
+    }
+}

@@ -196,6 +196,14 @@ TEST_CASE("BIOS EMS services allocate, map, remap, and release", "[BIOS][EMS]") 
     const uint32_t pageFrameBase =
         static_cast<uint32_t>(hw::BIOS::EMS_PAGE_FRAME_SEGMENT) << 4;
 
+    REQUIRE(mem.read32(0xF0000) == 0xFFFFFFFFu);
+    REQUIRE(mem.read16(0xF0004) == 0xC000);
+    REQUIRE(mem.read16(0xF0006) == hw::BIOS::EMS_PRIVATE_API_OFFSET);
+    REQUIRE(mem.read16(0xF0008) == hw::BIOS::EMS_PRIVATE_API_OFFSET);
+    std::string emsDeviceName;
+    for (uint32_t index = 0; index < 8; ++index)
+        emsDeviceName.push_back(static_cast<char>(mem.read8(0xF000A + index)));
+    REQUIRE(emsDeviceName == "EMMXXXX0");
     REQUIRE(mem.read16(0xF0012) == hw::BIOS::EMS_PRIVATE_API_OFFSET);
     REQUIRE(mem.read8(0xF0014) == 'C');
 
@@ -250,6 +258,37 @@ TEST_CASE("BIOS EMS services allocate, map, remap, and release", "[BIOS][EMS]") 
     cpu.setReg8(cpu::AH, 0x44);
     cpu.setReg8(cpu::AL, 0);
     cpu.setReg16(cpu::BX, 1);
+    cpu.setReg16(cpu::DX, emsHandle);
+    bios.handleInterrupt(0x67);
+    REQUIRE(cpu.getReg8(cpu::AH) == 0x00);
+    REQUIRE(mem.read8(pageFrameBase + 0) == 0x33);
+    REQUIRE(mem.read8(pageFrameBase + 1) == 0x44);
+
+    cpu.setSegReg(cpu::ES, 0x7100);
+    cpu.setSegBase(cpu::ES, 0x71000);
+    cpu.setReg16(cpu::DI, 0x0000);
+    cpu.setReg8(cpu::AH, 0x4D);
+    bios.handleInterrupt(0x67);
+    REQUIRE(cpu.getReg8(cpu::AH) == 0x00);
+    REQUIRE(cpu.getReg16(cpu::BX) == 1);
+    REQUIRE(mem.read16(0x71000) == emsHandle);
+    REQUIRE(mem.read16(0x71002) == 2);
+
+    cpu.setReg8(cpu::AH, 0x47);
+    cpu.setReg16(cpu::DX, emsHandle);
+    bios.handleInterrupt(0x67);
+    REQUIRE(cpu.getReg8(cpu::AH) == 0x00);
+
+    cpu.setReg8(cpu::AH, 0x44);
+    cpu.setReg8(cpu::AL, 0);
+    cpu.setReg16(cpu::BX, 0);
+    cpu.setReg16(cpu::DX, emsHandle);
+    bios.handleInterrupt(0x67);
+    REQUIRE(cpu.getReg8(cpu::AH) == 0x00);
+    REQUIRE(mem.read8(pageFrameBase + 0) == 0x11);
+    REQUIRE(mem.read8(pageFrameBase + 1) == 0x22);
+
+    cpu.setReg8(cpu::AH, 0x48);
     cpu.setReg16(cpu::DX, emsHandle);
     bios.handleInterrupt(0x67);
     REQUIRE(cpu.getReg8(cpu::AH) == 0x00);

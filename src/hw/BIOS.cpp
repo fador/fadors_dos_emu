@@ -1237,8 +1237,19 @@ void BIOS::initializeEMS() {
   m_emsHandles.clear();
   std::fill(m_emsMappings.begin(), m_emsMappings.end(), EMSMapping{});
 
+  static constexpr char kEMSDeviceName[] = "EMMXXXX0";
   static constexpr char kEMMSignature[] =
       "COMPAQ EXPANDED MEMORY MANAGER 386";
+  const uint32_t headerPhys = static_cast<uint32_t>(HLE_STUB_SEG) << 4;
+  m_memory.write32(headerPhys + 0x0000, 0xFFFFFFFFu);
+  m_memory.write16(headerPhys + 0x0004, 0xC000);
+  m_memory.write16(headerPhys + 0x0006, EMS_PRIVATE_API_OFFSET);
+  m_memory.write16(headerPhys + 0x0008, EMS_PRIVATE_API_OFFSET);
+  for (size_t index = 0; index < sizeof(kEMSDeviceName) - 1; ++index) {
+    m_memory.write8(headerPhys + 0x000A + static_cast<uint32_t>(index),
+                    static_cast<uint8_t>(kEMSDeviceName[index]));
+  }
+
   m_memory.write16((static_cast<uint32_t>(HLE_STUB_SEG) << 4) + 0x0012,
                    EMS_PRIVATE_API_OFFSET);
   const uint32_t sigPhys = (static_cast<uint32_t>(HLE_STUB_SEG) << 4) + 0x0014;
@@ -1698,6 +1709,8 @@ void BIOS::handleEMSService() {
 
     EMSHandle &handle = m_emsHandles[handleIndex];
     handle.allocated = true;
+  handle.hasSavedMapping = false;
+  handle.savedMappings = {};
     handle.pages.assign(requestedPages,
                         std::vector<uint8_t>(EMS_PAGE_SIZE, 0));
 
@@ -1764,6 +1777,8 @@ void BIOS::handleEMSService() {
     EMSHandle &handle = m_emsHandles[handleId - 1];
     handle.pages.clear();
     handle.allocated = false;
+    handle.hasSavedMapping = false;
+    handle.savedMappings = {};
 
     m_cpu.setReg8(cpu::AH, 0x00);
     updateEMSImportRecord();
@@ -1774,6 +1789,50 @@ void BIOS::handleEMSService() {
     m_cpu.setReg8(cpu::AL, 0x40); // EMS 4.0
     m_cpu.setReg8(cpu::AH, 0x00);
     break;
+
+  case 0x47: { // Save Mapping Context
+    const uint16_t handleId = m_cpu.getReg16(cpu::DX);
+    if (!validHandle(handleId)) {
+      fail(0x83);
+      break;
+    }
+
+    EMSHandle &handle = m_emsHandles[handleId - 1];
+    handle.savedMappings = m_emsMappings;
+    handle.hasSavedMapping = true;
+    m_cpu.setReg8(cpu::AH, 0x00);
+    break;
+  }
+
+  case 0x48: { // Restore Mapping Context
+    const uint16_t handleId = m_cpu.getReg16(cpu::DX);
+    if (!validHandle(handleId)) {
+      fail(0x83);
+      break;
+    }
+
+    EMSHandle &handle = m_emsHandles[handleId - 1];
+    if (!handle.hasSavedMapping) {
+      fail(0x8E);
+      break;
+    }
+
+    for (uint8_t physicalPage = 0; physicalPage < EMS_PHYSICAL_PAGE_COUNT;
+         ++physicalPage) {
+      flushEMSPhysicalPage(physicalPage);
+    }
+
+    m_emsMappings = handle.savedMappings;
+
+    for (uint8_t physicalPage = 0; physicalPage < EMS_PHYSICAL_PAGE_COUNT;
+         ++physicalPage) {
+      loadEMSPhysicalPage(physicalPage);
+    }
+
+    updateEMSImportRecord();
+    m_cpu.setReg8(cpu::AH, 0x00);
+    break;
+  }
 
   case 0x4B: { // Get Number of Open Handles
     uint16_t openHandles = 0;
@@ -1794,6 +1853,27 @@ void BIOS::handleEMSService() {
     }
     m_cpu.setReg16(cpu::BX,
                    static_cast<uint16_t>(m_emsHandles[handleId - 1].pages.size()));
+    m_cpu.setReg8(cpu::AH, 0x00);
+    break;
+  }
+
+  case 0x4D: { // Get Pages for All Handles
+    uint16_t openHandles = 0;
+    uint32_t outAddr = m_cpu.getSegBase(cpu::ES) + m_cpu.getReg16(cpu::DI);
+    for (size_t handleIndex = 0; handleIndex < m_emsHandles.size(); ++handleIndex) {
+      const EMSHandle &handle = m_emsHandles[handleIndex];
+      if (!handle.allocated)
+        continue;
+
+      const uint16_t handleId = static_cast<uint16_t>(handleIndex + 1);
+      m_memory.write16(outAddr + static_cast<uint32_t>(openHandles) * 4u + 0,
+                       handleId);
+      m_memory.write16(outAddr + static_cast<uint32_t>(openHandles) * 4u + 2,
+                       static_cast<uint16_t>(handle.pages.size()));
+      ++openHandles;
+    }
+
+    m_cpu.setReg16(cpu::BX, openHandles);
     m_cpu.setReg8(cpu::AH, 0x00);
     break;
   }

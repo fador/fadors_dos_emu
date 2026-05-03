@@ -109,13 +109,15 @@ private:
     void handleEMSService();        // INT 67h
     void handleXMSDispatch();       // INT E0h (XMS far-call entry)
 
-    struct EMSHandle {
-        bool allocated = false;
-        std::vector<std::vector<uint8_t>> pages;
-    };
     struct EMSMapping {
         uint16_t handle = 0;
         uint16_t logicalPage = 0xFFFF;
+    };
+    struct EMSHandle {
+        bool allocated = false;
+        bool hasSavedMapping = false;
+        std::vector<std::vector<uint8_t>> pages;
+        std::array<EMSMapping, EMS_PHYSICAL_PAGE_COUNT> savedMappings{};
     };
 
     void initializeEMS();
