@@ -424,8 +424,6 @@ void DOS::handleDOSService() {
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
     LOG_DOS("DOS: Set INT vector 0x", std::hex, (int)intNum, " to ", ds, ":",
             dx);
-    LOG_WARN("DOS: Set INT vector 0x", std::hex, (int)intNum, " to ", ds, ":",
-             dx);
     break;
   }
   case 0x35: { // Get Interrupt Vector
