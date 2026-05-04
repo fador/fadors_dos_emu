@@ -37,7 +37,7 @@ Debugger::Debugger(cpu::CPU& cpu, memory::MemoryBus& memory, cpu::InstructionDec
 }
 
 bool Debugger::run() {
-    CookedModeGuard cookedGuard;
+    [[maybe_unused]] CookedModeGuard cookedGuard;
     std::string line;
     std::cout << "\n[Fador Debugger] > " << std::flush;
     
@@ -171,7 +171,7 @@ void Debugger::dumpState(uint32_t contextLines) {
 }
 
 void Debugger::assembleMode(uint32_t startAddr) {
-    CookedModeGuard cookedGuard;
+    [[maybe_unused]] CookedModeGuard cookedGuard;
     uint32_t addr = startAddr;
     std::cout << "Entering assembly mode (blank line or '.' to exit)\n";
     std::string asmLine;

@@ -88,10 +88,9 @@ void PIT8254::addCycles(uint32_t cycles) {
 void PIT8254::advanceTime(std::chrono::nanoseconds elapsed) {
     if (elapsed.count() <= 0) return;
 
-    const uint64_t scaledTicks =
-        m_subTickRemainder + static_cast<uint64_t>(elapsed.count()) * BASE_FREQ_HZ;
-    const uint64_t wholeTicks = scaledTicks / NANOS_PER_SECOND;
-    m_subTickRemainder = scaledTicks % NANOS_PER_SECOND;
+    const double ticks = m_subTickTicks + (static_cast<double>(elapsed.count()) * BASE_FREQ_HZ) / 1e9;
+    const uint64_t wholeTicks = static_cast<uint64_t>(ticks);
+    m_subTickTicks = ticks - static_cast<double>(wholeTicks);
     advanceTicks(wholeTicks);
 }
 

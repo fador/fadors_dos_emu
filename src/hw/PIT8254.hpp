@@ -34,13 +34,12 @@ private:
     Channel m_channels[3];
     uint64_t m_pendingIRQ0 = 0;
     std::chrono::steady_clock::time_point m_lastUpdate;
-    uint64_t m_subTickRemainder = 0;
-
-    static constexpr uint64_t BASE_FREQ_HZ = 1193182;
+    static constexpr double BASE_FREQ_HZ = 1193181.8181818181;
     static constexpr uint64_t NANOS_PER_SECOND = 1000000000ULL;
 
     void advanceTicks(uint64_t ticks);
     void syncToRealtime();
+    double m_subTickTicks = 0.0;
 };
 
 } // namespace fador::hw

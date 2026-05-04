@@ -87,7 +87,7 @@ bool AudioBackend::queueSamples(const float *buffer, size_t count) {
 
 #ifdef HAVE_SDL2
   // count is the number of floats to queue.
-  int ret = SDL_QueueAudio(m_deviceId, buffer, count * sizeof(float));
+  int ret = SDL_QueueAudio(m_deviceId, buffer, static_cast<Uint32>(count * sizeof(float)));
   return (ret == 0);
 #else
   // Throw away samples when no audio backend
