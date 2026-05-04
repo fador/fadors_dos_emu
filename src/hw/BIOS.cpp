@@ -929,6 +929,16 @@ void BIOS::handleVideoService() {
     LOG_DEBUG("BIOS INT 10h AH=1Bh: State Info (filled)");
     break;
   }
+  case 0x5F: { // Vendor extended video BIOS probes
+    const uint8_t subfunction = m_cpu.getReg8(cpu::AL);
+    const uint16_t bx = m_cpu.getReg16(cpu::BX);
+    // Chips/Realtek adapters report support by changing AL/AH on return.
+    // Keep AL at 00h on generic VGA so callers detect "not supported".
+    m_cpu.setReg8(cpu::AL, 0x00);
+    LOG_DEBUG("BIOS INT 10h AH=5Fh: Vendor extension AL=", std::hex,
+              (int)subfunction, " BX=", bx, " not supported");
+    break;
+  }
   case 0xFE: { // Get Video Buffer Segment (Borland/TopView API)
     // Programs pass a guessed video segment in ES:DI and expect
     // ES to be updated with the actual segment to write to.
@@ -942,6 +952,15 @@ void BIOS::handleVideoService() {
     // Return AL != 6Fh to indicate not supported.
     m_cpu.setReg8(cpu::AL, 0x00);
     LOG_DEBUG("BIOS INT 10h AH=6Fh: Borland video extension (not supported)");
+    break;
+  }
+  case 0x70: { // Everex Extended Video BIOS
+    const uint8_t subfunction = m_cpu.getReg8(cpu::AL);
+    const uint16_t bx = m_cpu.getReg16(cpu::BX);
+    // Everex cards return AL=70h only when the extension is present.
+    m_cpu.setReg8(cpu::AL, 0x00);
+    LOG_DEBUG("BIOS INT 10h AH=70h: Everex extension AL=", std::hex,
+              (int)subfunction, " BX=", bx, " not supported");
     break;
   }
   case 0xFA: {
