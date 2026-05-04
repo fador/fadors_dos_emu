@@ -15,7 +15,7 @@ Fador's DOS Emulator is a multiplatform MS-DOS emulator written in modern C++20.
 - **Program Loading and Overlays:** `.COM` and MZ `.EXE` loading with relocation support, PSP/environment block creation, MCB-backed program memory, embedded 32-bit payload launching, and VROOMM/FBOV overlay loading for segmented applications.
 - **Built-in Disassembler:** Read-only x86 real-mode disassembler that produces human-readable assembly from memory without modifying CPU state. Supports prefixes, ModR/M and SIB decoding, and one-byte plus `0F` opcode forms.
 - **Built-in Assembler:** x86 real-mode assembler (`src/cpu/Assembler.{hpp,cpp}`) used by the interactive debugger and `--exec` CLI mode. Supports ALU ops, MOV, shifts, jumps, Jcc, CALL/RET, PUSH/POP, INC/DEC, NOT/NEG, MUL/DIV, IN/OUT, string ops, segment overrides, MOVZX/MOVSX, BT family, LEA, LES/LDS, ENTER/LEAVE, INT, XCHG, TEST, and more.
-- **Interactive Debugger and CLI Tooling:** Single-step execution, register and memory inspection, disassembly, inline assembly, `--exec` for one-shot assembly execution, and `--stop-after` / `--dump-on-exit` state dumps.
+- **Interactive Debugger and CLI Tooling:** Single-step execution, register and memory inspection, disassembly, inline assembly, `--exec` for one-shot assembly execution, and `--stop-after`, `--stop-after-debugger`, and `--dump-on-exit` state dumps.
 - **Benchmark Modes:** Built-in `decoder-loop`, `rep-movsb`, and `rep-movsd` benchmarks for measuring interpreter hot paths without full guest startup noise.
 - **Frontends:** Text-mode terminal rendering by default, with optional SDL rendering when the project is built with SDL2.
 - **Test Coverage:** Custom unit tests cover CPU execution, instruction decoding, assembler/disassembler behavior, BIOS/DOS/DPMI services, memory managers, interrupts, and hardware devices.
@@ -42,7 +42,10 @@ cmake --build .
 | `--himem` | Enable HIMEM/XMS support |
 | `--sdl` | Force the SDL frontend when SDL2 support is available |
 | `--no-sdl` | Force headless/text-mode execution even in SDL builds |
+| `--throttle-ips=N` | Pace guest execution to roughly `N` retired instructions per second |
+| `--throttle-machine=name` | Apply a rough named speed preset: `8088`, `286-12`, `386dx-33`, `486dx2-66`, or `pentium-90` |
 | `--stop-after=N` | Stop execution after N instruction cycles and dump CPU state |
+| `--stop-after-debugger` | When `--stop-after` triggers, enter the interactive debugger at that exact instruction instead of exiting |
 | `--dump-on-exit` | Dump CPU state when the program terminates |
 | `--bench=decoder-loop\|rep-movsb\|rep-movsd` | Run an in-process benchmark without loading a program |
 | `--bench-steps=N` | Number of measured instruction steps for `--bench` |
@@ -58,11 +61,20 @@ cmake --build .
 # Run headless with HIMEM/XMS enabled
 ./fadors_emu --himem --no-sdl program.exe
 
+# Run with an execution throttle of about 4 MIPS
+./fadors_emu --throttle-ips=4000000 program.exe
+
+# Run with a rough 486DX2/66-class throttle preset
+./fadors_emu --throttle-machine=486dx2-66 program.exe
+
 # Use the SDL frontend when it is available in the build
 ./fadors_emu --sdl program.exe
 
 # Stop after 5000 cycles and inspect state
 ./fadors_emu --stop-after=5000 program.com
+
+# Break into the interactive debugger exactly at the stop-after point
+./fadors_emu --stop-after=5000 --stop-after-debugger program.com
 
 # Run with CPU debug logging
 ./fadors_emu --debug=cpu program.exe

@@ -103,6 +103,51 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
         REQUIRE(cpu.getReg16(cpu::Reg16Index::BX) == 0x1234);
     }
 
+    SECTION("x87: FWAIT dispatches INT 75 on unmasked pending exception") {
+        cpu.setReg16(cpu::Reg16Index::SP, 0x0200);
+        cpu.setSegReg(cpu::SegRegIndex::CS, 0x0000);
+        cpu.setSegReg(cpu::SegRegIndex::SS, 0x0000);
+        cpu.setEIP(0x0100);
+
+        mem.write16(0x75 * 4, 0x3456);
+        mem.write16(0x75 * 4 + 2, 0x2222);
+
+        cpu.setFPUControlWord(static_cast<uint16_t>(cpu::FPU_CONTROL_DEFAULT &
+                                                    ~cpu::FPU_STATUS_ZE));
+        cpu.setFPUStatusBits(cpu::FPU_STATUS_ZE);
+
+        mem.write8(0x0100, 0x9B);
+        decoder.step();
+
+        REQUIRE((cpu.getFPUStatusWord() & cpu::FPU_STATUS_ES) != 0);
+        REQUIRE(cpu.getSegReg(cpu::SegRegIndex::CS) == 0x2222);
+        REQUIRE(cpu.getEIP() == 0x3456);
+        REQUIRE(cpu.getReg16(cpu::Reg16Index::SP) == 0x01FA);
+        REQUIRE(mem.read16(0x01FA) == 0x0101);
+        REQUIRE(mem.read16(0x01FC) == 0x0000);
+    }
+
+    SECTION("x87: FWAIT ignores masked pending exceptions") {
+        cpu.setReg16(cpu::Reg16Index::SP, 0x0200);
+        cpu.setSegReg(cpu::SegRegIndex::CS, 0x0000);
+        cpu.setSegReg(cpu::SegRegIndex::SS, 0x0000);
+        cpu.setEIP(0x0100);
+
+        mem.write16(0x75 * 4, 0x3456);
+        mem.write16(0x75 * 4 + 2, 0x2222);
+
+        cpu.setFPUControlWord(cpu::FPU_CONTROL_DEFAULT);
+        cpu.setFPUStatusBits(cpu::FPU_STATUS_ZE);
+
+        mem.write8(0x0100, 0x9B);
+        decoder.step();
+
+        REQUIRE((cpu.getFPUStatusWord() & cpu::FPU_STATUS_ES) == 0);
+        REQUIRE(cpu.getSegReg(cpu::SegRegIndex::CS) == 0x0000);
+        REQUIRE(cpu.getEIP() == 0x0101);
+        REQUIRE(cpu.getReg16(cpu::Reg16Index::SP) == 0x0200);
+    }
+
     SECTION("MOV r8 to r/m8 (Register to Register)") {
         // Setup AL = 0xAA
         cpu.setReg8(cpu::Reg8Index::AL, 0xAA);
@@ -1281,4 +1326,56 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
         decoder.step();
         REQUIRE(mem.read16(0x1030) == 0x1234);
     }
+}
+
+TEST_CASE("x87: Borland coprocessor probe takes the 80387 branch", "[Decoder][x87]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::IOBus iobus;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::DOS dos(cpu, mem);
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    bios.initialize();
+    dos.initialize();
+    cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
+
+    cpu.setSegReg(cpu::SegRegIndex::CS, 0x0000);
+    cpu.setSegReg(cpu::SegRegIndex::DS, 0x0000);
+    cpu.setSegReg(cpu::SegRegIndex::SS, 0x0000);
+    cpu.setReg16(cpu::Reg16Index::SP, 0x0200);
+    cpu.setEIP(0x0100);
+
+    mem.write8(0x100, 0xDB); mem.write8(0x101, 0xE3); // FNINIT
+    mem.write8(0x102, 0x9B);                           // FWAIT
+    mem.write8(0x103, 0xD9); mem.write8(0x104, 0xE8); // FLD1
+    mem.write8(0x105, 0x9B);                           // FWAIT
+    mem.write8(0x106, 0xD9); mem.write8(0x107, 0xEE); // FLDZ
+    mem.write8(0x108, 0x9B);                           // FWAIT
+    mem.write8(0x109, 0xDE); mem.write8(0x10A, 0xF9); // FDIVP ST1, ST0
+    mem.write8(0x10B, 0x9B);                           // FWAIT
+    mem.write8(0x10C, 0xD9); mem.write8(0x10D, 0xC0); // FLD ST0
+    mem.write8(0x10E, 0x9B);                           // FWAIT
+    mem.write8(0x10F, 0xD9); mem.write8(0x110, 0xE0); // FCHS
+    mem.write8(0x111, 0x9B);                           // FWAIT
+    mem.write8(0x112, 0xDE); mem.write8(0x113, 0xD9); // FCOMPP
+    mem.write8(0x114, 0x9B);                           // FWAIT
+    mem.write8(0x115, 0xDD); mem.write8(0x116, 0x3E); // FNSTSW [2000h]
+    mem.write16(0x117, 0x2000);
+    mem.write8(0x119, 0xA1); mem.write16(0x11A, 0x2000); // MOV AX, [2000h]
+    mem.write8(0x11C, 0x9E);                              // SAHF
+    mem.write8(0x11D, 0x75); mem.write8(0x11E, 0x05);     // JNZ +5
+    mem.write8(0x11F, 0xB8); mem.write16(0x120, 0x0002);  // MOV AX, 2
+    mem.write8(0x122, 0xEB); mem.write8(0x123, 0x03);     // JMP +3
+    mem.write8(0x124, 0xB8); mem.write16(0x125, 0x0003);  // MOV AX, 3
+
+    for (int i = 0; i < 19; ++i) {
+        decoder.step();
+    }
+
+    REQUIRE(cpu.getReg16(cpu::Reg16Index::AX) == 0x0003);
+    REQUIRE((cpu.getEFLAGS() & cpu::FLAG_ZERO) == 0);
+    REQUIRE((cpu.getEFLAGS() & cpu::FLAG_CARRY) != 0);
+    REQUIRE((cpu.getEFLAGS() & cpu::FLAG_PARITY) == 0);
 }

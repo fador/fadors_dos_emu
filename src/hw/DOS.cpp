@@ -1022,6 +1022,14 @@ void DOS::handleMemoryManagement() {
     uint16_t mcbSeg = segment - 1;
     MCB mcb = readMCB(mcbSeg);
 
+    auto syncPspEndSegment = [&]() {
+      if (segment != m_pspSegment) {
+        return;
+      }
+      m_memory.write16((static_cast<uint32_t>(segment) << 4) + 0x02,
+                       static_cast<uint16_t>(segment + requested));
+    };
+
     auto coalesceFollowingFreeBlocks = [&](MCB &block) {
       while (block.type == 'M') {
         const uint32_t nextSeg32 =
@@ -1072,6 +1080,7 @@ void DOS::handleMemoryManagement() {
         writeMCB(mcbSeg, mcb);
         writeMCB(newFreeSeg, next);
       }
+      syncPspEndSegment();
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
       LOG_DEBUG("DOS: Shrunk segment ", std::hex, segment, " to ", requested,
                 " paras");
@@ -1093,6 +1102,7 @@ void DOS::handleMemoryManagement() {
         } else {
           writeMCB(mcbSeg, expanded);
         }
+        syncPspEndSegment();
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
         LOG_DEBUG("DOS: Expanded segment ", std::hex, segment, " to ",
                   requested, " paras");

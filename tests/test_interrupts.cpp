@@ -714,6 +714,63 @@ TEST_CASE("Timer IRQ pipeline delivers every elapsed realtime pulse", "[Interrup
     REQUIRE(mem.read32(0x46C) == 3);
 }
 
+TEST_CASE("Hardware IRQ is deferred until after the instruction following STI", "[Interrupts][Timer]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::IOBus iobus;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::DOS dos(cpu, mem);
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    bios.initialize();
+    dos.initialize();
+    cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
+
+    cpu.setCR(0, 0);
+    cpu.setSegReg(cpu::CS, 0x1000);
+    cpu.setSegBase(cpu::CS, 0x10000);
+    cpu.setSegReg(cpu::DS, 0x0000);
+    cpu.setSegBase(cpu::DS, 0x0000);
+    cpu.setSegReg(cpu::SS, 0x0000);
+    cpu.setSegBase(cpu::SS, 0x0000);
+    cpu.setReg16(cpu::SP, 0x0200);
+    cpu.setEIP(0x0100);
+    cpu.setEFLAGS(cpu.getEFLAGS() & ~cpu::FLAG_INTERRUPT);
+
+    mem.write16(0x08 * 4, 0x4321);
+    mem.write16((0x08 * 4) + 2, 0x1234);
+
+    mem.write8(0x10100, 0xFB); // STI
+    mem.write8(0x10101, 0x90); // NOP
+
+    auto dispatchPendingHardwareInterrupt = [&]() {
+        if (cpu.hardwareInterruptsEnabled()) {
+            int pending = pic.getPendingInterrupt();
+            if (pending != -1) {
+                pic.acknowledgeInterrupt();
+                decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
+            }
+        }
+        cpu.advanceInterruptShadow();
+    };
+
+    pic.raiseIRQ(0);
+
+    decoder.step();
+    REQUIRE(cpu.getEFLAGS() & cpu::FLAG_INTERRUPT);
+    dispatchPendingHardwareInterrupt();
+
+    REQUIRE(cpu.getSegReg(cpu::CS) == 0x1000);
+    REQUIRE(cpu.getEIP() == 0x0101);
+
+    decoder.step();
+    dispatchPendingHardwareInterrupt();
+
+    REQUIRE(cpu.getSegReg(cpu::CS) == 0x1234);
+    REQUIRE(cpu.getEIP() == 0x4321);
+}
+
 TEST_CASE("Real-mode timer IRQ dispatch respects hooked INT 8 vector", "[Interrupts][Timer]") {
     cpu::CPU cpu;
     memory::MemoryBus mem;

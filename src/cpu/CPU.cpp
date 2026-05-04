@@ -52,6 +52,7 @@ void CPU::reset() {
   }
   m_segmentStateVersion = 1;
   m_dirtySegmentMask = 0;
+  m_interruptShadow = 0;
 
   LOG_INFO("CPU Reset: CS:EIP = 0x", std::hex, m_segRegs[CS], ":0x", m_eip);
 }

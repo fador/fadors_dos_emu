@@ -63,6 +63,9 @@ static constexpr uint16_t FPU_STATUS_C2 = 0x0400;
 static constexpr uint16_t FPU_STATUS_TOP_MASK = 0x3800;
 static constexpr uint16_t FPU_STATUS_C3 = 0x4000;
 static constexpr uint16_t FPU_STATUS_BUSY = 0x8000;
+static constexpr uint16_t FPU_EXCEPTION_STATUS_MASK =
+  FPU_STATUS_IE | FPU_STATUS_DE | FPU_STATUS_ZE |
+  FPU_STATUS_OE | FPU_STATUS_UE | FPU_STATUS_PE;
 
 enum FPUTagValue : uint8_t {
   FPU_TAG_VALID = 0,
@@ -336,6 +339,15 @@ public:
 
   uint64_t getSegmentStateVersion() const { return m_segmentStateVersion; }
   uint8_t getDirtySegmentMask() const { return m_dirtySegmentMask; }
+  bool hardwareInterruptsEnabled() const {
+    return (m_eflags & FLAG_INTERRUPT) != 0 && m_interruptShadow == 0;
+  }
+  void beginInterruptShadow() { m_interruptShadow = 1; }
+  void advanceInterruptShadow() {
+    if (m_interruptShadow > 0) {
+      --m_interruptShadow;
+    }
+  }
 
   uint32_t getEIP() const { return m_eip; }
   void setEIP(uint32_t val);
@@ -367,12 +379,30 @@ public:
 
   void resetFPU();
   uint16_t getFPUControlWord() const { return m_fpuControlWord; }
-  void setFPUControlWord(uint16_t val) { m_fpuControlWord = val; }
+  void setFPUControlWord(uint16_t val) {
+    m_fpuControlWord = val;
+    refreshFPUSummaryStatus();
+  }
   uint16_t getFPUStatusWord() const { return m_fpuStatusWord; }
-  void setFPUStatusWord(uint16_t val) { m_fpuStatusWord = val; }
-  void setFPUStatusBits(uint16_t mask) { m_fpuStatusWord |= mask; }
+  void setFPUStatusWord(uint16_t val) {
+    m_fpuStatusWord = val;
+    refreshFPUSummaryStatus();
+  }
+  void setFPUStatusBits(uint16_t mask) {
+    m_fpuStatusWord = static_cast<uint16_t>(m_fpuStatusWord | mask);
+    refreshFPUSummaryStatus();
+  }
   void clearFPUStatusBits(uint16_t mask) {
     m_fpuStatusWord = static_cast<uint16_t>(m_fpuStatusWord & ~mask);
+    refreshFPUSummaryStatus();
+  }
+  uint16_t getPendingFPUExceptionBits() const {
+    return static_cast<uint16_t>(m_fpuStatusWord &
+                                 static_cast<uint16_t>(~m_fpuControlWord) &
+                                 FPU_EXCEPTION_STATUS_MASK);
+  }
+  bool hasPendingFPUException() const {
+    return getPendingFPUExceptionBits() != 0;
   }
   uint16_t getFPUTagWord() const;
   void setFPUTagWord(uint16_t val);
@@ -405,6 +435,14 @@ public:
   void setMemoryBus(fador::memory::MemoryBus *memory) { m_memory = memory; }
 
 private:
+  void refreshFPUSummaryStatus() {
+    m_fpuStatusWord = static_cast<uint16_t>(m_fpuStatusWord & ~FPU_STATUS_ES);
+    if (getPendingFPUExceptionBits() != 0) {
+      m_fpuStatusWord = static_cast<uint16_t>(m_fpuStatusWord |
+                                              FPU_STATUS_ES);
+    }
+  }
+
   uint8_t fpuPhysicalIndex(uint8_t logicalIndex) const {
     return static_cast<uint8_t>((getFPUTop() + (logicalIndex & 0x7)) & 0x7);
   }
@@ -418,6 +456,7 @@ private:
   bool m_is32BitStack{false};          // SS B bit status
   uint64_t m_segmentStateVersion{1};
   uint8_t m_dirtySegmentMask{0};
+  uint8_t m_interruptShadow{0};
   uint32_t m_eip{0};
   uint32_t m_instructionStartEIP{0};
   uint32_t m_eflags{0x00000002}; // bit 1 is always reserved as 1

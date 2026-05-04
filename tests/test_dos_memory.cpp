@@ -14,7 +14,18 @@ TEST_CASE("DOS: Memory Management (MCB)", "[DOS][Memory]") {
 
     dos.initialize();
 
+    auto shrinkPSPBlock = [&](uint16_t paragraphs) {
+        const uint16_t psp = dos.getPSPSegment();
+        cpu.setReg8(AH, 0x4A);
+        cpu.setSegReg(ES, psp);
+        cpu.setReg16(BX, paragraphs);
+        dos.handleInterrupt(0x21);
+        REQUIRE(!(cpu.getEFLAGS() & FLAG_CARRY));
+    };
+
     SECTION("Initial state") {
+        shrinkPSPBlock(0x100);
+
         // ES:BX = 0x1000 paragraphs (64KB)
         cpu.setReg8(AH, 0x48);
         cpu.setReg16(BX, 0x1000);
@@ -31,6 +42,8 @@ TEST_CASE("DOS: Memory Management (MCB)", "[DOS][Memory]") {
     }
 
     SECTION("Allocate and Free") {
+        shrinkPSPBlock(0x100);
+
         // Allocate 0x10
         cpu.setReg8(AH, 0x48);
         cpu.setReg16(BX, 0x10);
@@ -57,6 +70,8 @@ TEST_CASE("DOS: Memory Management (MCB)", "[DOS][Memory]") {
     }
 
     SECTION("Resize Block") {
+        shrinkPSPBlock(0x100);
+
         // Allocate 0x100
         cpu.setReg8(AH, 0x48);
         cpu.setReg16(BX, 0x100);
@@ -77,6 +92,21 @@ TEST_CASE("DOS: Memory Management (MCB)", "[DOS][Memory]") {
         uint32_t nextMcbAddr = (seg + 0x50) << 4;
         REQUIRE(memory.read8(nextMcbAddr) == 'M');
         REQUIRE(memory.read16(nextMcbAddr + 1) == 0);
+    }
+
+    SECTION("Resize PSP block updates PSP end segment") {
+        const uint16_t psp = dos.getPSPSegment();
+
+        shrinkPSPBlock(0x100);
+
+        cpu.setReg8(AH, 0x4A);
+        cpu.setSegReg(ES, psp);
+        cpu.setReg16(BX, 0x50);
+        dos.handleInterrupt(0x21);
+
+        REQUIRE(!(cpu.getEFLAGS() & FLAG_CARRY));
+        REQUIRE(memory.read16((static_cast<uint32_t>(psp) << 4) + 0x02) ==
+                static_cast<uint16_t>(psp + 0x50));
     }
 }
 

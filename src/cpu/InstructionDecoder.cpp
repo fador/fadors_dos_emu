@@ -677,8 +677,22 @@ void InstructionDecoder::executeFPUOpcode(uint8_t opcode) {
     case 5:
       return rhs - lhs;
     case 6:
+      if (rhs == 0.0) {
+        if (lhs == 0.0 || std::isnan(lhs)) {
+          m_cpu.setFPUStatusBits(FPU_STATUS_IE);
+          return std::numeric_limits<double>::quiet_NaN();
+        }
+        m_cpu.setFPUStatusBits(FPU_STATUS_ZE);
+      }
       return lhs / rhs;
     case 7:
+      if (lhs == 0.0) {
+        if (rhs == 0.0 || std::isnan(rhs)) {
+          m_cpu.setFPUStatusBits(FPU_STATUS_IE);
+          return std::numeric_limits<double>::quiet_NaN();
+        }
+        m_cpu.setFPUStatusBits(FPU_STATUS_ZE);
+      }
       return rhs / lhs;
     default:
       return lhs;
@@ -876,6 +890,9 @@ void InstructionDecoder::executeFPUOpcode(uint8_t opcode) {
       m_cpu.popFPU();
       return;
     case 0xFA:
+      if (!std::isnan(st(0)) && st(0) < 0.0) {
+        m_cpu.setFPUStatusBits(FPU_STATUS_IE);
+      }
       writeSt(0, std::sqrt(st(0)));
       return;
     case 0xFB: {
@@ -2013,6 +2030,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
       loadSegment(SS, m_cpu.pop32() & 0xFFFF);
     else
       loadSegment(SS, m_cpu.pop16());
+    m_cpu.beginInterruptShadow();
     break;
   case 0x1E:
     if (m_hasPrefix66)
@@ -2028,7 +2046,10 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     break;
 
   case 0x9B:
-    break; // FWAIT/WAIT — no FPU, no-op
+    if (m_cpu.hasPendingFPUException()) {
+      triggerInterrupt(0x75);
+    }
+    break;
 
   // PUSHF / POPF
   case 0x9C:
@@ -2445,6 +2466,8 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     uint16_t segVal = readModRM16(m);
     auto segIdx = static_cast<SegRegIndex>(m.reg);
     loadSegment(segIdx, segVal);
+    if (segIdx == SS)
+      m_cpu.beginInterruptShadow();
     break;
   }
   case 0x98: { // CBW / CWDE
@@ -3314,6 +3337,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     break; // CLI
   case 0xFB:
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() | 0x0200);
+    m_cpu.beginInterruptShadow();
     break; // STI
   case 0xFC:
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~0x0400);
@@ -4462,6 +4486,7 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
       m_cpu.setReg16(modrm.reg, newOff);
       loadSegment(SS, newSel);
     }
+    m_cpu.beginInterruptShadow();
     break;
   }
   case 0xB4: { // LFS r16/32, m16:16

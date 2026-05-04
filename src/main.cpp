@@ -19,6 +19,7 @@
 #include "ui/TerminalRenderer.hpp"
 #include "utils/CrashHandler.hpp"
 #include "utils/Logger.hpp"
+#include <array>
 #include <iostream>
 #ifdef HAVE_SDL2
 #include "ui/SDLRenderer.hpp"
@@ -60,6 +61,82 @@ const char *benchmarkName(BenchmarkKind kind) {
     break;
   }
   return "none";
+}
+
+class InstructionThrottle {
+public:
+  explicit InstructionThrottle(uint64_t targetInstructionsPerSecond)
+      : m_targetInstructionsPerSecond(targetInstructionsPerSecond) {}
+
+  bool enabled() const { return m_targetInstructionsPerSecond != 0; }
+
+  void reset() {
+    if (!enabled()) {
+      return;
+    }
+    m_start = std::chrono::steady_clock::now();
+    m_started = true;
+  }
+
+  void pace(uint64_t retiredInstructions) {
+    if (!m_started || !enabled()) {
+      return;
+    }
+
+    using Seconds = std::chrono::duration<double>;
+    auto targetElapsed = Seconds(static_cast<double>(retiredInstructions) /
+                                 static_cast<double>(m_targetInstructionsPerSecond));
+    auto targetTime =
+        m_start + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                      targetElapsed);
+    auto now = std::chrono::steady_clock::now();
+    if (targetTime > now) {
+      std::this_thread::sleep_until(targetTime);
+    }
+  }
+
+private:
+  uint64_t m_targetInstructionsPerSecond{0};
+  std::chrono::steady_clock::time_point m_start{};
+  bool m_started{false};
+};
+
+struct ThrottleMachinePreset {
+  const char *name;
+  uint64_t instructionsPerSecond;
+};
+
+constexpr std::array<ThrottleMachinePreset, 5> kThrottleMachinePresets{{
+    {"8088", 330000},
+    {"286-12", 1200000},
+    {"386dx-33", 4000000},
+    {"486dx2-66", 8000000},
+    {"pentium-90", 20000000},
+}};
+
+uint64_t throttleMachineInstructionsPerSecond(const std::string &name) {
+  if (name == "xt" || name == "pc-xt")
+    return 330000;
+  if (name == "286" || name == "at" || name == "at-12")
+    return 1200000;
+  if (name == "386" || name == "386dx")
+    return 4000000;
+  if (name == "486" || name == "486dx2")
+    return 8000000;
+  if (name == "pentium" || name == "p90")
+    return 20000000;
+
+  for (const auto &preset : kThrottleMachinePresets) {
+    if (name == preset.name) {
+      return preset.instructionsPerSecond;
+    }
+  }
+
+  return 0;
+}
+
+const char *throttleMachinePresetList() {
+  return "8088, 286-12, 386dx-33, 486dx2-66, pentium-90";
 }
 
 } // namespace
@@ -137,6 +214,19 @@ int main(int argc, char *argv[]) {
     fador::hw::ProgramLoader loader(cpu, memory, dos.getHIMEM());
     fador::ui::TerminalRenderer renderer(memory);
     fador::ui::Debugger debugger(cpu, memory, decoder);
+
+    auto dispatchPendingHardwareInterrupt = [&](bool retireShadow) {
+      if (cpu.hardwareInterruptsEnabled()) {
+        int pending = pic.getPendingInterrupt();
+        if (pending != -1) {
+          pic.acknowledgeInterrupt();
+          decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
+        }
+      }
+      if (retireShadow) {
+        cpu.advanceInterruptShadow();
+      }
+    };
 
     // ── Install crash handlers ─────────────────────────────────────────
     // Capture raw pointers to emulator core for the crash dump callback.
@@ -221,7 +311,9 @@ int main(int argc, char *argv[]) {
     LOG_INFO("System initialized successfully.");
 
     // Parse command line:
-    //   fadors_emu [--himem] [--debug=<cats>] <program.com|exe>
+    //   fadors_emu [--himem] [--debug=<cats>] [--throttle-ips=N]
+    //   [--throttle-machine=name]
+    //   <program.com|exe>
     //   [program-args...]
     // Emulator flags (--himem, --debug=) are consumed only before the program
     // path. Everything after the program path is forwarded verbatim to the DOS
@@ -232,6 +324,9 @@ int main(int argc, char *argv[]) {
     bool useHimem = false;
     bool dumpOnExit = false;
     uint64_t stopAfterCycles = 0; // 0 = disabled
+    bool stopAfterDebugger = false;
+    uint64_t throttleInstructionsPerSecond = 0; // 0 = disabled
+    std::string throttleLabel;
     std::string execAsm;          // --exec="asm instructions"
     std::string benchmarkArg;
     BenchmarkKind benchmark = BenchmarkKind::None;
@@ -263,8 +358,23 @@ int main(int argc, char *argv[]) {
         useHimem = true;
       } else if (arg == "--dump-on-exit") {
         dumpOnExit = true;
+      } else if (arg.find("--throttle-ips=") == 0) {
+        throttleInstructionsPerSecond = std::stoull(arg.substr(15));
+        throttleLabel = arg.substr(15);
+      } else if (arg.find("--throttle-machine=") == 0) {
+        std::string presetName = arg.substr(19);
+        throttleInstructionsPerSecond =
+            throttleMachineInstructionsPerSecond(presetName);
+        if (throttleInstructionsPerSecond == 0) {
+          LOG_ERROR("Unknown throttle machine preset: ", presetName,
+                    ". Use one of ", throttleMachinePresetList());
+          return 1;
+        }
+        throttleLabel = presetName;
       } else if (arg.find("--stop-after=") == 0) {
         stopAfterCycles = std::stoull(arg.substr(13));
+      } else if (arg == "--stop-after-debugger") {
+        stopAfterDebugger = true;
       } else if (arg.find("--exec=") == 0) {
         execAsm = arg.substr(7);
       } else if (arg.find("--bench=") == 0) {
@@ -313,6 +423,59 @@ int main(int argc, char *argv[]) {
       }
     }
 
+    auto dumpTextVRAM = [&memory]() {
+      for (int row = 0; row < 25; ++row) {
+        std::string vramText;
+        for (int col = 0; col < 80; ++col) {
+          uint8_t ch = memory.read8(0xB8000 + (row * 80 + col) * 2);
+          vramText +=
+              (ch >= 0x20 && ch < 0x7F) ? static_cast<char>(ch) : '.';
+        }
+        while (!vramText.empty() && vramText.back() == '.')
+          vramText.pop_back();
+        if (!vramText.empty())
+          LOG_INFO("VRAM[", row, "]: ", vramText);
+      }
+    };
+
+    auto handleStopAfter = [&](uint64_t instrCount,
+                               bool emitInstructionTrace) -> bool {
+      LOG_INFO("Stopped after ", instrCount, " cycles (--stop-after)");
+
+      if (stopAfterDebugger) {
+        debugger.dumpState();
+        dumpTextVRAM();
+        stopAfterCycles = 0;
+        LOG_INFO("Entering debugger (--stop-after-debugger)");
+        return debugger.run();
+      }
+
+      if (emitInstructionTrace) {
+        LOG_INFO("=== Instruction trace at stop point ===");
+        for (int t = 0; t < 50; ++t) {
+          uint32_t eip = cpu.getEIP();
+          uint16_t cs_val = cpu.getSegReg(fador::cpu::CS);
+          uint32_t csBase = cpu.getSegBase(fador::cpu::CS);
+          uint32_t phys = csBase + eip;
+          char buf[256];
+          snprintf(
+              buf, sizeof(buf),
+              "TRACE %02d: CS=%04X EIP=%08X phys=%08X bytes=%02X %02X %02X %02X %02X %02X EAX=%08X",
+              t, cs_val, eip, phys, memory.read8(phys),
+              memory.read8(phys + 1), memory.read8(phys + 2),
+              memory.read8(phys + 3), memory.read8(phys + 4),
+              memory.read8(phys + 5), cpu.getReg32(fador::cpu::EAX));
+          LOG_INFO(buf);
+          decoder.step();
+          cpu.addCycles(4);
+        }
+      }
+
+      debugger.dumpState();
+      dumpTextVRAM();
+      return false;
+    };
+
     if (!path.empty()) {
       bool loaded = false;
       if (path.find(".com") != std::string::npos ||
@@ -327,6 +490,17 @@ int main(int argc, char *argv[]) {
       }
       dos.setProgramDir(path);
       decoder.syncSegments();
+      if (throttleInstructionsPerSecond > 0) {
+        if (!throttleLabel.empty()) {
+          LOG_INFO("Execution throttle enabled: ", throttleLabel, " -> ",
+                   std::dec, throttleInstructionsPerSecond,
+                   " instructions/sec");
+        } else {
+          LOG_INFO("Execution throttle enabled at ", std::dec,
+                   throttleInstructionsPerSecond,
+                   " instructions/sec");
+        }
+      }
     } else {
       auto runExecLoop = [&](uint64_t steps) {
         for (uint64_t i = 0; i < steps; ++i) {
@@ -458,7 +632,9 @@ int main(int argc, char *argv[]) {
 
       LOG_WARN(
           "No program specified. Use: fadors_emu [--himem] [--sdl|--no-sdl] "
-          "[--debug=cpu,video,dos] [--stop-after=N] [--dump-on-exit] "
+          "[--debug=cpu,video,dos] [--throttle-ips=N] "
+          "[--throttle-machine=name] [--stop-after=N] "
+          "[--stop-after-debugger] [--dump-on-exit] "
           "[--bench=decoder-loop|rep-movsb|rep-movsd] [--bench-steps=N] "
           "[--bench-warmup=N] [--exec=\"asm\"] <program.com|exe> "
           "[program-args...]");
@@ -500,11 +676,15 @@ int main(int argc, char *argv[]) {
 #ifdef HAVE_SDL2
     if (useSDL) {
       // ── SDL2 graphical window path ──────────────────────────
+  InstructionThrottle throttle(throttleInstructionsPerSecond);
+  throttle.reset();
+
       fador::ui::SDLRenderer sdlRenderer(memory, kbd, vga);
       sdlRenderer.setBIOS(bios);
 
       bios.setInputPollCallback([&sdlRenderer]() { sdlRenderer.pollInput(); });
-      bios.setIdleCallback([&sdlRenderer, &pit, &cpu, &decoder, &kbd, &pic]() {
+      bios.setIdleCallback([&sdlRenderer, &pit, &cpu, &decoder, &kbd, &pic,
+                &dispatchPendingHardwareInterrupt]() {
         cpu.addCycles(64);
         pit.update();
         while (pit.checkPendingIRQ0()) {
@@ -513,13 +693,7 @@ int main(int argc, char *argv[]) {
         if (kbd.checkPendingIRQ()) {
           pic.raiseIRQ(1);
         }
-        if (cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) {
-          int pending = pic.getPendingInterrupt();
-          if (pending != -1) {
-            pic.acknowledgeInterrupt();
-            decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
-          }
-        }
+        dispatchPendingHardwareInterrupt(false);
         static auto lr = std::chrono::steady_clock::now();
         auto now = std::chrono::steady_clock::now();
         if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lr)
@@ -530,18 +704,13 @@ int main(int argc, char *argv[]) {
       });
       dos.setKeyboard(kbd);
       dos.setInputPollCallback([&sdlRenderer]() { sdlRenderer.pollInput(); });
-      dos.setIdleCallback([&pit, &cpu, &decoder, &kbd, &pic]() {
+      dos.setIdleCallback([&pit, &cpu, &decoder, &kbd, &pic,
+               &dispatchPendingHardwareInterrupt]() {
         cpu.addCycles(64);
         pit.update();
         while (pit.checkPendingIRQ0()) { pic.raiseIRQ(0); }
         if (kbd.checkPendingIRQ()) { pic.raiseIRQ(1); }
-        if (cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) {
-          int pending = pic.getPendingInterrupt();
-          if (pending != -1) {
-            pic.acknowledgeInterrupt();
-            decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
-          }
-        }
+        dispatchPendingHardwareInterrupt(false);
       });
 
       cpu.setEFLAGS(cpu.getEFLAGS() | fador::cpu::FLAG_INTERRUPT);
@@ -564,39 +733,11 @@ int main(int argc, char *argv[]) {
         }
 
         if (stopAfterCycles > 0 && instrCount >= stopAfterCycles) {
-          // Trace next 50 instructions for diagnostic
-          LOG_INFO("=== Instruction trace at stop point ===");
-          for (int t = 0; t < 50; ++t) {
-            uint32_t eip = cpu.getEIP();
-            uint16_t cs_val = cpu.getSegReg(fador::cpu::CS);
-            uint32_t csBase = cpu.getSegBase(fador::cpu::CS);
-            uint32_t phys = csBase + eip;
-            char buf[256];
-            snprintf(buf, sizeof(buf),
-              "TRACE %02d: CS=%04X EIP=%08X phys=%08X bytes=%02X %02X %02X %02X %02X %02X EAX=%08X",
-              t, cs_val, eip, phys,
-              memory.read8(phys), memory.read8(phys+1), memory.read8(phys+2),
-              memory.read8(phys+3), memory.read8(phys+4), memory.read8(phys+5),
-              cpu.getReg32(fador::cpu::EAX));
-            LOG_INFO(buf);
-            decoder.step();
-            cpu.addCycles(4);
+          if (!handleStopAfter(instrCount, true)) {
+            running = false;
+            break;
           }
-          LOG_INFO("Stopped after ", instrCount, " cycles (--stop-after)");
-          debugger.dumpState();
-          for (int row = 0; row < 25; ++row) {
-            std::string vramText;
-            for (int col = 0; col < 80; ++col) {
-              uint8_t ch = memory.read8(0xB8000 + (row * 80 + col) * 2);
-              vramText += (ch >= 0x20 && ch < 0x7F) ? static_cast<char>(ch) : '.';
-            }
-            while (!vramText.empty() && vramText.back() == '.')
-              vramText.pop_back();
-            if (!vramText.empty())
-              LOG_INFO("VRAM[", row, "]: ", vramText);
-          }
-          running = false;
-          break;
+          continue;
         }
 
         if (dos.isTerminated()) {
@@ -640,13 +781,7 @@ int main(int argc, char *argv[]) {
             pic.raiseIRQ(1);
           }
 
-          if (cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) {
-            int pending = pic.getPendingInterrupt();
-            if (pending != -1) {
-              pic.acknowledgeInterrupt();
-              decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
-            }
-          }
+          dispatchPendingHardwareInterrupt(true);
 
           // Audio generation
           uint32_t queuedAudio = audio.getQueuedAudioSize();
@@ -673,6 +808,8 @@ int main(int argc, char *argv[]) {
             sdlRenderer.render();
             lastRender = now;
           }
+
+          throttle.pace(instrCount);
         }
       }
 
@@ -681,12 +818,16 @@ int main(int argc, char *argv[]) {
 #endif
     {
       // ── Terminal rendering path ─────────────────────────────
+  InstructionThrottle throttle(throttleInstructionsPerSecond);
+  throttle.reset();
+
       renderer.clearScreen();
 
       fador::ui::InputManager input(kbd);
       input.setBIOS(bios);
       bios.setInputPollCallback([&input]() { input.pollInput(); });
-      bios.setIdleCallback([&renderer, &pit, &cpu, &decoder, &kbd, &pic]() {
+      bios.setIdleCallback([&renderer, &pit, &cpu, &decoder, &kbd, &pic,
+                &dispatchPendingHardwareInterrupt]() {
         pit.update();
         while (pit.checkPendingIRQ0()) {
           pic.raiseIRQ(0);
@@ -694,13 +835,7 @@ int main(int argc, char *argv[]) {
         if (kbd.checkPendingIRQ()) {
           pic.raiseIRQ(1);
         }
-        if (cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) {
-          int pending = pic.getPendingInterrupt();
-          if (pending != -1) {
-            pic.acknowledgeInterrupt();
-            decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
-          }
-        }
+        dispatchPendingHardwareInterrupt(false);
         static auto lr = std::chrono::steady_clock::now();
         auto now = std::chrono::steady_clock::now();
         if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lr)
@@ -711,17 +846,12 @@ int main(int argc, char *argv[]) {
       });
       dos.setKeyboard(kbd);
       dos.setInputPollCallback([&input]() { input.pollInput(); });
-      dos.setIdleCallback([&pit, &cpu, &decoder, &kbd, &pic]() {
+      dos.setIdleCallback([&pit, &cpu, &decoder, &kbd, &pic,
+               &dispatchPendingHardwareInterrupt]() {
         pit.update();
         while (pit.checkPendingIRQ0()) { pic.raiseIRQ(0); }
         if (kbd.checkPendingIRQ()) { pic.raiseIRQ(1); }
-        if (cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) {
-          int pending = pic.getPendingInterrupt();
-          if (pending != -1) {
-            pic.acknowledgeInterrupt();
-            decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
-          }
-        }
+        dispatchPendingHardwareInterrupt(false);
       });
 
       cpu.setEFLAGS(cpu.getEFLAGS() | fador::cpu::FLAG_INTERRUPT);
@@ -745,31 +875,15 @@ int main(int argc, char *argv[]) {
             pic.raiseIRQ(1);
           }
 
-          if (cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) {
-            int pending = pic.getPendingInterrupt();
-            if (pending != -1) {
-              pic.acknowledgeInterrupt();
-              decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
-            }
-          }
+          dispatchPendingHardwareInterrupt(true);
         }
 
         if (stopAfterCycles > 0 && instrCount >= stopAfterCycles) {
-          LOG_INFO("Stopped after ", instrCount, " cycles (--stop-after)");
-          debugger.dumpState();
-          for (int row = 0; row < 25; ++row) {
-            std::string vramText;
-            for (int col = 0; col < 80; ++col) {
-              uint8_t ch = memory.read8(0xB8000 + (row * 80 + col) * 2);
-              vramText += (ch >= 0x20 && ch < 0x7F) ? static_cast<char>(ch) : '.';
-            }
-            while (!vramText.empty() && vramText.back() == '.')
-              vramText.pop_back();
-            if (!vramText.empty())
-              LOG_INFO("VRAM[", row, "]: ", vramText);
+          if (!handleStopAfter(instrCount, false)) {
+            running = false;
+            break;
           }
-          running = false;
-          break;
+          continue;
         }
 
         if (dos.isTerminated()) {
@@ -807,13 +921,7 @@ int main(int argc, char *argv[]) {
           if (kbd.checkPendingIRQ()) {
             pic.raiseIRQ(1);
           }
-          if (cpu.getEFLAGS() & fador::cpu::FLAG_INTERRUPT) {
-            int pending = pic.getPendingInterrupt();
-            if (pending != -1) {
-              pic.acknowledgeInterrupt();
-              decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
-            }
-          }
+          dispatchPendingHardwareInterrupt(true);
 
           static auto lastRender = std::chrono::steady_clock::now();
           auto now = std::chrono::steady_clock::now();
@@ -840,6 +948,8 @@ int main(int argc, char *argv[]) {
             renderer.render();
             lastRender = now;
           }
+
+          throttle.pace(instrCount);
         }
       }
 
