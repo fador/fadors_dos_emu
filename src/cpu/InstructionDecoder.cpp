@@ -44,6 +44,21 @@ double roundNearestEven(double value) {
   return integral + std::copysign(1.0, value);
 }
 
+constexpr uint64_t kMaxPackedBCDValue = 999999999999999999ULL;
+
+void writePackedBCD80(memory::MemoryBus &memory, uint32_t address,
+                     uint64_t magnitude, bool negative) {
+  for (uint32_t index = 0; index < 9; ++index) {
+    const uint8_t lowDigit = static_cast<uint8_t>(magnitude % 10);
+    magnitude /= 10;
+    const uint8_t highDigit = static_cast<uint8_t>(magnitude % 10);
+    magnitude /= 10;
+    memory.write8(address + index,
+                  static_cast<uint8_t>(lowDigit | (highDigit << 4)));
+  }
+  memory.write8(address + 9, negative ? 0x80 : 0x00);
+}
+
 } // namespace
 
 InstructionDecoder::InstructionDecoder(CPU &cpu, memory::MemoryBus &memory,
@@ -98,6 +113,10 @@ bool InstructionDecoder::tryFastRepMovs(uint32_t elementSize) {
     return true;
   }
 
+  if ((m_cpu.getEFLAGS() & FLAG_DIRECTION) != 0) {
+    return false;
+  }
+
   constexpr uint32_t MAX_REP_BATCH = 4096;
   uint32_t iterations = count > MAX_REP_BATCH ? MAX_REP_BATCH : count;
   uint8_t srcSeg = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
@@ -124,11 +143,20 @@ bool InstructionDecoder::tryFastRepMovs(uint32_t elementSize) {
   }
 
   uint32_t byteCount = iterations * elementSize;
+  uint32_t srcPhysStart = m_segBase[srcSeg] + srcStart;
+  uint32_t dstPhysStart = m_segBase[ES] + dstStart;
+
+  // Forward overlapping MOVS must observe bytes written earlier in the same
+  // instruction. A bulk memmove would preserve the original source bytes
+  // instead, which breaks packed executable decompressors.
+  if (dstPhysStart > srcPhysStart && dstPhysStart < srcPhysStart + byteCount) {
+    return false;
+  }
 
   uint8_t *srcPtr =
-      m_memory.contiguousAccess(m_segBase[srcSeg] + srcStart, byteCount);
+      m_memory.contiguousAccess(srcPhysStart, byteCount);
   uint8_t *dstPtr =
-      m_memory.contiguousAccess(m_segBase[ES] + dstStart, byteCount);
+      m_memory.contiguousAccess(dstPhysStart, byteCount);
   if (srcPtr == nullptr || dstPtr == nullptr) {
     return false;
   }
@@ -816,6 +844,37 @@ void InstructionDecoder::executeFPUOpcode(uint8_t opcode) {
     case 0xE4:
       setFPUCompareStatus(st(0), 0.0);
       return;
+    case 0xE5: {
+      const double value = m_cpu.getFPURegister(0);
+      m_cpu.clearFPUStatusBits(FPU_STATUS_C0 | FPU_STATUS_C1 |
+                               FPU_STATUS_C2 | FPU_STATUS_C3);
+      if (std::signbit(value)) {
+        m_cpu.setFPUStatusBits(FPU_STATUS_C1);
+      }
+
+      if (m_cpu.isFPURegisterEmpty(0)) {
+        m_cpu.setFPUStatusBits(FPU_STATUS_C3 | FPU_STATUS_C0);
+        return;
+      }
+
+      switch (std::fpclassify(value)) {
+      case FP_NAN:
+        m_cpu.setFPUStatusBits(FPU_STATUS_C0);
+        return;
+      case FP_INFINITE:
+        m_cpu.setFPUStatusBits(FPU_STATUS_C2 | FPU_STATUS_C0);
+        return;
+      case FP_ZERO:
+        m_cpu.setFPUStatusBits(FPU_STATUS_C3);
+        return;
+      case FP_SUBNORMAL:
+        m_cpu.setFPUStatusBits(FPU_STATUS_C3 | FPU_STATUS_C2);
+        return;
+      default:
+        m_cpu.setFPUStatusBits(FPU_STATUS_C2);
+        return;
+      }
+    }
     case 0xE8:
       m_cpu.pushFPU(1.0);
       return;
@@ -1059,6 +1118,38 @@ void InstructionDecoder::executeFPUOpcode(uint8_t opcode) {
       case 5:
         m_cpu.pushFPU(static_cast<double>(readInt64(addr)));
         return;
+      case 6: {
+        if (m_cpu.isFPURegisterEmpty(0)) {
+          m_cpu.clearFPUStatusBits(FPU_STATUS_C1);
+          m_cpu.setFPUStatusBits(FPU_STATUS_IE | FPU_STATUS_SF);
+          return;
+        }
+
+        const double source = m_cpu.getFPURegister(0);
+        const double rounded = roundFPUValue(source);
+        m_cpu.clearFPUStatusBits(FPU_STATUS_C1);
+        if (rounded != source && std::fabs(rounded) > std::fabs(source)) {
+          m_cpu.setFPUStatusBits(FPU_STATUS_C1);
+        }
+
+        bool invalid = false;
+        const int64_t converted = convertFPUToInt(source, 64, invalid);
+        const uint64_t magnitude = converted < 0
+                                       ? static_cast<uint64_t>(-converted)
+                                       : static_cast<uint64_t>(converted);
+        if (invalid || magnitude > kMaxPackedBCDValue) {
+          m_cpu.setFPUStatusBits(FPU_STATUS_IE);
+          for (uint32_t index = 0; index < 10; ++index) {
+            m_memory.write8(addr + index, 0);
+          }
+          m_cpu.popFPU();
+          return;
+        }
+
+        writePackedBCD80(m_memory, addr, magnitude, std::signbit(source));
+        m_cpu.popFPU();
+        return;
+      }
       case 7: {
         bool invalid = false;
         const int64_t converted = convertFPUToInt(st(0), 64, invalid);
@@ -2921,9 +3012,9 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     uint8_t srcSeg = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
     uint32_t srcOff = m_hasPrefix67 ? m_cpu.getReg32(ESI) : m_cpu.getReg16(SI);
     uint32_t dstOff = m_hasPrefix67 ? m_cpu.getReg32(EDI) : m_cpu.getReg16(DI);
-
-    m_memory.write8(m_segBase[ES] + dstOff,
-                    m_memory.read8(m_segBase[srcSeg] + srcOff));
+    uint32_t srcPhys = m_segBase[srcSeg] + srcOff;
+    uint32_t dstPhys = m_segBase[ES] + dstOff;
+    m_memory.write8(dstPhys, m_memory.read8(srcPhys));
 
     int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -1 : 1;
     if (m_hasPrefix67) {
@@ -2955,8 +3046,10 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
         m_cpu.setReg16(SI, static_cast<uint16_t>(srcOff + diff));
       }
     } else {
-      m_memory.write16(m_segBase[ES] + dstOff,
-                       m_memory.read16(m_segBase[srcSeg] + srcOff));
+      uint32_t dstPhys = m_segBase[ES] + dstOff;
+      uint32_t srcPhys = m_segBase[srcSeg] + srcOff;
+      uint16_t srcVal = m_memory.read16(srcPhys);
+      m_memory.write16(dstPhys, srcVal);
       int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -2 : 2;
       if (m_hasPrefix67) {
         m_cpu.setReg32(EDI, dstOff + diff);
@@ -3913,17 +4006,12 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
   }
   case 0x10: { // MOVUPS / MOVSS xmm, xmm/m  – SSE stub, just consume ModRM
     ModRM modrm = decodeModRM(fetch8());
-    (void)modrm;
-    break;
-  }
-  case 0x11: { // MOVUPS / MOVSS xmm/m, xmm  – SSE stub
-    ModRM modrm = decodeModRM(fetch8());
-    (void)modrm;
-    break;
-  }
-  case 0x20: { // MOV rd, CRn
-    ModRM modrm = decodeModRM(fetch8());
-    m_cpu.setReg32(modrm.rm, m_cpu.getCR(modrm.reg));
+    if (modrm.mod != 3) {
+      if (m_hasPrefix67)
+        getEffectiveAddress32(modrm);
+      else
+        getEffectiveAddress16(modrm);
+    }
     break;
   }
   case 0x21: { // MOV rd, DRn

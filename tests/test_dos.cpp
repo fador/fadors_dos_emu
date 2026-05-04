@@ -425,6 +425,69 @@ TEST_CASE("ProgramLoader parses FBOV overlays and INT 3F loads them", "[DOS][Ove
     std::remove(fname);
 }
 
+TEST_CASE("ProgramLoader zeroes EXE minimum allocation area", "[DOS][Loader]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    bios.initialize();
+    dos.initialize();
+    hw::ProgramLoader loader(cpu, mem, dos.getHIMEM());
+
+    const char* fname = "minalloc_zero.exe";
+    {
+        std::vector<uint8_t> exe(48, 0);
+        auto write16 = [&exe](size_t offset, uint16_t value) {
+            exe[offset + 0] = static_cast<uint8_t>(value & 0xFF);
+            exe[offset + 1] = static_cast<uint8_t>((value >> 8) & 0xFF);
+        };
+
+        exe[0] = 'M';
+        exe[1] = 'Z';
+        write16(2, 48);      // Last page size
+        write16(4, 1);       // Number of pages
+        write16(6, 0);       // Relocations
+        write16(8, 2);       // Header size paragraphs (32 bytes)
+        write16(10, 1);      // minAlloc paragraph
+        write16(12, 1);      // maxAlloc paragraph
+        write16(14, 0);      // SS
+        write16(16, 0x0200); // SP
+        write16(18, 0);      // checksum
+        write16(20, 0);      // IP
+        write16(22, 0);      // CS
+        write16(24, 0x001C); // relocation table offset
+        write16(26, 0);      // overlay number
+
+        exe[32] = 0x90;
+        exe[33] = 0x90;
+        exe[34] = 0xCD;
+        exe[35] = 0x20;
+
+        std::ofstream ofs(fname, std::ios::binary);
+        ofs.write(reinterpret_cast<const char*>(exe.data()), static_cast<std::streamsize>(exe.size()));
+    }
+
+    const uint16_t pspSegment = dos.getPSPSegment();
+    const uint32_t loadAddr = static_cast<uint32_t>(pspSegment + 0x10) << 4;
+    const uint32_t imageSize = 16;
+    const uint32_t minAllocAddr = loadAddr + imageSize;
+    const uint32_t farBssAddr = loadAddr + 0x2000;
+
+    mem.write8(minAllocAddr + 0, 0xCC);
+    mem.write8(minAllocAddr + 15, 0xCC);
+    mem.write8(farBssAddr, 0xCC);
+
+    REQUIRE(loader.loadEXE(fname, pspSegment, dos));
+    REQUIRE(mem.read8(minAllocAddr + 0) == 0x00);
+    REQUIRE(mem.read8(minAllocAddr + 15) == 0x00);
+    REQUIRE(mem.read8(farBssAddr) == 0x00);
+
+    std::remove(fname);
+}
+
 TEST_CASE("DOS: Close invalid file handle returns error", "[DOS][File]") {
     cpu::CPU cpu;
     memory::MemoryBus mem;

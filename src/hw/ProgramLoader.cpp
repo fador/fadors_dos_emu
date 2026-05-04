@@ -402,13 +402,19 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
       m_memory.write8(loadAddr + i, buffer[i]);
     }
 
-    // The memory beyond the loaded image retains the 0xCC fill written
-    // by MemoryBus::MemoryBus().  This simulates dirty DOS RAM — real DOS
-    // leaves leftover data from the boot process / previous programs.
-    // Borland mixed-model programs (e.g. TC 2.01) scan their far-heap
-    // allocation and rely on non-zero bytes to avoid false end-of-table
-    // sentinel matches; zeroing this area causes premature table
-    // termination and broken initialisation paths.
+    // Zero the remainder of the program's allocated DOS block after the
+    // file-backed image. Borland EXEs place startup globals in BSS beyond the
+    // on-disk load image and expect them to be zero before runtime init.
+    const uint32_t programLimit = std::min(
+        static_cast<uint32_t>(m_memory.read16((static_cast<uint32_t>(segment)
+                                               << 4u) +
+                                              0x02))
+            << 4u,
+        memory::MemoryBus::MEMORY_SIZE);
+    const uint32_t zeroFillLimit = std::max(loadAddr + imageSize, programLimit);
+    for (uint32_t addr = loadAddr + imageSize; addr < zeroFillLimit; ++addr) {
+      m_memory.write8(addr, 0u);
+    }
 
     // For executables with demand-loaded overlays, the PSP MCB was sized to
     // consume all conventional memory in DOS::initialize(). Shrink the loaded

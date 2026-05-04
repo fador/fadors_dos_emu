@@ -288,6 +288,33 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
         REQUIRE(cpu.getReg16(cpu::Reg16Index::DI) == 0x2003);
     }
 
+    SECTION("String Operations: REP MOVSB with forward overlap") {
+        cpu.setReg16(cpu::Reg16Index::SI, 0x1000);
+        cpu.setReg16(cpu::Reg16Index::DI, 0x1001);
+        cpu.setReg16(cpu::Reg16Index::CX, 4);
+        cpu.setSegReg(cpu::SegRegIndex::DS, 0x0000);
+        cpu.setSegReg(cpu::SegRegIndex::ES, 0x0000);
+        mem.write8(0x1000, 0x11);
+        mem.write8(0x1001, 0x22);
+        mem.write8(0x1002, 0x33);
+        mem.write8(0x1003, 0x44);
+        mem.write8(0x1004, 0x55);
+
+        // REP (0xF3) MOVSB (0xA4)
+        mem.write8(0x100, 0xF3);
+        mem.write8(0x101, 0xA4);
+        decoder.step();
+
+        REQUIRE(mem.read8(0x1000) == 0x11);
+        REQUIRE(mem.read8(0x1001) == 0x11);
+        REQUIRE(mem.read8(0x1002) == 0x11);
+        REQUIRE(mem.read8(0x1003) == 0x11);
+        REQUIRE(mem.read8(0x1004) == 0x11);
+        REQUIRE(cpu.getReg16(cpu::Reg16Index::CX) == 0);
+        REQUIRE(cpu.getReg16(cpu::Reg16Index::SI) == 0x1004);
+        REQUIRE(cpu.getReg16(cpu::Reg16Index::DI) == 0x1005);
+    }
+
     SECTION("String Operations: REP MOVSW") {
         cpu.setReg16(cpu::Reg16Index::SI, 0x1000);
         cpu.setReg16(cpu::Reg16Index::DI, 0x2000);
@@ -412,6 +439,41 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
         decoder.step();
 
         REQUIRE(mem.read16(0x2402) == 7);
+        REQUIRE(cpu.isFPURegisterEmpty(0));
+    }
+
+    SECTION("x87: FXAM classifies negative zero") {
+        cpu.pushFPU(-0.0);
+
+        mem.write8(0x100, 0xD9); mem.write8(0x101, 0xE5); // FXAM
+
+        decoder.step();
+
+        uint16_t status = cpu.getFPUStatusWord();
+        REQUIRE((status & cpu::FPU_STATUS_C1) != 0);
+        REQUIRE((status & cpu::FPU_STATUS_C3) != 0);
+        REQUIRE((status & cpu::FPU_STATUS_C2) == 0);
+        REQUIRE((status & cpu::FPU_STATUS_C0) == 0);
+    }
+
+    SECTION("x87: FBSTP stores packed BCD and pops") {
+        cpu.pushFPU(123456789012.0);
+
+        mem.write8(0x100, 0xDF); mem.write8(0x101, 0x36); // FBSTP tbyte ptr [2500h]
+        mem.write16(0x102, 0x2500);
+
+        decoder.step();
+
+        REQUIRE(mem.read8(0x2500) == 0x12);
+        REQUIRE(mem.read8(0x2501) == 0x90);
+        REQUIRE(mem.read8(0x2502) == 0x78);
+        REQUIRE(mem.read8(0x2503) == 0x56);
+        REQUIRE(mem.read8(0x2504) == 0x34);
+        REQUIRE(mem.read8(0x2505) == 0x12);
+        REQUIRE(mem.read8(0x2506) == 0x00);
+        REQUIRE(mem.read8(0x2507) == 0x00);
+        REQUIRE(mem.read8(0x2508) == 0x00);
+        REQUIRE(mem.read8(0x2509) == 0x00);
         REQUIRE(cpu.isFPURegisterEmpty(0));
     }
 
