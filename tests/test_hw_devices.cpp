@@ -99,6 +99,37 @@ TEST_CASE("Hardware: PIT8254", "[HW]") {
         REQUIRE(pit.checkPendingIRQ0());
         REQUIRE(!pit.checkPendingIRQ0());
     }
+
+    SECTION("PIT8254 Accuracy and Sub-tick Remainder") {
+        // Set 100Hz (Reload = 1193182 / 100 = 11932)
+        pit.write8(0x43, 0x36);
+        uint16_t reload = 11932;
+        pit.write8(0x40, reload & 0xFF);
+        pit.write8(0x40, reload >> 8);
+
+        // Advance 1 second
+        pit.advanceTime(std::chrono::seconds(1));
+
+        int ticks = 0;
+        while (pit.checkPendingIRQ0()) ticks++;
+
+        // 1193181.818 / 11932 = 99.998... so should be 99 or 100
+        REQUIRE(ticks >= 99);
+        REQUIRE(ticks <= 101);
+
+        // Sub-tick accumulation: Advance 100ms in 1ms steps
+        pit.write8(0x43, 0x36);
+        pit.write8(0x40, 0x00);
+        pit.write8(0x40, 0x00); // 65536 reload (~54.9ms per tick)
+
+        int totalTicks = 0;
+        for (int i = 0; i < 100; ++i) {
+            pit.advanceTime(std::chrono::milliseconds(1));
+            while (pit.checkPendingIRQ0()) totalTicks++;
+        }
+        REQUIRE(totalTicks >= 1);
+        REQUIRE(totalTicks <= 2);
+    }
 }
 
 TEST_CASE("Hardware: Keyboard Controller", "[HW]") {
@@ -109,5 +140,19 @@ TEST_CASE("Hardware: Keyboard Controller", "[HW]") {
         REQUIRE(kbd.read8(0x64) & 0x01); // Status: Output Buffer Full
         REQUIRE(kbd.read8(0x60) == 0x55); // Response
         REQUIRE(!(kbd.read8(0x64) & 0x01)); // Status: Buffer empty
+    }
+
+    SECTION("Port 0x61 PPI Port B Refresh Bit") {
+        uint8_t r1 = kbd.read8(0x61);
+        bool toggled = false;
+        uint8_t last = r1 & 0x10;
+        for (int i = 0; i < 10; ++i) {
+            uint8_t val = kbd.read8(0x61) & 0x10;
+            if (val != last) {
+                toggled = true;
+                break;
+            }
+        }
+        REQUIRE(toggled);
     }
 }

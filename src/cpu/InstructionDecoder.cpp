@@ -1615,7 +1615,6 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     // return TO the PM handler (same CS) would falsely trigger the
     // interception, prematurely ending the handler and corrupting state.
     {
-      uint16_t preIretCS = m_cpu.getSegReg(CS);
       const auto *pmPeek = m_cpu.peekDpmiFrameByDispatchedPM();
       if (pmPeek) {
         // Read what the IRET would pop from the stack
@@ -1649,7 +1648,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
           loadSegment(GS, pmFrame.savedGS);
           LOG_CPU("PM handler IRET intercepted: vec=0x", std::hex,
                   (int)pmFrame.vector,
-                  " \u2192 CS:EIP=0x", pmFrame.origCS, ":", pmFrame.origEIP,
+                  " -> CS:EIP=0x", pmFrame.origCS, ":", pmFrame.origEIP,
                   " SS:ESP=0x", pmFrame.origSS, ":", pmFrame.origESP);
           break;
         }
@@ -1944,76 +1943,76 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
 
   // AL/AX/EAX Immediates (0x04 - 0x3D)
   case 0x04:
-    m_cpu.setReg8(AL, aluOp(0, m_cpu.getReg8(AL), fetch8(), 8));
+    m_cpu.setReg8(AL, static_cast<uint8_t>(aluOp(0, m_cpu.getReg8(AL), fetch8(), 8)));
     break;
   case 0x05:
     if (m_hasPrefix66)
       m_cpu.setReg32(EAX, aluOp(0, m_cpu.getReg32(EAX), fetch32(), 32));
     else
-      m_cpu.setReg16(AX, aluOp(0, m_cpu.getReg16(AX), fetch16(), 16));
+      m_cpu.setReg16(AX, static_cast<uint16_t>(aluOp(0, m_cpu.getReg16(AX), fetch16(), 16)));
     break;
   case 0x0C:
-    m_cpu.setReg8(AL, aluOp(1, m_cpu.getReg8(AL), fetch8(), 8));
+    m_cpu.setReg8(AL, static_cast<uint8_t>(aluOp(1, m_cpu.getReg8(AL), fetch8(), 8)));
     break;
   case 0x0D:
     if (m_hasPrefix66)
       m_cpu.setReg32(EAX, aluOp(1, m_cpu.getReg32(EAX), fetch32(), 32));
     else
-      m_cpu.setReg16(AX, aluOp(1, m_cpu.getReg16(AX), fetch16(), 16));
+      m_cpu.setReg16(AX, static_cast<uint16_t>(aluOp(1, m_cpu.getReg16(AX), fetch16(), 16)));
     break;
   case 0x14:
-    m_cpu.setReg8(AL, aluOp(2, m_cpu.getReg8(AL), fetch8(), 8));
+    m_cpu.setReg8(AL, static_cast<uint8_t>(aluOp(2, m_cpu.getReg8(AL), fetch8(), 8)));
     break;
   case 0x15:
     if (m_hasPrefix66)
       m_cpu.setReg32(EAX, aluOp(2, m_cpu.getReg32(EAX), fetch32(), 32));
     else
-      m_cpu.setReg16(AX, aluOp(2, m_cpu.getReg16(AX), fetch16(), 16));
+      m_cpu.setReg16(AX, static_cast<uint16_t>(aluOp(2, m_cpu.getReg16(AX), fetch16(), 16)));
     break;
   case 0x1C:
-    m_cpu.setReg8(AL, aluOp(3, m_cpu.getReg8(AL), fetch8(), 8));
+    m_cpu.setReg8(AL, static_cast<uint8_t>(aluOp(3, m_cpu.getReg8(AL), fetch8(), 8)));
     break;
   case 0x1D:
     if (m_hasPrefix66)
       m_cpu.setReg32(EAX, aluOp(3, m_cpu.getReg32(EAX), fetch32(), 32));
     else
-      m_cpu.setReg16(AX, aluOp(3, m_cpu.getReg16(AX), fetch16(), 16));
+      m_cpu.setReg16(AX, static_cast<uint16_t>(aluOp(3, m_cpu.getReg16(AX), fetch16(), 16)));
     break;
   case 0x24:
-    m_cpu.setReg8(AL, aluOp(4, m_cpu.getReg8(AL), fetch8(), 8));
+    m_cpu.setReg8(AL, static_cast<uint8_t>(aluOp(4, m_cpu.getReg8(AL), fetch8(), 8)));
     break;
   case 0x25:
     if (m_hasPrefix66)
       m_cpu.setReg32(EAX, aluOp(4, m_cpu.getReg32(EAX), fetch32(), 32));
     else
-      m_cpu.setReg16(AX, aluOp(4, m_cpu.getReg16(AX), fetch16(), 16));
+      m_cpu.setReg16(AX, static_cast<uint16_t>(aluOp(4, m_cpu.getReg16(AX), fetch16(), 16)));
     break;
   case 0x2C:
-    m_cpu.setReg8(AL, aluOp(5, m_cpu.getReg8(AL), fetch8(), 8));
+    m_cpu.setReg8(AL, static_cast<uint8_t>(aluOp(5, m_cpu.getReg8(AL), fetch8(), 8)));
     break;
   case 0x2D:
     if (m_hasPrefix66)
       m_cpu.setReg32(EAX, aluOp(5, m_cpu.getReg32(EAX), fetch32(), 32));
     else
-      m_cpu.setReg16(AX, aluOp(5, m_cpu.getReg16(AX), fetch16(), 16));
+      m_cpu.setReg16(AX, static_cast<uint16_t>(aluOp(5, m_cpu.getReg16(AX), fetch16(), 16)));
     break;
   case 0x34:
-    m_cpu.setReg8(AL, aluOp(6, m_cpu.getReg8(AL), fetch8(), 8));
+    m_cpu.setReg8(AL, static_cast<uint8_t>(aluOp(6, m_cpu.getReg8(AL), fetch8(), 8)));
     break;
   case 0x35:
     if (m_hasPrefix66)
       m_cpu.setReg32(EAX, aluOp(6, m_cpu.getReg32(EAX), fetch32(), 32));
     else
-      m_cpu.setReg16(AX, aluOp(6, m_cpu.getReg16(AX), fetch16(), 16));
+      m_cpu.setReg16(AX, static_cast<uint16_t>(aluOp(6, m_cpu.getReg16(AX), fetch16(), 16)));
     break;
   case 0x3C:
-    aluOp(7, m_cpu.getReg8(AL), fetch8(), 8);
+    static_cast<void>(aluOp(7, m_cpu.getReg8(AL), fetch8(), 8));
     break;
   case 0x3D:
     if (m_hasPrefix66)
-      aluOp(7, m_cpu.getReg32(EAX), fetch32(), 32);
+      static_cast<void>(aluOp(7, m_cpu.getReg32(EAX), fetch32(), 32));
     else
-      aluOp(7, m_cpu.getReg16(AX), fetch16(), 16);
+      static_cast<void>(aluOp(7, m_cpu.getReg16(AX), fetch16(), 16));
     break;
 
   // BCD / ASCII adjust
@@ -2182,7 +2181,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
   case 0x38: {
     uint8_t op = (opcode >> 3) & 0x07;
     ModRM modrm = decodeModRM(fetch8());
-    uint8_t res = aluOp(op, readModRM8(modrm), m_cpu.getReg8(modrm.reg), 8);
+    uint8_t res = static_cast<uint8_t>(aluOp(op, readModRM8(modrm), m_cpu.getReg8(modrm.reg), 8));
     if (op != 7)
       writeModRM8(modrm, res);
     break;
@@ -2199,12 +2198,12 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     ModRM modrm = decodeModRM(fetch8());
     if (m_hasPrefix66) {
       uint32_t res =
-          aluOp(op, readModRM32(modrm), m_cpu.getReg32(modrm.reg), 32);
+          static_cast<uint32_t>(aluOp(op, readModRM32(modrm), m_cpu.getReg32(modrm.reg), 32));
       if (op != 7)
         writeModRM32(modrm, res);
     } else {
       uint16_t res =
-          aluOp(op, readModRM16(modrm), m_cpu.getReg16(modrm.reg), 16);
+          static_cast<uint16_t>(aluOp(op, readModRM16(modrm), m_cpu.getReg16(modrm.reg), 16));
       if (op != 7)
         writeModRM16(modrm, res);
     }
@@ -2220,7 +2219,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
   case 0x3A: {
     uint8_t op = (opcode >> 3) & 0x07;
     ModRM modrm = decodeModRM(fetch8());
-    uint8_t res = aluOp(op, m_cpu.getReg8(modrm.reg), readModRM8(modrm), 8);
+    uint8_t res = static_cast<uint8_t>(aluOp(op, m_cpu.getReg8(modrm.reg), readModRM8(modrm), 8));
     if (op != 7)
       m_cpu.setReg8(modrm.reg, res);
     break;
@@ -2237,12 +2236,12 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     ModRM modrm = decodeModRM(fetch8());
     if (m_hasPrefix66) {
       uint32_t res =
-          aluOp(op, m_cpu.getReg32(modrm.reg), readModRM32(modrm), 32);
+          static_cast<uint32_t>(aluOp(op, m_cpu.getReg32(modrm.reg), readModRM32(modrm), 32));
       if (op != 7)
         m_cpu.setReg32(modrm.reg, res);
     } else {
       uint16_t res =
-          aluOp(op, m_cpu.getReg16(modrm.reg), readModRM16(modrm), 16);
+          static_cast<uint16_t>(aluOp(op, m_cpu.getReg16(modrm.reg), readModRM16(modrm), 16));
       if (op != 7)
         m_cpu.setReg16(modrm.reg, res);
     }
@@ -2262,7 +2261,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     if (m_hasPrefix66)
       m_cpu.setReg32(reg, incOp(m_cpu.getReg32(reg), 32));
     else
-      m_cpu.setReg16(reg, incOp(m_cpu.getReg16(reg), 16));
+      m_cpu.setReg16(reg, static_cast<uint16_t>(incOp(m_cpu.getReg16(reg), 16)));
     break;
   }
   case 0x48:
@@ -2277,7 +2276,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     if (m_hasPrefix66)
       m_cpu.setReg32(reg, decOp(m_cpu.getReg32(reg), 32));
     else
-      m_cpu.setReg16(reg, decOp(m_cpu.getReg16(reg), 16));
+      m_cpu.setReg16(reg, static_cast<uint16_t>(decOp(m_cpu.getReg16(reg), 16)));
     break;
   }
 
@@ -2538,7 +2537,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
   }
   case 0x8C: {
     ModRM m = decodeModRM(fetch8());
-    writeModRM16(m, m_cpu.getSegReg(static_cast<SegRegIndex>(m.reg)));
+    writeModRM16(m, static_cast<uint16_t>(m_cpu.getSegReg(static_cast<SegRegIndex>(m.reg))));
     break;
   }
 
@@ -2636,7 +2635,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                                 : getEffectiveAddress16(modrm);
     if (m_hasPrefix66) {
       m_cpu.setReg32(modrm.reg, m_memory.read32(ea));
-      loadSegment(ES, m_memory.read16(ea + 4));
+      loadSegment(ES, static_cast<uint16_t>(m_memory.read16(ea + 4)));
     } else {
       m_cpu.setReg16(modrm.reg, m_memory.read16(ea));
       loadSegment(ES, m_memory.read16(ea + 2));
@@ -2649,7 +2648,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                                 : getEffectiveAddress16(modrm);
     if (m_hasPrefix66) {
       m_cpu.setReg32(modrm.reg, m_memory.read32(ea));
-      loadSegment(DS, m_memory.read16(ea + 4));
+      loadSegment(DS, static_cast<uint16_t>(m_memory.read16(ea + 4)));
     } else {
       m_cpu.setReg16(modrm.reg, m_memory.read16(ea));
       loadSegment(DS, m_memory.read16(ea + 2));
@@ -2710,10 +2709,10 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     } else if (signExt) {
       if (m_hasPrefix66) {
         val1 = readModRM32(modrm);
-        val2 = static_cast<int32_t>(static_cast<int8_t>(fetch8()));
+        val2 = static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(fetch8())));
       } else {
         val1 = readModRM16(modrm);
-        val2 = static_cast<int16_t>(static_cast<int8_t>(fetch8()));
+        val2 = static_cast<uint32_t>(static_cast<int16_t>(static_cast<int8_t>(fetch8())));
       }
     } else {
       if (m_hasPrefix66) {
@@ -2753,7 +2752,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
         writeModRM8(modrm, ~rmVal);
         break; // NOT
       case 3:
-        writeModRM8(modrm, aluOp(5, 0, rmVal, 8));
+        writeModRM8(modrm, static_cast<uint8_t>(aluOp(5, 0, rmVal, 8)));
         break;  // NEG
       case 4: { // MUL
         uint16_t res = static_cast<uint16_t>(m_cpu.getReg8(AL)) * rmVal;
@@ -2878,7 +2877,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
           writeModRM16(modrm, ~rmVal);
           break; // NOT
         case 3:
-          writeModRM16(modrm, aluOp(5, 0, rmVal, 16));
+          writeModRM16(modrm, static_cast<uint16_t>(aluOp(5, 0, rmVal, 16)));
           break;  // NEG
         case 4: { // MUL
           uint32_t res = static_cast<uint32_t>(m_cpu.getReg16(AX)) * rmVal;
@@ -3445,9 +3444,9 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     ModRM modrm = decodeModRM(fetch8());
     if (opcode == 0xFE) { // Group 4
       if (modrm.reg == 0)
-        writeModRM8(modrm, incOp(readModRM8(modrm), 8)); // INC rm8
+        writeModRM8(modrm, static_cast<uint8_t>(incOp(readModRM8(modrm), 8))); // INC rm8
       else if (modrm.reg == 1)
-        writeModRM8(modrm, decOp(readModRM8(modrm), 8)); // DEC rm8
+        writeModRM8(modrm, static_cast<uint8_t>(decOp(readModRM8(modrm), 8))); // DEC rm8
       break;
     }
     // Group 5
@@ -3500,10 +3499,10 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
       uint16_t val = (modrm.reg < 2 || modrm.reg == 6) ? readModRM16(modrm) : 0;
       switch (modrm.reg) {
       case 0:
-        writeModRM16(modrm, incOp(val, 16));
+        writeModRM16(modrm, static_cast<uint16_t>(incOp(val, 16)));
         break;
       case 1:
-        writeModRM16(modrm, decOp(val, 16));
+        writeModRM16(modrm, static_cast<uint16_t>(decOp(val, 16)));
         break;
       case 2: {
         uint16_t target = readModRM16(modrm);
@@ -5516,10 +5515,11 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
 void InstructionDecoder::syncSegments() {
   uint8_t dirtyMask = m_cpu.getDirtySegmentMask();
   for (int i = 0; i < 6; ++i) {
+    SegRegIndex seg = static_cast<SegRegIndex>(i);
     if (dirtyMask & (1u << i)) {
-      m_cpu.loadSegment(static_cast<SegRegIndex>(i), m_cpu.getSegReg(i));
+      m_cpu.loadSegment(seg, m_cpu.getSegReg(static_cast<uint8_t>(i)));
     }
-    m_segBase[i] = m_cpu.getSegBase(static_cast<SegRegIndex>(i));
+    m_segBase[i] = m_cpu.getSegBase(static_cast<uint8_t>(i));
   }
   m_cachedSegStateVersion = m_cpu.getSegmentStateVersion();
 }

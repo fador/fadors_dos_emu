@@ -23,7 +23,7 @@ static const char *signalName(int sig) {
 }
 
 // ── Common crash handler body ─────────────────────────────────────────────
-static void handleCrash(const char *description) {
+[[noreturn]] static void handleCrash(const char *description) {
   // Run the state dump callback FIRST (before any logging that might crash)
   if (g_dumpCallback) {
     // Use a try-catch since the dump itself might crash

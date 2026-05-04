@@ -52,6 +52,8 @@ private:
     uint8_t m_status;
     uint8_t m_commandByte;
     uint8_t m_lastCommand{0};
+    uint8_t m_port61{0};
+    uint64_t m_refreshCounter{0};
 };
 
 } // namespace fador::hw
