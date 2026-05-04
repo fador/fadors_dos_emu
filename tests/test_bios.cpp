@@ -80,6 +80,38 @@ TEST_CASE("BIOS Emulation Services", "[BIOS]") {
         REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
     }
 
+    SECTION("INT 10h: AH=5F vendor probe returns unsupported") {
+        cpu.setSegReg(cpu::SegRegIndex::CS, 0x0000);
+        cpu.setReg16(cpu::AX, 0x5F00);
+        cpu.setReg16(cpu::BX, 0x1234);
+
+        mem.write8(0x100, 0xCD);
+        mem.write8(0x101, 0x10);
+        cpu.setEIP(0x100);
+
+        decoder.step();
+
+        REQUIRE(cpu.getReg8(cpu::AL) == 0x00);
+        REQUIRE(cpu.getReg16(cpu::BX) == 0x1234);
+        REQUIRE(cpu.getEIP() == 0x102);
+    }
+
+    SECTION("INT 10h: AH=70 vendor probe returns unsupported") {
+        cpu.setSegReg(cpu::SegRegIndex::CS, 0x0000);
+        cpu.setReg16(cpu::AX, 0x7000);
+        cpu.setReg16(cpu::BX, 0x0000);
+
+        mem.write8(0x100, 0xCD);
+        mem.write8(0x101, 0x10);
+        cpu.setEIP(0x100);
+
+        decoder.step();
+
+        REQUIRE(cpu.getReg8(cpu::AL) == 0x00);
+        REQUIRE(cpu.getReg16(cpu::BX) == 0x0000);
+        REQUIRE(cpu.getEIP() == 0x102);
+    }
+
     SECTION("DOS INT 21h: AH=47 (Get Current Directory)") {
         cpu.setSegReg(cpu::SegRegIndex::CS, 0x0000);
         cpu.setSegReg(cpu::DS, 0x2000);
