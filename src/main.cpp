@@ -879,7 +879,7 @@ int main(int argc, char *argv[]) {
         }
 
         if (stopAfterCycles > 0 && instrCount >= stopAfterCycles) {
-          if (!handleStopAfter(instrCount, false)) {
+          if (!handleStopAfter(instrCount, true)) {
             running = false;
             break;
           }

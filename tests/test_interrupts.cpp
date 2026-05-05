@@ -245,6 +245,61 @@ TEST_CASE("0F FF INT 31h chain path merges only CF into caller flags", "[Interru
     REQUIRE((outFlags & cpu::FLAG_PARITY) == 0); // not merged from handler state
 }
 
+TEST_CASE("PM original HLE return restores full privilege-change frame", "[Interrupts][PM][HLE]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::DOS dos(cpu, mem);
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DPMI dpmi(cpu, mem);
+    hw::IOBus iobus;
+
+    bios.initialize();
+    dos.initialize();
+    dpmi.setDOS(&dos);
+    dpmi.setBIOS(&bios);
+    dos.setDPMI(&dpmi);
+
+    cpu.setSegReg(cpu::CS, 0x1000);
+    cpu.setSegReg(cpu::DS, 0x2000);
+    cpu.setSegReg(cpu::ES, 0x2000);
+    cpu.setSegReg(cpu::SS, 0x0000);
+    cpu.setReg16(cpu::SP, 0xFFFC);
+    uint16_t sp = cpu.getReg16(cpu::SP);
+    sp -= 2;
+    mem.write16(sp, 0x1000);
+    sp -= 2;
+    mem.write16(sp, 0x0100);
+    cpu.setReg16(cpu::SP, sp);
+    cpu.setReg16(cpu::AX, 0x0001);
+    REQUIRE(dpmi.handleEntry());
+
+    cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
+
+    uint16_t callerCs = cpu.getSegReg(cpu::CS);
+    uint32_t callerEip = cpu.getEIP();
+    uint16_t spBefore = cpu.getReg16(cpu::SP);
+    uint32_t codePhys = cpu.getSegBase(cpu::CS) + callerEip;
+
+    cpu.setReg16(cpu::AX, 0x0000); // INT 33h reset/detect
+    mem.write8(codePhys, 0xCD);
+    mem.write8(codePhys + 1, 0x33);
+
+    decoder.step();
+
+    REQUIRE(cpu.getSegReg(cpu::CS) == 0x0008);
+    REQUIRE(cpu.getEIP() == 0x000F01CC);
+    REQUIRE(cpu.getReg16(cpu::SP) == static_cast<uint16_t>(spBefore - 20));
+
+    decoder.step();
+
+    REQUIRE(cpu.getSegReg(cpu::CS) == callerCs);
+    REQUIRE(cpu.getEIP() == callerEip + 2);
+    REQUIRE(cpu.getReg16(cpu::SP) == spBefore);
+}
+
 TEST_CASE("0F FF chain width falls back to CS at ESP+4", "[Interrupts][Chain][IRET]") {
     cpu::CPU cpu;
     memory::MemoryBus mem;

@@ -103,6 +103,19 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
         REQUIRE(cpu.getReg16(cpu::Reg16Index::BX) == 0x1234);
     }
 
+    SECTION("MOV EAX, CR0") {
+        cpu.setCR(0, 0x12345679);
+
+        mem.write8(0x100, 0x0F);
+        mem.write8(0x101, 0x20);
+        mem.write8(0x102, 0xC0);
+
+        decoder.step();
+
+        REQUIRE(cpu.getReg32(cpu::RegIndex::EAX) == 0x12345679);
+        REQUIRE(cpu.getEIP() == 0x103);
+    }
+
     SECTION("x87: FWAIT dispatches INT 75 on unmasked pending exception") {
         cpu.setReg16(cpu::Reg16Index::SP, 0x0200);
         cpu.setSegReg(cpu::SegRegIndex::CS, 0x0000);

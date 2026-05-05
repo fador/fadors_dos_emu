@@ -1470,7 +1470,9 @@ void DPMI::handleRawSwitchRMtoPM() {
   uint16_t newCS = m_cpu.getReg16(cpu::CX);
   uint16_t newSS = m_cpu.getReg16(cpu::DX);
   uint32_t newESP = m_cpu.getReg32(cpu::EBX);
-  uint32_t newEIP = m_cpu.getReg32(cpu::ESI);
+  // The real-mode raw switch stub provides the return offset in SI.
+  // Zero-extend it so stale ESI high bits cannot turn into a bogus PM EIP.
+  uint32_t newEIP = m_cpu.getReg16(cpu::SI);
 
   LOG_DEBUG("DPMI: Raw switch RM→PM CS=", std::hex, newCS, " EIP=", newEIP,
             " DS=", newDS, " SS:ESP=", newSS, ":", newESP);
