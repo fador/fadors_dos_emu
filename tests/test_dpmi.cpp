@@ -992,6 +992,35 @@ TEST_CASE("DPMI raw switch RM→PM", "[dpmi][rawswitch]") {
     REQUIRE(env.cpu.getSegReg(cpu::SS) == pmSS);
 }
 
+TEST_CASE("DPMI raw switch RM→PM zero-extends SI into EIP", "[dpmi][rawswitch]") {
+    DPMITestEnv env;
+
+    env.cpu.setReg16(cpu::AX, 0x3000);
+    env.cpu.setReg16(cpu::CX, 0x4000);
+    env.cpu.setReg16(cpu::DX, 0x5000);
+    env.cpu.setReg16(cpu::BX, 0xFFF0);
+    env.cpu.setReg16(cpu::SI, 0x0200);
+    env.dpmi.handleRawSwitchPMtoRM();
+    REQUIRE((env.cpu.getCR(0) & 1) == 0);
+
+    uint16_t pmDS = 0x0014;
+    uint16_t pmCS = 0x000C;
+    uint16_t pmSS = 0x001C;
+
+    env.cpu.setReg16(cpu::AX, pmDS);
+    env.cpu.setReg16(cpu::CX, pmCS);
+    env.cpu.setReg16(cpu::DX, pmSS);
+    env.cpu.setReg32(cpu::EBX, 0x0010FFF0);
+    env.cpu.setReg32(cpu::ESI, 0x843A0594);
+
+    env.dpmi.handleRawSwitchRMtoPM();
+
+    REQUIRE((env.cpu.getCR(0) & 1) != 0);
+    REQUIRE(env.cpu.getEIP() == 0x0594);
+    REQUIRE(env.cpu.getReg32(cpu::ESP) == 0x0010FFF0);
+    REQUIRE(env.cpu.getSegBase(cpu::CS) == 0x10000);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Unhandled / Vendor-specific functions
 // ═══════════════════════════════════════════════════════════════════════════

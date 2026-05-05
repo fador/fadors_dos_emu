@@ -123,6 +123,7 @@ public:
     uint32_t framePhysAddr; // Physical address of IRET frame in memory
     uint32_t frameSP;       // SP/ESP value at push time (for restoring)
     bool stackIs32;         // Whether stack was 32-bit at push time
+    uint32_t returnFrameBytes = 0; // Total bytes to discard on HLE return
     uint8_t vector;         // Interrupt vector that created this frame
     bool dpmiStackSwitch = false; // Reflection stack was used
     uint32_t origESP = 0;        // Caller's original ESP before switch
@@ -145,7 +146,10 @@ public:
   const HLEFrame &lastHLEFrame() const { return m_hleStack.back(); }
   HLEFrame &lastHLEFrameMut() { return m_hleStack.back(); }
   void pushHLEFrame(bool is32, uint8_t vector = 0xFF) {
-    m_hleStack.push_back({is32, 0, 0, false, vector, false, 0, 0});
+    HLEFrame frame{};
+    frame.is32 = is32;
+    frame.vector = vector;
+    m_hleStack.push_back(frame);
   }
   void popHLEFrame() {
     if (!m_hleStack.empty())
@@ -198,7 +202,9 @@ public:
         }
       }
     }
-    return {false, 0, 0, false, 0xFF, false, 0, 0, 0, 0};
+    HLEFrame empty{};
+    empty.vector = 0xFF;
+    return empty;
   }
 
   // Pop a dpmiStackSwitch frame whose origCS:origEIP matches the given
@@ -226,7 +232,9 @@ public:
         return result;
       }
     }
-    return {false, 0, 0, false, 0xFF, false, 0, 0, 0, 0};
+    HLEFrame empty{};
+    empty.vector = 0xFF;
+    return empty;
   }
 
   // Peek at the most recent undispatched dpmiStackSwitch frame whose
@@ -241,7 +249,9 @@ public:
         if (isHwIrq) return *it;
       }
     }
-    return {false, 0, 0, false, 0xFF, false, 0, 0, 0, 0};
+    HLEFrame empty{};
+    empty.vector = 0xFF;
+    return empty;
   }
 
   // Find the outermost (first) dpmiStackSwitch frame on the HLE stack.

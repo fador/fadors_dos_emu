@@ -60,6 +60,19 @@ TEST_CASE("Disassembler - Single Instructions", "[Disassembler]") {
         REQUIRE(instr.hexBytes == "0F C8");
     }
 
+    SECTION("disassembleAt: MOV EAX, CR0") {
+        mem.write8(0x100, 0x0F);
+        mem.write8(0x101, 0x20);
+        mem.write8(0x102, 0xC0);
+
+        auto instr = disasm.disassembleAt(0x100);
+
+        REQUIRE(instr.address == 0x100);
+        REQUIRE(instr.length == 3);
+        REQUIRE(instr.mnemonic == "MOV EAX, CR0");
+        REQUIRE(instr.hexBytes == "0F 20 C0");
+    }
+
     SECTION("disassembleAt: FNSTENV [3000h]") {
         mem.write8(0x100, 0xD9);
         mem.write8(0x101, 0x36);

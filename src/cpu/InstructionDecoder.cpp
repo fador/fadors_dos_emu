@@ -4018,6 +4018,11 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
     }
     break;
   }
+    case 0x20: { // MOV rd, CRn
+      ModRM modrm = decodeModRM(fetch8());
+      m_cpu.setReg32(modrm.rm, m_cpu.getCR(modrm.reg));
+      break;
+    }
   case 0x21: { // MOV rd, DRn
     ModRM modrm = decodeModRM(fetch8());
     m_cpu.setReg32(modrm.rm, m_cpu.getDR(modrm.reg));
@@ -4856,6 +4861,8 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
         uint32_t frameAddr = hf.framePhysAddr;
         uint32_t afterFlags = m_cpu.getEFLAGS();
         uint32_t mask = hleReturnFlagMask(handled);
+        uint32_t returnFrameBytes =
+            hf.returnFrameBytes ? hf.returnFrameBytes : (hf.is32 ? 12u : 6u);
 
         if (hf.is32) {
           uint32_t newEip = m_memory.read32(frameAddr);
@@ -4875,9 +4882,10 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
           m_cpu.setEIP(newEip);
           loadSegment(CS, newCs);
           if (hf.stackIs32)
-            m_cpu.setReg32(ESP, hf.frameSP + 12);
+            m_cpu.setReg32(ESP, hf.frameSP + returnFrameBytes);
           else
-            m_cpu.setReg16(SP, static_cast<uint16_t>(hf.frameSP + 12));
+            m_cpu.setReg16(SP,
+                           static_cast<uint16_t>(hf.frameSP + returnFrameBytes));
         } else {
           uint16_t newIp = m_memory.read16(frameAddr);
           uint16_t newCs = m_memory.read16(frameAddr + 2);
@@ -4897,7 +4905,8 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
           m_cpu.setEFLAGS(merged);
           m_cpu.setEIP(newIp);
           loadSegment(CS, newCs);
-          m_cpu.setReg16(SP, static_cast<uint16_t>(hf.frameSP + 6));
+          m_cpu.setReg16(SP,
+                         static_cast<uint16_t>(hf.frameSP + returnFrameBytes));
         }
       }
     }
@@ -5227,6 +5236,8 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
       frame.framePhysAddr = ssB + sp;
       frame.frameSP = sp;
       frame.stackIs32 = s32;
+      frame.returnFrameBytes = use32 ? (privChange ? 20u : 12u)
+                                     : (privChange ? 10u : 6u);
     }
   } else {
     // Real Mode IVT lookup
@@ -5262,6 +5273,7 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
       frame.framePhysAddr = ssB + sp;
       frame.frameSP = sp;
       frame.stackIs32 = false;
+      frame.returnFrameBytes = 6;
     }
   }
 
@@ -5539,6 +5551,8 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
       frame.framePhysAddr = ssB + sp;
       frame.frameSP = sp;
       frame.stackIs32 = s32;
+      frame.returnFrameBytes = use32 ? (privChange ? 20u : 12u)
+                                     : (privChange ? 10u : 6u);
     }
   } else {
     eip32 = m_memory.read16(vector * 4);
@@ -5557,6 +5571,7 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
       frame.framePhysAddr = ssB + sp;
       frame.frameSP = sp;
       frame.stackIs32 = false;
+      frame.returnFrameBytes = 6;
     }
   }
 

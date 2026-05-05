@@ -606,6 +606,8 @@ std::string Disassembler::disasmOpcode0F(Cursor& c, uint8_t op, bool p66, bool p
                                           uint8_t segOvr) const {
     int opSize16 = p66 ? 32 : 16;
     auto regW = [&](uint8_t idx) -> const char* { return p66 ? reg32Name(idx) : reg16Name(idx); };
+    auto controlReg = [&](uint8_t idx) -> std::string { return "CR" + std::to_string(idx & 7); };
+    auto debugReg = [&](uint8_t idx) -> std::string { return "DR" + std::to_string(idx & 7); };
 
     // ── Group 6/7 ──
     if (op == 0x00) {
@@ -627,6 +629,22 @@ std::string Disassembler::disasmOpcode0F(Cursor& c, uint8_t op, bool p66, bool p
     if (op == 0x08) return "INVD";
     if (op == 0x09) return "WBINVD";
     if (op == 0x0B) return "UD2";
+    if (op == 0x20) {
+        ModRM m = decodeModRM(c.read8());
+        return "MOV " + std::string(reg32Name(m.rm)) + ", " + controlReg(m.reg);
+    }
+    if (op == 0x21) {
+        ModRM m = decodeModRM(c.read8());
+        return "MOV " + std::string(reg32Name(m.rm)) + ", " + debugReg(m.reg);
+    }
+    if (op == 0x22) {
+        ModRM m = decodeModRM(c.read8());
+        return "MOV " + controlReg(m.reg) + ", " + std::string(reg32Name(m.rm));
+    }
+    if (op == 0x23) {
+        ModRM m = decodeModRM(c.read8());
+        return "MOV " + debugReg(m.reg) + ", " + std::string(reg32Name(m.rm));
+    }
 
     // ── SSE stubs ──
     if (op == 0x10 || op == 0x11) { c.read8(); return "MOVUPS (SSE stub)"; }
