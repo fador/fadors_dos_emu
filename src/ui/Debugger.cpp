@@ -1,13 +1,45 @@
 #include "Debugger.hpp"
+#include <cctype>
 #include <iostream>
-#include <sstream>
 #include <iomanip>
+#include <optional>
+#include <sstream>
 #ifndef _WIN32
 #include <termios.h>
 #include <unistd.h>
 #endif
 
 namespace fador::ui {
+
+namespace {
+
+std::optional<uint64_t> parseUnsignedCount(const std::string& value) {
+    try {
+        size_t parsed = 0;
+        uint64_t result = std::stoull(value, &parsed, 10);
+        if (parsed != value.size()) {
+            return std::nullopt;
+        }
+        return result;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<uint32_t> parseLinearHexAddress(const std::string& value) {
+    try {
+        size_t parsed = 0;
+        uint64_t result = std::stoull(value, &parsed, 16);
+        if (parsed != value.size() || result > 0xFFFFFFFFull) {
+            return std::nullopt;
+        }
+        return static_cast<uint32_t>(result);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+} // namespace
 
 // RAII guard: if the terminal is in raw mode, temporarily restore canonical
 // (cooked) mode so std::getline / echo work.  Restores on destruction.
@@ -53,13 +85,37 @@ bool Debugger::run() {
         if (cmd == "q") return false;
         if (cmd == "c") return true; // Continue execution
         if (cmd == "s") {
-            m_decoder.step();
-            printRegisters();
+            traceInstructions(1);
         } else if (cmd == "r") {
             printRegisters();
         } else if (cmd == "d") {
             uint32_t addr = (args.size() > 1) ? std::stoul(args[1], nullptr, 16) : (m_cpu.getSegReg(cpu::DS) << 4);
             dumpMemory(addr, 128);
+        } else if (cmd == "t") {
+            uint64_t count = 1;
+            if (args.size() > 1) {
+                auto parsedCount = parseUnsignedCount(args[1]);
+                if (!parsedCount) {
+                    std::cout << "Usage: t [count] [hex-linear-addr]\n";
+                    std::cout << "       count is decimal, address is hex\n";
+                    std::cout << "\n[Fador Debugger] > " << std::flush;
+                    continue;
+                }
+                count = *parsedCount;
+            }
+
+            std::optional<uint32_t> startLinearAddress;
+            if (args.size() > 2) {
+                startLinearAddress = parseLinearHexAddress(args[2]);
+                if (!startLinearAddress) {
+                    std::cout << "Usage: t [count] [hex-linear-addr]\n";
+                    std::cout << "       count is decimal, address is hex\n";
+                    std::cout << "\n[Fador Debugger] > " << std::flush;
+                    continue;
+                }
+            }
+
+            traceInstructions(count, std::cout, startLinearAddress);
         } else if (cmd == "u") {
             uint32_t addr = (args.size() > 1) ? std::stoul(args[1], nullptr, 16)
                             : ((m_cpu.getSegReg(cpu::CS) << 4) + m_cpu.getEIP());
@@ -67,7 +123,9 @@ bool Debugger::run() {
             disassemble(addr, cnt);
         } else if (cmd == "h" || cmd == "?") {
             std::cout << "Commands:\n"
-                      << "  s          - Single step\n"
+                      << "  s          - Single step with one-line trace\n"
+                      << "  t [n] [addr] - Trace and execute n instructions\n"
+                      << "               optionally waiting for linear hex addr\n"
                       << "  c          - Continue execution\n"
                       << "  r          - Print registers\n"
                       << "  d [addr]   - Dump memory (hex)\n"
@@ -96,6 +154,66 @@ bool Debugger::run() {
         std::cout << "\n[Fador Debugger] > " << std::flush;
     }
     return true;
+}
+
+uint32_t Debugger::currentLinearIP() const {
+    return (m_cpu.getSegReg(cpu::CS) << 4) + m_cpu.getEIP();
+}
+
+std::string Debugger::currentTraceLine() const {
+    const uint32_t linearIP = currentLinearIP();
+    const auto instr = m_disasm.disassembleAt(linearIP);
+
+    std::ostringstream out;
+    out << std::uppercase << std::hex << std::setfill('0')
+        << "CS:EIP=" << std::setw(4) << m_cpu.getSegReg(cpu::CS)
+        << ":" << std::setw(8) << m_cpu.getEIP()
+        << " LIN=" << std::setw(8) << linearIP
+        << " BYTES=" << std::left << std::setfill(' ') << std::setw(24)
+        << instr.hexBytes
+        << std::right << std::setfill('0')
+        << " ASM=" << instr.mnemonic
+        << " | EAX=" << std::setw(8) << m_cpu.getReg32(cpu::EAX)
+        << " EBX=" << std::setw(8) << m_cpu.getReg32(cpu::EBX)
+        << " ECX=" << std::setw(8) << m_cpu.getReg32(cpu::ECX)
+        << " EDX=" << std::setw(8) << m_cpu.getReg32(cpu::EDX)
+        << " ESI=" << std::setw(8) << m_cpu.getReg32(cpu::ESI)
+        << " EDI=" << std::setw(8) << m_cpu.getReg32(cpu::EDI)
+        << " EBP=" << std::setw(8) << m_cpu.getReg32(cpu::EBP)
+        << " ESP=" << std::setw(8) << m_cpu.getReg32(cpu::ESP)
+        << " DS=" << std::setw(4) << m_cpu.getSegReg(cpu::DS)
+        << " ES=" << std::setw(4) << m_cpu.getSegReg(cpu::ES)
+        << " SS=" << std::setw(4) << m_cpu.getSegReg(cpu::SS)
+        << " FS=" << std::setw(4) << m_cpu.getSegReg(cpu::FS)
+        << " GS=" << std::setw(4) << m_cpu.getSegReg(cpu::GS)
+        << " EFLAGS=" << std::setw(8) << m_cpu.getEFLAGS();
+    return out.str();
+}
+
+bool Debugger::emitTraceIfRequested(TraceRequest& request, std::ostream& out) const {
+    if (request.remaining == 0) {
+        return false;
+    }
+
+    const uint32_t linearIP = currentLinearIP();
+    if (request.startLinearAddress && linearIP != *request.startLinearAddress) {
+        return false;
+    }
+
+    request.startLinearAddress.reset();
+    out << currentTraceLine() << '\n';
+    --request.remaining;
+    return true;
+}
+
+void Debugger::traceInstructions(uint64_t count,
+                                 std::ostream& out,
+                                 std::optional<uint32_t> startLinearAddress) {
+    TraceRequest request{count, startLinearAddress};
+    while (request.remaining > 0) {
+        emitTraceIfRequested(request, out);
+        m_decoder.step();
+    }
 }
 
 void Debugger::printRegisters() {

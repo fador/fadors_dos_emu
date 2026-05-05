@@ -28,6 +28,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <thread>
 
 namespace {
@@ -137,6 +138,19 @@ uint64_t throttleMachineInstructionsPerSecond(const std::string &name) {
 
 const char *throttleMachinePresetList() {
   return "8088, 286-12, 386dx-33, 486dx2-66, pentium-90";
+}
+
+std::optional<uint32_t> parseLinearHexAddress(const std::string &value) {
+  try {
+    size_t parsed = 0;
+    uint64_t result = std::stoull(value, &parsed, 16);
+    if (parsed != value.size() || result > 0xFFFFFFFFull) {
+      return std::nullopt;
+    }
+    return static_cast<uint32_t>(result);
+  } catch (...) {
+    return std::nullopt;
+  }
 }
 
 } // namespace
@@ -325,6 +339,10 @@ int main(int argc, char *argv[]) {
     bool dumpOnExit = false;
     uint64_t stopAfterCycles = 0; // 0 = disabled
     bool stopAfterDebugger = false;
+    uint64_t instructionTraceCount = 0;
+    bool instructionTraceStep = false;
+    uint64_t instructionTraceSkipSteps = 0;
+    std::optional<uint32_t> instructionTraceFrom;
     uint64_t throttleInstructionsPerSecond = 0; // 0 = disabled
     std::string throttleLabel;
     std::string execAsm;          // --exec="asm instructions"
@@ -375,6 +393,18 @@ int main(int argc, char *argv[]) {
         stopAfterCycles = std::stoull(arg.substr(13));
       } else if (arg == "--stop-after-debugger") {
         stopAfterDebugger = true;
+      } else if (arg.find("--instruction-trace=") == 0) {
+        instructionTraceCount = std::stoull(arg.substr(20));
+      } else if (arg.find("--instruction-trace-from=") == 0) {
+        auto parsedAddress = parseLinearHexAddress(arg.substr(25));
+        if (!parsedAddress) {
+          LOG_ERROR("Invalid --instruction-trace-from address: ",
+                    arg.substr(25), ". Use a hex linear address.");
+          return 1;
+        }
+        instructionTraceFrom = *parsedAddress;
+      } else if (arg == "--instruction-trace-step") {
+        instructionTraceStep = true;
       } else if (arg.find("--exec=") == 0) {
         execAsm = arg.substr(7);
       } else if (arg.find("--bench=") == 0) {
@@ -422,6 +452,44 @@ int main(int argc, char *argv[]) {
         path = arg;
       }
     }
+
+    if (instructionTraceFrom && instructionTraceCount == 0) {
+      LOG_ERROR("--instruction-trace-from requires --instruction-trace=N");
+      return 1;
+    }
+
+    fador::ui::Debugger::TraceRequest instructionTrace{instructionTraceCount,
+                                                       instructionTraceFrom};
+
+    auto emitInstructionTrace = [&]() {
+      if (debugger.emitTraceIfRequested(instructionTrace)) {
+        if (instructionTraceStep) {
+          if (instructionTraceSkipSteps > 0) {
+            --instructionTraceSkipSteps;
+            return;
+          }
+          std::cout << " [Step: ENTER to continue, sN to step N, q to stop stepping, d for debugger] " << std::flush;
+          std::string input;
+          if (!std::getline(std::cin, input)) {
+            instructionTraceStep = false;
+            return;
+          }
+          if (input == "q") {
+            instructionTraceStep = false;
+          } else if (input == "d") {
+            debugger.run();
+          } else if (!input.empty() && input[0] == 's') {
+            try {
+              uint64_t count = std::stoull(input.substr(1));
+              if (count > 1) {
+                instructionTraceSkipSteps = count - 1;
+              }
+            } catch (...) {
+            }
+          }
+        }
+      }
+    };
 
     auto dumpTextVRAM = [&memory]() {
       for (int row = 0; row < 25; ++row) {
@@ -504,6 +572,7 @@ int main(int argc, char *argv[]) {
     } else {
       auto runExecLoop = [&](uint64_t steps) {
         for (uint64_t i = 0; i < steps; ++i) {
+          emitInstructionTrace();
           decoder.step();
           cpu.addCycles(4);
           if (dos.isTerminated())
@@ -635,6 +704,7 @@ int main(int argc, char *argv[]) {
           "[--debug=cpu,video,dos] [--throttle-ips=N] "
           "[--throttle-machine=name] [--stop-after=N] "
           "[--stop-after-debugger] [--dump-on-exit] "
+          "[--instruction-trace=N] [--instruction-trace-from=ADDR] "
           "[--bench=decoder-loop|rep-movsb|rep-movsd] [--bench-steps=N] "
           "[--bench-warmup=N] [--exec=\"asm\"] <program.com|exe> "
           "[program-args...]");
@@ -720,6 +790,7 @@ int main(int argc, char *argv[]) {
       std::vector<float> audioBuf;
 
       while (running) {
+        emitInstructionTrace();
         decoder.step();
         cpu.addCycles(4);
         instrCount++;
@@ -861,6 +932,7 @@ int main(int argc, char *argv[]) {
       std::vector<float> audioBuf;
 
       while (running) {
+        emitInstructionTrace();
         decoder.step();
         cpu.addCycles(4);
         instrCount++;
