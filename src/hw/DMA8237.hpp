@@ -40,9 +40,11 @@ private:
     bool mask = true; // initially masked
   };
 
-  std::array<Channel, 4> m_channels; // Channel 0-3 (8-bit DMA)
-  bool m_flipflop = false;           // high/low byte toggle
+  std::array<Channel, 8> m_channels; // Channel 0-3 (8-bit), 4-7 (16-bit)
+  bool m_flipflop = false;           // low/high byte toggle (slave)
+  bool m_flipflopMaster = false;     // low/high byte toggle (master)
   uint8_t m_status = 0;
+  uint8_t m_statusMaster = 0;
 };
 
 } // namespace fador::hw

@@ -56,6 +56,8 @@ inline int run_all_tests() {
 
     // Optional: enable debug logging for test runs by setting DEBUG_LOGS=1
     const char* dbg = std::getenv("DEBUG_LOGS");
+    fador::utils::currentLevel = fador::utils::LogLevel::Info;
+    fador::utils::enabledCategories = 0;
     if (dbg && std::string(dbg) != "0") {
         fador::utils::currentLevel = fador::utils::LogLevel::Debug;
         fador::utils::enabledCategories = fador::utils::CAT_GENERIC | fador::utils::CAT_CPU | fador::utils::CAT_DOS | fador::utils::CAT_VIDEO;

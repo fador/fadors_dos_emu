@@ -65,7 +65,7 @@ InstructionDecoder::InstructionDecoder(CPU &cpu, memory::MemoryBus &memory,
                                        hw::IOBus &iobus, hw::BIOS &bios,
                                        hw::DOS &dos)
     : m_cpu(cpu), m_memory(memory), m_iobus(iobus), m_bios(bios), m_dos(dos),
-      m_stepCount(0), m_hasPrefix66(false), m_hasPrefix67(false),
+  m_stepCount(0), m_hasPrefix66(false), m_hasPrefix67(false),
       m_hasRepnz(false), m_hasRepz(false), m_segmentOverride(0xFF),
       m_cachedSegStateVersion(0),
       m_currentEA(0), m_currentOffset(0), m_currentEASegment(DS),
@@ -318,31 +318,33 @@ uint8_t InstructionDecoder::readModRM8(const ModRM &modrm) {
 }
 
 void InstructionDecoder::writeModRM32(const ModRM &modrm, uint32_t value) {
-  if (modrm.mod == 3)
+  if (modrm.mod == 3) {
     m_cpu.setReg32(modrm.rm, value);
-  else {
-    uint32_t addr =
-        m_hasPrefix67 ? getEffectiveAddress32(modrm) : getEffectiveAddress16(modrm);
-    m_memory.write32(addr, value);
+  } else {
+    m_memory.write32(m_hasPrefix67 ? getEffectiveAddress32(modrm)
+                                   : getEffectiveAddress16(modrm),
+                     value);
   }
 }
 
 void InstructionDecoder::writeModRM16(const ModRM &modrm, uint16_t value) {
-  if (modrm.mod == 3)
+  if (modrm.mod == 3) {
     m_cpu.setReg16(modrm.rm, value);
-  else
+  } else {
     m_memory.write16(m_hasPrefix67 ? getEffectiveAddress32(modrm)
                                    : getEffectiveAddress16(modrm),
                      value);
+  }
 }
 
 void InstructionDecoder::writeModRM8(const ModRM &modrm, uint8_t value) {
-  if (modrm.mod == 3)
+  if (modrm.mod == 3) {
     m_cpu.setReg8(modrm.rm, value);
-  else
+  } else {
     m_memory.write8(m_hasPrefix67 ? getEffectiveAddress32(modrm)
                                   : getEffectiveAddress16(modrm),
                     value);
+  }
 }
 
 float InstructionDecoder::readFloat32(uint32_t address) const {
@@ -792,6 +794,9 @@ void InstructionDecoder::executeFPUOpcode(uint8_t opcode) {
       case 0:
         trackDataMetadata();
         m_cpu.pushFPU(static_cast<double>(readFloat32(addr)));
+        return;
+      case 1: // Undefined for mod < 3
+        LOG_WARN("Illegal x87 opcode D9 /1 at mod < 3");
         return;
       case 2:
         trackDataMetadata();
@@ -1428,8 +1433,8 @@ void InstructionDecoder::step() {
   syncSegmentCacheIfNeeded();
   bool default32 = m_cpu.is32BitCode();
 
-  m_hasPrefix66 = default32;
-  m_hasPrefix67 = default32;
+  m_hasPrefix66 = m_cpu.is32BitCode();
+  m_hasPrefix67 = m_cpu.is32BitCode();
   m_hasRepnz = false;
   m_hasRepz = false;
   m_segmentOverride = 0xFF;
@@ -4713,6 +4718,18 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
       isChainCall = true;
     }
 
+    auto hleReturnFlagMask = [&](bool wasHandled) -> uint32_t {
+      const bool isHardwareVector =
+          (vector >= 0x08 && vector <= 0x0F) ||
+          (vector >= 0x70 && vector <= 0x77);
+      if (vector == 0x31)
+        return FLAG_CARRY;
+      if (!wasHandled || isHardwareVector)
+        return 0;
+      return FLAG_CARRY | FLAG_ZERO | FLAG_SIGN | FLAG_OVERFLOW |
+             FLAG_AUX | FLAG_PARITY;
+    };
+
     if (isChainCall) {
       bool chainIs32 = m_hasPrefix66;
 
@@ -4746,10 +4763,6 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
         int score16 = scoreFrame(cs16, ip16, flags16, false);
         int score32 = scoreFrame(cs32, eip32, flags32, true);
 
-        LOG_DEBUG("HLE scoring: vec=0x", std::hex, (int)vector,
-                  " score16=", score16, " score32=", score32,
-                  " pref32=", chainIs32 ? 1 : 0);
-
         if (score32 > score16 && score32 >= 0) {
           chainIs32 = true;
         } else if (score16 > score32 && score16 >= 0) {
@@ -4757,34 +4770,11 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
         } else if (score16 >= 0 && score32 >= 0 && score16 == score32) {
           chainIs32 = true;
         }
-
-        LOG_DEBUG("HLE decision: vec=0x", std::hex, (int)vector,
-                  " chainIs32=", chainIs32 ? 1 : 0);
       }
 
       // Capture flags *after* handlers ran so handlers can set CF/other bits
       uint32_t afterFlags = m_cpu.getEFLAGS();
-      // Also report entry flags for comparison
-      LOG_DEBUG("HLE FLAGS: vec=0x", std::hex, (int)vector,
-        " entryFlags=0x", entryFlags, " currentFlags=0x", afterFlags);
-      uint32_t mask = 0;
-      if (handled) {
-        mask = FLAG_CARRY | FLAG_ZERO | FLAG_SIGN | FLAG_OVERFLOW |
-               FLAG_AUX | FLAG_PARITY;
-        if (vector == 0x31) {
-          mask = FLAG_CARRY;
-        }
-      }
-      // DPMI INT 0x31 semantics require the carry bit to be considered for
-      // merging into the caller's FLAGS even when the handler path reports
-      // 'unhandled' (some DPMI stubs may signal errors by setting CF but
-      // still return control). Ensure CF is always merged for vector 0x31.
-      if (vector == 0x31)
-        mask |= FLAG_CARRY;
-
-      LOG_DEBUG("HLE mask: vec=0x", std::hex, (int)vector,
-        " mask=0x", mask, " handled=", handled ? 1 : 0,
-        " curFlags=0x", afterFlags);
+      uint32_t mask = hleReturnFlagMask(handled);
 
       if (chainIs32) {
         uint32_t newEip = m_memory.read32(ssBase + currentESP);
@@ -4804,16 +4794,7 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
           mergeSource32 = afterFlags;
         }
         popFlags = (popFlags & ~mask) | (mergeSource32 & mask);
-        LOG_DEBUG("HLE return32: vec=0x", std::hex, (int)vector,
-          " newEIP=0x", newEip, " newCS=0x", newCs,
-          " popFlags=0x", popFlags,
-          " stackIs32=", m_cpu.is32BitStack() ? 1 : 0,
-          " preSP=0x", currentESP);
-        LOG_DEBUG("HLE setEFLAGS before: vec=0x", std::hex, (int)vector,
-              " curEFLAGS=0x", m_cpu.getEFLAGS());
         m_cpu.setEFLAGS(popFlags);
-        LOG_DEBUG("HLE setEFLAGS after: vec=0x", std::hex, (int)vector,
-              " curEFLAGS=0x", m_cpu.getEFLAGS());
         m_cpu.setEIP(newEip);
         loadSegment(CS, newCs);
         if (m_cpu.is32BitStack()) {
@@ -4843,14 +4824,10 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
                      " newCs=0x", newCs, " popFlags16=0x", popFlags16,
                      " merged16=0x", merged16, " preSP=0x", currentESP);
           }
-        LOG_DEBUG("HLE setEFLAGS before: vec=0x", std::hex, (int)vector,
-            " curEFLAGS=0x", m_cpu.getEFLAGS());
         m_cpu.setEFLAGS(merged16);
           if (vector == 0x21) {
             LOG_INFO("HLE setEFLAGS after: vec=0x21 curEFLAGS=0x", std::hex, m_cpu.getEFLAGS());
           }
-        LOG_DEBUG("HLE setEFLAGS after: vec=0x", std::hex, (int)vector,
-            " curEFLAGS=0x", m_cpu.getEFLAGS());
         m_cpu.setEIP(newIp);
         loadSegment(CS, newCs);
         if (m_cpu.is32BitStack())
@@ -4878,11 +4855,7 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
       if (hf.framePhysAddr != 0) {
         uint32_t frameAddr = hf.framePhysAddr;
         uint32_t afterFlags = m_cpu.getEFLAGS();
-        uint32_t mask = 0;
-        if (handled) {
-          mask = FLAG_CARRY | FLAG_ZERO | FLAG_SIGN | FLAG_OVERFLOW |
-                 FLAG_AUX | FLAG_PARITY;
-        }
+        uint32_t mask = hleReturnFlagMask(handled);
 
         if (hf.is32) {
           uint32_t newEip = m_memory.read32(frameAddr);
@@ -4898,11 +4871,7 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
             mergeSrc = afterFlags;
           }
           popFlags = (popFlags & ~mask) | (mergeSrc & mask);
-          LOG_DEBUG("HLE setEFLAGS before: hf.vec=0x", std::hex, (int)vector,
-                    " curEFLAGS=0x", afterFlags, " framePhys=0x", frameAddr);
           m_cpu.setEFLAGS(popFlags);
-          LOG_DEBUG("HLE setEFLAGS after: hf.vec=0x", std::hex, (int)vector,
-                    " curEFLAGS=0x", m_cpu.getEFLAGS(), " framePhys=0x", frameAddr);
           m_cpu.setEIP(newEip);
           loadSegment(CS, newCs);
           if (hf.stackIs32)
@@ -4925,11 +4894,7 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
           uint16_t mergeSrc16 = static_cast<uint16_t>(mergeSrc32);
           popFlags = (static_cast<uint16_t>(popFlags) & static_cast<uint16_t>(~mask)) | (mergeSrc16 & static_cast<uint16_t>(mask));
           uint32_t merged = (mergeSrc32 & 0xFFFF0000) | popFlags;
-          LOG_DEBUG("HLE setEFLAGS before: hf.vec=0x", std::hex, (int)vector,
-                    " curEFLAGS=0x", m_cpu.getEFLAGS(), " framePhys=0x", frameAddr);
           m_cpu.setEFLAGS(merged);
-          LOG_DEBUG("HLE setEFLAGS after: hf.vec=0x", std::hex, (int)vector,
-                    " curEFLAGS=0x", m_cpu.getEFLAGS(), " framePhys=0x", frameAddr);
           m_cpu.setEIP(newIp);
           loadSegment(CS, newCs);
           m_cpu.setReg16(SP, static_cast<uint16_t>(hf.frameSP + 6));
@@ -5021,7 +4986,18 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
             " AX=", m_cpu.getReg16(EAX), " BX=", m_cpu.getReg16(EBX),
             " CX=", m_cpu.getReg16(ECX), " DX=", m_cpu.getReg16(EDX));
 
-  if (vector == 6 || vector == 8 || vector == 13 || vector == 14) {
+  if (vector == 0x06) {
+    uint32_t pc = m_segBase[CS] + m_cpu.getEIP();
+    LOG_ERROR("CRITICAL DUMP: INT 0x6 (Invalid Opcode) at CS:EIP=", std::hex, m_cpu.getSegReg(CS), ":", m_cpu.getEIP(),
+              " Opcode bytes: ", (int)m_memory.read8(pc), " ", (int)m_memory.read8(pc + 1), " ", (int)m_memory.read8(pc + 2));
+    LOG_ERROR("STATE: CR0:", m_cpu.getCR(0), " EFLAGS:", m_cpu.getEFLAGS(),
+              " EAX:", m_cpu.getReg32(EAX), " EBX:", m_cpu.getReg32(EBX),
+              " ECX:", m_cpu.getReg32(ECX), " EDX:", m_cpu.getReg32(EDX),
+              " ESP:", m_cpu.getReg32(ESP), " EBP:", m_cpu.getReg32(EBP),
+              " ESI:", m_cpu.getReg32(ESI), " EDI:", m_cpu.getReg32(EDI),
+              " CS:", m_cpu.getSegReg(CS), " (base: ", m_cpu.getSegBase(CS), ")",
+              " DS:", m_cpu.getSegReg(DS), " (base: ", m_cpu.getSegBase(DS), ")");
+  } else if (vector == 6 || vector == 8 || vector == 13 || vector == 14) {
     LOG_ERROR("CRITICAL DUMP: INT 0x", std::hex, (int)vector,
               " at CS:EIP=", m_cpu.getSegReg(CS), ":", m_cpu.getEIP());
     LOG_ERROR("STATE: CR0:", m_cpu.getCR(0), " EFLAGS:", m_cpu.getEFLAGS(),
@@ -5029,9 +5005,12 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
               " ECX:", m_cpu.getReg32(ECX), " EDX:", m_cpu.getReg32(EDX),
               " ESP:", m_cpu.getReg32(ESP), " EBP:", m_cpu.getReg32(EBP),
               " ESI:", m_cpu.getReg32(ESI), " EDI:", m_cpu.getReg32(EDI),
-              " CS:", m_cpu.getSegReg(CS), " DS:", m_cpu.getSegReg(DS),
-              " ES:", m_cpu.getSegReg(ES), " SS:", m_cpu.getSegReg(SS),
-              " FS:", m_cpu.getSegReg(FS), " GS:", m_cpu.getSegReg(GS));
+              " CS:", m_cpu.getSegReg(CS), " (base: ", m_cpu.getSegBase(CS), ")",
+              " DS:", m_cpu.getSegReg(DS), " (base: ", m_cpu.getSegBase(DS), ")",
+              " ES:", m_cpu.getSegReg(ES), " (base: ", m_cpu.getSegBase(ES), ")",
+              " SS:", m_cpu.getSegReg(SS), " (base: ", m_cpu.getSegBase(SS), ")",
+              " FS:", m_cpu.getSegReg(FS), " (base: ", m_cpu.getSegBase(FS), ")",
+              " GS:", m_cpu.getSegReg(GS), " (base: ", m_cpu.getSegBase(GS), ")");
   }
   if (vector == 0) {
     // Log the faulting address from the stack (if pushed) or current CS:IP
@@ -5129,10 +5108,10 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
                  " isOrig=", isOrig ? 1 : 0);
       }
 #endif
-      // Capture if caller is a 32-bit flat code segment (the app itself),
-      // not the thunk (0x8F) or DOS/4GW internal code (0x57, 0x0F).
-      // The app uses its own code selector (e.g., 0x016F for DOOM).
-      if (oldCs != 0x8F && oldCs != 0x57 && oldCs != 0x0F && oldCs != 0x08) {
+      // Capture if caller is the client code, not the thunk/wrapper itself.
+      // DOS/4GW's initial client CS commonly starts at 0x0F, so only the
+      // known wrapper selectors are excluded here.
+      if (oldCs != 0x8F && oldCs != 0x57 && oldCs != 0x08) {
         m_appPMVectors[targetVec].selector = targetSel;
         m_appPMVectors[targetVec].offset = targetOff;
         m_appPMVectors[targetVec].valid = true;
@@ -5175,12 +5154,36 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
         if (oldSs == 0xAF) {
           // Already on host stack — keep current ESP.
         } else {
-          uint32_t dsAFBase = 0x1197C0; // sel 0xAF base
-          uint32_t hostSP = m_memory.read32(dsAFBase + 0x0A42);
-          if (hostSP == 0 || hostSP > 0xFFF0) hostSP = 0x4800;
-          loadSegment(cpu::SS, 0xAF);
-          m_cpu.setReg32(ESP, hostSP);
-          privChange = true;
+          // Verify 0xAF selector before using it as a data segment
+          uint16_t selAF = 0xAF;
+          uint32_t dsAFBase = 0;
+          bool afValid = false;
+          if (selAF & 0x04) { // LDT
+            int idx = selAF >> 3;
+            uint32_t ldtBase = m_cpu.getLDTR().base;
+            uint32_t dLow = m_memory.read32(ldtBase + idx * 8);
+            uint32_t dHigh = m_memory.read32(ldtBase + idx * 8 + 4);
+            if (dHigh & 0x8000) { // Present
+               dsAFBase = (dLow >> 16) | ((dHigh & 0xFF) << 16) | (dHigh & 0xFF000000);
+               afValid = true;
+            }
+          }
+          
+          uint32_t hostSP = 0;
+          if (afValid) {
+            hostSP = m_memory.read32(dsAFBase + 0x0A42);
+          }
+
+          if (afValid && hostSP != 0) {
+            loadSegment(cpu::SS, 0xAF);
+            m_cpu.setReg32(ESP, hostSP);
+            privChange = true;
+          } else {
+            // If DOS/4GW's host stack selector is absent, stay on the
+            // current PM stack rather than switching to a bogus 0xAF:4800
+            // fallback frame.
+            loadSegment(cpu::SS, oldSs);
+          }
         }
         LOG_DEBUG("DPMI reflect: vec=0x", std::hex, (int)vector,
                   " origSS=0x", oldSs, " origESP=0x", oldEsp,
@@ -5373,6 +5376,7 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
   uint16_t cs;
   uint32_t eip32;
   bool use32 = false;
+  bool directAppPMDispatch = false;
   uint16_t oldCs = m_cpu.getSegReg(CS);
   uint16_t oldSs = m_cpu.getSegReg(SS);
   uint32_t oldEsp = m_cpu.getReg32(ESP);
@@ -5393,6 +5397,36 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
     uint8_t type = (high >> 8) & 0x0F;
     use32 = (type & 0x08) != 0;
     bool isInterruptGate = (type & 0x01) == 0;
+
+    auto decodeSelector = [&](uint16_t selector) -> Descriptor {
+      if ((selector & 0xFFF8) == 0) {
+        return {0, 0, false, false, 0, 0, true};
+      }
+      uint32_t tableBase = (selector & 0x04) ? m_cpu.getLDTR().base
+                                             : m_cpu.getGDTR().base;
+      uint32_t descAddr = tableBase + (selector & 0xFFF8);
+      return decodeDescriptor(m_memory.read32(descAddr),
+                              m_memory.read32(descAddr + 4));
+    };
+
+    // DOS/4GW's "convenient" IRQ hook mode installs its own wrapper in the
+    // IDT and keeps the application's real PM handler behind INT 31h/0205h.
+    // We capture that app vector when the game calls INT 31h and can deliver
+    // the IRQ straight to it here, avoiding the fragile 16-bit thunk path.
+    if (vector != 0x08 && oldSs != 0xAF && oldCs != 0x57 && oldCs != 0x8F) {
+      const auto &appVec = m_appPMVectors[vector];
+      if (appVec.valid && (cs != appVec.selector || eip32 != appVec.offset)) {
+        Descriptor appDesc = decodeSelector(appVec.selector);
+        if (appDesc.isPresent && !appDesc.isSystem && appDesc.is32Bit &&
+            (appDesc.type & 0x08)) {
+          directAppPMDispatch = true;
+          cs = appVec.selector;
+          eip32 = appVec.offset;
+          use32 = true;
+        }
+      }
+    }
+
     uint8_t newCpl = cs & 3;
 
     LOG_DEBUG("HW IRQ PM 0x", std::hex, (int)vector, " selector: 0x", cs,
@@ -5420,7 +5454,7 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
     // local data. In that case, push the interrupt frame below the
     // current ESP like a normal same-privilege interrupt.
     bool isOrig = (cs == 0x08 && eip32 == (0xF0100u + vector * 4));
-    if (!isOrig && !(m_cpu.getEFLAGS() & 0x00020000)) {
+    if (!directAppPMDispatch && !isOrig && !(m_cpu.getEFLAGS() & 0x00020000)) {
       auto &frame = m_cpu.lastHLEFrameMut();
       frame.dpmiStackSwitch = true;
       frame.origESP = oldEsp;
@@ -5435,19 +5469,43 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
         // Already on the host stack — don't switch.  Keep the current ESP
         // so the interrupt frame is pushed below the thunk's live data.
         // Don't set privChange: same-privilege interrupts don't push SS:ESP.
+        loadSegment(cpu::SS, oldSs);
+        loadSegment(cpu::SS, oldSs);
       } else {
         // Transition from PM app stack → host stack.
-        uint32_t dsAFBase = 0x1197C0; // sel 0xAF base
-        uint32_t hostSP = m_memory.read32(dsAFBase + 0x0A42);
-        if (hostSP == 0 || hostSP > 0xFFF0) hostSP = 0x4800; // fallback
-        loadSegment(cpu::SS, 0xAF);
-        m_cpu.setReg32(ESP, hostSP);
-        // Force privilege-change frame: on real hardware, the HW interrupt
-        // always transitions ring 3 → ring 0, so the CPU always pushes
-        // SS:ESP.  The thunk expects a full 5-word frame (SS, ESP, FLAGS,
-        // CS, EIP).  Without this, the thunk reads garbage for SS:ESP and
-        // restores the wrong stack when it IRETs to the PM handler.
-        privChange = true;
+        // The DOS/4GW thunk keeps its reflection stack pointer in selector
+        // 0xAF, not necessarily in the current DS.
+        uint16_t selAF = 0xAF;
+        uint32_t dsAFBase = 0;
+        bool afValid = false;
+        if (selAF & 0x04) {
+          int idx = selAF >> 3;
+          uint32_t ldtBase = m_cpu.getLDTR().base;
+          uint32_t dLow = m_memory.read32(ldtBase + idx * 8);
+          uint32_t dHigh = m_memory.read32(ldtBase + idx * 8 + 4);
+          if (dHigh & 0x8000) {
+            dsAFBase = (dLow >> 16) | ((dHigh & 0xFF) << 16) |
+                       (dHigh & 0xFF000000);
+            afValid = true;
+          }
+        }
+
+        uint32_t hostSP = 0;
+        if (afValid) {
+          hostSP = m_memory.read32(dsAFBase + 0x0A42);
+        }
+        if (afValid && hostSP != 0) {
+          loadSegment(cpu::SS, 0xAF);
+          m_cpu.setReg32(ESP, hostSP);
+          // Force privilege-change frame: on real hardware, the HW interrupt
+          // always transitions ring 3 → ring 0, so the CPU always pushes
+          // SS:ESP.  The thunk expects a full 5-word frame (SS, ESP, FLAGS,
+          // CS, EIP).  Without this, the thunk reads garbage for SS:ESP and
+          // restores the wrong stack when it IRETs to the PM handler.
+          privChange = true;
+        } else {
+          loadSegment(cpu::SS, oldSs);
+        }
       }
     }
 

@@ -83,6 +83,44 @@ TEST_CASE("DOS: Directory Search", "[DOS][Search]") {
         REQUIRE((cpu.getEFLAGS() & FLAG_CARRY));
     }
 
+    SECTION("FindFirst honors non-zero DTA offset") {
+        constexpr uint16_t dtaSegment = 0x0843;
+        constexpr uint16_t dtaOffset = 0x8430;
+        constexpr uint32_t dtaAddr = (static_cast<uint32_t>(dtaSegment) << 4) +
+                                     dtaOffset;
+
+        cpu.setSegReg(DS, dtaSegment);
+        cpu.setReg16(DX, dtaOffset);
+        cpu.setReg8(AH, 0x1A);
+        dos.handleInterrupt(0x21);
+
+        std::string pattern = "ARROW.*";
+        for (size_t i = 0; i < pattern.length(); ++i) {
+            memory.write8(0x2000 + static_cast<uint32_t>(i),
+                          static_cast<uint8_t>(pattern[i]));
+        }
+        memory.write8(0x2000 + static_cast<uint32_t>(pattern.length()), 0);
+
+        cpu.setReg8(AH, 0x4E);
+        cpu.setSegReg(DS, 0x0000);
+        cpu.setReg16(DX, 0x2000);
+        cpu.setReg8(CL, 0x00);
+        dos.handleInterrupt(0x21);
+
+        REQUIRE(!(cpu.getEFLAGS() & FLAG_CARRY));
+
+        std::string match;
+        for (int i = 0; i < 13; ++i) {
+            char c = static_cast<char>(memory.read8(dtaAddr + 0x1E + i));
+            if (c == 0) break;
+            match += c;
+        }
+
+        REQUIRE(match == "ARROW.SHP");
+        REQUIRE(memory.read8(dtaAddr + 0x15) == 0x20);
+        REQUIRE(memory.read32(dtaAddr + 0x1A) > 0);
+    }
+
     fs::current_path(originalDir);
     fs::remove_all(testDir);
 }

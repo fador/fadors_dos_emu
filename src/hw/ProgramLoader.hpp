@@ -17,7 +17,7 @@ public:
     ~ProgramLoader() = default;
 
     // Loads a flat .COM file into memory at segment:0x100
-    bool loadCOM(const std::string& path, uint16_t segment, const std::string& args = "");
+    bool loadCOM(const std::string& path, uint16_t segment, DOS& dos, const std::string& args = "");
 
     // Loads an .EXE file, parses MZ header, relocates, and sets initial CS:IP / SS:SP
     bool loadEXE(const std::string& path, uint16_t segment, DOS& dos, const std::string& args = "", bool useHimem = false);
@@ -28,7 +28,7 @@ private:
     memory::HIMEM* m_himem;
 
     // Creates a 256-byte Program Segment Prefix at the given segment
-    void createPSP(uint16_t segment, const std::string& args, const std::string& programPath);
+    void createPSP(uint16_t segment, uint16_t envSegment, DOS& dos, const std::string& args, const std::string& programPath);
 };
 
 } // namespace fador::hw

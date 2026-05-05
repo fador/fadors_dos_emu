@@ -45,6 +45,11 @@ public:
   uint8_t getExitCode() const { return m_exitCode; }
   uint16_t getPSPSegment() const { return m_pspSegment; }
   void setPSPSegment(uint16_t seg) { m_pspSegment = seg; }
+  void setProgramPath(const std::string &path) { m_programPath = path; }
+  std::string getProgramPath() const { return m_programPath; }
+
+  // Memory allocation for internal use (ProgramLoader)
+  uint16_t allocateMemory(uint16_t paragraphs, uint16_t owner = 0xFFFF);
 
   // VROOMM Overlay Support
   struct NESegment {
@@ -71,6 +76,19 @@ public:
 
   // Set the working directory to the program's parent directory
   void setProgramDir(const std::string &programPath);
+
+  // Memory Control Block (MCB)
+  struct MCB {
+    uint8_t type;   // 'M' (0x4D) or 'Z' (0x5A)
+    uint16_t owner; // 0x0000 if free, 0x0008 if system, or PSP segment
+    uint16_t size;  // size in paragraphs (16 bytes)
+    uint8_t reserved[3];
+    char name[8];
+  };
+
+  MCB readMCB(uint16_t segment);
+  void writeMCB(uint16_t segment, const MCB &mcb);
+  void dumpMCBChain();
 
 private:
   // HIMEM (XMS) support
@@ -119,14 +137,6 @@ private:
   };
   std::vector<std::shared_ptr<FileHandle>> m_fileHandles;
 
-  // Memory Control Block (MCB)
-  struct MCB {
-    uint8_t type;   // 'M' (0x4D) or 'Z' (0x5A)
-    uint16_t owner; // 0x0000 if free, 0x0008 if system, or PSP segment
-    uint16_t size;  // size in paragraphs (16 bytes)
-    uint8_t reserved[3];
-    char name[8];
-  };
   static constexpr uint16_t FIRST_MCB_SEGMENT = 0x0800;
   static constexpr uint16_t LAST_PARA = 0x9FFF;
 
@@ -145,10 +155,6 @@ private:
   std::string m_searchDir;
 
   // Helpers
-  MCB readMCB(uint16_t segment);
-  void writeMCB(uint16_t segment, const MCB &mcb);
-  void dumpMCBChain();
-
   std::string readDOSString(uint32_t address); // Read '$' terminated string
   std::string readFilename(uint32_t address);  // Read null-terminated string
   void writeCharToVRAM(uint8_t c); // Teletype-style output to B800 VRAM

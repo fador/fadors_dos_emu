@@ -49,6 +49,9 @@ void BIOS::sendEOI(uint8_t vector) {
 
 bool BIOS::handleInterrupt(uint8_t vector) {
   switch (vector) {
+  case 0x09:
+    handleKeyboardIRQ();
+    return true;
   case 0x10:
     handleVideoService();
     return true;
@@ -154,6 +157,15 @@ bool BIOS::handleInterrupt(uint8_t vector) {
     return true;
   }
   return false;
+}
+
+void BIOS::handleKeyboardIRQ() {
+  // The BIOS INT 09h handler consumes the pending controller byte and
+  // acknowledges IRQ1. Host input already mirrored make codes into the BIOS
+  // key queue for INT 16h, so the IRQ path only needs to drain port 60h.
+  uint8_t scancode = m_kbd.read8(0x60);
+  LOG_DEBUG("BIOS INT 09h: scancode=0x", std::hex, (int)scancode);
+  sendEOI(0x09);
 }
 
 void BIOS::handleMouseService() {

@@ -722,6 +722,14 @@ TEST_CASE("INT 21h AH=1Ah Set DTA via asm", "[int][asm][dos]") {
     REQUIRE(e.cpu.getReg16(cpu::BX) == 0x0300);
 }
 
+TEST_CASE("INT 21h AH=67h Set Handle Count via asm", "[int][asm][dos]") {
+    IntTestEnv e;
+    e.assemble("MOV AH, 67h\nMOV BX, 40h\nINT 21h");
+    e.run(3);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(e.mem.read16((IntTestEnv::CODE_SEG << 4) + 0x32) == 0x0040);
+}
+
 TEST_CASE("INT 21h AH=37h Get Switch Character via asm", "[int][asm][dos]") {
     IntTestEnv e;
     e.assemble("MOV AH, 37h\nMOV AL, 0\nINT 21h");

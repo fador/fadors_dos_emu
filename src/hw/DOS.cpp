@@ -110,31 +110,38 @@ DOS::DOS(cpu::CPU &cpu, memory::MemoryBus &memory)
 }
 
 void DOS::initialize() {
-  LOG_INFO("DOS: Kernel initialized.");
+  LOG_INFO("DOS: Kernel initialized (v2.2).");
 
   // Setup initial MCB chain
-  // Block 1: PSP starting at FIRST_MCB_SEGMENT + 1 (0x801)
-  m_pspSegment = FIRST_MCB_SEGMENT + 1;
+  // Block 1: System sentinel at FIRST_MCB_SEGMENT (0x800)
+  MCB system;
+  system.type = 'M';
+  system.owner = 0x0008; // System
+  system.size = 0x10;    // 256 bytes
+  std::strcpy(system.name, "SDATA");
+  writeMCB(FIRST_MCB_SEGMENT, system);
 
-  // Real DOS allocates ALL available conventional memory to the loaded
-  // program (respecting MZ maxAlloc=0xFFFF).  The program then shrinks its
-  // block with INT 21h AH=4Ah to release memory for other uses.
-  MCB psp;
-  psp.type = 'Z'; // Only block — last in chain
-  psp.owner = m_pspSegment;
-  psp.size = LAST_PARA - m_pspSegment; // All memory up to 640K
-  for (int i = 0; i < 8; ++i)
-    psp.name[i] = 0;
-  writeMCB(FIRST_MCB_SEGMENT, psp);
+  // Block 2: Free memory for everything else
+  uint16_t freeSeg = FIRST_MCB_SEGMENT + 0x10 + 1;
+  MCB free;
+  free.type = 'Z';
+  free.owner = 0;
+  free.size = LAST_PARA - freeSeg;
+  for (int i = 0; i < 8; ++i) free.name[i] = 0;
+  writeMCB(freeSeg, free);
 
   initializeDOSListOfLists(m_memory, FIRST_MCB_SEGMENT);
 
-  LOG_INFO("DOS: Initial MCB chain setup. PSP block at 0x", std::hex,
-           m_pspSegment, " size 0x", std::hex, psp.size);
+  LOG_INFO("DOS: Initial MCB chain setup. System block at 0x", std::hex,
+           FIRST_MCB_SEGMENT, " size 0x10; Free block at 0x", freeSeg, 
+           " size 0x", free.size);
 
-  // Default DTA is at offset 0x80 of the initial PSP
-  m_dtaPtr = (static_cast<uint32_t>(m_pspSegment) << 16) | 0x0080;
+  // Default DTA is at offset 0x80 of a placeholder PSP
+  // (Will be updated when program is loaded)
+  m_pspSegment = 0; 
+  m_dtaPtr = 0x00000080;
 }
+
 
 bool DOS::handleInterrupt(uint8_t vector) {
   switch (vector) {
@@ -655,6 +662,21 @@ void DOS::handleDOSService() {
     m_cpu.setReg8(cpu::DL, 0);  // 1/100 second
     break;
   }
+  case 0x67: { // Set Handle Count
+    uint16_t handleCount = m_cpu.getReg16(cpu::BX);
+    if (m_pspSegment != 0) {
+      uint32_t pspAddr = static_cast<uint32_t>(m_pspSegment) << 4;
+      m_memory.write16(pspAddr + 0x32, handleCount);
+      if (handleCount <= 20) {
+        m_memory.write16(pspAddr + 0x34, 0x0018);
+        m_memory.write16(pspAddr + 0x36, m_pspSegment);
+      }
+    }
+    m_cpu.setReg16(cpu::AX, 0);
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    LOG_DOS("DOS: Set Handle Count -> ", std::dec, handleCount);
+    break;
+  }
 
   case 0x4C: { // Terminate with return code
     uint8_t al = m_cpu.getReg8(cpu::AL);
@@ -916,84 +938,31 @@ void DOS::writeMCB(uint16_t segment, const MCB &mcb) {
 
 void DOS::handleMemoryManagement() {
   uint8_t ah = m_cpu.getReg8(cpu::AH);
-  dumpMCBChain();
   if (ah == 0x48) { // Allocate
     uint16_t requested = m_cpu.getReg16(cpu::BX);
-    uint16_t current = FIRST_MCB_SEGMENT;
-    uint16_t bestFit = 0;
-    uint16_t bestFitSize = 0xFFFF;
-    uint16_t largestFree = 0;
-    int mcbCount = 0;
-
-    while (true) {
-      if (mcbCount++ > 1000) {
-        LOG_ERROR("DOS: MCB chain corrupted or too long (infinite loop?)");
-        break;
-      }
-      MCB mcb = readMCB(current);
-      LOG_DEBUG("DOS: Checking MCB at 0x", std::hex, current,
-                " type=", (char)mcb.type, " owner=0x", mcb.owner, " size=0x",
-                mcb.size);
-
-      if (mcb.owner == 0) {
-        if (mcb.size > largestFree)
-          largestFree = mcb.size;
-        if (mcb.size >= requested && mcb.size < bestFitSize) {
-          bestFit = current;
-          bestFitSize = mcb.size;
-        }
-      }
-      if (mcb.type == 'Z')
-        break;
-      uint32_t next = (uint32_t)current + mcb.size + 1;
-      if (next > 0xFFFF || next > LAST_PARA) {
-        LOG_DEBUG("DOS: MCB chain ends/wraps at 0x", std::hex, current,
-                  " size 0x", mcb.size);
-        break;
-      }
-      current = static_cast<uint16_t>(next);
-    }
-
-    if (bestFit != 0) {
-      MCB mcb = readMCB(bestFit);
-      LOG_DEBUG("DOS: Splitting MCB at 0x", std::hex, bestFit, " requested 0x",
-                requested, " total 0x", mcb.size);
-      if (mcb.size > requested + 1) { // Split
-        MCB next;
-        next.type = mcb.type;
-        next.owner = 0;
-        next.size = mcb.size - requested - 1;
-
-        mcb.type = 'M';
-        mcb.size = requested;
-        mcb.owner = m_pspSegment;
-
-        writeMCB(bestFit, mcb);
-        uint16_t nextMcbSeg = static_cast<uint16_t>(bestFit + requested + 1);
-        writeMCB(nextMcbSeg, next);
-        LOG_DEBUG("DOS: Created new free MCB at 0x", std::hex, nextMcbSeg,
-                  " size 0x", next.size);
-      } else {
-        mcb.owner = m_pspSegment;
-        writeMCB(bestFit, mcb);
-      }
-      m_cpu.setReg16(cpu::AX, bestFit + 1);
+    uint16_t segment = allocateMemory(requested);
+    if (segment != 0) {
+      m_cpu.setReg16(cpu::AX, segment);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-      LOG_DEBUG("DOS: Allocated 0x", std::hex, requested, " paras at 0x",
-                bestFit + 1);
     } else {
+      // Find largest free block for error return
+      uint16_t current = FIRST_MCB_SEGMENT;
+      uint16_t largestFree = 0;
+      while (true) {
+        MCB mcb = readMCB(current);
+        if (mcb.owner == 0 && mcb.size > largestFree) largestFree = mcb.size;
+        if (mcb.type == 'Z') break;
+        current = static_cast<uint16_t>(current + mcb.size + 1);
+      }
       m_cpu.setReg16(cpu::AX, 0x0008);      // Insufficient memory
       m_cpu.setReg16(cpu::BX, largestFree); // Largest available block
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
-      LOG_WARN("DOS: Failed to allocate ", std::hex, requested,
-               " paras (largest free: 0x", largestFree, ")");
-      dumpMCBChain();
     }
   } else if (ah == 0x49) { // Free
     uint16_t segment = m_cpu.getSegReg(cpu::ES);
     uint16_t mcbSeg = segment - 1;
     MCB mcb = readMCB(mcbSeg);
-    if (mcb.type == 'M' || mcb.type == 'Z') {
+    if ((mcb.type == 'M' || mcb.type == 'Z') && mcb.owner != 0) {
       mcb.owner = 0;
       writeMCB(mcbSeg, mcb);
 
@@ -1275,8 +1244,8 @@ void DOS::handleDirectorySearch() {
   uint8_t ah = m_cpu.getReg8(cpu::AH);
   // DTA pointer is stored as a segmented address. In PM, its interpretation
   // is tricky. For now, we assume it's a RM pointer or a legacy PM pointer.
-  uint16_t dtaSeg = m_dtaPtr >> 16;
-  uint32_t dtaOff = m_dtaPtr & 0xFFFFFFFF;
+  uint16_t dtaSeg = static_cast<uint16_t>(m_dtaPtr >> 16);
+  uint16_t dtaOff = static_cast<uint16_t>(m_dtaPtr & 0xFFFF);
   // If in PM, we might need more complex logic, but usually DTA is RM-segment
   // compatible in early DOS/4GW.
   uint32_t dtaAddr = (static_cast<uint32_t>(dtaSeg) << 4) + dtaOff;
@@ -1408,18 +1377,89 @@ void DOS::handleDirectorySearch() {
   }
 }
 
+uint16_t DOS::allocateMemory(uint16_t requested, uint16_t owner) {
+  uint16_t current = FIRST_MCB_SEGMENT;
+  uint16_t bestFit = 0;
+  uint16_t bestFitSize = 0xFFFF;
+  int mcbCount = 0;
+
+  while (true) {
+    if (mcbCount++ > 1000) {
+      LOG_ERROR("DOS: MCB chain corrupted or too long (infinite loop?)");
+      return 0;
+    }
+    MCB mcb = readMCB(current);
+    if (mcb.owner == 0) {
+      if (mcb.size >= requested && mcb.size < bestFitSize) {
+        bestFit = current;
+        bestFitSize = mcb.size;
+      }
+    }
+    if (mcb.type == 'Z')
+      break;
+    uint32_t next = (uint32_t)current + mcb.size + 1;
+    if (next > 0xFFFF || next > LAST_PARA)
+      break;
+    current = static_cast<uint16_t>(next);
+  }
+
+  if (bestFit != 0) {
+    MCB mcb = readMCB(bestFit);
+    uint16_t actualOwner = owner;
+    if (actualOwner == 0xFFFF) {
+        actualOwner = (m_pspSegment != 0) ? m_pspSegment : (bestFit + 1);
+    }
+
+    LOG_INFO("DOS: allocateMemory(", requested, " paras) -> found block at 0x", 
+             std::hex, bestFit, " (size 0x", mcb.size, "), owner: 0x", actualOwner);
+
+    if (mcb.size > requested + 1) { // Split
+      MCB next;
+      std::memset(&next, 0, sizeof(next));
+      next.type = mcb.type;
+      next.owner = 0;
+      next.size = mcb.size - requested - 1;
+
+      mcb.type = 'M';
+      mcb.size = requested;
+      mcb.owner = actualOwner;
+
+      writeMCB(bestFit, mcb);
+      uint16_t nextMcbSeg = static_cast<uint16_t>(bestFit + requested + 1);
+      writeMCB(nextMcbSeg, next);
+      LOG_INFO("DOS: Split block at 0x", std::hex, bestFit, " -> new free block at 0x", nextMcbSeg, " size 0x", next.size);
+    } else {
+      mcb.owner = actualOwner;
+      writeMCB(bestFit, mcb);
+    }
+    return bestFit + 1;
+  }
+  LOG_ERROR("DOS: allocateMemory(", requested, " paras) FAILED. No free block large enough.");
+  return 0;
+}
+
 void DOS::dumpMCBChain() {
   uint16_t current = FIRST_MCB_SEGMENT;
   LOG_INFO("--- DOS MCB Chain Dump ---");
-  while (true) {
+  int count = 0;
+  while (count++ < 100) {
     MCB mcb = readMCB(current);
+    if (mcb.type != 'M' && mcb.type != 'Z') {
+      LOG_WARN("DOS: MCB chain corrupted at 0x", std::hex, current, " type=0x", (int)mcb.type);
+      break;
+    }
     LOG_INFO("MCB [", (char)mcb.type, "] Seg: 0x", std::hex, current,
              " Owner: 0x", mcb.owner, " Size: ", std::dec, mcb.size, " paras");
     if (mcb.type == 'Z')
       break;
-    current = static_cast<uint16_t>(current + mcb.size + 1);
-    if (current >= LAST_PARA)
+    if (mcb.size == 0) {
+      LOG_WARN("DOS: MCB with size 0 at 0x", std::hex, current);
       break;
+    }
+    uint32_t next = (uint32_t)current + mcb.size + 1;
+    if (next >= LAST_PARA)
+      break;
+    current = static_cast<uint16_t>(next);
   }
 }
 
@@ -1725,6 +1765,7 @@ void DOS::handleFileService() {
         m_cpu.getReg8(cpu::AL) & 0x03; // 0=Read, 1=Write, 2=Read/Write
     uint32_t nameAddr = m_cpu.getSegBase(cpu::DS) + dx;
     std::string filename = readFilename(nameAddr);
+    LOG_DEBUG("DOS: Open file '", filename, "' accessMode=", (int)accessMode);
 
     if (isEMSDeviceProbe(filename)) {
       auto fh = std::make_shared<FileHandle>();
@@ -1751,8 +1792,8 @@ void DOS::handleFileService() {
     // just an extension and the file doesn't exist.
     if (!fs::exists(hostPath) && !m_programPath.empty()) {
       fs::path fn = fs::path(filename).filename();
-      std::string fnStr = fn.string();
-      if (!fnStr.empty() && fnStr[0] == '.') {
+      std::string fnStr = upperASCII(fn.string());
+      if (fnStr.size() >= 4 && fnStr.substr(fnStr.size() - 4) == ".EXE") {
         hostPath = m_programPath;
         fh->path = hostPath;
         LOG_INFO("DOS: Filename fallback: '", filename, "' -> '",

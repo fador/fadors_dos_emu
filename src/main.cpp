@@ -174,6 +174,7 @@ int main(int argc, char *argv[]) {
     iobus.registerDevice(0x3C0, 0x3CF, &vga);
     iobus.registerDevice(0x3D0, 0x3DF, &vga);
     iobus.registerDevice(0x00, 0x0F, &dma);
+    iobus.registerDevice(0xC0, 0xDF, &dma);
     iobus.registerDevice(0x81, 0x8F, &dma);
     iobus.registerDevice(0x220, 0x22F, &sb);
     iobus.registerDevice(0x388, 0x389, &adlib);
@@ -467,7 +468,7 @@ int main(int argc, char *argv[]) {
               memory.read8(phys + 5), cpu.getReg32(fador::cpu::EAX));
           LOG_INFO(buf);
           decoder.step();
-          cpu.addCycles(4);
+          cpu.addCycles(1);
         }
       }
 
@@ -480,7 +481,7 @@ int main(int argc, char *argv[]) {
       bool loaded = false;
       if (path.find(".com") != std::string::npos ||
           path.find(".COM") != std::string::npos) {
-        loaded = loader.loadCOM(path, dos.getPSPSegment(), args);
+        loaded = loader.loadCOM(path, dos.getPSPSegment(), dos, args);
       } else {
         loaded = loader.loadEXE(path, dos.getPSPSegment(), dos, args, useHimem);
       }
@@ -505,7 +506,7 @@ int main(int argc, char *argv[]) {
       auto runExecLoop = [&](uint64_t steps) {
         for (uint64_t i = 0; i < steps; ++i) {
           decoder.step();
-          cpu.addCycles(4);
+          cpu.addCycles(1);
           if (dos.isTerminated())
             return false;
         }
@@ -685,7 +686,7 @@ int main(int argc, char *argv[]) {
       bios.setInputPollCallback([&sdlRenderer]() { sdlRenderer.pollInput(); });
       bios.setIdleCallback([&sdlRenderer, &pit, &cpu, &decoder, &kbd, &pic,
                 &dispatchPendingHardwareInterrupt]() {
-        cpu.addCycles(64);
+        cpu.addCycles(8);
         pit.update();
         while (pit.checkPendingIRQ0()) {
           pic.raiseIRQ(0);
@@ -706,7 +707,7 @@ int main(int argc, char *argv[]) {
       dos.setInputPollCallback([&sdlRenderer]() { sdlRenderer.pollInput(); });
       dos.setIdleCallback([&pit, &cpu, &decoder, &kbd, &pic,
                &dispatchPendingHardwareInterrupt]() {
-        cpu.addCycles(64);
+        cpu.addCycles(8);
         pit.update();
         while (pit.checkPendingIRQ0()) { pic.raiseIRQ(0); }
         if (kbd.checkPendingIRQ()) { pic.raiseIRQ(1); }
@@ -721,7 +722,7 @@ int main(int argc, char *argv[]) {
 
       while (running) {
         decoder.step();
-        cpu.addCycles(4);
+        cpu.addCycles(1);
         instrCount++;
 
         // Periodic EIP sample for progress tracking
@@ -795,7 +796,6 @@ int main(int argc, char *argv[]) {
               adlib.generateSamples(audioBuf.data(), samplesNeeded);
               sb.generateSamples(audioBuf.data(), samplesNeeded);
               audio.queueSamples(audioBuf.data(), samplesNeeded * 2);
-              adlib.updateTimers((double)samplesNeeded / 44100.0);
             }
           }
 
@@ -862,7 +862,7 @@ int main(int argc, char *argv[]) {
 
       while (running) {
         decoder.step();
-        cpu.addCycles(4);
+        cpu.addCycles(1);
         instrCount++;
 
         if ((instrCount & 0x3FF) == 0) {

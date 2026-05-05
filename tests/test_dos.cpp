@@ -71,7 +71,7 @@ TEST_CASE("DOS Emulation and Program Loading", "[DOS]") {
             ofs.write(reinterpret_cast<const char*>(code), sizeof(code));
         }
 
-        REQUIRE(loader.loadCOM("test.com", 0x1000));
+        REQUIRE(loader.loadCOM("test.com", 0x1000, dos));
 
         // Verify PSP
         REQUIRE(mem.read8(0x10000) == 0xCD); // INT 20h
@@ -470,20 +470,28 @@ TEST_CASE("ProgramLoader zeroes EXE minimum allocation area", "[DOS][Loader]") {
         ofs.write(reinterpret_cast<const char*>(exe.data()), static_cast<std::streamsize>(exe.size()));
     }
 
-    const uint16_t pspSegment = dos.getPSPSegment();
-    const uint32_t loadAddr = static_cast<uint32_t>(pspSegment + 0x10) << 4;
+    // ProgramLoader allocates an environment block first, then the program
+    // block. Prefill the future minimum-allocation paragraph in that program
+    // block so this test proves the loader zeroes the file-unbacked tail.
+    const uint16_t firstMcb = mem.read16((0x0050u << 4) + 0x0020u - 2u);
+    const uint16_t firstFreeMcb =
+        static_cast<uint16_t>(firstMcb + dos.readMCB(firstMcb).size + 1u);
+    const uint16_t expectedProgSegment =
+        static_cast<uint16_t>(firstFreeMcb + 0x20u + 2u);
     const uint32_t imageSize = 16;
-    const uint32_t minAllocAddr = loadAddr + imageSize;
-    const uint32_t farBssAddr = loadAddr + 0x2000;
+    const uint32_t expectedLoadAddr =
+        static_cast<uint32_t>(expectedProgSegment + 0x10u) << 4u;
+    const uint32_t minAllocAddr = expectedLoadAddr + imageSize;
 
     mem.write8(minAllocAddr + 0, 0xCC);
     mem.write8(minAllocAddr + 15, 0xCC);
-    mem.write8(farBssAddr, 0xCC);
 
-    REQUIRE(loader.loadEXE(fname, pspSegment, dos));
-    REQUIRE(mem.read8(minAllocAddr + 0) == 0x00);
-    REQUIRE(mem.read8(minAllocAddr + 15) == 0x00);
-    REQUIRE(mem.read8(farBssAddr) == 0x00);
+    REQUIRE(loader.loadEXE(fname, dos.getPSPSegment(), dos));
+    const uint32_t actualLoadAddr =
+        static_cast<uint32_t>(dos.getPSPSegment() + 0x10u) << 4u;
+    REQUIRE(actualLoadAddr == expectedLoadAddr);
+    REQUIRE(mem.read8(actualLoadAddr + imageSize + 0) == 0x00);
+    REQUIRE(mem.read8(actualLoadAddr + imageSize + 15) == 0x00);
 
     std::remove(fname);
 }
