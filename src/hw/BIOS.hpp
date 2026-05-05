@@ -101,6 +101,7 @@ private:
     uint16_t m_mouseCallbackOff = 0;
 
     void handleVideoService();      // INT 10h
+    void handleKeyboardIRQ();       // INT 09h
     void handleKeyboardService();   // INT 16h
     void handleMouseService();      // INT 33h
     void handleTimeService();       // INT 1Ah

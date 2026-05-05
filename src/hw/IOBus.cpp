@@ -28,6 +28,7 @@ uint8_t IOBus::read8(uint16_t port) {
 
 void IOBus::write8(uint16_t port, uint8_t value) {
     if (auto device = getDevice(port)) {
+        if ((port & 0xFFF0) == 0x0220) LOG_INFO("IOBus: SB write to 0x", std::hex, port, " val=0x", (int)value);
         device->write8(port, value);
         return;
     }

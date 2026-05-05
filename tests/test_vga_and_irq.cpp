@@ -504,6 +504,176 @@ TEST_CASE("IRQ: Unhandled HLE vector sends EOI and returns", "[IRQ]") {
     }
 }
 
+TEST_CASE("IRQ: Keyboard PM reflection uses selector 0xAF host stack", "[IRQ][KBD][DPMI]") {
+    PMIRQTestEnv env;
+
+    constexpr uint32_t LDT_ADDR = 0x6000;
+    constexpr uint32_t HOST_SEG_BASE = 0x50000;
+    constexpr uint32_t WRONG_DS_HOST_SP = 0x1234;
+    constexpr uint32_t RIGHT_HOST_SP = 0x3456;
+    constexpr uint32_t IRQ32_FRAME_BYTES = 20;
+
+    env.cpu.setLDTR({0x00FF, LDT_ADDR});
+    env.cpu.setLDTRSelector(0x0018);
+    env.writeDescriptor(LDT_ADDR + ((0xAFu >> 3) * 8), HOST_SEG_BASE, 0xFFFF,
+                        false, true, false);
+
+    env.mem.write32(0x0A42, WRONG_DS_HOST_SP);
+    env.mem.write32(HOST_SEG_BASE + 0x0A42, RIGHT_HOST_SP);
+
+    env.pic.raiseIRQ(1);
+    REQUIRE(env.pic.getPendingInterrupt() == 0x09);
+    env.pic.acknowledgeInterrupt();
+
+    env.decoder.injectHardwareInterrupt(0x09);
+
+    REQUIRE(env.cpu.getSegReg(cpu::SS) == 0x00AF);
+    REQUIRE(env.cpu.getReg32(cpu::ESP) == RIGHT_HOST_SP - IRQ32_FRAME_BYTES);
+    REQUIRE(env.cpu.getSegReg(cpu::CS) == PMIRQTestEnv::CODE16_SEL);
+    REQUIRE(env.cpu.getEIP() == 0x0020);
+}
+
+TEST_CASE("IRQ: Keyboard PM reflection accepts high selector 0xAF host stack", "[IRQ][KBD][DPMI]") {
+    PMIRQTestEnv env;
+
+    constexpr uint32_t LDT_ADDR = 0x6000;
+    constexpr uint32_t HOST_SEG_BASE = 0x50000;
+    constexpr uint32_t HIGH_HOST_SP = 0xE47FC;
+    constexpr uint32_t IRQ32_FRAME_BYTES = 20;
+
+    env.cpu.setLDTR({0x00FF, LDT_ADDR});
+    env.cpu.setLDTRSelector(0x0018);
+    env.writeDescriptor(LDT_ADDR + ((0xAFu >> 3) * 8), HOST_SEG_BASE, 0xFFFF,
+                        false, true, false);
+
+    env.mem.write32(HOST_SEG_BASE + 0x0A42, HIGH_HOST_SP);
+
+    env.pic.raiseIRQ(1);
+    REQUIRE(env.pic.getPendingInterrupt() == 0x09);
+    env.pic.acknowledgeInterrupt();
+
+    env.decoder.injectHardwareInterrupt(0x09);
+
+    REQUIRE(env.cpu.getSegReg(cpu::SS) == 0x00AF);
+    REQUIRE(env.cpu.getReg32(cpu::ESP) == HIGH_HOST_SP - IRQ32_FRAME_BYTES);
+    REQUIRE(env.cpu.getSegReg(cpu::CS) == PMIRQTestEnv::CODE16_SEL);
+    REQUIRE(env.cpu.getEIP() == 0x0020);
+}
+
+TEST_CASE("IRQ: Keyboard PM reflection refreshes stale 0xAF stack width", "[IRQ][KBD][DPMI]") {
+    PMIRQTestEnv env;
+
+    constexpr uint32_t LDT_ADDR = 0x6000;
+    constexpr uint32_t HOST_SEG_BASE = 0x50000;
+    constexpr uint32_t HOST_SP = 0xE47FC;
+    constexpr uint32_t IRQ32_FRAME_BYTES = 12;
+
+    env.cpu.setLDTR({0x00FF, LDT_ADDR});
+    env.cpu.setLDTRSelector(0x0018);
+
+    // Load SS=0xAF while the descriptor is still 16-bit, leaving the CPU's
+    // cached stack width stale until the IRQ path reloads it.
+    env.writeDescriptor(LDT_ADDR + ((0xAFu >> 3) * 8), HOST_SEG_BASE, 0xFFFF,
+                        false, false, false);
+    env.decoder.loadSegment(cpu::SS, 0x00AF);
+    env.cpu.setReg32(cpu::ESP, HOST_SP);
+    REQUIRE(!env.cpu.is32BitStack());
+
+    // Simulate DOS/4GW rewriting the live 0xAF descriptor in place to a
+    // 32-bit host stack without reloading SS.
+    env.writeDescriptor(LDT_ADDR + ((0xAFu >> 3) * 8), HOST_SEG_BASE, 0xFFFF,
+                        false, true, false);
+
+    env.pic.raiseIRQ(1);
+    REQUIRE(env.pic.getPendingInterrupt() == 0x09);
+    env.pic.acknowledgeInterrupt();
+
+    env.decoder.injectHardwareInterrupt(0x09);
+
+    REQUIRE(env.cpu.getSegReg(cpu::SS) == 0x00AF);
+    REQUIRE(env.cpu.is32BitStack());
+    REQUIRE(env.cpu.getReg32(cpu::ESP) == HOST_SP - IRQ32_FRAME_BYTES);
+    REQUIRE(env.cpu.getSegReg(cpu::CS) == PMIRQTestEnv::CODE16_SEL);
+    REQUIRE(env.cpu.getEIP() == 0x0020);
+}
+
+TEST_CASE("IRQ: Keyboard PM reflection keeps app stack when 0xAF is absent", "[IRQ][KBD][DPMI]") {
+    PMIRQTestEnv env;
+
+    constexpr uint32_t APP_STACK_ESP = 0xE47BC;
+    constexpr uint32_t IRQ32_FRAME_BYTES = 12;
+
+    // Leave selector 0xAF unallocated/zeroed. The IRQ path should stay on the
+    // current PM stack instead of switching to a bogus fallback host stack.
+    env.decoder.loadSegment(cpu::SS, PMIRQTestEnv::DATA32_SEL);
+    env.cpu.setReg32(cpu::ESP, APP_STACK_ESP);
+
+    env.pic.raiseIRQ(1);
+    REQUIRE(env.pic.getPendingInterrupt() == 0x09);
+    env.pic.acknowledgeInterrupt();
+
+    env.decoder.injectHardwareInterrupt(0x09);
+
+    REQUIRE(env.cpu.getSegReg(cpu::SS) == PMIRQTestEnv::DATA32_SEL);
+    REQUIRE(env.cpu.is32BitStack());
+    REQUIRE(env.cpu.getReg32(cpu::ESP) == APP_STACK_ESP - IRQ32_FRAME_BYTES);
+    REQUIRE(env.cpu.getSegReg(cpu::CS) == PMIRQTestEnv::CODE16_SEL);
+    REQUIRE(env.cpu.getEIP() == 0x0020);
+}
+
+TEST_CASE("IRQ: Keyboard auto-passup uses captured app PM vector", "[IRQ][KBD][DPMI]") {
+    PMIRQTestEnv env;
+
+    constexpr uint32_t LDT_ADDR = 0x6000;
+    constexpr uint16_t APP32_SEL = 0x000F;
+    constexpr uint32_t APP_CODE_BASE = 0x120000;
+    constexpr uint32_t APP_HANDLER_OFF = 0x2000;
+    constexpr uint32_t APP_STACK_ESP = 0x90000;
+    constexpr uint32_t HOST_SEG_BASE = 0x50000;
+    constexpr uint32_t HOST_SP = 0x3456;
+
+    env.cpu.setLDTR({0x00FF, LDT_ADDR});
+    env.cpu.setLDTRSelector(0x0018);
+    env.writeDescriptor(LDT_ADDR + ((0xAFu >> 3) * 8), HOST_SEG_BASE, 0xFFFF,
+                        false, true, false);
+    env.writeDescriptor(LDT_ADDR + ((APP32_SEL >> 3) * 8), APP_CODE_BASE,
+                        0xFFFF, true, true, false);
+    env.mem.write32(HOST_SEG_BASE + 0x0A42, HOST_SP);
+
+    env.writeIDTEntry(0x31, PMIRQTestEnv::CODE16_SEL, 0x0020);
+    env.mem.write8(APP_CODE_BASE + 0x0100, 0xCD);
+    env.mem.write8(APP_CODE_BASE + 0x0101, 0x31);
+
+    env.decoder.loadSegment(cpu::CS, APP32_SEL);
+    env.cpu.setEIP(0x0100);
+    env.cpu.setReg32(cpu::ESP, APP_STACK_ESP);
+    env.cpu.setReg16(cpu::AX, 0x0205);
+    env.cpu.setReg8(cpu::BL, 0x09);
+    env.cpu.setReg16(cpu::CX, APP32_SEL);
+    env.cpu.setReg32(cpu::EDX, APP_HANDLER_OFF);
+
+    env.decoder.step();
+    REQUIRE(env.cpu.hleStackSize() == 1);
+    env.cpu.popHLEFrame();
+
+    env.decoder.loadSegment(cpu::CS, APP32_SEL);
+    env.decoder.loadSegment(cpu::SS, PMIRQTestEnv::DATA32_SEL);
+    env.cpu.setEIP(0x0300);
+    env.cpu.setReg32(cpu::ESP, APP_STACK_ESP);
+    env.cpu.setEFLAGS(env.cpu.getEFLAGS() | cpu::FLAG_INTERRUPT);
+
+    env.pic.raiseIRQ(1);
+    REQUIRE(env.pic.getPendingInterrupt() == 0x09);
+    env.pic.acknowledgeInterrupt();
+
+    env.decoder.injectHardwareInterrupt(0x09);
+
+    REQUIRE(env.cpu.getSegReg(cpu::CS) == APP32_SEL);
+    REQUIRE(env.cpu.getEIP() == APP_HANDLER_OFF);
+    REQUIRE(env.cpu.getSegReg(cpu::SS) == PMIRQTestEnv::DATA32_SEL);
+    REQUIRE(env.cpu.getReg32(cpu::ESP) == APP_STACK_ESP - 12);
+}
+
 TEST_CASE("IRQ: Timer HLE increments app ticcount via Watcom ISR table", "[IRQ]") {
     PMIRQTestEnv env;
 

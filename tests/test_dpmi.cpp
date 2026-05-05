@@ -1445,6 +1445,47 @@ TEST_CASE("HLE 0F FF chain merges only carry for INT 0x31", "[dpmi][hle][mask]")
     REQUIRE((env.cpu.getEFLAGS() & 0xFFFFu) == (expected & 0xFFFFu));
 }
 
+TEST_CASE("HLE 0F FF chain preserves stacked flags for hardware IRQs", "[dpmi][hle][irq]") {
+    DPMITestEnv env;
+    hw::IOBus iobus;
+    cpu::InstructionDecoder decoder(env.cpu, env.mem, iobus, env.bios, env.dos);
+
+    uint32_t ssBase = env.cpu.getSegBase(cpu::SS);
+    uint32_t espBase = env.cpu.getReg32(cpu::ESP);
+    uint32_t spTracked = espBase - 0x200;
+    uint32_t spChain = espBase - 0x100;
+
+    env.kbd.pushMakeKey('a', 0x1E);
+
+    env.cpu.pushHLEFrame(true, 0x09);
+    auto &hf = env.cpu.lastHLEFrameMut();
+    hf.framePhysAddr = ssBase + spTracked;
+    hf.frameSP = spTracked;
+    hf.stackIs32 = true;
+
+    uint32_t newEip = 0x0000535Eu;
+    uint32_t newCs = env.cpu.getSegReg(cpu::CS);
+    uint32_t popFlagsVal = cpu::FLAG_INTERRUPT | 0x02u;
+    env.mem.write32(ssBase + spChain, newEip);
+    env.mem.write32(ssBase + spChain + 4, newCs);
+    env.mem.write32(ssBase + spChain + 8, popFlagsVal);
+
+    env.cpu.setReg32(cpu::ESP, spChain);
+    env.cpu.setEFLAGS(cpu::FLAG_ZERO | cpu::FLAG_PARITY | 0x02u);
+
+    uint32_t codePhys = env.cpu.getSegBase(cpu::CS) + env.cpu.getEIP();
+    env.mem.write8(codePhys, 0x0F);
+    env.mem.write8(codePhys + 1, 0xFF);
+    env.mem.write8(codePhys + 2, 0x09);
+
+    decoder.step();
+
+    REQUIRE(env.cpu.getEIP() == newEip);
+    REQUIRE(env.cpu.getSegReg(cpu::CS) == static_cast<uint16_t>(newCs & 0xFFFFu));
+    REQUIRE((env.cpu.getEFLAGS() & 0xFFFFu) == (popFlagsVal & 0xFFFFu));
+    REQUIRE((env.kbd.read8(0x64) & 0x01u) == 0);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // isOriginalIVT PM path — controls HLE shortcut in InstructionDecoder
 // ═══════════════════════════════════════════════════════════════════════════

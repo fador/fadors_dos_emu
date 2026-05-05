@@ -9,7 +9,8 @@ namespace fador::memory {
 
 class MemoryBus {
 public:
-  static constexpr uint32_t MEMORY_SIZE = 64 * 1024 * 1024; // 64MB
+  static constexpr uint32_t MEMORY_SIZE = 128 * 1024 * 1024; // 128MB
+
 
   MemoryBus();
   ~MemoryBus() = default;
@@ -100,7 +101,7 @@ public:
   const hw::VGAController *getVGA() const { return m_vga; }
 
 private:
-  static constexpr uint32_t A20_MASK = 0xFFFFF;
+  static constexpr uint32_t A20_MASK = 0xFFEFFFFF;
   static constexpr uint32_t IVT_BDA_LIMIT = 0x400;
   static constexpr uint32_t VGA_PLANAR_START = 0xA0000;
   static constexpr uint32_t VGA_PLANAR_END = 0xB0000;

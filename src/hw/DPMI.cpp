@@ -103,17 +103,27 @@ bool DPMI::handleEntry() {
   uint16_t pspSeg = m_dos ? m_dos->getPSPSegment() : 0x0801;
   m_ldt[selectorToIndex(m_clientPSPSel)] = makeDataDesc(pspSeg);
 
-  // Environment selector — the environment block is at pspSeg - 0x20.
+  // Environment selector — the environment block is pointed to by PSP:0x2C.
   // Create a PM selector for it and patch PSP:0x2C so PM clients can
   // access the environment through the PSP selector chain.
   {
-    uint16_t envSeg = pspSeg - 0x20;
+    uint32_t pspPhys = static_cast<uint32_t>(pspSeg) << 4;
+    uint16_t envSeg = m_memory.read16(pspPhys + 0x2C);
     uint16_t envSel = allocateDescriptors(1);
-    if (envSel) {
+    if (envSel && envSeg != 0) {
       m_ldt[selectorToIndex(envSel)] = makeDataDesc(envSeg);
       // Overwrite PSP:0x2C with the PM environment selector
-      uint32_t pspPhys = static_cast<uint32_t>(pspSeg) << 4;
       m_memory.write16(pspPhys + 0x2C, envSel);
+      LOG_INFO("DPMI: Environment block mapped. RealSeg=0x", std::hex, envSeg, " PMSel=0x", envSel);
+      
+      // Sanity check: log the first few bytes of the environment
+      uint32_t envPhys = static_cast<uint32_t>(envSeg) << 4;
+      char buf[128];
+      for(int i=0; i<127; ++i) buf[i] = m_memory.read8(envPhys + i);
+      buf[127] = 0;
+      LOG_DEBUG("DPMI: Env prefix: ", buf);
+    } else {
+      LOG_WARN("DPMI: Environment block mapping FAILED. envSeg=0x", std::hex, envSeg);
     }
   }
 

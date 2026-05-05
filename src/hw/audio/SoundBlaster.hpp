@@ -43,7 +43,7 @@ private:
   uint8_t m_currentCommand = 0;
 
   // Playback State
-  bool m_speakerOn = false;
+  bool m_speakerOn = true;
   float m_dspSampleRate = 22050.0f;
   float m_systemSampleRate = 44100.0f;
 
