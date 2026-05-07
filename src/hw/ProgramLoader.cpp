@@ -126,7 +126,11 @@ bool ProgramLoader::loadCOM(const std::string &path, uint16_t segment,
   m_cpu.setSegReg(cpu::ES, segment);
   m_cpu.setSegReg(cpu::SS, segment);
   m_cpu.setEIP(0x100);
-  m_cpu.setReg16(cpu::SP, 0xFFFE); // Stack at top of segment
+
+  // MS-DOS natively writes 0x0000 to the top of the stack for COM files.
+  // This allows a simple top-level RET instruction to jump to PSP:0000 (INT 20h)
+  m_memory.write16((segment << 4) + 0xFFFE, 0x0000);
+  m_cpu.setReg16(cpu::SP, 0xFFFE);
 
   LOG_INFO("ProgramLoader: Successfully loaded .COM file: ", path, " at ",
            std::hex, segment, ":0100");
@@ -148,6 +152,7 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
 
   dos.clearOverlayInfo();
 
+#pragma pack(push, 1)
   struct MZHeader {
     uint16_t signature; // 'MZ'
     uint16_t lastPageSize;
@@ -164,6 +169,7 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
     uint16_t relocOffset;
     uint16_t overlayNum;
   } header;
+#pragma pack(pop)
 
   if (!file.read(reinterpret_cast<char *>(&header), sizeof(header))) {
     LOG_ERROR("ProgramLoader: Failed to read EXE header");
@@ -224,6 +230,10 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
       file.seekg(neOffset + 0x32, std::ios::beg);
       uint16_t alignShift = 0;
       file.read(reinterpret_cast<char *>(&alignShift), sizeof(alignShift));
+      
+      if (alignShift == 0) {
+          alignShift = 9; // Per standard: if alignShift is 0, default is 9.
+      }
 
       // Read more tables for debugging relocations
       file.seekg(neOffset + 0x1E, std::ios::beg);
@@ -360,7 +370,11 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
   std::vector<uint8_t> buffer(imageSize);
   file.clear();
   file.seekg(imageOffset, std::ios::beg);
-  if (!file.read(reinterpret_cast<char *>(buffer.data()), imageSize)) {
+  file.read(reinterpret_cast<char *>(buffer.data()), imageSize);
+  
+  // Exes can optionally pad their BSS directly into the size. 
+  // Allow partial reads that hit EOF, but error if 0 bytes were read at all.
+  if (file.gcount() == 0 && imageSize > 0) {
     LOG_ERROR("ProgramLoader: Failed to read EXE image");
     return false;
   }
@@ -417,37 +431,44 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
     if (isNEExe || !fbovOverlays.empty()) {
       // PSP (16 para) + MZ stub (rounded up to paragraph boundary)
       uint16_t stubParas = static_cast<uint16_t>((imageSize + 15u) / 16u);
-      uint16_t loadedParas = 0x10u + stubParas;                // PSP + stub
+      
+      // Calculate requirement limits avoiding stack and BSS truncation inside MCB.
+      uint16_t stackParas = header.ss + static_cast<uint16_t>((header.sp + 15u) / 16u);
+      uint16_t requiredParas = std::max<uint16_t>(stubParas + header.minAlloc, stackParas);
+
+      uint16_t loadedParas = 0x10u + requiredParas;            // PSP + safe limits
       uint16_t pspMcbSeg = static_cast<uint16_t>(segment - 1); // 0x0FFF
-      const uint32_t pspMcbAddr = static_cast<uint32_t>(pspMcbSeg) << 4u;
-      const uint16_t currentProgramParas = m_memory.read16(pspMcbAddr + 3u);
-      const uint8_t nextBlockType = m_memory.read8(pspMcbAddr + 0u);
+
+      // Hard clamp bounds of the new MCB allocation block to Conventional RAM constraints
+      uint16_t maxParas = 0x9FFFu - pspMcbSeg - 1u;
+      if (loadedParas > maxParas) {
+          loadedParas = maxParas;
+      }
 
       // Update PSP MCB size (byte offset 3 within MCB header)
-      m_memory.write16(pspMcbAddr + 3u, loadedParas);
-      // PSP MCB type must be 'M' when another block follows.
-      m_memory.write8(pspMcbAddr + 0u, 'M');
+      m_memory.write16(static_cast<uint32_t>(pspMcbSeg << 4) + 3u, loadedParas);
+      // PSP MCB type must be 'M' (already set by DOS::initialize, just be sure)
+      m_memory.write8(static_cast<uint32_t>(pspMcbSeg << 4), 'M');
 
-      if (currentProgramParas > loadedParas + 1u) {
-        // Write a new free MCB between the loaded image and the next block.
-        uint16_t freeMcbSeg = static_cast<uint16_t>(pspMcbSeg + loadedParas + 1u);
+      // Write a new free MCB right after the PSP+stub block
+      uint16_t freeMcbSeg = static_cast<uint16_t>(pspMcbSeg + loadedParas + 1u);
+      if (freeMcbSeg < 0x9FFF) {
         uint32_t freeMcbAddr = static_cast<uint32_t>(freeMcbSeg) << 4u;
-        uint16_t freeSize =
-            static_cast<uint16_t>(currentProgramParas - loadedParas - 1u);
-        m_memory.write8(freeMcbAddr + 0u, nextBlockType);
+        uint16_t freeSize = static_cast<uint16_t>(0x9FFFu - freeMcbSeg - 1u);
+        m_memory.write8(freeMcbAddr + 0u, 'Z'); // last MCB in chain
         m_memory.write16(freeMcbAddr + 1u, 0u); // owner = 0 (free)
         m_memory.write16(freeMcbAddr + 3u, freeSize);
-        for (uint32_t offset = 0x05; offset < 0x10; ++offset) {
-          m_memory.write8(freeMcbAddr + offset, 0u);
-        }
+        for (int k = 0; k < 8; ++k)
+          m_memory.write8(freeMcbAddr + 8u + k, 0u);
 
         LOG_INFO("ProgramLoader: Overlay-capable MCB updated – PSP block 0x",
                  std::hex, loadedParas, " paras; free block at seg 0x",
                  freeMcbSeg, " size 0x", freeSize, " paras");
+      } else {
+        // Fits perfectly, no room for trailing memory allocations
+        m_memory.write8(static_cast<uint32_t>(pspMcbSeg << 4), 'Z');
+        LOG_INFO("ProgramLoader: Overlay-capable MCB updated – PSP block fills memory constraints");
       }
-
-      m_memory.write16((static_cast<uint32_t>(segment) << 4u) + 0x02,
-                       static_cast<uint16_t>(segment + loadedParas));
     }
   }
 
@@ -485,7 +506,6 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
 
 void ProgramLoader::createPSP(uint16_t segment, const std::string &args,
                               const std::string &programPath) {
-  constexpr uint16_t kEnvBlockParas = 0x20;
   uint32_t pspAddr = (segment << 4);
 
   // Zero the entire 256-byte PSP first so no fields contain 0xCC garbage
@@ -497,40 +517,8 @@ void ProgramLoader::createPSP(uint16_t segment, const std::string &args,
   m_memory.write8(pspAddr + 0x00, 0xCD);
   m_memory.write8(pspAddr + 0x01, 0x20);
 
-  const uint32_t mcbAddr = ((segment - 1u) << 4);
-  const uint8_t mcbType = m_memory.read8(mcbAddr + 0x00);
-  const uint16_t mcbOwner = m_memory.read16(mcbAddr + 0x01);
-  const bool hasOwningMCB = (mcbType == 'M' || mcbType == 'Z') &&
-                            mcbOwner == segment;
-  uint16_t programBlockParas = hasOwningMCB
-                                   ? m_memory.read16(mcbAddr + 0x03)
-                                   : static_cast<uint16_t>(0xA000u - segment);
-  uint16_t envSegment = static_cast<uint16_t>(segment - kEnvBlockParas);
-
-  if (hasOwningMCB && programBlockParas > kEnvBlockParas + 1u) {
-    const uint8_t nextBlockType = mcbType;
-    const uint16_t envMcbSeg =
-        static_cast<uint16_t>(segment + programBlockParas - kEnvBlockParas - 1u);
-    const uint32_t envMcbAddr = static_cast<uint32_t>(envMcbSeg) << 4u;
-
-    programBlockParas =
-        static_cast<uint16_t>(programBlockParas - kEnvBlockParas - 1u);
-    envSegment = static_cast<uint16_t>(envMcbSeg + 1u);
-
-    m_memory.write8(mcbAddr + 0x00, 'M');
-    m_memory.write16(mcbAddr + 0x03, programBlockParas);
-
-    m_memory.write8(envMcbAddr + 0x00, nextBlockType);
-    m_memory.write16(envMcbAddr + 0x01, segment);
-    m_memory.write16(envMcbAddr + 0x03, kEnvBlockParas);
-    for (uint32_t offset = 0x05; offset < 0x10; ++offset) {
-      m_memory.write8(envMcbAddr + offset, 0x00);
-    }
-  }
-
-  // Segment of the first paragraph beyond this program block.
-  m_memory.write16(pspAddr + 0x02,
-                   static_cast<uint16_t>(segment + programBlockParas));
+  // Segment of top of memory at offset 2 (stubbed to 640KB)
+  m_memory.write16(pspAddr + 0x02, 0xA000);
 
   // Saved interrupt vectors (from IVT) at offsets 0x0A-0x15
   // INT 22h (Terminate Address)
@@ -568,12 +556,11 @@ void ProgramLoader::createPSP(uint16_t segment, const std::string &args,
   m_memory.write8(pspAddr + 0x51, 0x21); // 21h
   m_memory.write8(pspAddr + 0x52, 0xCB); // RETF
 
-  // Environment block segment at offset 0x2C.
-  // Prefer a real MCB-backed block owned by the PSP when one is available.
+  // Environment block segment at offset 0x2C
+  // Place environment 0x20 paragraphs (512 bytes) before the PSP
+  // Clamp it from underflowing to segment 0
+  uint16_t envSegment = (segment > 0x20) ? segment - 0x20 : 0;
   uint32_t envAddr = (envSegment << 4);
-  for (uint32_t i = 0; i < static_cast<uint32_t>(kEnvBlockParas) * 16u; ++i) {
-    m_memory.write8(envAddr + i, 0x00);
-  }
 
   // Derive directory containing the program for PATH/LIB/INCLUDE
   std::filesystem::path progFsPath = std::filesystem::absolute(programPath);
