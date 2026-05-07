@@ -15,7 +15,6 @@ namespace fador::hw {
 namespace {
 
 constexpr std::array<uint8_t, 4> kFBOVSignature{{'F', 'B', 'O', 'V'}};
-constexpr uint16_t kEnvBlockParas = 0x20;
 
 uint16_t readLE16(const uint8_t *data) {
   return static_cast<uint16_t>(data[0]) |
@@ -97,7 +96,6 @@ bool ProgramLoader::loadCOM(const std::string &path, uint16_t segment, DOS &dos,
     LOG_ERROR("ProgramLoader: Failed to open .COM file: ", path);
     return false;
   }
-  dos.setProgramPath(path);
 
   std::streamsize size = file.tellg();
   file.seekg(0, std::ios::beg);
@@ -107,32 +105,11 @@ bool ProgramLoader::loadCOM(const std::string &path, uint16_t segment, DOS &dos,
     return false;
   }
 
-  // Allocate environment block FIRST so it stays below the program
-  uint16_t envSegment = dos.allocateMemory(0x20); // kEnvBlockParas = 32 (0x20)
-  if (envSegment == 0) {
-      LOG_ERROR("ProgramLoader: Failed to allocate environment block");
-      return false;
-  }
+  // 1. Create PSP at segment:0000
+  createPSP(segment, args, path);
 
-  // 1. Allocate memory for program: PSP (256 bytes) + image
-  uint16_t parasNeeded = 0x10 + static_cast<uint16_t>((size + 15) / 16);
-  uint16_t progSegment = dos.allocateMemory(parasNeeded);
-  if (progSegment == 0) {
-      LOG_ERROR("ProgramLoader: Failed to allocate memory for .COM file (", parasNeeded, " paras)");
-      return false;
-  }
-  dos.setPSPSegment(progSegment);
-
-  // Re-owner the environment block to the program
-  DOS::MCB envMcb = dos.readMCB(envSegment - 1);
-  envMcb.owner = progSegment;
-  dos.writeMCB(envSegment - 1, envMcb);
-
-  // 2. Create PSP at progSegment:0000
-  createPSP(progSegment, envSegment, dos, args, path);
-
-  // 3. Load file data at progSegment:0100
-  uint32_t loadAddr = (progSegment << 4) + 0x100;
+  // 2. Load file data at segment:0100
+  uint32_t loadAddr = (segment << 4) + 0x100;
   std::vector<uint8_t> buffer(static_cast<size_t>(size));
   if (file.read(reinterpret_cast<char *>(buffer.data()), size)) {
     for (uint32_t i = 0; i < size; ++i) {
@@ -143,16 +120,20 @@ bool ProgramLoader::loadCOM(const std::string &path, uint16_t segment, DOS &dos,
     return false;
   }
 
-  // 4. Set CPU state for .COM execution
-  m_cpu.setSegReg(cpu::CS, progSegment);
-  m_cpu.setSegReg(cpu::DS, progSegment);
-  m_cpu.setSegReg(cpu::ES, progSegment);
-  m_cpu.setSegReg(cpu::SS, progSegment);
+  // 3. Set CPU state for .COM execution
+  m_cpu.setSegReg(cpu::CS, segment);
+  m_cpu.setSegReg(cpu::DS, segment);
+  m_cpu.setSegReg(cpu::ES, segment);
+  m_cpu.setSegReg(cpu::SS, segment);
   m_cpu.setEIP(0x100);
-  m_cpu.setReg16(cpu::SP, 0xFFFE); // Stack at top of segment
+
+  // MS-DOS natively writes 0x0000 to the top of the stack for COM files.
+  // This allows a simple top-level RET instruction to jump to PSP:0000 (INT 20h)
+  m_memory.write16((segment << 4) + 0xFFFE, 0x0000);
+  m_cpu.setReg16(cpu::SP, 0xFFFE);
 
   LOG_INFO("ProgramLoader: Successfully loaded .COM file: ", path, " at ",
-           std::hex, progSegment, ":0100");
+           std::hex, segment, ":0100");
   return true;
 }
 
@@ -169,9 +150,9 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
   const uint32_t fileSize = static_cast<uint32_t>(file.tellg());
   file.seekg(0, std::ios::beg);
 
-  dos.setProgramPath(path);
   dos.clearOverlayInfo();
 
+#pragma pack(push, 1)
   struct MZHeader {
     uint16_t signature; // 'MZ'
     uint16_t lastPageSize;
@@ -188,6 +169,7 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
     uint16_t relocOffset;
     uint16_t overlayNum;
   } header;
+#pragma pack(pop)
 
   if (!file.read(reinterpret_cast<char *>(&header), sizeof(header))) {
     LOG_ERROR("ProgramLoader: Failed to read EXE header");
@@ -204,36 +186,6 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
            header.sp);
   LOG_INFO("ProgramLoader: MZ Entry CS:IP = ", std::hex, header.cs, ":",
            header.ip);
-
-  // 1. Determine size and allocate environment BEFORE program so program can expand
-  uint32_t imageOffset = static_cast<uint32_t>(header.headerSize) * 16;
-  uint32_t mzImageBytes =
-      (static_cast<uint32_t>(header.numPages) - 1) * 512 +
-      (header.lastPageSize == 0 ? 512 : header.lastPageSize);
-  uint32_t imageSize = (mzImageBytes > imageOffset) ? (mzImageBytes - imageOffset) : 0;
-  
-  uint16_t imageParas = static_cast<uint16_t>((imageSize + 15u) / 16u);
-  uint16_t parasNeeded = 0x10 + imageParas + header.minAlloc;
-
-  // Allocate environment block FIRST so it stays below the program
-  uint16_t envSegment = dos.allocateMemory(kEnvBlockParas);
-  if (envSegment == 0) {
-      LOG_ERROR("ProgramLoader: Failed to allocate environment block");
-      return false;
-  }
-
-  // Allocate program block SECOND so it can expand upwards
-  uint16_t progSegment = dos.allocateMemory(parasNeeded);
-  if (progSegment == 0) {
-      LOG_ERROR("ProgramLoader: Failed to allocate memory for .EXE file (", parasNeeded, " paras)");
-      return false;
-  }
-
-  dos.setPSPSegment(progSegment);
-  // Re-owner the environment block to the program
-  DOS::MCB envMcb = dos.readMCB(envSegment - 1);
-  envMcb.owner = progSegment;
-  dos.writeMCB(envSegment - 1, envMcb);
 
   // Check for NE header offset at 0x3C
   file.seekg(0x3C, std::ios::beg);
@@ -278,6 +230,10 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
       file.seekg(neOffset + 0x32, std::ios::beg);
       uint16_t alignShift = 0;
       file.read(reinterpret_cast<char *>(&alignShift), sizeof(alignShift));
+      
+      if (alignShift == 0) {
+          alignShift = 9; // Per standard: if alignShift is 0, default is 9.
+      }
 
       // Read more tables for debugging relocations
       file.seekg(neOffset + 0x1E, std::ios::beg);
@@ -346,7 +302,7 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
           uint32_t mzBaseIdx = (uint32_t)header.headerSize * 16;
           if (fileOff >= mzBaseIdx) {
             seg.loadedSegment =
-                (progSegment + 0x10) + (uint16_t)((fileOff - mzBaseIdx) / 16);
+                (segment + 0x10) + (uint16_t)((fileOff - mzBaseIdx) / 16);
             LOG_INFO("ProgramLoader: Segment ", i + 1,
                      " marked as resident at 0x", std::hex, seg.loadedSegment);
           } else {
@@ -361,7 +317,7 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
                  " flags=0x", seg.flags, " minAlloc=0x", seg.minAlloc);
       }
 
-      dos.setNEInfo(path, alignShift, segments, progSegment + 0x10);
+      dos.setNEInfo(path, alignShift, segments, segment + 0x10);
       LOG_INFO("ProgramLoader: VROOMM Info set. Segments: ", std::dec,
                numSegments, " AlignShift: ", alignShift);
     }
@@ -370,8 +326,8 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
   // Load only the MZ image portion of the file. MS-DOS executables often have
   // extra data appended (overlays, LE/LX headers, debug info) which must NOT
   // be loaded into conventional memory, as it would overflow into VRAM/BIOS.
-  imageOffset = static_cast<uint32_t>(header.headerSize) * 16;
-  mzImageBytes =
+  uint32_t imageOffset = static_cast<uint32_t>(header.headerSize) * 16;
+  uint32_t mzImageBytes =
       (static_cast<uint32_t>(header.numPages) - 1) * 512 +
       (header.lastPageSize == 0 ? 512 : header.lastPageSize);
 
@@ -379,7 +335,7 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
     LOG_ERROR("ProgramLoader: Invalid MZ header (image size < header size)");
     return false;
   }
-  imageSize = mzImageBytes - imageOffset;
+  uint32_t imageSize = mzImageBytes - imageOffset;
 
   bool isNEExe = false;
   std::vector<DOS::FBOVOverlay> fbovOverlays;
@@ -403,16 +359,22 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
     }
   }
 
-  // 2. Create PSP
-  createPSP(progSegment, envSegment, dos, args, path);
+  // For now, let's just use a simple load to segment:0000 (after PSP)
+  // Actually, EXE load usually puts PSP at segment, and image at segment + 10h
+  // (256 bytes)
+  createPSP(segment, args, path);
 
-  uint16_t loadSegment = progSegment + 0x10; // Image starts after 256-byte PSP
+  uint16_t loadSegment = segment + 0x10; // Image starts after 256-byte PSP
   uint32_t loadAddr = (loadSegment << 4);
 
   std::vector<uint8_t> buffer(imageSize);
   file.clear();
   file.seekg(imageOffset, std::ios::beg);
-  if (!file.read(reinterpret_cast<char *>(buffer.data()), imageSize)) {
+  file.read(reinterpret_cast<char *>(buffer.data()), imageSize);
+  
+  // Exes can optionally pad their BSS directly into the size. 
+  // Allow partial reads that hit EOF, but error if 0 bytes were read at all.
+  if (file.gcount() == 0 && imageSize > 0) {
     LOG_ERROR("ProgramLoader: Failed to read EXE image");
     return false;
   }
@@ -454,23 +416,65 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
       m_memory.write8(loadAddr + i, buffer[i]);
     }
 
-    const uint16_t programEndSegment =
-        static_cast<uint16_t>(progSegment + parasNeeded);
-
-    // Update PSP end-of-allocation segment before zero-filling so the
-    // program's minimum allocation area is cleared inside the block we just
-    // reserved for this load.
-    m_memory.write16((static_cast<uint32_t>(progSegment) << 4u) + 0x02,
-                     programEndSegment);
-
     // Zero the remainder of the program's allocated DOS block after the
     // file-backed image. Borland EXEs place startup globals in BSS beyond the
     // on-disk load image and expect them to be zero before runtime init.
-    const uint32_t zeroFillLimit = std::min(
-        static_cast<uint32_t>(programEndSegment) << 4u,
+    const uint32_t programLimit = std::min(
+        static_cast<uint32_t>(m_memory.read16((static_cast<uint32_t>(segment)
+                                               << 4u) +
+                                              0x02))
+            << 4u,
         memory::MemoryBus::MEMORY_SIZE);
+    const uint32_t zeroFillLimit = std::max(loadAddr + imageSize, programLimit);
     for (uint32_t addr = loadAddr + imageSize; addr < zeroFillLimit; ++addr) {
       m_memory.write8(addr, 0u);
+    }
+
+    // For executables with demand-loaded overlays, the PSP MCB was sized to
+    // consume all conventional memory in DOS::initialize(). Shrink the loaded
+    // block to the actual resident image so the remainder is available for
+    // overlay allocations.
+    if (isNEExe || !fbovOverlays.empty()) {
+      // PSP (16 para) + MZ stub (rounded up to paragraph boundary)
+      uint16_t stubParas = static_cast<uint16_t>((imageSize + 15u) / 16u);
+      
+      // Calculate requirement limits avoiding stack and BSS truncation inside MCB.
+      uint16_t stackParas = header.ss + static_cast<uint16_t>((header.sp + 15u) / 16u);
+      uint16_t requiredParas = std::max<uint16_t>(stubParas + header.minAlloc, stackParas);
+
+      uint16_t loadedParas = 0x10u + requiredParas;            // PSP + safe limits
+      uint16_t pspMcbSeg = static_cast<uint16_t>(segment - 1); // 0x0FFF
+
+      // Hard clamp bounds of the new MCB allocation block to Conventional RAM constraints
+      uint16_t maxParas = 0x9FFFu - pspMcbSeg - 1u;
+      if (loadedParas > maxParas) {
+          loadedParas = maxParas;
+      }
+
+      // Update PSP MCB size (byte offset 3 within MCB header)
+      m_memory.write16(static_cast<uint32_t>(pspMcbSeg << 4) + 3u, loadedParas);
+      // PSP MCB type must be 'M' (already set by DOS::initialize, just be sure)
+      m_memory.write8(static_cast<uint32_t>(pspMcbSeg << 4), 'M');
+
+      // Write a new free MCB right after the PSP+stub block
+      uint16_t freeMcbSeg = static_cast<uint16_t>(pspMcbSeg + loadedParas + 1u);
+      if (freeMcbSeg < 0x9FFF) {
+        uint32_t freeMcbAddr = static_cast<uint32_t>(freeMcbSeg) << 4u;
+        uint16_t freeSize = static_cast<uint16_t>(0x9FFFu - freeMcbSeg - 1u);
+        m_memory.write8(freeMcbAddr + 0u, 'Z'); // last MCB in chain
+        m_memory.write16(freeMcbAddr + 1u, 0u); // owner = 0 (free)
+        m_memory.write16(freeMcbAddr + 3u, freeSize);
+        for (int k = 0; k < 8; ++k)
+          m_memory.write8(freeMcbAddr + 8u + k, 0u);
+
+        LOG_INFO("ProgramLoader: Overlay-capable MCB updated – PSP block 0x",
+                 std::hex, loadedParas, " paras; free block at seg 0x",
+                 freeMcbSeg, " size 0x", freeSize, " paras");
+      } else {
+        // Fits perfectly, no room for trailing memory allocations
+        m_memory.write8(static_cast<uint32_t>(pspMcbSeg << 4), 'Z');
+        LOG_INFO("ProgramLoader: Overlay-capable MCB updated – PSP block fills memory constraints");
+      }
     }
   }
 
@@ -497,8 +501,8 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
   m_cpu.setEIP(header.ip);
   m_cpu.setSegReg(cpu::SS, loadSegment + header.ss);
   m_cpu.setReg16(cpu::SP, header.sp);
-  m_cpu.setSegReg(cpu::DS, progSegment); // DS and ES point to PSP
-  m_cpu.setSegReg(cpu::ES, progSegment);
+  m_cpu.setSegReg(cpu::DS, segment); // DS and ES point to PSP
+  m_cpu.setSegReg(cpu::ES, segment);
 
   LOG_INFO("ProgramLoader: Successfully loaded .EXE file: ", path,
            " at CS:EIP=", std::hex, m_cpu.getSegReg(cpu::CS), ":",
@@ -506,7 +510,7 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
   return true;
 }
 
-void ProgramLoader::createPSP(uint16_t segment, uint16_t envSegment, DOS &dos, const std::string &args,
+void ProgramLoader::createPSP(uint16_t segment, const std::string &args,
                               const std::string &programPath) {
   uint32_t pspAddr = (segment << 4);
 
@@ -519,10 +523,8 @@ void ProgramLoader::createPSP(uint16_t segment, uint16_t envSegment, DOS &dos, c
   m_memory.write8(pspAddr + 0x00, 0xCD);
   m_memory.write8(pspAddr + 0x01, 0x20);
 
-  // Segment of the first paragraph beyond this program block.
-  // (Will be updated by the caller)
-  m_memory.write16(pspAddr + 0x02, 0); 
-
+  // Segment of top of memory at offset 2 (stubbed to 640KB)
+  m_memory.write16(pspAddr + 0x02, 0xA000);
 
   // Saved interrupt vectors (from IVT) at offsets 0x0A-0x15
   // INT 22h (Terminate Address)
@@ -560,12 +562,11 @@ void ProgramLoader::createPSP(uint16_t segment, uint16_t envSegment, DOS &dos, c
   m_memory.write8(pspAddr + 0x51, 0x21); // 21h
   m_memory.write8(pspAddr + 0x52, 0xCB); // RETF
 
-  // Environment block segment at offset 0x2C.
-  m_memory.write16(pspAddr + 0x2C, envSegment);
+  // Environment block segment at offset 0x2C
+  // Place environment 0x20 paragraphs (512 bytes) before the PSP
+  // Clamp it from underflowing to segment 0
+  uint16_t envSegment = (segment > 0x20) ? segment - 0x20 : 0;
   uint32_t envAddr = (envSegment << 4);
-  for (uint32_t i = 0; i < static_cast<uint32_t>(kEnvBlockParas) * 16u; ++i) {
-    m_memory.write8(envAddr + i, 0x00);
-  }
 
   // Derive directory containing the program for PATH/LIB/INCLUDE
   std::filesystem::path progFsPath = std::filesystem::absolute(programPath);
@@ -596,7 +597,7 @@ void ProgramLoader::createPSP(uint16_t segment, uint16_t envSegment, DOS &dos, c
   envStr += "INCLUDE=";
   envStr += dosDir;
   envStr += '\0';
-  envStr += "BLASTER=A220 I5 D1 H5 T6";
+  envStr += "BLASTER=A220 I5 D1 T3";
   envStr += '\0';
   envStr += '\0';               // End of variables
   envStr.append("\x01\x00", 2); // Signature for program name follows
@@ -606,11 +607,9 @@ void ProgramLoader::createPSP(uint16_t segment, uint16_t envSegment, DOS &dos, c
   for (size_t i = 0; i < envStr.length(); ++i) {
     m_memory.write8(envAddr + i, static_cast<uint8_t>(envStr[i]));
   }
-  std::string loggedEnv = envStr;
-  for (char &c : loggedEnv) if (c == '\0') c = '|';
+  m_memory.write16(pspAddr + 0x2C, envSegment);
   LOG_INFO("ProgramLoader: Environment block created at segment 0x", std::hex,
-           envSegment, " contents: ", loggedEnv);
-  LOG_INFO("ProgramLoader: Program path: ", dosFullPath);
+           envSegment, ", program path: ", dosFullPath);
 
   // Command tail size at offset 0x80
   // In DOS, the command tail starts with a space before args.

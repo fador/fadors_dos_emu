@@ -28,7 +28,7 @@ private:
     memory::HIMEM* m_himem;
 
     // Creates a 256-byte Program Segment Prefix at the given segment
-    void createPSP(uint16_t segment, uint16_t envSegment, DOS& dos, const std::string& args, const std::string& programPath);
+    void createPSP(uint16_t segment, const std::string& args, const std::string& programPath);
 };
 
 } // namespace fador::hw
