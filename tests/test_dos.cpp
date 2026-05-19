@@ -71,7 +71,7 @@ TEST_CASE("DOS Emulation and Program Loading", "[DOS]") {
             ofs.write(reinterpret_cast<const char*>(code), sizeof(code));
         }
 
-        REQUIRE(loader.loadCOM("test.com", 0x1000));
+        REQUIRE(loader.loadCOM("test.com", 0x1000, dos));
 
         // Verify PSP
         REQUIRE(mem.read8(0x10000) == 0xCD); // INT 20h

@@ -121,11 +121,11 @@ void DOS::initialize() {
   std::strcpy(system.name, "SDATA");
   writeMCB(FIRST_MCB_SEGMENT, system);
 
-  // Block 2: Free memory for everything else
+  // Block 2: User program block, initially owned by the program PSP
   uint16_t freeSeg = FIRST_MCB_SEGMENT + 0x10 + 1;
   MCB free;
   free.type = 'Z';
-  free.owner = 0;
+  free.owner = freeSeg + 1; // Owned by the program PSP at 0x0812
   free.size = LAST_PARA - freeSeg;
   for (int i = 0; i < 8; ++i) free.name[i] = 0;
   writeMCB(freeSeg, free);
@@ -136,9 +136,8 @@ void DOS::initialize() {
            FIRST_MCB_SEGMENT, " size 0x10; Free block at 0x", freeSeg, 
            " size 0x", free.size);
 
-  // Default DTA is at offset 0x80 of a placeholder PSP
-  // (Will be updated when program is loaded)
-  m_pspSegment = 0; 
+  // Default DTA is at offset 0x80 of the loaded program PSP
+  m_pspSegment = freeSeg + 1; 
   m_dtaPtr = 0x00000080;
 }
 
