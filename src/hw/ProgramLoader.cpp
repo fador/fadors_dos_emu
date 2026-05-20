@@ -350,6 +350,26 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
     }
   }
 
+  // For NE/VROOMM executables, the MZ numPages can describe an image far larger
+  // than conventional memory (640 KB). On a real PC the DOS loader only loads
+  // what fits; overlay segments beyond that boundary are fetched on demand by
+  // the VROOMM runtime via INT 3Fh. If we load the full image with A20
+  // disabled (the default), addresses >= 0x100000 wrap back through the A20
+  // mask and overwrite the program's own already-loaded code — including the
+  // entry point. Cap the resident load to what fits below 0xA0000.
+  {
+    uint16_t loadSegment_tmp = segment + 0x10;
+    uint32_t loadAddr_tmp = static_cast<uint32_t>(loadSegment_tmp) << 4;
+    constexpr uint32_t kConventionalLimit = 0xA0000;
+    if (loadAddr_tmp + imageSize > kConventionalLimit) {
+      uint32_t cappedSize = kConventionalLimit - loadAddr_tmp;
+      LOG_WARN("ProgramLoader: MZ image (0x", std::hex, imageSize,
+               " bytes) exceeds conventional memory; capping load to 0x",
+               cappedSize, " bytes");
+      imageSize = cappedSize;
+    }
+  }
+
   if (!isNEExe) {
     fbovOverlays = parseFBOVOverlays(file, mzImageBytes, fileSize);
     if (!fbovOverlays.empty()) {
