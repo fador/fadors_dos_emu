@@ -28,11 +28,11 @@ uint32_t readLE32(const uint8_t *data) {
          (static_cast<uint32_t>(data[3]) << 24);
 }
 
+// Fixed: Corrected to match true 32-bit fields of Borland FBOV structure
 struct FBOVHeader {
-  uint16_t blockSize;
-  uint16_t overlayId;
-  uint32_t auxOffset;
-  uint32_t auxCount;
+  uint32_t ovrSize;   // Total size of the overlay block data area
+  uint32_t exeInfo;   // File offset targeting the internal segment map table
+  uint32_t segNum;    // Count of overlay segments
 };
 
 std::vector<DOS::FBOVOverlay>
@@ -55,25 +55,27 @@ parseFBOVOverlays(std::ifstream &file, uint32_t startOffset, uint32_t fileSize) 
   while (it != tail.end()) {
     const size_t relOffset =
         static_cast<size_t>(std::distance(tail.begin(), it));
-    if (tail.size() - relOffset < 16u)
+    if (tail.size() - relOffset < kFBOVSignature.size() + 12u)
       break;
 
     const uint8_t *headerData = tail.data() + relOffset + kFBOVSignature.size();
-    const FBOVHeader header{readLE16(headerData + 0), readLE16(headerData + 2),
-                            readLE32(headerData + 4), readLE32(headerData + 8)};
+    const FBOVHeader header{readLE32(headerData + 0), 
+                            readLE32(headerData + 4), 
+                            readLE32(headerData + 8)};
     const uint32_t absOffset = startOffset + static_cast<uint32_t>(relOffset);
 
-    const bool valid =
-        header.blockSize >= 16u && header.overlayId != 0 &&
-        absOffset + header.blockSize <= fileSize;
+    // Size of full FBOV block = 4-byte signature + 12-byte header + data size
+    const uint32_t totalBlockSize = kFBOVSignature.size() + 12u + header.ovrSize;
+    const bool valid = header.ovrSize > 0 && relOffset + totalBlockSize <= tail.size();
+
     if (valid) {
-      overlays.push_back({header.overlayId, absOffset, header.blockSize,
-                          header.auxOffset, header.auxCount, 0});
+      overlays.push_back({0, absOffset, header.ovrSize,
+                          header.exeInfo, header.segNum, 0});
     }
 
     auto next = it + 1;
     if (valid) {
-      next = tail.begin() + static_cast<std::ptrdiff_t>(relOffset + header.blockSize);
+      next = tail.begin() + static_cast<std::ptrdiff_t>(relOffset + totalBlockSize);
     }
     it = std::search(next, tail.end(), kFBOVSignature.begin(),
                      kFBOVSignature.end());
@@ -445,7 +447,12 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
                                               0x02))
             << 4u,
         memory::MemoryBus::MEMORY_SIZE);
-    const uint32_t zeroFillLimit = std::max(loadAddr + imageSize, programLimit);
+    
+    // Fixed: Clamped zeroFillLimit to 0xA0000 to prevent wiping real video memory
+    uint32_t zeroFillLimit = std::max(loadAddr + imageSize, programLimit);
+    if (zeroFillLimit > 0xA0000) {
+      zeroFillLimit = 0xA0000;
+    }
     for (uint32_t addr = loadAddr + imageSize; addr < zeroFillLimit; ++addr) {
       m_memory.write8(addr, 0u);
     }
@@ -455,10 +462,14 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
     // block to the actual resident image so the remainder is available for
     // overlay allocations.
     if (isNEExe || !fbovOverlays.empty()) {
-      // PSP (16 para) + MZ stub (rounded up to paragraph boundary)
-      uint16_t stubParas = static_cast<uint16_t>((imageSize + 15u) / 16u);
-      
-      // Calculate requirement limits avoiding stack and BSS truncation inside MCB.
+      uint32_t stubBytes;
+      if (isNEExe && neOffset > imageOffset) {
+        stubBytes = neOffset - imageOffset;
+      } else {
+        stubBytes = imageSize;
+      }
+      uint16_t stubParas = static_cast<uint16_t>((stubBytes + 15u) / 16u);
+
       uint16_t stackParas = header.ss + static_cast<uint16_t>((header.sp + 15u) / 16u);
       uint16_t requiredParas = std::max<uint16_t>(stubParas + header.minAlloc, stackParas);
 
@@ -480,9 +491,10 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
       uint16_t freeMcbSeg = static_cast<uint16_t>(pspMcbSeg + loadedParas + 1u);
       if (freeMcbSeg < 0x9FFF) {
         uint32_t freeMcbAddr = static_cast<uint32_t>(freeMcbSeg) << 4u;
-        uint16_t freeSize = static_cast<uint16_t>(0x9FFFu - freeMcbSeg - 1u);
-        m_memory.write8(freeMcbAddr + 0u, 'Z'); // last MCB in chain
-        m_memory.write16(freeMcbAddr + 1u, 0u); // owner = 0 (free)
+        // Fixed: Off-by-one correction for available paragraphs mapping up to 0x9FFF
+        uint16_t freeSize = static_cast<uint16_t>(0x9FFFu - freeMcbSeg);
+        m_memory.write8(freeMcbAddr + 0u, 'Z'); 
+        m_memory.write16(freeMcbAddr + 1u, 0u); 
         m_memory.write16(freeMcbAddr + 3u, freeSize);
         for (int k = 0; k < 8; ++k)
           m_memory.write8(freeMcbAddr + 8u + k, 0u);
@@ -510,6 +522,10 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
         LOG_ERROR("ProgramLoader: Relocation address out of DOS memory: 0x",
                   std::hex, relocAddr);
         return false;
+      }
+      // Fixed: Prevent executing relocations on components left unloaded by conventional limits
+      if (relocAddr >= loadAddr + imageSize) {
+        continue;
       }
       uint16_t val = m_memory.read16(relocAddr);
       m_memory.write16(relocAddr, val + loadSegment);

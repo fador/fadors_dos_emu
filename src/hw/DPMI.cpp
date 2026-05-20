@@ -3,6 +3,7 @@
 #include "DOS.hpp"
 #include "../utils/Logger.hpp"
 #include <cstring>
+#include <algorithm>
 
 namespace fador::hw {
 
@@ -24,6 +25,20 @@ DPMI::DPMI(cpu::CPU &cpu, memory::MemoryBus &memory)
 
 // ── INT 2Fh AX=1687h — DPMI detection ───────────────────────────────────────
 void DPMI::handleDetect() {
+  // --- Inline State Reset to Guarantee Clean Environment Across Runs ---
+  m_active = false;
+  std::fill(m_ldtUsed.begin(), m_ldtUsed.end(), false);
+  std::fill(m_ldtBatchAlloc.begin(), m_ldtBatchAlloc.end(), false);
+  m_ldtUsed[0] = true; // null descriptor
+  m_coprocessorClientFlags = 0;
+  m_is32BitClient = false;
+  m_memBlocks.clear();
+  m_nextBlockHandle = 1;
+  for (auto &desc : m_ldt) {
+    desc.low = 0;
+    desc.high = 0;
+  }
+
   m_cpu.setReg16(cpu::AX, 0x0000); // DPMI is available
   m_cpu.setReg16(cpu::BX, 0x0001); // Flags: 32-bit programs supported
   m_cpu.setReg8(cpu::CL, 0x03);    // Processor type: 386
@@ -32,7 +47,7 @@ void DPMI::handleDetect() {
   m_cpu.setReg16(cpu::SI, 0x0000); // Paragraphs needed for host data (0)
   m_cpu.setSegReg(cpu::ES, DPMI_ENTRY_SEG);
   m_cpu.setReg16(cpu::DI, DPMI_ENTRY_OFF);
-  LOG_DEBUG("DPMI: Detection → available, entry at F000:0050");
+  LOG_DEBUG("DPMI: Detection → initialized and reset. Entry at F000:0050");
 }
 
 // ── DPMI entry — real mode → protected mode ─────────────────────────────────
@@ -405,26 +420,13 @@ void DPMI::handleDescriptorMgmt() {
     int idx = selectorToIndex(sel);
     if (idx > 0 && idx < MAX_LDT && m_ldtUsed[idx]) {
       auto &d = m_ldt[idx];
-      uint8_t accessByte = rights & 0xFF;
-      // DPMI spec: Present bit (bit 7) must be set and DPL must match CPL.
-      // If invalid, reject the call without modifying the descriptor.
-      uint8_t present = (accessByte >> 7) & 1;
-      uint8_t dpl = (accessByte >> 5) & 3;
-      if (!present || dpl != 3) {
-        LOG_DEBUG("DPMI 0009h: Rejected sel=0x", std::hex, sel,
-                  " CX=0x", rights, " (P=", (int)present, " DPL=", (int)dpl, ")");
-        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
-        m_cpu.setReg16(cpu::AX, 0x8021);
-        break;
-      }
-      // CL = access byte (bits 8-15 of high dword)
-      // CH bits 4-7 = G/D/L/AVL (bits 20-23 of high dword)
+      // DPMI spec: Present bit (bit 7) must be forced to 1, and the DPL 
+      // (bits 5-6) must be forced to the client's current CPL (usually 3).
+      // We should not reject clients with unaligned bits, but force conformant values.
+      uint8_t accessByte = (rights & 0xFF) | 0x80; // force present
+      accessByte = (accessByte & ~0x60) | 0x60;   // force DPL=3
       uint8_t extNibble = (rights >> 12) & 0x0F;
-      // Always update the access byte. For the flags nibble (G/D/L/AVL),
-      // only update when the caller provides non-zero extended type.
-      // 16-bit LAR (used by DOS/4GW's 16-bit stub code) can't capture
-      // the flags nibble; passing CH=0 should not clear D/G on
-      // descriptors that already have them set.
+      
       d.high = (d.high & ~0x0000FF00U) |
                (static_cast<uint32_t>(accessByte) << 8);
       if (extNibble != 0) {
@@ -505,18 +507,19 @@ void DPMI::handleDescriptorMgmt() {
       // Sync m_ldt from physical memory in case it was modified externally
       m_ldt[idx].low = physLow;
       m_ldt[idx].high = physHigh;
-      // If incoming descriptor has access byte = 0 (Not Present, no type),
-      // preserve existing access byte and flags from current descriptor.
-      // DOS/4GW sets base+limit via 0x000C with zero access, expecting
-      // existing access rights to persist.
+      
       uint8_t incomingAccess = (newHigh >> 8) & 0xFF;
       if (incomingAccess == 0) {
         // Preserve both access byte and flags nibble when access is 0.
-        // DOS/4GW sets base+limit via 0x000C with zero access, expecting
-        // existing access rights to persist.
         newHigh = (newHigh & ~0x00F0FF00U) |
                   (m_ldt[idx].high & 0x00F0FF00U);
+      } else {
+        // Force Present=1 and DPL=3 on user-supplied descriptors to preserve Ring-3 access
+        incomingAccess |= 0x80;
+        incomingAccess = (incomingAccess & ~0x60) | 0x60;
+        newHigh = (newHigh & ~0x0000FF00U) | (static_cast<uint32_t>(incomingAccess) << 8);
       }
+      
       m_ldt[idx].low = newLow;
       m_ldt[idx].high = newHigh;
       uint32_t newBase = extractBase(m_ldt[idx]);
@@ -669,16 +672,16 @@ void DPMI::handleInterruptVectors() {
     uint16_t newSel = m_cpu.getReg16(cpu::CX);
     uint32_t newOff = m_is32BitClient ? m_cpu.getReg32(cpu::EDX)
                                       : m_cpu.getReg16(cpu::DX);
-      // Skip updates (both m_pmVectors and IDT) when the caller is restoring our
-      // own HLE stub for this vector. That is a save/restore operation by a
-      // sub-host (e.g. DOS/4GW cleanup) and must not disturb the chain-wrappers
-      // that are currently installed.
-      {
-        uint32_t hleStub = 0xF0000u + 0x0100u + static_cast<uint32_t>(vec) * 4;
-        bool isRestoringHleStub = (newSel == 0x0008 && newOff == hleStub);
-        if (!isRestoringHleStub) {
-          m_pmVectors[vec].selector = newSel;
-          m_pmVectors[vec].offset = newOff;
+    // Skip updates (both m_pmVectors and IDT) when the caller is restoring our
+    // own HLE stub for this vector. That is a save/restore operation by a
+    // sub-host (e.g. DOS/4GW cleanup) and must not disturb the chain-wrappers
+    // that are currently installed.
+    {
+      uint32_t hleStub = 0xF0000u + 0x0100u + static_cast<uint32_t>(vec) * 4;
+      bool isRestoringHleStub = (newSel == 0x0008 && newOff == hleStub);
+      if (!isRestoringHleStub) {
+        m_pmVectors[vec].selector = newSel;
+        m_pmVectors[vec].offset = newOff;
         uint32_t idtAddr = IDT_PM_PHYS + vec * 8;
         uint32_t low =
             (static_cast<uint32_t>(newSel) << 16) | (newOff & 0xFFFF);
@@ -765,6 +768,7 @@ void DPMI::handleTranslation() {
   case 0x0301: // Call Real Mode Procedure With Far Return Frame
   case 0x0302: // Call Real Mode Procedure With IRET Frame
   {
+    bool handled = false;
     uint8_t intNo = m_cpu.getReg8(cpu::BL);
     uint32_t structAddr = getLinearAddr(cpu::ES, cpu::EDI);
     uint32_t reqRmEax = m_is32BitClient ? m_memory.read32(structAddr + 0x1C)
@@ -850,11 +854,7 @@ void DPMI::handleTranslation() {
     }
     #endif
 
-    // Load registers from the RM call structure (50 bytes):
-    // +00: EDI, +04: ESI, +08: EBP, +0C: reserved
-    // +10: EBX, +14: EDX, +18: ECX, +1C: EAX
-    // +20: FLAGS, +22: ES, +24: DS, +26: FS, +28: GS
-    // +2A: IP, +2C: CS, +2E: SP, +30: SS
+    // Load registers from the RM call structure (50 bytes)
     if (m_is32BitClient) {
       m_cpu.setReg32(cpu::EDI, m_memory.read32(structAddr + 0x00));
       m_cpu.setReg32(cpu::ESI, m_memory.read32(structAddr + 0x04));
@@ -864,8 +864,6 @@ void DPMI::handleTranslation() {
       m_cpu.setReg32(cpu::ECX, m_memory.read32(structAddr + 0x18));
       m_cpu.setReg32(cpu::EAX, m_memory.read32(structAddr + 0x1C));
     } else {
-      // 16-bit clients use only low halves in this structure.
-      // Zero-extend to avoid propagating stale high-word garbage.
       m_cpu.setReg32(cpu::EDI, m_memory.read16(structAddr + 0x00));
       m_cpu.setReg32(cpu::ESI, m_memory.read16(structAddr + 0x04));
       m_cpu.setReg32(cpu::EBP, m_memory.read16(structAddr + 0x08));
@@ -882,6 +880,13 @@ void DPMI::handleTranslation() {
     uint16_t rmGS = m_memory.read16(structAddr + 0x28);
     uint16_t rmSP = m_memory.read16(structAddr + 0x2E);
     uint16_t rmSS = m_memory.read16(structAddr + 0x30);
+
+    // DPMI Spec: If SS and SP are both zero, the host must supply a safe,
+    // temporary real-mode stack instead of allowing stack corruption.
+    if (rmSS == 0 && rmSP == 0) {
+      rmSS = 0x0070; // safe conventional segment (BIOS data area wrapper)
+      rmSP = 0x03F0; // safe top-of-segment offset
+    }
 
     // Temporarily set RM state for the call
     m_cpu.setEFLAGS((m_cpu.getEFLAGS() & 0xFFFF0000) | rmFlags);
@@ -924,8 +929,6 @@ void DPMI::handleTranslation() {
 
     if (func == 0x0300) {
       LOG_DEBUG("DPMI 0300h: Simulate RM INT 0x", std::hex, (int)intNo);
-      // Use HLE to handle the interrupt directly
-      bool handled = false;
       if (m_dos && m_dos->handleInterrupt(intNo))
         handled = true;
       if (!handled && m_bios && m_bios->handleInterrupt(intNo))
@@ -951,7 +954,6 @@ void DPMI::handleTranslation() {
                  " structAddr=", structAddr);
       }
       // Try HLE at the target address
-      bool handled = false;
       // Check if the target is one of our HLE stubs: F000:(0x100 + v*4).
       // We match against the known stub layout directly rather than the
       // runtime IVT, which may have been hooked by DOS extenders/TSRs.
@@ -991,23 +993,10 @@ void DPMI::handleTranslation() {
       if (!handled) {
         LOG_WARN("DPMI 030", (int)(func & 0xF),
                  "h: RM proc at ", std::hex, rmCS, ":", rmIP, " not handled");
-        // Signal failure to the caller — set CF in the returned flags
-        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
       }
     }
 
     // Write back modified registers to the call structure
-    {
-      uint16_t retFlags = static_cast<uint16_t>(m_cpu.getEFLAGS() & 0xFFFF);
-      bool retCF = !!(retFlags & cpu::FLAG_CARRY);
-      /*
-      LOG_INFO("DPMI 030xh result: AX=", std::hex,
-                m_cpu.getReg16(cpu::AX),
-                " BX=", m_cpu.getReg16(cpu::BX),
-                " CF=", retCF ? 1 : 0,
-                " ES=", m_cpu.getSegReg(cpu::ES));
-                */
-    }
     if (m_is32BitClient) {
       m_memory.write32(structAddr + 0x00, m_cpu.getReg32(cpu::EDI));
       m_memory.write32(structAddr + 0x04, m_cpu.getReg32(cpu::ESI));
@@ -1069,7 +1058,7 @@ void DPMI::handleTranslation() {
     }
     #endif
 
-    // Restore PM state
+    // Restore PM state completely
     for (int i = 0; i < 8; i++)
       m_cpu.setReg32(i, savedRegs[i]);
     for (int i = 0; i < 6; i++) {
@@ -1077,9 +1066,16 @@ void DPMI::handleTranslation() {
       m_cpu.setSegBase(i, savedSegBases[i]);
     }
     m_cpu.setEIP(savedEIP);
-    m_cpu.setEFLAGS(savedEFLAGS & ~cpu::FLAG_CARRY);
     m_cpu.setIs32BitCode(savedIs32Code);
     m_cpu.setIs32BitStack(savedIs32Stack);
+
+    // DPMI Spec: Carry flag must be set/cleared on DPMI-level call success/failure
+    if (handled) {
+      m_cpu.setEFLAGS(savedEFLAGS & ~cpu::FLAG_CARRY);
+    } else {
+      m_cpu.setEFLAGS(savedEFLAGS | cpu::FLAG_CARRY);
+      m_cpu.setReg16(cpu::AX, 0x8011); // Request failed / simulation unsupported
+    }
 
     #if FADOR_ENABLE_DEBUG_DIAGNOSTICS
     if (func == 0x0302) {
@@ -1469,13 +1465,12 @@ void DPMI::handleRawSwitchRMtoPM() {
   uint16_t newDS = m_cpu.getReg16(cpu::AX);
   uint16_t newCS = m_cpu.getReg16(cpu::CX);
   uint16_t newSS = m_cpu.getReg16(cpu::DX);
-  uint32_t newESP = m_cpu.getReg32(cpu::EBX);
-  // The real-mode raw switch stub provides the return offset in SI.
-  // Zero-extend it so stale ESI high bits cannot turn into a bogus PM EIP.
-  uint32_t newEIP = m_cpu.getReg16(cpu::SI);
+  
+  // Capture the raw register configurations first
+  uint32_t rawEBX = m_cpu.getReg32(cpu::EBX);
+  uint32_t rawESI = m_cpu.getReg32(cpu::ESI);
 
-  LOG_DEBUG("DPMI: Raw switch RM→PM CS=", std::hex, newCS, " EIP=", newEIP,
-            " DS=", newDS, " SS:ESP=", newSS, ":", newESP);
+  LOG_DEBUG("DPMI: Raw switch RM→PM. CS=0x", std::hex, newCS, " DS=0x", newDS);
 
   // Switch to protected mode
   m_cpu.setCR(0, m_cpu.getCR(0) | 1);
@@ -1525,12 +1520,20 @@ void DPMI::handleRawSwitchRMtoPM() {
   decodePMSelector(newCS, csBase, cs32, csValid);
   decodePMSelector(newDS, dsBase, ds32, dsValid);
   decodePMSelector(newSS, ssBase, ss32, ssValid);
+  
   m_cpu.setSegBase(cpu::CS, csBase);
   m_cpu.setSegBase(cpu::DS, dsBase);
   m_cpu.setSegBase(cpu::SS, ssBase);
   m_cpu.setSegBase(cpu::ES, dsBase);
   m_cpu.setSegBase(cpu::FS, 0);
   m_cpu.setSegBase(cpu::GS, 0);
+
+  // Resolve target EIP and ESP dynamically:
+  // Use 32-bit registers (ESI/EBX) if the segment descriptor specifies 
+  // 32-bit width. Otherwise, fallback to zero-extended 16-bit registers (SI/BX)
+  // to avoid garbage propagation from real-mode stubs.
+  uint32_t newEIP = cs32 ? rawESI : (rawESI & 0xFFFF);
+  uint32_t newESP = ss32 ? rawEBX : (rawEBX & 0xFFFF);
 
   m_cpu.setReg32(cpu::ESP, newESP);
   m_cpu.setEIP(newEIP);
