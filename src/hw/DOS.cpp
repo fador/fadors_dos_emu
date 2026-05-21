@@ -5,6 +5,7 @@
 #include "DOS.hpp"
 #include "DPMI.hpp"
 #include "KeyboardController.hpp"
+#include "ProgramLoader.hpp"
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
@@ -228,9 +229,21 @@ bool DOS::handleInterrupt(uint8_t vector) {
     } else if (ax == 0x1680) {
       // Release time slice (no-op)
       m_cpu.setReg8(cpu::AL, 0x00);
+    } else if (ax == 0xFB42) {
+      uint16_t bx = m_cpu.getReg16(cpu::BX);
+      uint16_t cx = m_cpu.getReg16(cpu::CX);
+      LOG_DEBUG("DOS: INT 2Fh AX=FB42h BX=0x", std::hex, bx, " CX=0x", cx, " (DPMILOAD installation check)");
+      if (bx == 0x0014 && cx == 0x0001) {
+        m_cpu.setReg16(cpu::BX, 0x0000);
+      }
     } else {
-      LOG_DOS("DOS: INT 2Fh Multiplex (stubbed), AX=0x", std::hex, ax);
-      m_cpu.setReg8(cpu::AL, 0x00);
+      LOG_DOS("DOS: INT 2Fh Multiplex (unhandled), AX=0x", std::hex, ax);
+      // Default to AL=00h for unhandled DOS internal multiplex calls (AH=12h).
+      // Other unknown multiplex calls (e.g. Borland TC.EXE checking AX=FB43h)
+      // should leave registers unchanged so callers can detect installation absence.
+      if ((ax >> 8) == 0x12) {
+        m_cpu.setReg8(cpu::AL, 0x00);
+      }
     }
     return true;
   }
@@ -650,8 +663,159 @@ void DOS::handleDOSService() {
     std::string filename =
         resolvePath(readFilename(m_cpu.getSegBase(cpu::DS) + dx));
     LOG_DOS("DOS: Exec '", filename, "' mode ", (int)mode);
-    m_cpu.setReg16(cpu::AX, 0x02); // File not found (simplified stub)
-    m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+
+    if (mode == 0) { // Load and execute
+      // Find largest free block
+      uint16_t current = FIRST_MCB_SEGMENT;
+      uint16_t largestFree = 0;
+      while (true) {
+        MCB mcb = readMCB(current);
+        if (mcb.owner == 0 && mcb.size > largestFree) {
+          largestFree = mcb.size;
+        }
+        if (mcb.type == 'Z') break;
+        uint32_t next = (uint32_t)current + mcb.size + 1;
+        if (next > 0xFFFF || next > LAST_PARA) break;
+        current = static_cast<uint16_t>(next);
+      }
+
+      uint16_t childSeg = allocateMemory(largestFree, 0xFFFF);
+      if (childSeg == 0) {
+        LOG_ERROR("DOS: Exec failed: Insufficient memory to allocate child process block.");
+        m_cpu.setReg16(cpu::AX, 0x08); // Insufficient memory
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+        break;
+      }
+
+      // Read parameter block from ES:BX
+      uint32_t paramBlockAddr = m_cpu.getSegBase(cpu::ES) + m_cpu.getReg16(cpu::BX);
+      uint16_t envSeg = m_memory.read16(paramBlockAddr);
+      uint32_t cmdTailPtr = m_memory.read32(paramBlockAddr + 2);
+      uint16_t cmdTailOffset = cmdTailPtr & 0xFFFF;
+      uint16_t cmdTailSeg = cmdTailPtr >> 16;
+      uint32_t cmdTailPhys = (static_cast<uint32_t>(cmdTailSeg) << 4) + cmdTailOffset;
+
+      uint8_t cmdTailLen = m_memory.read8(cmdTailPhys);
+
+
+      std::string args;
+      for (uint8_t i = 0; i < cmdTailLen; ++i) {
+        args += static_cast<char>(m_memory.read8(cmdTailPhys + 1 + i));
+      }
+      if (!args.empty() && args[0] == ' ') {
+        args = args.substr(1);
+      }
+
+      // Recover parent IP, CS, and FLAGS
+      uint32_t ssBase = m_cpu.getSegBase(cpu::SS);
+      uint32_t currentESP = m_cpu.is32BitStack() ? m_cpu.getReg32(cpu::ESP) : m_cpu.getReg16(cpu::SP);
+      
+      uint32_t parentEIP = 0;
+      uint16_t parentCS = 0;
+      uint32_t parentEFLAGS = 0;
+      uint32_t parentESP_restored = 0;
+
+      uint16_t currentCS = m_cpu.getSegReg(cpu::CS);
+      uint32_t currentEIP = m_cpu.getEIP();
+      bool inPM = (m_cpu.getCR(0) & 1);
+      bool isInsideStub = false;
+      if (inPM) {
+        isInsideStub = (currentCS == 0x08 || currentCS == 0x0B) && (currentEIP >= 0xF0000 && currentEIP < 0x100000);
+      } else {
+        isInsideStub = (currentCS == 0xF000);
+      }
+
+      if (!isInsideStub) {
+        // HLE shortcut path: registers hold return state directly
+        parentEIP = currentEIP;
+        parentCS = currentCS;
+        parentEFLAGS = m_cpu.getEFLAGS();
+        parentESP_restored = currentESP;
+      } else {
+        // Trap path: read from stack frame (IRET frame currently pushed on stack)
+        bool is32 = m_cpu.is32BitCode();
+        if (is32) {
+          parentEIP = m_memory.read32(ssBase + currentESP);
+          parentCS = m_memory.read32(ssBase + currentESP + 4) & 0xFFFF;
+          parentEFLAGS = m_memory.read32(ssBase + currentESP + 8);
+          parentESP_restored = currentESP + 12;
+        } else {
+          parentEIP = m_memory.read16(ssBase + currentESP);
+          parentCS = m_memory.read16(ssBase + currentESP + 2);
+          parentEFLAGS = m_memory.read16(ssBase + currentESP + 4);
+          parentESP_restored = currentESP + 6;
+        }
+      }
+
+      // Save parent state
+      ProcessState parent;
+      for (int i = 0; i < 8; ++i) {
+        parent.regs[i] = m_cpu.getReg32(i);
+      }
+      parent.regs[cpu::ESP] = parentESP_restored; // Use stack pointer with discarded IRET frame
+
+      for (int i = 0; i < 6; ++i) {
+        parent.segRegs[i] = m_cpu.getSegReg(i);
+        parent.segBase[i] = m_cpu.getSegBase(i);
+      }
+      parent.is32BitCode = m_cpu.is32BitCode();
+      parent.is32BitStack = m_cpu.is32BitStack();
+      parent.eip = parentEIP;
+      parent.eflags = parentEFLAGS & ~cpu::FLAG_CARRY; // clear carry flag on restore path
+      parent.hleStack = m_cpu.getHLEStack();
+
+      parent.pspSegment = m_pspSegment;
+      parent.dtaPtr = m_dtaPtr;
+      parent.programPath = m_programPath;
+      parent.m_neAlignShift = m_neAlignShift;
+      parent.m_neInitialLoadSegment = m_neInitialLoadSegment;
+      parent.m_neSegments = m_neSegments;
+      parent.m_fbovOverlays = m_fbovOverlays;
+      parent.fileHandlesCount = m_fileHandles.size();
+
+      parent.currentDir = m_currentDir;
+      parent.dosCurrentDir = m_dosCurrentDir;
+      parent.childMemorySeg = childSeg;
+
+      // Load the child process
+      ProgramLoader loader(m_cpu, m_memory, m_himem.get());
+      bool loaded = false;
+      std::string lowerFilename = filename;
+      std::transform(lowerFilename.begin(), lowerFilename.end(), lowerFilename.begin(), ::tolower);
+      if (lowerFilename.length() >= 4 && lowerFilename.substr(lowerFilename.length() - 4) == ".com") {
+        loaded = loader.loadCOM(filename, childSeg, *this, args, envSeg);
+      } else {
+        loaded = loader.loadEXE(filename, childSeg, *this, args, false, envSeg);
+      }
+
+      if (loaded) {
+        // Child PSP parent pointer update
+        uint32_t pspPhys = (static_cast<uint32_t>(childSeg) << 4);
+        m_memory.write16(pspPhys + 0x16, parent.pspSegment);
+
+        // Push parent state
+        m_processStack.push_back(parent);
+
+        // Setup child environment
+        m_pspSegment = childSeg;
+        m_dtaPtr = (static_cast<uint32_t>(childSeg) << 16) | 0x80;
+
+        m_execTriggered = true;
+
+        // Clear Carry flag in CPU registers
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+        LOG_INFO("DOS: Exec child process '", filename, "' successfully loaded at segment 0x", std::hex, childSeg);
+      } else {
+        LOG_ERROR("DOS: Exec child process '", filename, "' failed to load.");
+        freeMemory(childSeg);
+        m_cpu.setReg16(cpu::AX, 0x02); // File not found / general load error
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      }
+    } else {
+      LOG_WARN("DOS: Exec mode ", (int)mode, " not supported");
+      m_cpu.setReg16(cpu::AX, 0x01); // Invalid function
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+    }
     break;
   }
   case 0x2C: { // Get System Time
@@ -681,6 +845,13 @@ void DOS::handleDOSService() {
   case 0x4C: { // Terminate with return code
     uint8_t al = m_cpu.getReg8(cpu::AL);
     terminateProcess(al);
+    break;
+  }
+  case 0x4D: { // Get Return Code
+    m_cpu.setReg8(cpu::AL, m_lastChildExitCode);
+    m_cpu.setReg8(cpu::AH, 0); // Normal termination
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    LOG_DOS("DOS: Get Return Code -> AL=0x", std::hex, (int)m_lastChildExitCode);
     break;
   }
   case 0x48: // Allocate Memory
@@ -733,8 +904,66 @@ void DOS::handleDOSService() {
 void DOS::terminateProcess(uint8_t exitCode) {
   LOG_INFO("DOS: Process terminated with exit code ", (int)exitCode);
 
-  m_terminated = true;
-  m_exitCode = exitCode;
+  if (!m_processStack.empty()) {
+    ProcessState parent = m_processStack.back();
+    m_processStack.pop_back();
+
+    m_lastChildExitCode = exitCode;
+
+    // Free child process memory
+    if (parent.childMemorySeg != 0) {
+      freeMemory(parent.childMemorySeg);
+    }
+
+    // Clean up file handles opened by the child
+    while (m_fileHandles.size() > parent.fileHandlesCount) {
+      auto &fh = m_fileHandles.back();
+      if (fh && !fh->isEMSDevice()) {
+        fh->stream.close();
+      }
+      m_fileHandles.pop_back();
+    }
+
+    // Reset DPMI
+    if (m_dpmi) {
+      m_dpmi->reset();
+    }
+
+    // Restore parent CPU registers
+    for (int i = 0; i < 8; ++i) {
+      m_cpu.setReg32(i, parent.regs[i]);
+    }
+    for (int i = 0; i < 6; ++i) {
+      m_cpu.setSegReg(i, parent.segRegs[i]);
+      m_cpu.setSegBase(i, parent.segBase[i]);
+    }
+    m_cpu.setIs32BitCode(parent.is32BitCode);
+    m_cpu.setIs32BitStack(parent.is32BitStack);
+    m_cpu.setEIP(parent.eip);
+    m_cpu.setEFLAGS(parent.eflags & ~cpu::FLAG_CARRY); // clear carry
+
+    // Restore HLE stack
+    m_cpu.setHLEStack(parent.hleStack);
+
+    // Restore DOS state
+    m_pspSegment = parent.pspSegment;
+    m_dtaPtr = parent.dtaPtr;
+    m_programPath = parent.programPath;
+    m_neAlignShift = parent.m_neAlignShift;
+    m_neInitialLoadSegment = parent.m_neInitialLoadSegment;
+    m_neSegments = parent.m_neSegments;
+    m_fbovOverlays = parent.m_fbovOverlays;
+
+    // Restore working directories
+    m_currentDir = parent.currentDir;
+    m_dosCurrentDir = parent.dosCurrentDir;
+
+    LOG_INFO("DOS: Restored parent process CS:EIP=", std::hex, m_cpu.getSegReg(cpu::CS), ":", m_cpu.getEIP(),
+             " PSP=0x", m_pspSegment);
+  } else {
+    m_terminated = true;
+    m_exitCode = exitCode;
+  }
 }
 
 std::string DOS::readDOSString(uint32_t address) {
@@ -936,6 +1165,32 @@ void DOS::writeMCB(uint16_t segment, const MCB &mcb) {
     m_memory.write8(addr + 8 + i, (uint8_t)mcb.name[i]);
 }
 
+bool DOS::freeMemory(uint16_t segment) {
+  if (segment == 0) return false;
+  uint16_t mcbSeg = segment - 1;
+  MCB mcb = readMCB(mcbSeg);
+  if ((mcb.type == 'M' || mcb.type == 'Z') && mcb.owner != 0) {
+    mcb.owner = 0;
+    writeMCB(mcbSeg, mcb);
+
+    // Simplified merge: only merge with next if free
+    if (mcb.type == 'M') {
+      uint16_t nextSeg = mcbSeg + mcb.size + 1;
+      MCB next = readMCB(nextSeg);
+      if (next.owner == 0) {
+        mcb.type = next.type;
+        mcb.size = static_cast<uint16_t>(mcb.size + next.size + 1);
+        writeMCB(mcbSeg, mcb);
+      }
+    }
+    LOG_DEBUG("DOS: Freed segment ", std::hex, segment);
+    return true;
+  } else {
+    LOG_ERROR("DOS: Failed to free invalid segment ", std::hex, segment);
+    return false;
+  }
+}
+
 void DOS::handleMemoryManagement() {
   uint8_t ah = m_cpu.getReg8(cpu::AH);
   if (ah == 0x48) { // Allocate
@@ -960,28 +1215,11 @@ void DOS::handleMemoryManagement() {
     }
   } else if (ah == 0x49) { // Free
     uint16_t segment = m_cpu.getSegReg(cpu::ES);
-    uint16_t mcbSeg = segment - 1;
-    MCB mcb = readMCB(mcbSeg);
-    if ((mcb.type == 'M' || mcb.type == 'Z') && mcb.owner != 0) {
-      mcb.owner = 0;
-      writeMCB(mcbSeg, mcb);
-
-      // Simplified merge: only merge with next if free
-      if (mcb.type == 'M') {
-        uint16_t nextSeg = mcbSeg + mcb.size + 1;
-        MCB next = readMCB(nextSeg);
-        if (next.owner == 0) {
-          mcb.type = next.type;
-          mcb.size = static_cast<uint16_t>(mcb.size + next.size + 1);
-          writeMCB(mcbSeg, mcb);
-        }
-      }
+    if (freeMemory(segment)) {
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-      LOG_DEBUG("DOS: Freed segment ", std::hex, segment);
     } else {
       m_cpu.setReg16(cpu::AX, 0x09); // Memory block address invalid
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
-      LOG_ERROR("DOS: Failed to free invalid segment ", std::hex, segment);
     }
   } else if (ah == 0x4A) { // Resize
     uint16_t segment = m_cpu.getSegReg(cpu::ES);

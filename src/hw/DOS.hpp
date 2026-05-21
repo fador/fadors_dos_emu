@@ -50,6 +50,10 @@ public:
 
   // Memory allocation for internal use (ProgramLoader)
   uint16_t allocateMemory(uint16_t paragraphs, uint16_t owner = 0xFFFF);
+  bool freeMemory(uint16_t segment);
+
+  bool isExecTriggered() const { return m_execTriggered; }
+  void clearExecTriggered() { m_execTriggered = false; }
 
   // VROOMM Overlay Support
   struct NESegment {
@@ -73,6 +77,39 @@ public:
                  uint16_t initialLoadSegment);
   void setFBOVInfo(const std::string &path,
                    const std::vector<FBOVOverlay> &overlays);
+
+  struct ProcessState {
+    // CPU registers & segment info
+    std::array<uint32_t, 8> regs;
+    std::array<uint16_t, 6> segRegs;
+    std::array<uint32_t, 6> segBase;
+    bool is32BitCode;
+    bool is32BitStack;
+    uint32_t eip;
+    uint32_t eflags;
+
+    // CPU HLE stack
+    std::vector<cpu::CPU::HLEFrame> hleStack;
+
+    // DOS state
+    uint16_t pspSegment;
+    uint32_t dtaPtr;
+    std::string programPath;
+    uint16_t m_neAlignShift;
+    uint16_t m_neInitialLoadSegment;
+    std::vector<NESegment> m_neSegments;
+    std::vector<FBOVOverlay> m_fbovOverlays;
+
+    // Directory state
+    std::string currentDir;
+    std::string dosCurrentDir;
+
+    // File handles count for resource cleanup
+    size_t fileHandlesCount = 0;
+
+    // Memory tracker: child memory segment to free on return
+    uint16_t childMemorySeg = 0;
+  };
 
   // Set the working directory to the program's parent directory
   void setProgramDir(const std::string &programPath);
@@ -164,6 +201,10 @@ private:
   hostToDosPath(const std::string &hostPath); // Convert host path to DOS path
   std::string
   dosToHostPath(const std::string &dosPath); // Convert DOS path to host path
+
+  std::vector<ProcessState> m_processStack;
+  uint8_t m_lastChildExitCode = 0;
+  bool m_execTriggered = false;
 };
 
 } // namespace fador::hw

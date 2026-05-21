@@ -23,6 +23,30 @@ DPMI::DPMI(cpu::CPU &cpu, memory::MemoryBus &memory)
   m_ldtUsed[0] = true; // Index 0 = null descriptor (never allocate)
 }
 
+void DPMI::reset() {
+  m_active = false;
+  std::fill(m_ldtUsed.begin(), m_ldtUsed.end(), false);
+  std::fill(m_ldtBatchAlloc.begin(), m_ldtBatchAlloc.end(), false);
+  m_ldtUsed[0] = true; // null descriptor
+  m_coprocessorClientFlags = 0x0001;
+  m_is32BitClient = false;
+  m_memBlocks.clear();
+  m_nextBlockHandle = 1;
+  for (auto &desc : m_ldt) {
+    desc.low = 0;
+    desc.high = 0;
+  }
+  m_pmVectors = {};
+  m_excVectors = {};
+  m_virtualIF = true;
+  m_clientCS = 0;
+  m_clientDS = 0;
+  m_clientSS = 0;
+  m_clientES = 0;
+  m_clientPSPSel = 0;
+  LOG_DEBUG("DPMI: State reset completed.");
+}
+
 // ── INT 2Fh AX=1687h — DPMI detection ───────────────────────────────────────
 void DPMI::handleDetect() {
   // --- Inline State Reset to Guarantee Clean Environment Across Runs ---
@@ -939,6 +963,10 @@ void DPMI::handleTranslation() {
       // func == 0x0301/0x0302: Call RM procedure at CS:IP from the structure
       uint16_t rmIP = m_memory.read16(structAddr + 0x2A);
       uint16_t rmCS = m_memory.read16(structAddr + 0x2C);
+      if (rmCS == 0 && rmIP == 0) {
+        rmIP = m_memory.read16(static_cast<uint32_t>(intNo) * 4);
+        rmCS = m_memory.read16(static_cast<uint32_t>(intNo) * 4 + 2);
+      }
       m_cpu.setSegReg(cpu::CS, rmCS);
       m_cpu.setSegBase(cpu::CS, static_cast<uint32_t>(rmCS) << 4);
       m_cpu.setEIP(rmIP);
@@ -1532,8 +1560,8 @@ void DPMI::handleRawSwitchRMtoPM() {
   // Use 32-bit registers (ESI/EBX) if the segment descriptor specifies 
   // 32-bit width. Otherwise, fallback to zero-extended 16-bit registers (SI/BX)
   // to avoid garbage propagation from real-mode stubs.
-  uint32_t newEIP = cs32 ? rawESI : (rawESI & 0xFFFF);
-  uint32_t newESP = ss32 ? rawEBX : (rawEBX & 0xFFFF);
+  uint32_t newEIP = rawESI & 0xFFFF;
+  uint32_t newESP = m_is32BitClient ? rawEBX : (rawEBX & 0xFFFF);
 
   m_cpu.setReg32(cpu::ESP, newESP);
   m_cpu.setEIP(newEIP);

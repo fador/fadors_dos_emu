@@ -157,6 +157,8 @@ public:
   }
   size_t hleStackSize() const { return m_hleStack.size(); }
   const HLEFrame &hleFrameAt(size_t i) const { return m_hleStack[i]; }
+  const std::vector<HLEFrame>& getHLEStack() const { return m_hleStack; }
+  void setHLEStack(const std::vector<HLEFrame>& stack) { m_hleStack = stack; }
 
   // Pop an HLE frame whose framePhysAddr matches the given address.
   // Used by IRET to clean up frames for interrupts handled entirely

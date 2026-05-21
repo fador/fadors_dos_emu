@@ -380,10 +380,9 @@ TEST_CASE("ProgramLoader parses FBOV overlays and INT 3F loads them", "[DOS][Ove
         exe[49] = 'B';
         exe[50] = 'O';
         exe[51] = 'V';
-        write16(52, 24);     // FBOV block size
-        write16(54, 2);      // Overlay id
-        write32(56, 0);      // aux offset
-        write32(60, 0);      // aux count
+        write32(52, 8);      // ovrSize (8 bytes of data)
+        write32(56, 0);      // exeInfo
+        write32(60, 2);      // segNum (overlay ID = 2)
         exe[64] = 'O';
         exe[65] = 'V';
         exe[66] = 'R';
@@ -1218,3 +1217,130 @@ TEST_CASE("DOS: Get/set interrupt vector round-trip", "[DOS][IVT]") {
     cpu.setReg16(cpu::DX, origBX);
     dos.handleInterrupt(0x21);
 }
+
+TEST_CASE("DOS: Nested Exec (AH=4Bh) and Get Return Code (AH=4Dh)", "[DOS][Exec]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::IOBus iobus;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    
+    bios.initialize();
+    dos.initialize();
+    cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
+    hw::ProgramLoader loader(cpu, mem, dos.getHIMEM());
+
+    // 1. Create child.com
+    {
+        std::ofstream ofs("child.com", std::ios::binary);
+        uint8_t childCode[] = { 0xB4, 0x4C, 0xB0, 0x2A, 0xCD, 0x21 }; // MOV AH, 4Ch, MOV AL, 2Ah (42), INT 21h
+        ofs.write(reinterpret_cast<const char*>(childCode), sizeof(childCode));
+    }
+
+    // 2. Create parent.com
+    {
+        std::ofstream ofs("parent.com", std::ios::binary);
+        std::vector<uint8_t> parentImg(0x180, 0);
+
+        // Code at 100h (offset 0 in COM file, which starts at 100h in memory)
+        uint8_t code[] = {
+            0xBB, 0x40, 0x00,                   // mov bx, 0x40 (shrink memory to 1024 bytes)
+            0xB4, 0x4A,                         // mov ah, 0x4A
+            0xCD, 0x21,                         // int 0x21 (Resize block)
+            0x8C, 0xC8,                         // mov ax, cs
+            0xA3, 0x62, 0x01,                   // mov [0x162], ax
+            0xA3, 0x66, 0x01,                   // mov [0x166], ax
+            0xA3, 0x6A, 0x01,                   // mov [0x16A], ax
+            0xBA, 0x50, 0x01,                   // mov dx, 0x150
+            0xBB, 0x60, 0x01,                   // mov bx, 0x160
+            0xB8, 0x00, 0x4B,                   // mov ax, 0x4B00
+            0xCD, 0x21,                         // int 0x21 (Exec child)
+            0xB4, 0x4D,                         // mov ah, 0x4D (Get Exit Code)
+            0xCD, 0x21,                         // int 0x21
+            0xB4, 0x4C,                         // mov ah, 0x4C
+            0xCD, 0x21                          // int 0x21
+        };
+        std::copy(std::begin(code), std::end(code), parentImg.begin());
+
+        // Filename at 150h (offset 0x50 in parentImg)
+        std::string filename = "child.com";
+        std::copy(filename.begin(), filename.end(), parentImg.begin() + 0x50);
+        parentImg[0x50 + filename.size()] = 0; // null terminator
+
+        // Parameter block at 160h (offset 0x60 in parentImg)
+        parentImg[0x60] = 0; parentImg[0x61] = 0; // envSeg = 0
+        parentImg[0x62] = 0x70; parentImg[0x63] = 0x01; // cmdTail offset = 0x170
+
+        // Command tail at 170h (offset 0x70 in parentImg)
+        parentImg[0x70] = 0; // length
+        parentImg[0x71] = 0x0D; // CR
+
+        ofs.write(reinterpret_cast<const char*>(parentImg.data()), parentImg.size());
+    }
+
+    // Load parent.com at the default PSP segment (0x0812)
+    uint16_t parentSeg = dos.getPSPSegment();
+    REQUIRE(loader.loadCOM("parent.com", parentSeg, dos));
+
+    // Run execution loop until terminated
+    int instructions = 0;
+    while (!dos.isTerminated() && instructions < 1000) {
+        decoder.step();
+        instructions++;
+    }
+
+    // Verify exit code is 42
+    REQUIRE(dos.isTerminated());
+    REQUIRE(dos.getExitCode() == 42);
+
+    std::remove("child.com");
+    std::remove("parent.com");
+}
+
+TEST_CASE("DOS: ProgramLoader respects envSeg and Multiplex AX=FB42h check", "[DOS][Loader]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::IOBus iobus;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+
+    bios.initialize();
+    dos.initialize();
+    
+    hw::ProgramLoader loader(cpu, mem, dos.getHIMEM());
+
+    // 1. Create a dummy child
+    {
+        std::ofstream ofs("dummy_child.com", std::ios::binary);
+        uint8_t code[] = { 0xCB }; // RETF
+        ofs.write(reinterpret_cast<const char*>(code), sizeof(code));
+    }
+
+    // Load with a specific envSeg
+    uint16_t customEnvSeg = 0x1234;
+    uint16_t childSeg = 0x2000;
+    REQUIRE(loader.loadCOM("dummy_child.com", childSeg, dos, "", customEnvSeg));
+
+    // Verify PSP offset 0x2C is set to customEnvSeg
+    uint32_t pspPhys = (static_cast<uint32_t>(childSeg) << 4);
+    uint16_t loadedEnvSeg = mem.read16(pspPhys + 0x2C);
+    REQUIRE(loadedEnvSeg == customEnvSeg);
+
+    std::remove("dummy_child.com");
+
+    // 2. Verify INT 2Fh AX=FB42h installation check
+    cpu.setReg16(cpu::AX, 0xFB42);
+    cpu.setReg16(cpu::BX, 0x0014);
+    cpu.setReg16(cpu::CX, 0x0001);
+    
+    // Call the handler
+    REQUIRE(dos.handleInterrupt(0x2F));
+    REQUIRE(cpu.getReg16(cpu::BX) == 0x0000);
+}
+

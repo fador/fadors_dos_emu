@@ -69,7 +69,7 @@ parseFBOVOverlays(std::ifstream &file, uint32_t startOffset, uint32_t fileSize) 
     const bool valid = header.ovrSize > 0 && relOffset + totalBlockSize <= tail.size();
 
     if (valid) {
-      overlays.push_back({0, absOffset, header.ovrSize,
+      overlays.push_back({static_cast<uint16_t>(header.segNum), absOffset, header.ovrSize,
                           header.exeInfo, header.segNum, 0});
     }
 
@@ -92,7 +92,7 @@ ProgramLoader::ProgramLoader(cpu::CPU &cpu, memory::MemoryBus &memory,
     : m_cpu(cpu), m_memory(memory), m_himem(himem) {}
 
 bool ProgramLoader::loadCOM(const std::string &path, uint16_t segment, DOS &dos,
-                            const std::string &args) {
+                            const std::string &args, uint16_t envSeg) {
   std::ifstream file(path, std::ios::binary | std::ios::ate);
   if (!file.is_open()) {
     LOG_ERROR("ProgramLoader: Failed to open .COM file: ", path);
@@ -108,7 +108,7 @@ bool ProgramLoader::loadCOM(const std::string &path, uint16_t segment, DOS &dos,
   }
 
   // 1. Create PSP at segment:0000
-  createPSP(segment, args, path);
+  createPSP(segment, args, path, envSeg);
 
   // 2. Load file data at segment:0100
   uint32_t loadAddr = (segment << 4) + 0x100;
@@ -140,7 +140,7 @@ bool ProgramLoader::loadCOM(const std::string &path, uint16_t segment, DOS &dos,
 }
 
 bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
-                            const std::string &args, bool useHimem) {
+                            const std::string &args, bool useHimem, uint16_t envSeg) {
   // Basic MZ Parsing
   std::ifstream file(path, std::ios::binary);
   if (!file.is_open()) {
@@ -384,7 +384,7 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
   // For now, let's just use a simple load to segment:0000 (after PSP)
   // Actually, EXE load usually puts PSP at segment, and image at segment + 10h
   // (256 bytes)
-  createPSP(segment, args, path);
+  createPSP(segment, args, path, envSeg);
 
   uint16_t loadSegment = segment + 0x10; // Image starts after 256-byte PSP
   uint32_t loadAddr = (loadSegment << 4);
@@ -547,7 +547,7 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
 }
 
 void ProgramLoader::createPSP(uint16_t segment, const std::string &args,
-                              const std::string &programPath) {
+                              const std::string &programPath, uint16_t envSeg) {
   uint32_t pspAddr = (segment << 4);
 
   // Zero the entire 256-byte PSP first so no fields contain 0xCC garbage
@@ -599,53 +599,58 @@ void ProgramLoader::createPSP(uint16_t segment, const std::string &args,
   m_memory.write8(pspAddr + 0x52, 0xCB); // RETF
 
   // Environment block segment at offset 0x2C
-  // Place environment 0x20 paragraphs (512 bytes) before the PSP
-  // Clamp it from underflowing to segment 0
-  uint16_t envSegment = (segment > 0x20) ? segment - 0x20 : 0;
-  uint32_t envAddr = (envSegment << 4);
+  if (envSeg != 0) {
+    m_memory.write16(pspAddr + 0x2C, envSeg);
+    LOG_INFO("ProgramLoader: Using parent environment segment 0x", std::hex, envSeg);
+  } else {
+    // Place environment 0x20 paragraphs (512 bytes) before the PSP
+    // Clamp it from underflowing to segment 0
+    uint16_t envSegment = (segment > 0x20) ? segment - 0x20 : 0;
+    uint32_t envAddr = (envSegment << 4);
 
-  // Derive directory containing the program for PATH/LIB/INCLUDE
-  std::filesystem::path progFsPath = std::filesystem::absolute(programPath);
-  std::string progDir = progFsPath.parent_path().string();
+    // Derive directory containing the program for PATH/LIB/INCLUDE
+    std::filesystem::path progFsPath = std::filesystem::absolute(programPath);
+    std::string progDir = progFsPath.parent_path().string();
 
-  // Convert host paths to DOS-style paths for the environment block.
-  // DOS programs expect backslash separators and a drive letter prefix.
-  // Use the last directory component as the DOS directory name.
-  std::string dirName = progFsPath.parent_path().filename().string();
-  std::transform(
-      dirName.begin(), dirName.end(), dirName.begin(),
-      [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-  std::string fileName = progFsPath.filename().string();
-  std::transform(
-      fileName.begin(), fileName.end(), fileName.begin(),
-      [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-  std::string dosDir = "C:\\" + dirName;
-  std::string dosFullPath = dosDir + "\\" + fileName;
+    // Convert host paths to DOS-style paths for the environment block.
+    // DOS programs expect backslash separators and a drive letter prefix.
+    // Use the last directory component as the DOS directory name.
+    std::string dirName = progFsPath.parent_path().filename().string();
+    std::transform(
+        dirName.begin(), dirName.end(), dirName.begin(),
+        [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    std::string fileName = progFsPath.filename().string();
+    std::transform(
+        fileName.begin(), fileName.end(), fileName.begin(),
+        [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    std::string dosDir = "C:\\" + dirName;
+    std::string dosFullPath = dosDir + "\\" + fileName;
 
-  // Format: VAR=VAL\0\0\0\x01\x00PROGRAM_PATH\0
-  std::string envStr;
-  envStr += "PATH=";
-  envStr += dosDir;
-  envStr += '\0';
-  envStr += "LIB=";
-  envStr += dosDir;
-  envStr += '\0';
-  envStr += "INCLUDE=";
-  envStr += dosDir;
-  envStr += '\0';
-  envStr += "BLASTER=A220 I5 D1 T3";
-  envStr += '\0';
-  envStr += '\0';               // End of variables
-  envStr.append("\x01\x00", 2); // Signature for program name follows
-  envStr += dosFullPath;
-  envStr += '\0';
+    // Format: VAR=VAL\0\0\0\x01\x00PROGRAM_PATH\0
+    std::string envStr;
+    envStr += "PATH=";
+    envStr += dosDir;
+    envStr += '\0';
+    envStr += "LIB=";
+    envStr += dosDir;
+    envStr += '\0';
+    envStr += "INCLUDE=";
+    envStr += dosDir;
+    envStr += '\0';
+    envStr += "BLASTER=A220 I5 D1 T3";
+    envStr += '\0';
+    envStr += '\0';               // End of variables
+    envStr.append("\x01\x00", 2); // Signature for program name follows
+    envStr += dosFullPath;
+    envStr += '\0';
 
-  for (size_t i = 0; i < envStr.length(); ++i) {
-    m_memory.write8(envAddr + i, static_cast<uint8_t>(envStr[i]));
+    for (size_t i = 0; i < envStr.length(); ++i) {
+      m_memory.write8(envAddr + i, static_cast<uint8_t>(envStr[i]));
+    }
+    m_memory.write16(pspAddr + 0x2C, envSegment);
+    LOG_INFO("ProgramLoader: Environment block created at segment 0x", std::hex,
+             envSegment, ", program path: ", dosFullPath);
   }
-  m_memory.write16(pspAddr + 0x2C, envSegment);
-  LOG_INFO("ProgramLoader: Environment block created at segment 0x", std::hex,
-           envSegment, ", program path: ", dosFullPath);
 
   // Command tail size at offset 0x80
   // In DOS, the command tail starts with a space before args.

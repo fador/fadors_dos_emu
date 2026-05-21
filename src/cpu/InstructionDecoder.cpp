@@ -4695,6 +4695,16 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
       handled = true;
 
     if (handled) {
+      if (vector == 0x21 && m_dos.isExecTriggered()) {
+        m_dos.clearExecTriggered();
+        loadSegment(CS, m_cpu.getSegReg(CS));
+        loadSegment(SS, m_cpu.getSegReg(SS));
+        loadSegment(DS, m_cpu.getSegReg(DS));
+        loadSegment(ES, m_cpu.getSegReg(ES));
+        loadSegment(FS, m_cpu.getSegReg(FS));
+        loadSegment(GS, m_cpu.getSegReg(GS));
+        break;
+      }
       // Vector 0xE1 = DPMI entry point (reached via CALL FAR, not INT).
       // Vector 0xE2 = DPMI raw switch PM→RM (reached via JMP FAR).
       // Vector 0xE3 = DPMI raw switch RM→PM (reached via JMP FAR).
@@ -5087,6 +5097,15 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
       if (isOrig) {
         if (m_dos.handleInterrupt(vector)) {
           m_cpu.popHLEFrame();
+          if (vector == 0x21 && m_dos.isExecTriggered()) {
+            m_dos.clearExecTriggered();
+            loadSegment(CS, m_cpu.getSegReg(CS));
+            loadSegment(SS, m_cpu.getSegReg(SS));
+            loadSegment(DS, m_cpu.getSegReg(DS));
+            loadSegment(ES, m_cpu.getSegReg(ES));
+            loadSegment(FS, m_cpu.getSegReg(FS));
+            loadSegment(GS, m_cpu.getSegReg(GS));
+          }
           return;
         }
         if (m_bios.handleInterrupt(vector)) {
@@ -5253,6 +5272,15 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
     if (isOrig) {
       if (m_dos.handleInterrupt(vector)) {
         m_cpu.popHLEFrame();
+        if (vector == 0x21 && m_dos.isExecTriggered()) {
+          m_dos.clearExecTriggered();
+          loadSegment(CS, m_cpu.getSegReg(CS));
+          loadSegment(SS, m_cpu.getSegReg(SS));
+          loadSegment(DS, m_cpu.getSegReg(DS));
+          loadSegment(ES, m_cpu.getSegReg(ES));
+          loadSegment(FS, m_cpu.getSegReg(FS));
+          loadSegment(GS, m_cpu.getSegReg(GS));
+        }
         return;
       }
       if (m_bios.handleInterrupt(vector)) {
