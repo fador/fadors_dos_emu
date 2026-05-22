@@ -1,3 +1,4 @@
+#include <cstring>
 #include "../memory/himem/HIMEM.hpp"
 
 #include "../utils/Logger.hpp"
@@ -118,7 +119,7 @@ void DOS::initialize() {
   system.type = 'M';
   system.owner = 0x0008; // System
   system.size = 0x10;    // 256 bytes
-  std::strcpy(system.name, "SDATA");
+  strcpy(system.name, "SDATA");
   writeMCB(FIRST_MCB_SEGMENT, system);
 
   // Block 2: User program block, initially owned by the program PSP
@@ -1414,7 +1415,7 @@ uint16_t DOS::allocateMemory(uint16_t requested, uint16_t owner) {
 
     if (mcb.size > requested + 1) { // Split
       MCB next;
-      std::memset(&next, 0, sizeof(next));
+      memset(&next, 0, sizeof(next));
       next.type = mcb.type;
       next.owner = 0;
       next.size = mcb.size - requested - 1;
