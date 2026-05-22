@@ -44,6 +44,7 @@ void DPMI::reset() {
   m_clientSS = 0;
   m_clientES = 0;
   m_clientPSPSel = 0;
+  m_sdaSel = 0;
   LOG_DEBUG("DPMI: State reset completed.");
 }
 
@@ -58,6 +59,7 @@ void DPMI::handleDetect() {
   m_is32BitClient = false;
   m_memBlocks.clear();
   m_nextBlockHandle = 1;
+  m_sdaSel = 0;
   for (auto &desc : m_ldt) {
     desc.low = 0;
     desc.high = 0;
@@ -126,8 +128,9 @@ bool DPMI::handleEntry() {
   m_clientSS = allocateDescriptors(1);
   m_clientES = allocateDescriptors(1);
   m_clientPSPSel = allocateDescriptors(1);
+  m_sdaSel = allocateDescriptors(1);
 
-  if (!m_clientCS || !m_clientDS || !m_clientSS || !m_clientES) {
+  if (!m_clientCS || !m_clientDS || !m_clientSS || !m_clientES || !m_sdaSel) {
     LOG_ERROR("DPMI: Failed to allocate initial descriptors");
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
     return false;
@@ -141,6 +144,9 @@ bool DPMI::handleEntry() {
   // PSP selector
   uint16_t pspSeg = m_dos ? m_dos->getPSPSegment() : 0x0801;
   m_ldt[selectorToIndex(m_clientPSPSel)] = makeDataDesc(pspSeg);
+
+  // SDA selector (maps segment 0x0070, base 0x0700)
+  m_ldt[selectorToIndex(m_sdaSel)] = makeDataDesc(0x0070);
 
   // Environment selector — the environment block is pointed to by PSP:0x2C.
   // Create a PM selector for it and patch PSP:0x2C so PM clients can
@@ -262,7 +268,7 @@ bool DPMI::handleEntry() {
 
   LOG_INFO("DPMI: Entered PM. CS=0x", std::hex, m_clientCS, " DS=0x",
            m_clientDS, " SS=0x", m_clientSS, " ES=0x", m_clientES,
-           " EIP=0x", callerIP);
+           " EIP=0x", callerIP, " Cycles=", std::dec, m_cpu.getCycles());
   return true;
 }
 
@@ -1150,7 +1156,7 @@ void DPMI::handleTranslation() {
     m_cpu.setReg16(cpu::BX, 0xF000);
     m_cpu.setReg16(cpu::CX, 0x0063); // RM procedure at F000:0063
     m_cpu.setReg16(cpu::SI, 0x0008); // PM selector (flat code)
-    m_cpu.setReg32(cpu::EDI, 0xF0063); // PM offset (same phys addr)
+    m_cpu.setReg32(cpu::EDI, 0x0508); // PM offset (low physical address reachable with 16-bit offset)
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
     break;
   }

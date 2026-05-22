@@ -28,6 +28,7 @@ public:
 
   bool isActive() const { return m_active; }
   uint16_t getPSPSelector() const { return m_clientPSPSel; }
+  uint16_t getSDASelector() const { return m_sdaSel; }
   void reset();
 
   // Called from INT 2Fh AX=1687h — fill registers for DPMI detection
@@ -116,6 +117,7 @@ private:
   uint16_t m_clientSS = 0;
   uint16_t m_clientES = 0;
   uint16_t m_clientPSPSel = 0;
+  uint16_t m_sdaSel = 0;
 
   cpu::CPU &m_cpu;
   memory::MemoryBus &m_memory;

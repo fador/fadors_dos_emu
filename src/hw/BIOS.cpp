@@ -120,8 +120,8 @@ bool BIOS::handleInterrupt(uint8_t vector) {
       m_cpu.setReg16(cpu::AX, 0x0000); // Real mode
       LOG_DEBUG("INT 2Fh AX=1686h: Get CPU Mode -> Real Mode");
     } else {
-      LOG_DEBUG("BIOS: INT 2Fh Multiplex (stubbed), AX=0x", std::hex, ax);
-      m_cpu.setReg8(cpu::AL, 0x00); // Not supported
+      LOG_DEBUG("BIOS: INT 2Fh Multiplex (unhandled), AX=0x", std::hex, ax);
+      return false;
     }
     return true;
   }
@@ -1252,6 +1252,11 @@ void BIOS::initialize() {
   {
     uint32_t phys = 0xF0063;
     m_memory.write8(phys, 0xCB); // RETF (no state to save/restore)
+  }
+
+  // DPMI state save/restore stub at physical 0x508 (reachable as 0x08:0x0508)
+  {
+    m_memory.write8(0x508, 0xCB); // RETF (no state to save/restore)
   }
 
   initializeEMS();

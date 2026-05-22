@@ -573,8 +573,8 @@ void ProgramLoader::createPSP(uint16_t segment, const std::string &args,
   m_memory.write16(pspAddr + 0x12, m_memory.read16(0x24 * 4));
   m_memory.write16(pspAddr + 0x14, m_memory.read16(0x24 * 4 + 2));
 
-  // Parent PSP segment at offset 0x16 (no parent — use own segment)
-  m_memory.write16(pspAddr + 0x16, segment);
+  // Parent PSP segment at offset 0x16 (no parent — default to fake shell PSP segment 0x0070)
+  m_memory.write16(pspAddr + 0x16, 0x0070);
 
   // Job File Table (JFT) at offset 0x18: 20 bytes
   // Handles 0-4 map to SFT indices 0-4 (stdin/stdout/stderr/stdaux/stdprn)

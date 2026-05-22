@@ -147,6 +147,10 @@ void CPU::loadSegment(SegRegIndex segIndex, uint16_t value) {
 
   m_dirtySegmentMask = static_cast<uint8_t>(m_dirtySegmentMask & ~mask);
   ++m_segmentStateVersion;
+
+  if (segIndex == CS && !m_is32BitCode) {
+    m_eip &= 0xFFFF;
+  }
 }
 
 void CPU::push16(uint16_t value) {
@@ -197,7 +201,7 @@ uint16_t CPU::pop16() {
 }
 
 void CPU::setEIP(uint32_t val) {
-  m_eip = val;
+  m_eip = m_is32BitCode ? val : (val & 0xFFFF);
 }
 
 uint32_t CPU::pop32() {

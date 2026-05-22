@@ -171,3 +171,31 @@ TEST_CASE("CPU HLE Stack Frames", "[CPU]") {
         REQUIRE(cpu.lastHLEFrame().vector == 0x21);
     }
 }
+
+TEST_CASE("CPU EIP Truncation and CS Segment Transition Truncation", "[CPU]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    cpu.setMemoryBus(&mem);
+
+    SECTION("setEIP limits EIP to 16-bit in 16-bit code segments") {
+        cpu.setIs32BitCode(false);
+        cpu.setEIP(0x12345678);
+        REQUIRE(cpu.getEIP() == 0x5678);
+
+        cpu.setIs32BitCode(true);
+        cpu.setEIP(0x12345678);
+        REQUIRE(cpu.getEIP() == 0x12345678);
+    }
+
+    SECTION("loadSegment truncates EIP on transitioning to 16-bit CS") {
+        cpu.setIs32BitCode(true);
+        cpu.setEIP(0x12345678);
+        REQUIRE(cpu.getEIP() == 0x12345678);
+
+        // Load CS to a real-mode like 16-bit segment (CR0 PE = 0)
+        cpu.loadSegment(cpu::SegRegIndex::CS, 0x1000);
+        REQUIRE(cpu.is32BitCode() == false);
+        REQUIRE(cpu.getEIP() == 0x5678); // High word truncated
+    }
+}
+

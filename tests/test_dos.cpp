@@ -1334,13 +1334,73 @@ TEST_CASE("DOS: ProgramLoader respects envSeg and Multiplex AX=FB42h check", "[D
 
     std::remove("dummy_child.com");
 
-    // 2. Verify INT 2Fh AX=FB42h installation check
+    // 2. Verify INT 2Fh AX=FB42h installation check is NOT handled (not resident)
     cpu.setReg16(cpu::AX, 0xFB42);
     cpu.setReg16(cpu::BX, 0x0014);
     cpu.setReg16(cpu::CX, 0x0001);
     
-    // Call the handler
-    REQUIRE(dos.handleInterrupt(0x2F));
-    REQUIRE(cpu.getReg16(cpu::BX) == 0x0000);
+    // Call the handler - should return false (unhandled)
+    REQUIRE(!dos.handleInterrupt(0x2F));
+
+    // 3. Verify INT 2Fh AX=FB42h BX=000Ah is NOT handled
+    cpu.setReg16(cpu::AX, 0xFB42);
+    cpu.setReg16(cpu::BX, 0x000A);
+    cpu.setReg16(cpu::DX, 0x0016);
+
+    REQUIRE(!dos.handleInterrupt(0x2F));
+}
+
+TEST_CASE("DOS: INT 21h AH=5Dh Swappable Data Area and fallback", "[DOS]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::DOS dos(cpu, mem);
+    dos.initialize();
+
+    SECTION("AH=5Dh AL=06h (Get SDA address) in Real Mode") {
+        cpu.setReg8(cpu::AH, 0x5D);
+        cpu.setReg8(cpu::AL, 0x06);
+        cpu.setReg16(cpu::SI, 0x0000);
+        cpu.setSegReg(cpu::DS, 0x0000);
+        cpu.setEFLAGS(cpu.getEFLAGS() | cpu::FLAG_CARRY); // Start with CF set
+
+        REQUIRE(dos.handleInterrupt(0x21));
+
+        REQUIRE(cpu.getSegReg(cpu::DS) == 0x0070);
+        REQUIRE(cpu.getReg16(cpu::SI) == 0x000F);
+        REQUIRE(cpu.getReg16(cpu::CX) == 0x80);
+        REQUIRE(cpu.getReg16(cpu::DX) == 0x18);
+        REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY)); // CF must be clear
+
+        // Verify current PSP segment is written to physical 0x071F
+        REQUIRE(mem.read16(0x071F) == dos.getPSPSegment());
+    }
+
+    SECTION("AH=5Dh AL=0Ah (Set Extended Error Info)") {
+        cpu.setReg8(cpu::AH, 0x5D);
+        cpu.setReg8(cpu::AL, 0x0A);
+        cpu.setEFLAGS(cpu.getEFLAGS() | cpu::FLAG_CARRY); // Start with CF set
+
+        REQUIRE(dos.handleInterrupt(0x21));
+        REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY)); // CF must be clear
+    }
+
+    SECTION("AH=5Dh AL=0xFF (Unknown subfunction)") {
+        cpu.setReg8(cpu::AH, 0x5D);
+        cpu.setReg8(cpu::AL, 0xFF);
+        cpu.setEFLAGS(cpu.getEFLAGS() & ~cpu::FLAG_CARRY); // Start with CF clear
+
+        REQUIRE(dos.handleInterrupt(0x21));
+        REQUIRE(cpu.getReg16(cpu::AX) == 0x0001);
+        REQUIRE((cpu.getEFLAGS() & cpu::FLAG_CARRY)); // CF must be set
+    }
+
+    SECTION("Unknown INT 21h AH=0xFA (Robust error return)") {
+        cpu.setReg8(cpu::AH, 0xFA);
+        cpu.setEFLAGS(cpu.getEFLAGS() & ~cpu::FLAG_CARRY); // Start with CF clear
+
+        REQUIRE(dos.handleInterrupt(0x21));
+        REQUIRE(cpu.getReg16(cpu::AX) == 0x0001);
+        REQUIRE((cpu.getEFLAGS() & cpu::FLAG_CARRY)); // CF must be set
+    }
 }
 

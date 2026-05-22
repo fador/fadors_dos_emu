@@ -111,7 +111,12 @@ public:
   }
 
   bool is32BitCode() const { return m_is32BitCode; }
-  void setIs32BitCode(bool val) { m_is32BitCode = val; }
+  void setIs32BitCode(bool val) {
+    m_is32BitCode = val;
+    if (!val) {
+      m_eip &= 0xFFFF;
+    }
+  }
   bool is32BitStack() const { return m_is32BitStack; }
   void setIs32BitStack(bool val) { m_is32BitStack = val; }
 

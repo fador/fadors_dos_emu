@@ -89,7 +89,7 @@ bool Debugger::run() {
         } else if (cmd == "r") {
             printRegisters();
         } else if (cmd == "d") {
-            uint32_t addr = (args.size() > 1) ? std::stoul(args[1], nullptr, 16) : (m_cpu.getSegReg(cpu::DS) << 4);
+            uint32_t addr = (args.size() > 1) ? std::stoul(args[1], nullptr, 16) : m_cpu.getSegBase(cpu::DS);
             dumpMemory(addr, 128);
         } else if (cmd == "t") {
             uint64_t count = 1;
@@ -118,7 +118,7 @@ bool Debugger::run() {
             traceInstructions(count, std::cout, startLinearAddress);
         } else if (cmd == "u") {
             uint32_t addr = (args.size() > 1) ? std::stoul(args[1], nullptr, 16)
-                            : ((m_cpu.getSegReg(cpu::CS) << 4) + m_cpu.getEIP());
+                            : (m_cpu.getSegBase(cpu::CS) + m_cpu.getEIP());
             uint32_t cnt = (args.size() > 2) ? std::stoul(args[2]) : 16;
             disassemble(addr, cnt);
         } else if (cmd == "h" || cmd == "?") {
@@ -135,7 +135,7 @@ bool Debugger::run() {
                       << "  q          - Quit emulator\n";
         } else if (cmd == "a") {
             uint32_t addr = (args.size() > 1) ? std::stoul(args[1], nullptr, 16)
-                            : ((m_cpu.getSegReg(cpu::CS) << 4) + m_cpu.getEIP());
+                            : (m_cpu.getSegBase(cpu::CS) + m_cpu.getEIP());
             assembleMode(addr);
         } else if (cmd == "w") {
             if (args.size() >= 3) {
@@ -157,7 +157,7 @@ bool Debugger::run() {
 }
 
 uint32_t Debugger::currentLinearIP() const {
-    return (m_cpu.getSegReg(cpu::CS) << 4) + m_cpu.getEIP();
+    return m_cpu.getSegBase(cpu::CS) + m_cpu.getEIP();
 }
 
 std::string Debugger::currentTraceLine() const {
@@ -273,10 +273,10 @@ void Debugger::dumpState(uint32_t contextLines) {
               << "  Video Mode: " << std::setw(2)
               << static_cast<unsigned>(videoMode) << std::dec << std::endl;
     std::cout << "\n--- Stack (SS:SP, 32 bytes) ---" << std::endl;
-    uint32_t stackAddr = (m_cpu.getSegReg(cpu::SS) << 4) + (m_cpu.getReg16(cpu::SP));
+    uint32_t stackAddr = m_cpu.getSegBase(cpu::SS) + (m_cpu.is32BitStack() ? m_cpu.getReg32(cpu::ESP) : m_cpu.getReg16(cpu::SP));
     dumpMemory(stackAddr, 32);
     std::cout << "\n--- Disassembly around CS:EIP ---" << std::endl;
-    uint32_t linearIP = (m_cpu.getSegReg(cpu::CS) << 4) + m_cpu.getEIP();
+    uint32_t linearIP = m_cpu.getSegBase(cpu::CS) + m_cpu.getEIP();
     auto instrs = m_disasm.disassembleAround(linearIP, contextLines, contextLines + 1);
     for (const auto& instr : instrs) {
         const char* marker = (instr.address == linearIP) ? "-->" : "   ";

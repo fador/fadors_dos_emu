@@ -134,6 +134,10 @@ void DOS::initialize() {
 
   initializeDOSListOfLists(m_memory, FIRST_MCB_SEGMENT);
 
+  // Initialize Fake Shell PSP at segment 0x0070
+  // Write parent PSP segment to 0x0070 (itself) at offset 0x16 (physical 0x0716)
+  m_memory.write16((0x0070 << 4) + 0x16, 0x0070);
+
   LOG_INFO("DOS: Initial MCB chain setup. System block at 0x", std::hex,
            FIRST_MCB_SEGMENT, " size 0x10; Free block at 0x", freeSeg, 
            " size 0x", free.size);
@@ -229,13 +233,7 @@ bool DOS::handleInterrupt(uint8_t vector) {
     } else if (ax == 0x1680) {
       // Release time slice (no-op)
       m_cpu.setReg8(cpu::AL, 0x00);
-    } else if (ax == 0xFB42) {
-      uint16_t bx = m_cpu.getReg16(cpu::BX);
-      uint16_t cx = m_cpu.getReg16(cpu::CX);
-      LOG_DEBUG("DOS: INT 2Fh AX=FB42h BX=0x", std::hex, bx, " CX=0x", cx, " (DPMILOAD installation check)");
-      if (bx == 0x0014 && cx == 0x0001) {
-        m_cpu.setReg16(cpu::BX, 0x0000);
-      }
+
     } else {
       LOG_DOS("DOS: INT 2Fh Multiplex (unhandled), AX=0x", std::hex, ax);
       // Default to AL=00h for unhandled DOS internal multiplex calls (AH=12h).
@@ -243,7 +241,9 @@ bool DOS::handleInterrupt(uint8_t vector) {
       // should leave registers unchanged so callers can detect installation absence.
       if ((ax >> 8) == 0x12) {
         m_cpu.setReg8(cpu::AL, 0x00);
+        return true;
       }
+      return false;
     }
     return true;
   }
@@ -896,8 +896,36 @@ void DOS::handleDOSService() {
         kListOfListsOff, " (First MCB: ", FIRST_MCB_SEGMENT, ")");
     break;
   }
+  case 0x5D: { // Swappable Data Area / Extended Error
+    uint8_t al = m_cpu.getReg8(cpu::AL);
+    if (al == 0x06) {
+      // Get Address of DOS Swappable Data Area
+      if (m_dpmi && m_dpmi->isActive()) {
+        m_cpu.setSegReg(cpu::DS, m_dpmi->getSDASelector());
+      } else {
+        m_cpu.setSegReg(cpu::DS, 0x0070);
+      }
+      m_cpu.setReg16(cpu::SI, 0x000F);
+      m_memory.write16(0x071F, m_pspSegment);
+      m_cpu.setReg16(cpu::CX, 0x80); // swappable size
+      m_cpu.setReg16(cpu::DX, 0x18); // always swap size
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY); // clear CF
+      LOG_DOS("DOS: Get Swappable Data Area Address -> DS:000F (PSP at physical 0x071F = 0x", std::hex, m_pspSegment, ")");
+    } else if (al == 0x0A) {
+      // Set Extended Error Info (stub)
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY); // clear CF
+      LOG_DOS("DOS: Set Extended Error Info (stubbed)");
+    } else {
+      m_cpu.setReg16(cpu::AX, 0x0001); // Invalid function
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY); // set CF
+      LOG_WARN("DOS: Unknown INT 21h AH=5Dh AL=0x", std::hex, (int)al);
+    }
+    break;
+  }
   default:
     LOG_WARN("DOS: Unknown INT 21h function AH=0x", std::hex, (int)ah);
+    m_cpu.setReg16(cpu::AX, 0x0001); // Invalid function
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY); // set CF
     break;
   }
 }

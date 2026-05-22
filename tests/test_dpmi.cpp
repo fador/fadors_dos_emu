@@ -2222,3 +2222,27 @@ TEST_CASE("DPMI 0301h calls RM procedure with far return", "[dpmi][0301]") {
     uint16_t retAX = env.mem.read16(structAddr + 0x1C);
     REQUIRE(retAX == 640);
 }
+
+TEST_CASE("DPMI: INT 21h AH=5Dh AL=06h (Get SDA address) in Protected Mode", "[dpmi][dos]") {
+    DPMITestEnv env;
+
+    env.cpu.setReg8(cpu::AH, 0x5D);
+    env.cpu.setReg8(cpu::AL, 0x06);
+    env.cpu.setReg16(cpu::SI, 0x0000);
+    env.cpu.setSegReg(cpu::DS, 0x0000);
+    env.clearCarry();
+
+    REQUIRE(env.dos.handleInterrupt(0x21));
+
+    uint16_t expectedSdaSel = env.dpmi.getSDASelector();
+    REQUIRE(expectedSdaSel != 0);
+    REQUIRE(env.cpu.getSegReg(cpu::DS) == expectedSdaSel);
+    REQUIRE(env.cpu.getReg16(cpu::SI) == 0x000F);
+    REQUIRE(env.cpu.getReg16(cpu::CX) == 0x80);
+    REQUIRE(env.cpu.getReg16(cpu::DX) == 0x18);
+    REQUIRE(!env.carrySet());
+
+    // Verify current PSP segment is written to physical 0x071F
+    REQUIRE(env.mem.read16(0x071F) == env.dos.getPSPSegment());
+}
+
