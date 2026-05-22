@@ -1404,3 +1404,80 @@ TEST_CASE("DOS: INT 21h AH=5Dh Swappable Data Area and fallback", "[DOS]") {
     }
 }
 
+TEST_CASE("DOS: Date, Time and Forward Slash Path Resolution", "[DOS]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::DOS dos(cpu, mem);
+    dos.initialize();
+
+    SECTION("AH=2Ah Get System Date") {
+        cpu.setReg8(cpu::AH, 0x2A);
+        REQUIRE(dos.handleInterrupt(0x21));
+
+        uint16_t year = cpu.getReg16(cpu::CX);
+        uint8_t month = cpu.getReg8(cpu::DH);
+        uint8_t day = cpu.getReg8(cpu::DL);
+        uint8_t dayOfWeek = cpu.getReg8(cpu::AL);
+
+        REQUIRE(year >= 2026);
+        REQUIRE(month >= 1);
+        REQUIRE(month <= 12);
+        REQUIRE(day >= 1);
+        REQUIRE(day <= 31);
+        REQUIRE(dayOfWeek <= 6);
+    }
+
+    SECTION("AH=2Ch Get System Time") {
+        cpu.setReg8(cpu::AH, 0x2C);
+        REQUIRE(dos.handleInterrupt(0x21));
+
+        uint8_t hour = cpu.getReg8(cpu::CH);
+        uint8_t minute = cpu.getReg8(cpu::CL);
+        uint8_t second = cpu.getReg8(cpu::DH);
+        uint8_t centisecond = cpu.getReg8(cpu::DL);
+
+        REQUIRE(hour <= 23);
+        REQUIRE(minute <= 59);
+        REQUIRE(second <= 59);
+        REQUIRE(centisecond <= 99);
+    }
+
+    SECTION("Forward Slash Path Resolution") {
+        // Create a temporary file in the current host directory
+        const std::string fname = "fslash.txt";
+        {
+            std::ofstream ofs(fname);
+            ofs << "forward slash test";
+        }
+
+        // Try to open it using /fslash.txt (starts with forward slash)
+        // Set DS:DX to point to "/fslash.txt"
+        const std::string dosPath = "/fslash.txt";
+        const uint32_t pathAddr = 0x70000;
+        for (size_t i = 0; i < dosPath.size(); ++i) {
+            mem.write8(pathAddr + i, dosPath[i]);
+        }
+        mem.write8(pathAddr + dosPath.size(), 0); // Null terminator
+
+        cpu.setSegReg(cpu::DS, 0x7000);
+        cpu.setSegBase(cpu::DS, 0x70000);
+        cpu.setReg16(cpu::DX, 0x0000);
+        cpu.setReg8(cpu::AH, 0x3D); // Open File
+        cpu.setReg8(cpu::AL, 0x00); // Read-only
+        
+        REQUIRE(dos.handleInterrupt(0x21));
+        REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+
+        uint16_t handle = cpu.getReg16(cpu::AX);
+
+        // Close the file
+        cpu.setReg8(cpu::AH, 0x3E);
+        cpu.setReg16(cpu::BX, handle);
+        REQUIRE(dos.handleInterrupt(0x21));
+        REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+
+        std::remove(fname.c_str());
+    }
+}
+
+

@@ -7,7 +7,9 @@
 #include "KeyboardController.hpp"
 #include "ProgramLoader.hpp"
 #include <algorithm>
+#include <chrono>
 #include <cctype>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -407,11 +409,17 @@ void DOS::handleDOSService() {
     // Return current date
     std::time_t t = std::time(nullptr);
     std::tm *now = std::localtime(&t);
-    m_cpu.setReg16(cpu::CX, now->tm_year + 1900); // Year
-    m_cpu.setReg8(cpu::DH, now->tm_mon + 1);      // Month
-    m_cpu.setReg8(cpu::DL, now->tm_mday);         // Day
-    m_cpu.setReg8(cpu::AL,
-                  now->tm_wday); // Day of week (0=Sun, 1=Mon, ..., 6=Sat)
+    if (now) {
+      m_cpu.setReg16(cpu::CX, now->tm_year + 1900); // Year
+      m_cpu.setReg8(cpu::DH, now->tm_mon + 1);      // Month
+      m_cpu.setReg8(cpu::DL, now->tm_mday);         // Day
+      m_cpu.setReg8(cpu::AL, now->tm_wday);         // Day of week (0=Sun, 1=Mon, ..., 6=Sat)
+    } else {
+      m_cpu.setReg16(cpu::CX, 1980);
+      m_cpu.setReg8(cpu::DH, 1);
+      m_cpu.setReg8(cpu::DL, 1);
+      m_cpu.setReg8(cpu::AL, 2); // Tuesday
+    }
     break;
   }
   case 0x2B: { // Set System Date
@@ -828,11 +836,21 @@ void DOS::handleDOSService() {
     break;
   }
   case 0x2C: { // Get System Time
-    LOG_DOS("DOS: Get System Time (stub)");
-    m_cpu.setReg8(cpu::CH, 12); // Hour
-    m_cpu.setReg8(cpu::CL, 0);  // Minute
-    m_cpu.setReg8(cpu::DH, 0);  // Second
-    m_cpu.setReg8(cpu::DL, 0);  // 1/100 second
+    std::time_t t = std::time(nullptr);
+    std::tm *now = std::localtime(&t);
+    if (now) {
+      m_cpu.setReg8(cpu::CH, now->tm_hour); // Hour
+      m_cpu.setReg8(cpu::CL, now->tm_min);  // Minute
+      m_cpu.setReg8(cpu::DH, now->tm_sec);  // Second
+    } else {
+      m_cpu.setReg8(cpu::CH, 12); // Hour
+      m_cpu.setReg8(cpu::CL, 0);  // Minute
+      m_cpu.setReg8(cpu::DH, 0);  // Second
+    }
+    auto timeNow = std::chrono::system_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                  timeNow.time_since_epoch()) % 1000;
+    m_cpu.setReg8(cpu::DL, static_cast<uint8_t>(ms.count() / 10)); // 1/100 second
     break;
   }
   case 0x67: { // Set Handle Count
@@ -1094,8 +1112,8 @@ std::string DOS::resolvePath(const std::string &path) {
       path[1] == ':') {
     resolvedStr = dosToHostPath(path);
   }
-  // Check for DOS backslash paths
-  else if (!path.empty() && path[0] == '\\') {
+  // Check for DOS backslash or forward slash paths
+  else if (!path.empty() && (path[0] == '\\' || path[0] == '/')) {
     resolvedStr = dosToHostPath(path);
   }
   else {
