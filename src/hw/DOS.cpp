@@ -234,6 +234,15 @@ bool DOS::handleInterrupt(uint8_t vector) {
       // Release time slice (no-op)
       m_cpu.setReg8(cpu::AL, 0x00);
 
+    } else if ((ax >> 8) == 0x15) {
+      LOG_DEBUG("DOS: INT 2Fh CD-ROM/MSCDEX Multiplex, AX=0x", std::hex, ax, " -> Not installed");
+      m_cpu.setReg8(cpu::AL, 0x00);
+      if (ax == 0x1500) {
+        m_cpu.setReg16(cpu::BX, 0x0000);
+        m_cpu.setReg16(cpu::CX, 0x0000);
+      } else if (ax == 0x150B) {
+        m_cpu.setReg16(cpu::AX, 0x0000);
+      }
     } else {
       LOG_DOS("DOS: INT 2Fh Multiplex (unhandled), AX=0x", std::hex, ax);
       // Default to AL=00h for unhandled DOS internal multiplex calls (AH=12h).

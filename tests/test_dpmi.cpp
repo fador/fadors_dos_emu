@@ -2246,3 +2246,39 @@ TEST_CASE("DPMI: INT 21h AH=5Dh AL=06h (Get SDA address) in Protected Mode", "[d
     REQUIRE(env.mem.read16(0x071F) == env.dos.getPSPSegment());
 }
 
+TEST_CASE("DPMI 0300h INT 2Fh AX=1500h MSCDEX installation check returns uninstalled", "[dpmi][translation]") {
+    DPMITestEnv env;
+
+    uint32_t structAddr = DPMITestEnv::SCRATCH_ADDR;
+    for (int i = 0; i < 50; ++i)
+        env.mem.write8(structAddr + i, 0);
+
+    uint8_t intNo = 0x2F;
+    // Set up real-mode call structure for INT 2Fh AX=1500h
+    env.mem.write32(structAddr + 0x1C, 0x00001500); // EAX = AX=1500h
+    env.mem.write32(structAddr + 0x10, 0x00000000); // EBX = BX=0000h
+    env.mem.write16(structAddr + 0x20, 0x0202);     // FLAGS
+    env.mem.write16(structAddr + 0x2E, 0xFFF0);     // SP
+    env.mem.write16(structAddr + 0x30, 0x8000);     // SS
+
+    env.cpu.setReg16(cpu::AX, 0x0300); // Simulate Real Mode Interrupt
+    env.cpu.setReg8(cpu::BL, intNo);   // BL = Interrupt number
+    env.cpu.setReg8(cpu::BH, 0x00);   // BH = flags
+    env.cpu.setReg16(cpu::CX, 0);      // CX = 0
+    env.cpu.setSegBase(cpu::ES, 0);
+    env.cpu.setReg32(cpu::EDI, structAddr);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+
+    REQUIRE(!env.carrySet());
+
+    // Should return AL=0, BX=0, CX=0 indicating MSCDEX is not installed / 0 CD-ROMs
+    uint32_t retEAX = env.mem.read32(structAddr + 0x1C);
+    uint32_t retEBX = env.mem.read32(structAddr + 0x10);
+    uint32_t retECX = env.mem.read32(structAddr + 0x18);
+
+    REQUIRE((retEAX & 0xFF) == 0x00);
+    REQUIRE((retEBX & 0xFFFF) == 0x0000);
+    REQUIRE((retECX & 0xFFFF) == 0x0000);
+}
+

@@ -964,7 +964,7 @@ void DPMI::handleTranslation() {
       if (!handled && m_bios && m_bios->handleInterrupt(intNo))
         handled = true;
       if (!handled)
-        LOG_WARN("DPMI 0300h: INT 0x", std::hex, (int)intNo, " not handled");
+        LOG_WARN("DPMI 0300h: INT 0x", std::hex, (int)intNo, " not handled. AX=0x", reqRmEax);
     } else {
       // func == 0x0301/0x0302: Call RM procedure at CS:IP from the structure
       uint16_t rmIP = m_memory.read16(structAddr + 0x2A);
