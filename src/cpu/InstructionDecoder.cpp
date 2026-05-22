@@ -1755,8 +1755,8 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
         uint16_t newGs = m_memory.read32(ssBaseLocal + esp + 32) & 0xFFFF;
 
         m_cpu.setEFLAGS(newEflags);
-        m_cpu.setEIP(newEip);
         loadSegment(CS, newCs);
+        m_cpu.setEIP(newEip);
         m_cpu.setReg32(ESP, newEsp);
         loadSegment(SS, newSs);
         loadSegment(ES, newEs);
@@ -1765,8 +1765,8 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
         loadSegment(GS, newGs);
       } else {
         m_cpu.setEFLAGS(newEflags);
-        m_cpu.setEIP(newEip);
         loadSegment(CS, newCs);
+        m_cpu.setEIP(newEip);
         if (newCpl > oldCpl && (m_cpu.getCR(0) & 1)) {
           uint32_t newEsp = m_memory.read32(ssBaseLocal + esp + 12);
           uint16_t newSs = m_memory.read32(ssBaseLocal + esp + 16) & 0xFFFF;
@@ -1795,8 +1795,8 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
 
       uint32_t merged = (m_cpu.getEFLAGS() & 0xFFFF0000) | newFlags;
       m_cpu.setEFLAGS(merged);
-      m_cpu.setEIP(newIp);
       loadSegment(CS, newCs);
+      m_cpu.setEIP(newIp);
 
       if (newCpl > oldCpl && (m_cpu.getCR(0) & 1)) {
         uint16_t newSp = m_memory.read16(ssBaseLocal2 + sp + 6);
@@ -4810,8 +4810,8 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
         }
         popFlags = (popFlags & ~mask) | (mergeSource32 & mask);
         m_cpu.setEFLAGS(popFlags);
-        m_cpu.setEIP(newEip);
         loadSegment(CS, newCs);
+        m_cpu.setEIP(newEip);
         if (m_cpu.is32BitStack()) {
           m_cpu.setReg32(ESP, currentESP + 12);
         } else {
@@ -4843,8 +4843,8 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
           if (vector == 0x21) {
             LOG_INFO("HLE setEFLAGS after: vec=0x21 curEFLAGS=0x", std::hex, m_cpu.getEFLAGS());
           }
-        m_cpu.setEIP(newIp);
         loadSegment(CS, newCs);
+        m_cpu.setEIP(newIp);
         if (m_cpu.is32BitStack())
           m_cpu.setReg32(ESP, currentESP + 6);
         else
@@ -4889,8 +4889,8 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
           }
           popFlags = (popFlags & ~mask) | (mergeSrc & mask);
           m_cpu.setEFLAGS(popFlags);
-          m_cpu.setEIP(newEip);
           loadSegment(CS, newCs);
+          m_cpu.setEIP(newEip);
           if (hf.stackIs32)
             m_cpu.setReg32(ESP, hf.frameSP + returnFrameBytes);
           else
@@ -4913,8 +4913,8 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
           popFlags = (static_cast<uint16_t>(popFlags) & static_cast<uint16_t>(~mask)) | (mergeSrc16 & static_cast<uint16_t>(mask));
           uint32_t merged = (mergeSrc32 & 0xFFFF0000) | popFlags;
           m_cpu.setEFLAGS(merged);
-          m_cpu.setEIP(newIp);
           loadSegment(CS, newCs);
+          m_cpu.setEIP(newIp);
           m_cpu.setReg16(SP,
                          static_cast<uint16_t>(hf.frameSP + returnFrameBytes));
         }

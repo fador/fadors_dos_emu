@@ -1095,13 +1095,13 @@ void DPMI::handleTranslation() {
     // Restore PM state completely
     for (int i = 0; i < 8; i++)
       m_cpu.setReg32(i, savedRegs[i]);
+    m_cpu.setIs32BitCode(savedIs32Code);
+    m_cpu.setIs32BitStack(savedIs32Stack);
     for (int i = 0; i < 6; i++) {
       m_cpu.setSegReg(i, savedSegs[i]);
       m_cpu.setSegBase(i, savedSegBases[i]);
     }
     m_cpu.setEIP(savedEIP);
-    m_cpu.setIs32BitCode(savedIs32Code);
-    m_cpu.setIs32BitStack(savedIs32Stack);
 
     // DPMI Spec: Carry flag must be set/cleared on DPMI-level call success/failure
     if (handled) {
@@ -1484,11 +1484,10 @@ void DPMI::handleRawSwitchPMtoRM() {
   m_cpu.setSegBase(cpu::FS, 0);
   m_cpu.setSegBase(cpu::GS, 0);
 
-  m_cpu.setReg16(cpu::SP, newSP);
-  m_cpu.setEIP(newIP);
-
   m_cpu.setIs32BitCode(false);
   m_cpu.setIs32BitStack(false);
+  m_cpu.setReg16(cpu::SP, newSP);
+  m_cpu.setEIP(newIP);
 }
 
 // ── Raw mode switch: RM → PM (vector 0xE3) ──────────────────────────────────
@@ -1562,6 +1561,12 @@ void DPMI::handleRawSwitchRMtoPM() {
   m_cpu.setSegBase(cpu::FS, 0);
   m_cpu.setSegBase(cpu::GS, 0);
 
+  // Determine 32-bit mode from the CS/SS descriptors' D bits
+  if (csValid)
+    m_cpu.setIs32BitCode(cs32);
+  if (ssValid)
+    m_cpu.setIs32BitStack(ss32);
+
   // Resolve target EIP and ESP dynamically:
   // Use 32-bit registers (ESI/EBX) if the segment descriptor specifies 
   // 32-bit width. Otherwise, fallback to zero-extended 16-bit registers (SI/BX)
@@ -1571,12 +1576,6 @@ void DPMI::handleRawSwitchRMtoPM() {
 
   m_cpu.setReg32(cpu::ESP, newESP);
   m_cpu.setEIP(newEIP);
-
-  // Determine 32-bit mode from the CS descriptor's D bit
-  if (csValid)
-    m_cpu.setIs32BitCode(cs32);
-  if (ssValid)
-    m_cpu.setIs32BitStack(ss32);
 }
 
 } // namespace fador::hw
