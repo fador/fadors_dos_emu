@@ -13,7 +13,6 @@ public:
     uint8_t read8(uint16_t port) override;
     void write8(uint16_t port, uint8_t value) override;
 
-    // TODO: IRQ handling logic
     void raiseIRQ(uint8_t irq);
     int getPendingInterrupt();
     void acknowledgeInterrupt();
@@ -29,6 +28,16 @@ private:
     // Initialization state machine
     uint8_t m_icwStep;
     bool m_initializing;
+
+    // Additional state
+    bool m_autoEoi;
+    uint8_t m_priorityAdd;
+    uint8_t m_readRegSelect; // 0 = IRR, 1 = ISR
+    bool m_specialMaskMode;
+    bool m_specialFullyNestedMode;
+    bool m_pollMode;
+
+    int getHighestPriorityIRQ(uint8_t mask);
 };
 
 } // namespace fador::hw

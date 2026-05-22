@@ -1,3 +1,4 @@
+#include <cstring>
 #include "CrashHandler.hpp"
 #include "Logger.hpp"
 #include <cstdio>
@@ -88,13 +89,13 @@ static LONG WINAPI sehHandler(EXCEPTION_POINTERS *exInfo) {
   void *addr = exInfo->ExceptionRecord->ExceptionAddress;
 
   char buf[384];
-  std::snprintf(buf, sizeof(buf),
+  snprintf(buf, sizeof(buf),
                 "%s (code 0x%08lX) at address %p",
                 sehCodeName(code), (unsigned long)code, addr);
 
   // If it's an access violation, report the attempted address
   if (code == EXCEPTION_ACCESS_VIOLATION && exInfo->ExceptionRecord->NumberParameters >= 2) {
-    std::snprintf(buf + std::strlen(buf), sizeof(buf) - std::strlen(buf),
+    snprintf(buf + std::strlen(buf), sizeof(buf) - std::strlen(buf),
                   "  [%s address 0x%p]",
                   exInfo->ExceptionRecord->ExceptionInformation[0] == 0 ? "read from" :
                   exInfo->ExceptionRecord->ExceptionInformation[0] == 1 ? "write to" : "execute at",
@@ -107,7 +108,7 @@ static LONG WINAPI sehHandler(EXCEPTION_POINTERS *exInfo) {
 
 static void signalHandlerWin(int sig) {
   char buf[192];
-  std::snprintf(buf, sizeof(buf), "Signal: %s (%d)", signalName(sig), sig);
+  snprintf(buf, sizeof(buf), "Signal: %s (%d)", signalName(sig), sig);
   handleCrash(buf);
 }
 
@@ -149,11 +150,11 @@ bool installCrashHandler(std::function<void(const std::string &)> onCrash) {
 static void signalHandlerPosix(int sig, siginfo_t *info, void * /*ctx*/) {
   char buf[256];
   if (info && info->si_addr) {
-    std::snprintf(buf, sizeof(buf),
+    snprintf(buf, sizeof(buf),
                   "Signal: %s (%d) at address %p",
                   signalName(sig), sig, info->si_addr);
   } else {
-    std::snprintf(buf, sizeof(buf),
+    snprintf(buf, sizeof(buf),
                   "Signal: %s (%d)", signalName(sig), sig);
   }
   handleCrash(buf);
