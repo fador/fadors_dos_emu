@@ -445,7 +445,7 @@ void DOS::handleDOSService() {
   case 0x62: { // Get Current PSP
     // In PM, return the PSP selector (not the RM segment).
     // DPMI spec requires INT 21h results to use PM selectors.
-    if (m_dpmi && m_dpmi->isActive()) {
+    if (m_dpmi && m_dpmi->isActive() && (m_cpu.getCR(0) & 1)) {
       uint16_t pspSel = m_dpmi->getPSPSelector();
       m_cpu.setReg16(cpu::BX, pspSel);
       LOG_DOS("DOS: Get Current PSP (PM) -> sel 0x", std::hex, pspSel);
@@ -792,6 +792,13 @@ void DOS::handleDOSService() {
       parent.is32BitStack = m_cpu.is32BitStack();
       parent.eip = parentEIP;
       parent.eflags = parentEFLAGS & ~cpu::FLAG_CARRY; // clear carry flag on restore path
+      parent.cr0 = m_cpu.getCR(0);
+      parent.gdtr = m_cpu.getGDTR();
+      parent.idtr = m_cpu.getIDTR();
+      parent.ldtr = m_cpu.getLDTR();
+      parent.tr = m_cpu.getTR();
+      parent.ldtrSelector = m_cpu.getLDTRSelector();
+      parent.trSelector = m_cpu.getTRSelector();
       parent.hleStack = m_cpu.getHLEStack();
 
       parent.pspSegment = m_pspSegment;
@@ -947,7 +954,7 @@ void DOS::handleDOSService() {
     uint8_t al = m_cpu.getReg8(cpu::AL);
     if (al == 0x06) {
       // Get Address of DOS Swappable Data Area
-      if (m_dpmi && m_dpmi->isActive()) {
+      if (m_dpmi && m_dpmi->isActive() && (m_cpu.getCR(0) & 1)) {
         m_cpu.setSegReg(cpu::DS, m_dpmi->getSDASelector());
       } else {
         m_cpu.setSegReg(cpu::DS, 0x0070);
@@ -1021,6 +1028,13 @@ void DOS::terminateProcess(uint8_t exitCode, uint8_t exitType, uint16_t resident
     m_cpu.setIs32BitStack(parent.is32BitStack);
     m_cpu.setEIP(parent.eip);
     m_cpu.setEFLAGS(parent.eflags & ~cpu::FLAG_CARRY); // clear carry
+    m_cpu.setCR(0, parent.cr0);
+    m_cpu.setGDTR(parent.gdtr);
+    m_cpu.setIDTR(parent.idtr);
+    m_cpu.setLDTR(parent.ldtr);
+    m_cpu.setTR(parent.tr);
+    m_cpu.setLDTRSelector(parent.ldtrSelector);
+    m_cpu.setTRSelector(parent.trSelector);
 
     // Restore HLE stack
     m_cpu.setHLEStack(parent.hleStack);

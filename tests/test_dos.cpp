@@ -1300,6 +1300,122 @@ TEST_CASE("DOS: Nested Exec (AH=4Bh) and Get Return Code (AH=4Dh)", "[DOS][Exec]
     std::remove("parent.com");
 }
 
+TEST_CASE("DOS: Process State Save and Restore (CR0 and Descriptors)", "[DOS][Exec]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::IOBus iobus;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    
+    bios.initialize();
+    dos.initialize();
+    cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
+    hw::ProgramLoader loader(cpu, mem, dos.getHIMEM());
+
+    // 1. Create child.com that exits immediately
+    {
+        std::ofstream ofs("child.com", std::ios::binary);
+        uint8_t childCode[] = { 0xB4, 0x4C, 0xB0, 0x00, 0xCD, 0x21 }; // MOV AH, 4Ch, MOV AL, 00h, INT 21h
+        ofs.write(reinterpret_cast<const char*>(childCode), sizeof(childCode));
+    }
+
+    // 2. Create parent.com
+    {
+        std::ofstream ofs("parent.com", std::ios::binary);
+        std::vector<uint8_t> parentImg(0x180, 0);
+
+        // Code at 100h: shrink block, then exec child, then exit
+        uint8_t code[] = {
+            0xBB, 0x40, 0x00,                   // mov bx, 0x40
+            0xB4, 0x4A,                         // mov ah, 0x4A
+            0xCD, 0x21,                         // int 0x21 (Resize block)
+            0x8C, 0xC8,                         // mov ax, cs
+            0xA3, 0x62, 0x01,                   // mov [0x162], ax
+            0xA3, 0x66, 0x01,                   // mov [0x166], ax
+            0xA3, 0x6A, 0x01,                   // mov [0x16A], ax
+            0xBA, 0x50, 0x01,                   // mov dx, 0x150
+            0xBB, 0x60, 0x01,                   // mov bx, 0x160
+            0xB8, 0x00, 0x4B,                   // mov ax, 0x4B00
+            0xCD, 0x21,                         // int 0x21 (Exec child)
+            0xB4, 0x4C,                         // mov ah, 0x4C
+            0xCD, 0x21                          // int 0x21
+        };
+        std::copy(std::begin(code), std::end(code), parentImg.begin());
+
+        // Filename at 150h
+        std::string filename = "child.com";
+        std::copy(filename.begin(), filename.end(), parentImg.begin() + 0x50);
+        parentImg[0x50 + filename.size()] = 0;
+
+        // Parameter block at 160h
+        parentImg[0x60] = 0; parentImg[0x61] = 0;
+        parentImg[0x62] = 0x70; parentImg[0x63] = 0x01;
+
+        // Command tail at 170h
+        parentImg[0x70] = 0;
+        parentImg[0x71] = 0x0D;
+
+        ofs.write(reinterpret_cast<const char*>(parentImg.data()), parentImg.size());
+    }
+
+    // Load parent.com at the default PSP segment (0x0812)
+    uint16_t parentSeg = dos.getPSPSegment();
+    REQUIRE(loader.loadCOM("parent.com", parentSeg, dos));
+
+    // Set custom registers in parent before execution
+    cpu.setCR(0, 0x00000010); // Real mode CR0 with some bits
+    cpu.setGDTR({0x1234, 0x56789ABC});
+    cpu.setIDTR({0x4321, 0x98765432});
+    cpu.setLDTR({0x1111, 0x22222222});
+    cpu.setTR({0x3333, 0x44444444});
+    cpu.setLDTRSelector(0x5555);
+    cpu.setTRSelector(0x6666);
+
+    // Step instructions. When parent does INT 21h (Exec child),
+    // the emulator will save these parent registers.
+    // In child process, we can check that we run (and optionally child sets CR0=1, i.e., Protected Mode).
+    int instructions = 0;
+    bool childLoaded = false;
+    while (!dos.isTerminated() && instructions < 1000) {
+        decoder.step();
+        instructions++;
+
+        // Once the child runs, it's at CS != parentSeg
+        if (cpu.getSegReg(cpu::CS) != parentSeg) {
+            childLoaded = true;
+            // Simulate child changing these registers
+            cpu.setCR(0, 0x60000000); // Real mode (PE=0) with CD and NW flags set
+            cpu.setGDTR({0xFFFF, 0xFFFFFFFF});
+            cpu.setIDTR({0xAAAA, 0xBBBBBBBB});
+            cpu.setLDTR({0xCCCC, 0xDDDDDDDD});
+            cpu.setTR({0xEEEE, 0x00000000});
+            cpu.setLDTRSelector(0x9999);
+            cpu.setTRSelector(0x8888);
+        }
+    }
+
+    // After termination, parent registers should be restored back to the custom values
+    REQUIRE(childLoaded);
+    REQUIRE(dos.isTerminated());
+    REQUIRE(cpu.getCR(0) == 0x00000010);
+    REQUIRE(cpu.getGDTR().limit == 0x1234);
+    REQUIRE(cpu.getGDTR().base == 0x56789ABC);
+    REQUIRE(cpu.getIDTR().limit == 0x4321);
+    REQUIRE(cpu.getIDTR().base == 0x98765432);
+    REQUIRE(cpu.getLDTR().limit == 0x1111);
+    REQUIRE(cpu.getLDTR().base == 0x22222222);
+    REQUIRE(cpu.getTR().limit == 0x3333);
+    REQUIRE(cpu.getTR().base == 0x44444444);
+    REQUIRE(cpu.getLDTRSelector() == 0x5555);
+    REQUIRE(cpu.getTRSelector() == 0x6666);
+
+    std::remove("child.com");
+    std::remove("parent.com");
+}
+
 TEST_CASE("DOS: ProgramLoader respects envSeg and Multiplex AX=FB42h check", "[DOS][Loader]") {
     cpu::CPU cpu;
     memory::MemoryBus mem;

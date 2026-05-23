@@ -87,6 +87,13 @@ public:
     bool is32BitStack;
     uint32_t eip;
     uint32_t eflags;
+    uint32_t cr0 = 0;
+    cpu::DescriptorRegister gdtr = {0, 0};
+    cpu::DescriptorRegister idtr = {0, 0};
+    cpu::DescriptorRegister ldtr = {0, 0};
+    cpu::DescriptorRegister tr = {0, 0};
+    uint16_t ldtrSelector = 0;
+    uint16_t trSelector = 0;
 
     // CPU HLE stack
     std::vector<cpu::CPU::HLEFrame> hleStack;
