@@ -215,6 +215,12 @@ bool DPMI::handleEntry() {
     for (int i = 0; i < 0x68; ++i)
       m_memory.write8(TSS_PHYS + i, 0);
   }
+  // Entry 5 (sel 0x28): Ring-0 code, flat 4GB, 16-bit
+  {
+    auto d = buildDescriptor(0, 0xFFFFF, 0x9A, 0x08); // G=1, D=0 (16-bit)
+    m_memory.write32(GDT_PHYS + 0x28, d.low);
+    m_memory.write32(GDT_PHYS + 0x2C, d.high);
+  }
 
   // --- Build PM IDT ---
   // Each entry points to the HLE stub at physical F0000h + HLE_STUB_BASE + v*4
@@ -236,7 +242,7 @@ bool DPMI::handleEntry() {
   }
 
   // --- Load system registers ---
-  m_cpu.setGDTR({0x27, GDT_PHYS}); // 5 entries, limit = 39
+  m_cpu.setGDTR({0x2F, GDT_PHYS}); // 6 entries, limit = 47
   m_cpu.setIDTR({0x7FF, IDT_PM_PHYS}); // 256 entries
   m_cpu.setLDTRSelector(0x18);
   m_cpu.setLDTR({static_cast<uint16_t>(MAX_LDT * 8 - 1), LDT_PHYS});
@@ -1155,7 +1161,8 @@ void DPMI::handleTranslation() {
     m_cpu.setReg16(cpu::AX, 0); // Buffer size = 0
     m_cpu.setReg16(cpu::BX, 0xF000);
     m_cpu.setReg16(cpu::CX, 0x0063); // RM procedure at F000:0063
-    m_cpu.setReg16(cpu::SI, 0x0008); // PM selector (flat code)
+    // Use 16-bit flat CS selector (0x28) for 16-bit clients to avoid stack mismatch on RETF
+    m_cpu.setReg16(cpu::SI, m_is32BitClient ? 0x0008 : 0x0028); // PM selector (flat code)
     m_cpu.setReg32(cpu::EDI, 0x0508); // PM offset (low physical address reachable with 16-bit offset)
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
     break;
@@ -1459,13 +1466,14 @@ uint32_t DPMI::getLinearAddr(uint8_t segReg, uint8_t reg) const {
 //            BX=new SP, SI=new IP, EDI preserved.
 void DPMI::handleRawSwitchPMtoRM() {
   uint16_t newDS = m_cpu.getReg16(cpu::AX);
-  uint16_t newCS = m_cpu.getReg16(cpu::CX);
+  uint16_t newES = m_cpu.getReg16(cpu::CX);
   uint16_t newSS = m_cpu.getReg16(cpu::DX);
   uint16_t newSP = m_cpu.getReg16(cpu::BX);
-  uint16_t newIP = m_cpu.getReg16(cpu::SI);
+  uint16_t newCS = m_cpu.getReg16(cpu::SI);
+  uint16_t newIP = m_cpu.getReg16(cpu::DI);
 
   LOG_DEBUG("DPMI: Raw switch PM→RM CS=", std::hex, newCS, " IP=", newIP,
-            " DS=", newDS, " SS:SP=", newSS, ":", newSP);
+            " DS=", newDS, " ES=", newES, " SS:SP=", newSS, ":", newSP);
 
   // Switch to real mode
   m_cpu.setCR(0, m_cpu.getCR(0) & ~1u);
@@ -1474,13 +1482,13 @@ void DPMI::handleRawSwitchPMtoRM() {
   m_cpu.setSegReg(cpu::CS, newCS);
   m_cpu.setSegReg(cpu::DS, newDS);
   m_cpu.setSegReg(cpu::SS, newSS);
-  m_cpu.setSegReg(cpu::ES, newDS); // ES defaults to DS per convention
+  m_cpu.setSegReg(cpu::ES, newES);
   m_cpu.setSegReg(cpu::FS, 0);
   m_cpu.setSegReg(cpu::GS, 0);
   m_cpu.setSegBase(cpu::CS, static_cast<uint32_t>(newCS) << 4);
   m_cpu.setSegBase(cpu::DS, static_cast<uint32_t>(newDS) << 4);
   m_cpu.setSegBase(cpu::SS, static_cast<uint32_t>(newSS) << 4);
-  m_cpu.setSegBase(cpu::ES, static_cast<uint32_t>(newDS) << 4);
+  m_cpu.setSegBase(cpu::ES, static_cast<uint32_t>(newES) << 4);
   m_cpu.setSegBase(cpu::FS, 0);
   m_cpu.setSegBase(cpu::GS, 0);
 
@@ -1496,14 +1504,15 @@ void DPMI::handleRawSwitchPMtoRM() {
 //            (E)BX=new ESP, SI=new EIP, EDI preserved.
 void DPMI::handleRawSwitchRMtoPM() {
   uint16_t newDS = m_cpu.getReg16(cpu::AX);
-  uint16_t newCS = m_cpu.getReg16(cpu::CX);
+  uint16_t newES = m_cpu.getReg16(cpu::CX);
   uint16_t newSS = m_cpu.getReg16(cpu::DX);
+  uint16_t newCS = m_cpu.getReg16(cpu::SI);
   
   // Capture the raw register configurations first
   uint32_t rawEBX = m_cpu.getReg32(cpu::EBX);
-  uint32_t rawESI = m_cpu.getReg32(cpu::ESI);
+  uint32_t rawEDI = m_cpu.getReg32(cpu::EDI);
 
-  LOG_DEBUG("DPMI: Raw switch RM→PM. CS=0x", std::hex, newCS, " DS=0x", newDS);
+  LOG_DEBUG("DPMI: Raw switch RM→PM. CS=0x", std::hex, newCS, " ES=0x", newES, " DS=0x", newDS);
 
   // Switch to protected mode
   m_cpu.setCR(0, m_cpu.getCR(0) | 1);
@@ -1512,7 +1521,7 @@ void DPMI::handleRawSwitchRMtoPM() {
   m_cpu.setSegReg(cpu::CS, newCS);
   m_cpu.setSegReg(cpu::DS, newDS);
   m_cpu.setSegReg(cpu::SS, newSS);
-  m_cpu.setSegReg(cpu::ES, newDS);
+  m_cpu.setSegReg(cpu::ES, newES);
   m_cpu.setSegReg(cpu::FS, 0);
   m_cpu.setSegReg(cpu::GS, 0);
 
@@ -1547,17 +1556,18 @@ void DPMI::handleRawSwitchRMtoPM() {
     valid = true;
   };
 
-  uint32_t csBase = 0, dsBase = 0, ssBase = 0;
-  bool cs32 = false, ds32 = false, ss32 = false;
-  bool csValid = false, dsValid = false, ssValid = false;
+  uint32_t csBase = 0, dsBase = 0, ssBase = 0, esBase = 0;
+  bool cs32 = false, ds32 = false, ss32 = false, es32 = false;
+  bool csValid = false, dsValid = false, ssValid = false, esValid = false;
   decodePMSelector(newCS, csBase, cs32, csValid);
   decodePMSelector(newDS, dsBase, ds32, dsValid);
   decodePMSelector(newSS, ssBase, ss32, ssValid);
+  decodePMSelector(newES, esBase, es32, esValid);
   
   m_cpu.setSegBase(cpu::CS, csBase);
   m_cpu.setSegBase(cpu::DS, dsBase);
   m_cpu.setSegBase(cpu::SS, ssBase);
-  m_cpu.setSegBase(cpu::ES, dsBase);
+  m_cpu.setSegBase(cpu::ES, esBase);
   m_cpu.setSegBase(cpu::FS, 0);
   m_cpu.setSegBase(cpu::GS, 0);
 
@@ -1568,10 +1578,10 @@ void DPMI::handleRawSwitchRMtoPM() {
     m_cpu.setIs32BitStack(ss32);
 
   // Resolve target EIP and ESP dynamically:
-  // Use 32-bit registers (ESI/EBX) if the segment descriptor specifies 
-  // 32-bit width. Otherwise, fallback to zero-extended 16-bit registers (SI/BX)
+  // Use 32-bit registers (EDI/EBX) if the client is a 32-bit client.
+  // Otherwise, fallback to zero-extended 16-bit registers (DI/BX)
   // to avoid garbage propagation from real-mode stubs.
-  uint32_t newEIP = rawESI & 0xFFFF;
+  uint32_t newEIP = m_is32BitClient ? rawEDI : (rawEDI & 0xFFFF);
   uint32_t newESP = m_is32BitClient ? rawEBX : (rawEBX & 0xFFFF);
 
   m_cpu.setReg32(cpu::ESP, newESP);

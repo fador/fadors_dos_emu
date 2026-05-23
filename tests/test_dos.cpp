@@ -1334,20 +1334,22 @@ TEST_CASE("DOS: ProgramLoader respects envSeg and Multiplex AX=FB42h check", "[D
 
     std::remove("dummy_child.com");
 
-    // 2. Verify INT 2Fh AX=FB42h installation check is NOT handled (not resident)
+    // 2. Verify INT 2Fh AX=FB42h installation check is handled and returns BX unchanged (not resident)
     cpu.setReg16(cpu::AX, 0xFB42);
     cpu.setReg16(cpu::BX, 0x0014);
     cpu.setReg16(cpu::CX, 0x0001);
     
-    // Call the handler - should return false (unhandled)
-    REQUIRE(!dos.handleInterrupt(0x2F));
+    // Call the handler - should return true (handled) and BX should remain 0x0014
+    REQUIRE(dos.handleInterrupt(0x2F));
+    REQUIRE(cpu.getReg16(cpu::BX) == 0x0014);
 
-    // 3. Verify INT 2Fh AX=FB42h BX=000Ah is NOT handled
+    // 3. Verify INT 2Fh AX=FB42h BX=000Ah is handled and returns failure code
     cpu.setReg16(cpu::AX, 0xFB42);
     cpu.setReg16(cpu::BX, 0x000A);
     cpu.setReg16(cpu::DX, 0x0016);
 
-    REQUIRE(!dos.handleInterrupt(0x2F));
+    REQUIRE(dos.handleInterrupt(0x2F));
+    REQUIRE(cpu.getReg16(cpu::DX) == 0xFFDB);
 }
 
 TEST_CASE("DOS: INT 21h AH=5Dh Swappable Data Area and fallback", "[DOS]") {

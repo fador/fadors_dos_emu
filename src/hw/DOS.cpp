@@ -219,6 +219,19 @@ bool DOS::handleInterrupt(uint8_t vector) {
     // Let XMS calls (AX=4300h/4310h) fall through to BIOS handler
     if (ax == 0x4300 || ax == 0x4310)
       return false;
+    if (ax == 0xFB42) {
+      uint16_t bx = m_cpu.getReg16(cpu::BX);
+      LOG_DEBUG("DOS: INT 2Fh AX=FB42h Borland DPMILOAD subfunction BX=0x", std::hex, bx);
+      if (bx == 0x0014) {
+        // Installation check. Return with BX unchanged (non-zero) to report "not resident".
+        return true;
+      } else if (bx == 0x000A) {
+        // Init DPMI Host / Spawn Subshell. Return failure code.
+        m_cpu.setReg16(cpu::DX, 0xFFDB);
+        return true;
+      }
+      return true;
+    }
     if (ax == 0x1687) {
       if (m_dpmi) {
         m_dpmi->handleDetect();
@@ -869,6 +882,12 @@ void DOS::handleDOSService() {
     break;
   }
 
+  case 0x31: { // Terminate and Stay Resident (TSR)
+    uint8_t al = m_cpu.getReg8(cpu::AL);
+    uint16_t dx = m_cpu.getReg16(cpu::DX);
+    terminateProcess(al, 3, dx);
+    break;
+  }
   case 0x4C: { // Terminate with return code
     uint8_t al = m_cpu.getReg8(cpu::AL);
     terminateProcess(al);
@@ -876,9 +895,10 @@ void DOS::handleDOSService() {
   }
   case 0x4D: { // Get Return Code
     m_cpu.setReg8(cpu::AL, m_lastChildExitCode);
-    m_cpu.setReg8(cpu::AH, 0); // Normal termination
+    m_cpu.setReg8(cpu::AH, m_lastChildExitType);
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-    LOG_DOS("DOS: Get Return Code -> AL=0x", std::hex, (int)m_lastChildExitCode);
+    LOG_DOS("DOS: Get Return Code -> AL=0x", std::hex, (int)m_lastChildExitCode,
+            " AH=0x", (int)m_lastChildExitType);
     break;
   }
   case 0x48: // Allocate Memory
@@ -956,18 +976,23 @@ void DOS::handleDOSService() {
     break;
   }
 }
-void DOS::terminateProcess(uint8_t exitCode) {
-  LOG_INFO("DOS: Process terminated with exit code ", (int)exitCode);
+void DOS::terminateProcess(uint8_t exitCode, uint8_t exitType, uint16_t residentParas) {
+  LOG_INFO("DOS: Process terminated with exit code ", (int)exitCode, " exitType ", (int)exitType);
 
   if (!m_processStack.empty()) {
     ProcessState parent = m_processStack.back();
     m_processStack.pop_back();
 
     m_lastChildExitCode = exitCode;
+    m_lastChildExitType = exitType;
 
-    // Free child process memory
+    // Free child process memory or resize TSR block
     if (parent.childMemorySeg != 0) {
-      freeMemory(parent.childMemorySeg);
+      if (exitType == 3) {
+        resizeTSRBlock(parent.childMemorySeg, residentParas);
+      } else {
+        freeMemory(parent.childMemorySeg);
+      }
     }
 
     // Clean up file handles opened by the child
@@ -979,8 +1004,8 @@ void DOS::terminateProcess(uint8_t exitCode) {
       m_fileHandles.pop_back();
     }
 
-    // Reset DPMI
-    if (m_dpmi) {
+    // Reset DPMI (only if not staying resident)
+    if (m_dpmi && exitType != 3) {
       m_dpmi->reset();
     }
 
@@ -1018,6 +1043,49 @@ void DOS::terminateProcess(uint8_t exitCode) {
   } else {
     m_terminated = true;
     m_exitCode = exitCode;
+  }
+}
+
+void DOS::resizeTSRBlock(uint16_t segment, uint16_t requested) {
+  uint16_t mcbSeg = segment - 1;
+  MCB mcb = readMCB(mcbSeg);
+
+  if (mcb.size >= requested) { // Shrink
+    if (mcb.size > requested + 1) {
+      // Compute the size of the new free block
+      uint16_t freeSize = mcb.size - requested - 1;
+      uint8_t  freeType = mcb.type; // inherit 'M' or 'Z'
+
+      // Merge with the following block if it is also free
+      uint16_t newFreeSeg = static_cast<uint16_t>(mcbSeg + requested + 1);
+      if (freeType == 'M') {
+        uint16_t afterSeg = static_cast<uint16_t>(newFreeSeg + freeSize + 1);
+        if (afterSeg <= LAST_PARA) {
+          MCB afterMcb = readMCB(afterSeg);
+          if (afterMcb.owner == 0) {
+            freeSize = static_cast<uint16_t>(freeSize + 1 + afterMcb.size);
+            freeType = afterMcb.type;
+          }
+        }
+      }
+
+      MCB next;
+      next.type = freeType;
+      next.owner = 0;
+      next.size = freeSize;
+
+      mcb.type = 'M';
+      mcb.size = requested;
+
+      writeMCB(mcbSeg, mcb);
+      writeMCB(newFreeSeg, next);
+    }
+    // Update the program's top paragraph in its PSP (offset 0x02)
+    m_memory.write16((static_cast<uint32_t>(segment) << 4) + 0x02,
+                     static_cast<uint16_t>(segment + requested));
+    LOG_INFO("DOS: Shrunk TSR segment ", std::hex, segment, " to ", requested, " paras");
+  } else {
+    LOG_WARN("DOS: TSR requested expansion of segment ", std::hex, segment, " from ", mcb.size, " to ", requested, " paras; keeping current size");
   }
 }
 

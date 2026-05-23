@@ -940,10 +940,11 @@ TEST_CASE("DPMI raw switch PM→RM", "[dpmi][rawswitch]") {
 
     // Set up registers for the raw switch
     env.cpu.setReg16(cpu::AX, 0x3000);  // new DS
-    env.cpu.setReg16(cpu::CX, 0x4000);  // new CS
+    env.cpu.setReg16(cpu::CX, 0x4000);  // new ES
     env.cpu.setReg16(cpu::DX, 0x5000);  // new SS
     env.cpu.setReg16(cpu::BX, 0xFFF0);  // new SP
-    env.cpu.setReg16(cpu::SI, 0x0200);  // new IP
+    env.cpu.setReg16(cpu::SI, 0x6000);  // new CS
+    env.cpu.setReg16(cpu::DI, 0x0200);  // new IP
 
     env.dpmi.handleRawSwitchPMtoRM();
 
@@ -951,8 +952,9 @@ TEST_CASE("DPMI raw switch PM→RM", "[dpmi][rawswitch]") {
     REQUIRE((env.cpu.getCR(0) & 1) == 0);
 
     // Check segment registers
-    REQUIRE(env.cpu.getSegReg(cpu::CS) == 0x4000);
+    REQUIRE(env.cpu.getSegReg(cpu::CS) == 0x6000);
     REQUIRE(env.cpu.getSegReg(cpu::DS) == 0x3000);
+    REQUIRE(env.cpu.getSegReg(cpu::ES) == 0x4000);
     REQUIRE(env.cpu.getSegReg(cpu::SS) == 0x5000);
     REQUIRE(env.cpu.getReg16(cpu::SP) == 0xFFF0);
     REQUIRE(env.cpu.getEIP() == 0x0200);
@@ -966,7 +968,8 @@ TEST_CASE("DPMI raw switch RM→PM", "[dpmi][rawswitch]") {
     env.cpu.setReg16(cpu::CX, 0x4000);
     env.cpu.setReg16(cpu::DX, 0x5000);
     env.cpu.setReg16(cpu::BX, 0xFFF0);
-    env.cpu.setReg16(cpu::SI, 0x0200);
+    env.cpu.setReg16(cpu::SI, 0x6000);
+    env.cpu.setReg16(cpu::DI, 0x0200);
     env.dpmi.handleRawSwitchPMtoRM();
     REQUIRE((env.cpu.getCR(0) & 1) == 0);
 
@@ -974,14 +977,16 @@ TEST_CASE("DPMI raw switch RM→PM", "[dpmi][rawswitch]") {
     // Get the initial selectors from the entry for a valid PM return
     // We'll use simple values that exist in the LDT
     uint16_t pmDS = 0x0014; // LDT index 2 (entry allocated during DPMITestEnv setup)
+    uint16_t pmES = 0x0014; // LDT index 2
     uint16_t pmCS = 0x000C; // LDT index 1
     uint16_t pmSS = 0x001C; // LDT index 3
 
     env.cpu.setReg16(cpu::AX, pmDS);
-    env.cpu.setReg16(cpu::CX, pmCS);
+    env.cpu.setReg16(cpu::CX, pmES);     // new ES
     env.cpu.setReg16(cpu::DX, pmSS);
     env.cpu.setReg32(cpu::EBX, 0xFFF0);  // ESP
-    env.cpu.setReg32(cpu::ESI, 0x100);    // EIP
+    env.cpu.setReg16(cpu::SI, pmCS);     // new CS
+    env.cpu.setReg32(cpu::EDI, 0x100);   // EIP
 
     env.dpmi.handleRawSwitchRMtoPM();
 
@@ -989,34 +994,38 @@ TEST_CASE("DPMI raw switch RM→PM", "[dpmi][rawswitch]") {
     REQUIRE((env.cpu.getCR(0) & 1) != 0);
     REQUIRE(env.cpu.getSegReg(cpu::CS) == pmCS);
     REQUIRE(env.cpu.getSegReg(cpu::DS) == pmDS);
+    REQUIRE(env.cpu.getSegReg(cpu::ES) == pmES);
     REQUIRE(env.cpu.getSegReg(cpu::SS) == pmSS);
 }
 
-TEST_CASE("DPMI raw switch RM→PM zero-extends SI into EIP", "[dpmi][rawswitch]") {
+TEST_CASE("DPMI raw switch RM→PM zero-extends EDI into EIP", "[dpmi][rawswitch]") {
     DPMITestEnv env;
 
     env.cpu.setReg16(cpu::AX, 0x3000);
     env.cpu.setReg16(cpu::CX, 0x4000);
     env.cpu.setReg16(cpu::DX, 0x5000);
     env.cpu.setReg16(cpu::BX, 0xFFF0);
-    env.cpu.setReg16(cpu::SI, 0x0200);
+    env.cpu.setReg16(cpu::SI, 0x6000);
+    env.cpu.setReg16(cpu::DI, 0x0200);
     env.dpmi.handleRawSwitchPMtoRM();
     REQUIRE((env.cpu.getCR(0) & 1) == 0);
 
     uint16_t pmDS = 0x0014;
+    uint16_t pmES = 0x0014;
     uint16_t pmCS = 0x000C;
     uint16_t pmSS = 0x001C;
 
     env.cpu.setReg16(cpu::AX, pmDS);
-    env.cpu.setReg16(cpu::CX, pmCS);
+    env.cpu.setReg16(cpu::CX, pmES);
     env.cpu.setReg16(cpu::DX, pmSS);
     env.cpu.setReg32(cpu::EBX, 0x0010FFF0);
-    env.cpu.setReg32(cpu::ESI, 0x843A0594);
+    env.cpu.setReg16(cpu::SI, pmCS);
+    env.cpu.setReg32(cpu::EDI, 0x843A0594); // upper bits set
 
     env.dpmi.handleRawSwitchRMtoPM();
 
     REQUIRE((env.cpu.getCR(0) & 1) != 0);
-    REQUIRE(env.cpu.getEIP() == 0x0594);
+    REQUIRE(env.cpu.getEIP() == 0x0594); // zero-extended since cs is 16-bit
     REQUIRE(env.cpu.getReg32(cpu::ESP) == 0x0010FFF0);
     REQUIRE(env.cpu.getSegBase(cpu::CS) == 0x10000);
 }

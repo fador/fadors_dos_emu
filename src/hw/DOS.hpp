@@ -183,7 +183,8 @@ private:
   void handleDirectoryService();           // AH=39h, 3Ah, 3Bh, 47h
   void handleDriveService();               // AH=0Eh, 19h, 36h
   void handleDirectorySearch();            // AH=4Eh, 4Fh
-  void terminateProcess(uint8_t exitCode); // AH=4Ch or INT 20h
+  void terminateProcess(uint8_t exitCode, uint8_t exitType = 0, uint16_t residentParas = 0); // AH=4Ch, AH=31h or INT 20h
+  void resizeTSRBlock(uint16_t segment, uint16_t requested);
 
   // FindFirst/FindNext search state
   std::vector<std::filesystem::path> m_searchResults;
@@ -204,6 +205,7 @@ private:
 
   std::vector<ProcessState> m_processStack;
   uint8_t m_lastChildExitCode = 0;
+  uint8_t m_lastChildExitType = 0;
   bool m_execTriggered = false;
 };
 
