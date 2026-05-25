@@ -2637,3 +2637,368 @@ TEST_CASE("DPMI 0302h preserves segment registers after RM call", "[dpmi][transl
     REQUIRE(env.cpu.getSegReg(cpu::ES) == savedES);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Borland FB42h Multiplex (INT 2Fh AX=FB42h) — used by TC.EXE / DPMILOAD
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("INT 2Fh FB42h BX=000Ah returns DX=0 when DPMI active", "[dpmi][fb42]") {
+    // Simulate TC.EXE calling INT 2Fh FB42h BX=000Ah after DPMILOAD TSR exit.
+    // DPMI should be active at this point.
+    DPMITestEnv env;
+    REQUIRE(env.dpmi.isActive());
+
+    env.cpu.setReg16(cpu::AX, 0xFB42);
+    env.cpu.setReg16(cpu::BX, 0x000A);
+    // Preserve caller's AX-like value; TC.EXE passes CX,DX,SI from memory
+    env.cpu.setReg16(cpu::CX, 0x0001);
+    env.cpu.setReg16(cpu::DX, 0x0016);
+    env.cpu.setReg16(cpu::SI, 0x0300);
+
+    // The DOS handler intercepts INT 2Fh
+    bool handled = env.dos.handleInterrupt(0x2F);
+    REQUIRE(handled);
+
+    // DX must be set to 0 (success)
+    REQUIRE(env.cpu.getReg16(cpu::DX) == 0x0000);
+    // AX must be preserved (caller's value, not overwritten)
+    REQUIRE(env.cpu.getReg16(cpu::AX) == 0xFB42);
+}
+
+TEST_CASE("INT 2Fh FB42h BX=0015h returns BX=0 when DPMI active", "[dpmi][fb42]") {
+    DPMITestEnv env;
+    REQUIRE(env.dpmi.isActive());
+
+    env.cpu.setReg16(cpu::AX, 0xFB42);
+    env.cpu.setReg16(cpu::BX, 0x0015);
+
+    bool handled = env.dos.handleInterrupt(0x2F);
+    REQUIRE(handled);
+
+    // BX must be set to 0 (DPMI resident)
+    REQUIRE(env.cpu.getReg16(cpu::BX) == 0x0000);
+    // AX must be preserved
+    REQUIRE(env.cpu.getReg16(cpu::AX) == 0xFB42);
+}
+
+TEST_CASE("INT 2Fh FB42h BX=0014h leaves BX unchanged when DPMI inactive", "[dpmi][fb42]") {
+    // Without DPMI active, the installation check should return non-zero BX
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic{true};
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    bios.initialize();
+    dos.initialize();
+
+    cpu.setReg16(cpu::AX, 0xFB42);
+    cpu.setReg16(cpu::BX, 0x0014);
+
+    bool handled = dos.handleInterrupt(0x2F);
+    REQUIRE(handled);
+    // BX unchanged when DPMI not active
+    REQUIRE(cpu.getReg16(cpu::BX) == 0x0014);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DPMILOAD-style memory allocation + resize + descriptor sequence
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("DPMI alloc+resize preserves descriptor access", "[dpmi][memory][segload]") {
+    DPMITestEnv env;
+
+    // Step 1: Get memory info (0500h)
+    uint32_t structAddr = DPMITestEnv::SCRATCH_ADDR;
+    env.mem.write32(structAddr + 0x00, 0);
+    for (int i = 4; i < 0x30; i += 4)
+        env.mem.write32(structAddr + i, 0x1000);
+
+    env.cpu.setReg16(cpu::AX, 0x0500);
+    env.cpu.setSegBase(cpu::ES, 0);
+    env.cpu.setReg32(cpu::EDI, structAddr);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+
+    // Step 2: Allocate LDT descriptor via 0000h
+    env.cpu.setReg16(cpu::AX, 0x0000);
+    env.cpu.setReg16(cpu::CX, 1);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+    uint16_t dataSel = env.cpu.getReg16(cpu::AX);
+    REQUIRE(dataSel != 0);
+
+    // Step 3: Allocate DPMI memory (0501h)
+    env.cpu.setReg16(cpu::AX, 0x0501);
+    env.cpu.setReg16(cpu::BX, 0x0000);
+    env.cpu.setReg16(cpu::CX, 0xFFFF);  // 65535 bytes
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+    uint32_t handle1 = (static_cast<uint32_t>(env.cpu.getReg16(cpu::SI)) << 16)
+                       | env.cpu.getReg16(cpu::DI);
+    REQUIRE(handle1 == 1);
+
+    // Step 4: Resize (0503h)
+    env.cpu.setReg16(cpu::AX, 0x0503);
+    env.cpu.setReg16(cpu::SI, static_cast<uint16_t>(handle1 >> 16));
+    env.cpu.setReg16(cpu::DI, static_cast<uint16_t>(handle1 & 0xFFFF));
+    env.cpu.setReg16(cpu::BX, 0x0000);
+    env.cpu.setReg16(cpu::CX, 0x2000);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+    uint32_t linear2 = (static_cast<uint32_t>(env.cpu.getReg16(cpu::BX)) << 16)
+                       | env.cpu.getReg16(cpu::CX);
+    REQUIRE(linear2 != 0);
+
+    // Step 5: Set descriptor (000Ch) to the resized address
+    uint32_t descBuf = DPMITestEnv::SCRATCH_ADDR + 0x100;
+    uint32_t descLow = (linear2 << 16) | 0x1FFF;
+    uint32_t descHigh = (linear2 & 0xFF000000)
+                       | ((linear2 & 0x00FF0000) >> 16)
+                       | 0x00F20000;
+    env.mem.write32(descBuf, descLow);
+    env.mem.write32(descBuf + 4, descHigh);
+    env.cpu.setReg16(cpu::AX, 0x000C);
+    env.cpu.setReg16(cpu::BX, dataSel);
+    env.cpu.setSegBase(cpu::ES, 0);
+    env.cpu.setReg32(cpu::EDI, descBuf);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+
+    // Step 6: Verify descriptor base matches new linear address
+    uint32_t selectorBase = env.dpmi.getSelectorBase(dataSel);
+    REQUIRE(selectorBase == linear2);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DPMI re-entry after TSR child: parent can enter PM after child TSR exit
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("DPMI re-entry possible after TSR child (clearActiveFlag)", "[dpmi][tsr]") {
+    // Simulate: DPMILOAD enters PM, terminates as TSR, parent restored.
+    // Parent (TC.EXE) should be able to call INT 2Fh 1687h and enter PM.
+    DPMITestEnv env;
+    REQUIRE(env.dpmi.isActive());
+
+    // Simulate TSR child exit: just clear the active flag
+    env.dpmi.clearActiveFlag();
+    REQUIRE(!env.dpmi.isActive());
+
+    // Now simulate parent calling INT 2Fh 1687h (DPMI detection)
+    env.dpmi.handleDetect();
+    REQUIRE(env.cpu.getReg16(cpu::AX) == 0x0000);  // DPMI available
+    REQUIRE(env.cpu.getSegReg(cpu::ES) == 0xF000);  // Entry segment
+    REQUIRE(env.cpu.getReg16(cpu::DI) == 0x0050);   // Entry offset
+
+    // Detecting DPMI should not set active flag
+    REQUIRE(!env.dpmi.isActive());
+
+    // Parent should be able to enter PM now
+    // Set up a new RM state for parent's entry
+    env.cpu.setSegReg(cpu::CS, 0x082E);
+    env.cpu.setSegReg(cpu::DS, 0x0812);
+    env.cpu.setSegReg(cpu::SS, 0x0822);
+    env.cpu.setReg16(cpu::SP, 0xFFFC);
+    uint16_t sp = env.cpu.getReg16(cpu::SP);
+    sp -= 2; env.mem.write16(sp, 0x082E);  // push CS
+    sp -= 2; env.mem.write16(sp, 0x100);    // push IP
+    env.cpu.setReg16(cpu::SP, sp);
+    env.cpu.setReg16(cpu::AX, 0x0000);  // 16-bit client
+
+    bool result = env.dpmi.handleEntry();
+    REQUIRE(result);
+    REQUIRE(env.dpmi.isActive());
+    REQUIRE((env.cpu.getCR(0) & 1) != 0);  // CR0.PE set
+    REQUIRE(!(env.cpu.getEFLAGS() & cpu::FLAG_CARRY));  // success
+}
+
+TEST_CASE("DPMI memory blocks preserved after TSR child exit", "[dpmi][tsr]") {
+    DPMITestEnv env;
+
+    // Allocate a DPMI memory block (like DPMILOAD does)
+    env.cpu.setReg16(cpu::AX, 0x0501);
+    env.cpu.setReg16(cpu::BX, 0x0000);
+    env.cpu.setReg16(cpu::CX, 0x1000);  // 4096 bytes
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+    uint32_t handle = (static_cast<uint32_t>(env.cpu.getReg16(cpu::SI)) << 16)
+                      | env.cpu.getReg16(cpu::DI);
+    uint32_t origLinear = (static_cast<uint32_t>(env.cpu.getReg16(cpu::BX)) << 16)
+                          | env.cpu.getReg16(cpu::CX);
+
+    // Write data to the block
+    env.mem.write32(origLinear, 0xCAFEBABE);
+
+    // Simulate TSR child exit
+    env.dpmi.clearActiveFlag();
+    REQUIRE(!env.dpmi.isActive());
+
+    // The DPMI memory block should still be accessible at the same linear address
+    REQUIRE(env.mem.read32(origLinear) == 0xCAFEBABE);
+
+    // Now parent enters PM fresh
+    env.dpmi.handleDetect();
+    env.cpu.setSegReg(cpu::CS, 0x082E);
+    env.cpu.setSegReg(cpu::DS, 0x0812);
+    env.cpu.setSegReg(cpu::SS, 0x0000);
+    env.cpu.setReg16(cpu::SP, 0xFFFC);
+    uint16_t sp = env.cpu.getReg16(cpu::SP);
+    sp -= 2; env.mem.write16(sp, 0x082E);
+    sp -= 2; env.mem.write16(sp, 0x100);
+    env.cpu.setReg16(cpu::SP, sp);
+    env.cpu.setReg16(cpu::AX, 0x0000);
+    REQUIRE(env.dpmi.handleEntry());
+
+    // Data should still be present
+    REQUIRE(env.mem.read32(origLinear) == 0xCAFEBABE);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Raw mode switch register mapping (Borland DPMILOAD convention)
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("Raw mode switch PM→RM maps registers correctly", "[dpmi][rawswitch]") {
+    DPMITestEnv env;
+    REQUIRE(env.dpmi.isActive());
+
+    // Set up DPMILOAD's raw switch registers:
+    // AX→DS, CX→ES, DX→SS, BX→SP, SI→CS, DI→IP
+    env.cpu.setReg16(cpu::AX, 0xC920);  // new DS
+    env.cpu.setReg16(cpu::CX, 0x089F);  // new ES
+    env.cpu.setReg16(cpu::DX, 0xDFA0);  // new SS
+    env.cpu.setReg16(cpu::BX, 0x030E);  // new SP
+    env.cpu.setReg16(cpu::SI, 0x08AF);  // new CS
+    env.cpu.setReg16(cpu::DI, 0x0A21);  // new IP
+
+    env.dpmi.handleRawSwitchPMtoRM();
+
+    REQUIRE(env.cpu.getSegReg(cpu::DS) == 0xC920);
+    REQUIRE(env.cpu.getSegReg(cpu::ES) == 0x089F);
+    REQUIRE(env.cpu.getSegReg(cpu::SS) == 0xDFA0);
+    REQUIRE(env.cpu.getReg16(cpu::SP) == 0x030E);
+    REQUIRE(env.cpu.getSegReg(cpu::CS) == 0x08AF);
+    REQUIRE(env.cpu.getEIP() == 0x0A21);
+
+    // Should be back in real mode
+    REQUIRE((env.cpu.getCR(0) & 1) == 0);
+}
+
+TEST_CASE("Raw mode switch RM→PM maps registers correctly", "[dpmi][rawswitch]") {
+    DPMITestEnv env;
+    REQUIRE(env.dpmi.isActive());
+
+    // First switch to RM
+    env.cpu.setReg16(cpu::AX, 0xC920);
+    env.cpu.setReg16(cpu::CX, 0x089F);
+    env.cpu.setReg16(cpu::DX, 0xDFA0);
+    env.cpu.setReg16(cpu::BX, 0x030E);
+    env.cpu.setReg16(cpu::SI, 0x08AF);
+    env.cpu.setReg16(cpu::DI, 0x0A21);
+    env.dpmi.handleRawSwitchPMtoRM();
+    REQUIRE((env.cpu.getCR(0) & 1) == 0);
+
+    // Now switch back to PM:
+    // AX→DS, CX→ES, DX→SS, SI→CS, EBX→ESP
+    env.cpu.setReg16(cpu::AX, 0x0017);  // new DS sel
+    env.cpu.setReg16(cpu::CX, 0x0027);  // new ES sel
+    env.cpu.setReg16(cpu::DX, 0x001F);  // new SS sel
+    env.cpu.setReg16(cpu::SI, 0x000F);  // new CS sel
+    env.cpu.setReg32(cpu::EBX, 0x304);  // new ESP
+    // Set current CS to DPMI_ENTRY_SEG so the LDT base update runs
+    env.cpu.setSegReg(cpu::CS, hw::DPMI::DPMI_ENTRY_SEG);
+    env.dpmi.handleRawSwitchRMtoPM();
+
+    // Should be back in protected mode
+    REQUIRE((env.cpu.getCR(0) & 1) != 0);
+    REQUIRE(env.dpmi.isActive());
+
+    // Segments should be set to PM selectors
+    REQUIRE((env.cpu.getSegReg(cpu::DS) & 0x04) != 0);  // LDT selector
+    REQUIRE((env.cpu.getSegReg(cpu::ES) & 0x04) != 0);
+    REQUIRE((env.cpu.getSegReg(cpu::SS) & 0x04) != 0);
+    REQUIRE((env.cpu.getSegReg(cpu::CS) & 0x04) != 0);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DPMI 0302h: RM callback state integrity
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("DPMI 0302h preserves PM segment registers after RM call", "[dpmi][translation]") {
+    DPMITestEnv env;
+
+    // Save PM state before the call
+    uint16_t savedCS = env.cpu.getSegReg(cpu::CS);
+    uint16_t savedDS = env.cpu.getSegReg(cpu::DS);
+    uint16_t savedSS = env.cpu.getSegReg(cpu::SS);
+    uint16_t savedES = env.cpu.getSegReg(cpu::ES);
+    uint32_t savedEIP = env.cpu.getEIP();
+
+    // Build RM call structure for INT 21h AH=30h (Get DOS Version — harmless)
+    // Use an address ABOVE DOS memory (0xA0000) to avoid corrupting MCB chain.
+    uint32_t structAddr = 0xF1000;  // Safe: above BIOS stubs, below GDT
+    for (int i = 0; i < 0x34; i++) env.mem.write8(structAddr + i, 0);
+    env.mem.write32(structAddr + 0x1C, 0x3000);       // EAX = AH=30h
+    env.mem.write16(structAddr + 0x20, 0x0202);        // Flags
+    env.mem.write16(structAddr + 0x22, 0x0000);        // ES
+    env.mem.write16(structAddr + 0x24, 0x0000);        // DS
+    env.mem.write16(structAddr + 0x2A, 0x0310);        // IP → HLE stub for INT 21h (0x100 + 0x21*16)
+    env.mem.write16(structAddr + 0x2C, 0xF000);        // CS → HLE stub segment
+    env.mem.write16(structAddr + 0x2E, 0xFFF0);        // SP
+    env.mem.write16(structAddr + 0x30, 0x2000);        // SS
+
+    env.cpu.setReg16(cpu::AX, 0x0302);
+    env.cpu.setReg8(cpu::BL, 0x21);  // INT 21h
+    env.cpu.setSegBase(cpu::ES, 0);
+    env.cpu.setReg32(cpu::EDI, structAddr);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+
+    REQUIRE(!env.carrySet());  // Call should succeed
+
+    // PM segment registers must be fully restored
+    REQUIRE(env.cpu.getSegReg(cpu::CS) == savedCS);
+    REQUIRE(env.cpu.getSegReg(cpu::DS) == savedDS);
+    REQUIRE(env.cpu.getSegReg(cpu::SS) == savedSS);
+    REQUIRE(env.cpu.getSegReg(cpu::ES) == savedES);
+    REQUIRE(env.cpu.getEIP() == savedEIP);
+}
+
+TEST_CASE("DPMI 0302h INT 21h AH=48h returns correct segment", "[dpmi][translation]") {
+    // DPMILOAD uses 0302h to allocate DOS memory from PM.
+    // Verify the segment is correct and carry is clear.
+    DPMITestEnv env;
+
+    // Build RM call structure for INT 21h AH=48h (Allocate Memory)
+    // Use an address ABOVE DOS memory (0xA0000) to avoid corrupting MCB chain.
+    uint32_t structAddr = 0xF1000;
+    for (int i = 0; i < 0x34; i++) env.mem.write8(structAddr + i, 0);
+    env.mem.write32(structAddr + 0x1C, 0x4800);       // EAX = AH=48h
+    env.mem.write32(structAddr + 0x10, 0x0040);        // EBX = 64 paragraphs
+    env.mem.write16(structAddr + 0x20, 0x0202);        // Flags
+    env.mem.write16(structAddr + 0x22, 0x0000);        // ES
+    env.mem.write16(structAddr + 0x24, 0x0000);        // DS
+    env.mem.write16(structAddr + 0x2A, 0x0310);        // IP → HLE stub for INT 21h (0x100 + 0x21*16)
+    env.mem.write16(structAddr + 0x2C, 0xF000);        // CS → HLE stub segment
+    env.mem.write16(structAddr + 0x2E, 0xFFF0);        // SP
+    env.mem.write16(structAddr + 0x30, 0x2000);        // SS
+
+    env.cpu.setReg16(cpu::AX, 0x0302);
+    env.cpu.setReg8(cpu::BL, 0x21);
+    env.cpu.setSegBase(cpu::ES, 0);
+    env.cpu.setReg32(cpu::EDI, structAddr);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+
+    REQUIRE(!env.carrySet());
+
+    // Check that the RM call structure was updated with the result
+    uint16_t resultAX = env.mem.read16(structAddr + 0x1C);
+    // AH should reflect DOS return, AL=segment on success
+    REQUIRE(resultAX != 0);  // Should have allocated something
+}

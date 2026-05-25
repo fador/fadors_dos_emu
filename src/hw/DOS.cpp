@@ -223,12 +223,18 @@ bool DOS::handleInterrupt(uint8_t vector) {
     if (ax == 0xFB42) {
       uint16_t bx = m_cpu.getReg16(cpu::BX);
       LOG_DEBUG("DOS: INT 2Fh AX=FB42h Borland DPMILOAD subfunction BX=0x", std::hex, bx);
-      if (bx == 0x0014) {
-        // Installation check. Return with BX unchanged (non-zero) to report "not resident".
+      if (bx == 0x0014 || bx == 0x0015) {
+        // Installation check (0x14) and alternative check (0x15 used by
+        // Borland TC.EXE during its DPMILOAD callback). Return BX=0
+        // when DPMI is active, otherwise leave BX unchanged (non-zero).
+        if (m_dpmi && m_dpmi->isActive()) {
+          m_cpu.setReg16(cpu::BX, 0x0000);
+        }
         return true;
       } else if (bx == 0x000A) {
-        // Init DPMI Host / Spawn Subshell. Return failure code.
-        m_cpu.setReg16(cpu::DX, 0xFFDB);
+        // Init DPMI Host / Spawn Subshell. Return DX=0 (success) to
+        // allow Borland DPMILOAD to continue initialization.
+        m_cpu.setReg16(cpu::DX, 0x0000);
         return true;
       }
       return true;
@@ -878,6 +884,7 @@ void DOS::handleDOSService() {
       parent.currentDir = m_currentDir;
       parent.dosCurrentDir = m_dosCurrentDir;
       parent.childMemorySeg = childSeg;
+      parent.childEnvSeg = childEnvSeg;
 
       // Load the child process
       ProgramLoader loader(m_cpu, m_memory, m_himem.get());
@@ -1064,10 +1071,26 @@ void DOS::terminateProcess(uint8_t exitCode, uint8_t exitType, uint16_t resident
       if (exitType == 3) {
         resizeTSRBlock(parent.childMemorySeg, residentParas);
       } else {
-        // Free child's environment block segment if one was set
-        uint16_t childEnvSeg = m_memory.read16((parent.childMemorySeg << 4) + 0x2C);
-        if (childEnvSeg != 0) {
-          freeMemory(childEnvSeg);
+        // Free all child-owned MCBs before the main block (DPMI may have
+        // allocated additional memory blocks via INT 31h AX=0100h).
+        uint16_t current = FIRST_MCB_SEGMENT;
+        while (true) {
+          MCB mcb = readMCB(current);
+          if (mcb.owner == parent.childMemorySeg) {
+            freeMemory(current + 1);
+            current = FIRST_MCB_SEGMENT;
+            continue;
+          }
+          if (mcb.type == 'Z') break;
+          uint32_t next = static_cast<uint32_t>(current) + mcb.size + 1;
+          if (next > 0xFFFF || next > LAST_PARA) break;
+          current = static_cast<uint16_t>(next);
+        }
+
+        // Free child's environment block using saved segment (not PSP:0x2C,
+        // which DPMI may have overwritten with a PM selector).
+        if (parent.childEnvSeg != 0) {
+          freeMemory(parent.childEnvSeg);
         }
         freeMemory(parent.childMemorySeg);
       }
@@ -1080,11 +1103,6 @@ void DOS::terminateProcess(uint8_t exitCode, uint8_t exitType, uint16_t resident
         fh->stream.close();
       }
       m_fileHandles.pop_back();
-    }
-
-    // Reset DPMI (only if not staying resident)
-    if (m_dpmi && exitType != 3) {
-      m_dpmi->reset();
     }
 
     // Restore parent CPU registers
@@ -1127,6 +1145,20 @@ void DOS::terminateProcess(uint8_t exitCode, uint8_t exitType, uint16_t resident
     LOG_INFO("DOS: Restored parent process CS:EIP=", std::hex, m_cpu.getSegReg(cpu::CS), ":", m_cpu.getEIP(),
              " PSP=0x", m_pspSegment);
     m_parentRestored = true;
+
+    // Reset DPMI after parent is fully restored.
+    // For normal exit: full reset (clear LDT, memory blocks, etc.).
+    // For TSR exit: just clear the active flag so the parent can
+    // make a fresh DPMI entry via INT 2Fh 1687h → handleEntry.
+    // DPMI memory blocks (0501h allocations) loaded by the TSR child
+    // are preserved so the parent can map them with new descriptors.
+    if (m_dpmi) {
+      if (exitType != 3) {
+        m_dpmi->reset();
+      } else {
+        m_dpmi->clearActiveFlag();
+      }
+    }
   } else {
     m_terminated = true;
     m_exitCode = exitCode;

@@ -31,6 +31,8 @@ public:
   uint16_t getSDASelector() const { return m_sdaSel; }
   uint32_t getSelectorBase(uint16_t selector) const;
   void reset();
+  // Clear only the active flag (for TSR child exit: parent needs fresh entry)
+  void clearActiveFlag() { m_active = false; }
 
   // Called from INT 2Fh AX=1687h — fill registers for DPMI detection
   void handleDetect();

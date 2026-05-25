@@ -1531,9 +1531,10 @@ uint32_t DPMI::getLinearAddr(uint8_t segReg, uint8_t reg) const {
 }
 
 // ── Raw mode switch: PM → RM (vector 0xE2) ──────────────────────────────────
-// Called via JMP FAR to 0x08:0xF005A (flat PM address).
-// Registers: AX=new DS seg, CX=new CS seg, DX=new SS seg,
-//            BX=new SP, SI=new IP, EDI preserved.
+// Called via JMP FAR to 0x08:0x0500 (flat PM address, set by 0306h).
+// Register mapping (Borland DPMILOAD convention):
+//   AX → new DS segment, CX → new ES segment, DX → new SS segment,
+//   BX → new SP,         SI → new CS segment, DI → new IP.
 void DPMI::handleRawSwitchPMtoRM() {
   uint16_t newDS = m_cpu.getReg16(cpu::AX);
   uint16_t newES = m_cpu.getReg16(cpu::CX);
@@ -1572,9 +1573,10 @@ void DPMI::handleRawSwitchPMtoRM() {
 }
 
 // ── Raw mode switch: RM → PM (vector 0xE3) ──────────────────────────────────
-// Called via JMP FAR to F000:005D (real-mode address).
-// Registers: AX=new DS sel, CX=new CS sel, DX=new SS sel,
-//            (E)BX=new ESP, SI=new EIP, EDI preserved.
+// Called via JMP FAR to F000:005D (real-mode address, set by 0306h).
+// Register mapping (Borland DPMILOAD convention):
+//   AX → new DS selector, CX → new ES selector, DX → new SS selector,
+//   SI → new CS selector, EBX → new ESP, EDI preserved.
 void DPMI::handleRawSwitchRMtoPM() {
   uint16_t newDS = m_cpu.getReg16(cpu::AX);
   uint16_t newES = m_cpu.getReg16(cpu::CX);

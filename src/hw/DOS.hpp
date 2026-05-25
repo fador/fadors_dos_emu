@@ -123,6 +123,7 @@ public:
 
     // Memory tracker: child memory segment to free on return
     uint16_t childMemorySeg = 0;
+    uint16_t childEnvSeg = 0; // saved env segment (PSP:0x2C may be overwritten by DPMI)
   };
 
   // Set the working directory to the program's parent directory

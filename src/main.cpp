@@ -21,6 +21,10 @@
 #include "utils/Logger.hpp"
 #include <array>
 #include <iostream>
+#ifdef _WIN32
+#include <crtdbg.h>
+#include <cstdlib>
+#endif
 #ifdef HAVE_SDL2
 #include "ui/SDLRenderer.hpp"
 #endif
@@ -157,6 +161,17 @@ std::optional<uint32_t> parseLinearHexAddress(const std::string &value) {
 
 int main(int argc, char *argv[]) {
   try {
+#ifdef _WIN32
+    // Suppress MSVC debug runtime dialogs ("Abort/Retry/Ignore",
+    // "Debug Assertion Failed", etc.) so crashes exit cleanly
+    // without requiring manual user intervention.
+    _CrtSetReportMode(_CRT_WARN, _CRTDBG_MODE_DEBUG);
+    _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_DEBUG);
+    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_DEBUG);
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+    _set_error_mode(_OUT_TO_STDERR);
+#endif
+
     fador::utils::currentLevel = fador::utils::LogLevel::Info;
     LOG_INFO("Fador's DOS Emulator Starting...");
 

@@ -4,6 +4,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <csignal>
+#ifdef _WIN32
+#include <crtdbg.h>
+#endif
 
 namespace fador::utils {
 
@@ -119,6 +122,13 @@ static void terminateHandler() {
 
 bool installCrashHandler(std::function<void(const std::string &)> onCrash) {
   g_crashCallback = std::move(onCrash);
+
+  // Suppress MSVC debug runtime dialogs so crashes exit cleanly
+  _CrtSetReportMode(_CRT_WARN, _CRTDBG_MODE_DEBUG);
+  _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_DEBUG);
+  _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_DEBUG);
+  _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+  _set_error_mode(_OUT_TO_STDERR);
 
   // SEH top-level filter
   SetUnhandledExceptionFilter(sehHandler);
