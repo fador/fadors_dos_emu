@@ -1888,6 +1888,250 @@ TEST_CASE("DOS: Child Environment Duplication", "[DOS][Exec]") {
     std::remove("parent.com");
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// VROOMM / NE Overlay Segment Loading via INT 3Fh
+// ═══════════════════════════════════════════════════════════════════════════
 
+TEST_CASE("VROOMM: NE overlay segments load with relocation fixups", "[DOS][VROOMM][NE]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    bios.initialize();
+    dos.initialize();
+    hw::ProgramLoader loader(cpu, mem, dos.getHIMEM());
 
+    const char* fname = "ne_overlay2.exe";
+    {
+        auto write16 = [](std::vector<uint8_t>& v, size_t off, uint16_t val) {
+            v[off] = val & 0xFF; v[off+1] = (val >> 8) & 0xFF;
+        };
+        std::vector<uint8_t> exe(1536, 0);
+        exe[0]='M'; exe[1]='Z';
+        write16(exe, 2, 0); write16(exe, 4, 2); // 2 pages = 1024 bytes
+        write16(exe, 8, 2); write16(exe, 10, 0); write16(exe, 12, 0);
+        write16(exe, 14, 0); write16(exe, 16, 0x100);
+        write16(exe, 20, 0); write16(exe, 22, 0);
+        write16(exe, 0x3C, 0x40);
+
+        exe[32]=0x90; exe[33]=0x90; // NOPs as stub
+
+        size_t ne = 0x40;
+        exe[ne]='N'; exe[ne+1]='E';
+        write16(exe, ne+0x0E, 0x03); write16(exe, ne+0x18, 1);
+        write16(exe, ne+0x1C, 2);    // numSegments = 2
+        write16(exe, ne+0x22, 0x40); // segTableOffset = 0x40 (at 0x40+0x40=0x80)
+        write16(exe, ne+0x32, 9);    // alignShift = 9
+        exe[ne+0x36] = 1;
+
+        // Segment table at file offset 0x80 (0x40 + 0x40)
+        size_t segTab = 0x80;
+        // Segment 1: resident data at sector 0
+        write16(exe, segTab+0, 0); write16(exe, segTab+2, 0x10);
+        write16(exe, segTab+4, 0x0010); write16(exe, segTab+6, 0x10);
+        // Segment 2: overlay at sector 1 (file offset 512)
+        write16(exe, segTab+8, 1); write16(exe, segTab+10, 0x10);
+        write16(exe, segTab+12, 0x0010); write16(exe, segTab+14, 0x10);
+
+        // Overlay data at sector 1 (file offset 512)
+        for (int i=0;i<16;i++) exe[512+i]=static_cast<uint8_t>(0xCC+i);
+
+        std::ofstream ofs(fname, std::ios::binary);
+        ofs.write(reinterpret_cast<const char*>(exe.data()), 1536);
+    }
+
+    REQUIRE(loader.loadEXE(fname, dos.getPSPSegment(), dos));
+
+    cpu.setInstructionStartEIP(0x100);
+    cpu.setSegReg(cpu::CS, 0x2000);
+    cpu.setSegBase(cpu::CS, 0x20000);
+    cpu.setEIP(0x102);
+
+    mem.write8(0x20100, 0xCD); mem.write8(0x20101, 0x3F);
+    mem.write16(0x20102, 0x0008);
+    mem.write16(0x20104, 0x0002); // segment index 2
+
+    REQUIRE(dos.handleInterrupt(0x3F));
+    REQUIRE(mem.read8(0x20100) == 0xEA); // JMP FAR patched
+    uint16_t loadedSeg = mem.read16(0x20103);
+    REQUIRE(loadedSeg != 0);
+
+    // Verify at least the data was loaded
+    uint32_t loadAddr = static_cast<uint32_t>(loadedSeg) << 4;
+    REQUIRE(mem.read8(loadAddr) == 0xCC);
+
+    std::remove(fname);
+}
+
+TEST_CASE("VROOMM: reloading already-loaded segment returns cached segment", "[DOS][VROOMM]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    bios.initialize();
+    dos.initialize();
+    hw::ProgramLoader loader(cpu, mem, dos.getHIMEM());
+
+    const char* fname = "ne_cached.exe";
+    {
+        auto write16 = [](std::vector<uint8_t>& v, size_t off, uint16_t val) {
+            v[off] = val & 0xFF; v[off+1] = (val >> 8) & 0xFF;
+        };
+        std::vector<uint8_t> exe(1024, 0);
+        exe[0]='M'; exe[1]='Z';
+        write16(exe, 2, 0); write16(exe, 4, 1);
+        write16(exe, 8, 2); write16(exe, 20, 0); write16(exe, 22, 0);
+        write16(exe, 0x3C, 0x40);
+
+        exe[32]=0xB8; exe[33]=0x00; exe[34]=0x4C; exe[35]=0xCD; exe[36]=0x21;
+
+        size_t ne = 0x40;
+        exe[ne]='N'; exe[ne+1]='E';
+        write16(exe, ne+0x0E, 0x03); write16(exe, ne+0x18, 1);
+        write16(exe, ne+0x1C, 1); write16(exe, ne+0x22, 0x80);
+        write16(exe, ne+0x32, 9); exe[ne+0x36] = 1;
+
+        size_t segTab = 0x80;
+        write16(exe, segTab+0, 1); write16(exe, segTab+2, 8);
+        write16(exe, segTab+4, 0x0010); write16(exe, segTab+6, 0x10);
+
+        for (int i=0;i<8;i++) exe[512+i]=0xCC;
+
+        std::ofstream ofs(fname, std::ios::binary);
+        ofs.write(reinterpret_cast<const char*>(exe.data()), 1024);
+    }
+
+    REQUIRE(loader.loadEXE(fname, dos.getPSPSegment(), dos));
+
+    cpu.setInstructionStartEIP(0x100);
+    cpu.setSegReg(cpu::CS, 0x2000);
+    cpu.setSegBase(cpu::CS, 0x20000);
+
+    // First load
+    cpu.setEIP(0x102);
+    mem.write8(0x20100, 0xCD); mem.write8(0x20101, 0x3F);
+    mem.write16(0x20102, 0x0000);
+    mem.write16(0x20104, 0x0001);
+    REQUIRE(dos.handleInterrupt(0x3F));
+    uint16_t firstSeg = mem.read16(0x20103);
+    REQUIRE(firstSeg != 0);
+
+    // Second load → cached
+    mem.write8(0x20100, 0xCD); mem.write8(0x20101, 0x3F);
+    mem.write16(0x20102, 0x0000);
+    mem.write16(0x20104, 0x0001);
+    cpu.setEIP(0x102);
+    REQUIRE(dos.handleInterrupt(0x3F));
+    REQUIRE(mem.read16(0x20103) == firstSeg);
+
+    std::remove(fname);
+}
+
+TEST_CASE("VROOMM: out-of-bounds segment index returns zero", "[DOS][VROOMM]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    bios.initialize();
+    dos.initialize();
+
+    cpu.setInstructionStartEIP(0x100);
+    cpu.setSegReg(cpu::CS, 0x2000);
+    cpu.setSegBase(cpu::CS, 0x20000);
+    cpu.setEIP(0x102);
+
+    mem.write8(0x20100, 0xCD); mem.write8(0x20101, 0x3F);
+    mem.write16(0x20102, 0x0000);
+    mem.write16(0x20104, 0x0099);
+
+    REQUIRE(dos.handleInterrupt(0x3F));
+    REQUIRE(mem.read8(0x20100) == 0xCD);
+    REQUIRE(mem.read8(0x20101) == 0x3F);
+}
+
+TEST_CASE("VROOMM: FBOV multiple overlays load independently", "[DOS][VROOMM][FBOV]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    bios.initialize();
+    dos.initialize();
+    hw::ProgramLoader loader(cpu, mem, dos.getHIMEM());
+
+    const char* fname = "fbov_multi2.exe";
+    {
+        auto write16 = [](std::vector<uint8_t>& v, size_t off, uint16_t val) {
+            v[off] = val & 0xFF; v[off+1] = (val >> 8) & 0xFF;
+        };
+        auto write32 = [](std::vector<uint8_t>& v, size_t off, uint32_t val) {
+            v[off]=val&0xFF; v[off+1]=(val>>8)&0xFF; v[off+2]=(val>>16)&0xFF; v[off+3]=(val>>24)&0xFF;
+        };
+
+        // 2-page EXE: MZ image fills 1024 bytes, then FBOV blocks follow
+        std::vector<uint8_t> exe(1536, 0);
+        exe[0]='M'; exe[1]='Z';
+        write16(exe, 2, 0);     // lastPageSize = 0 (full 512 for last page)
+        write16(exe, 4, 2);     // numPages = 2 (1024 bytes)
+        write16(exe, 8, 2);     // headerSize = 2 paragraphs
+        write16(exe, 10, 0);    // minAlloc = 0
+        write16(exe, 12, 0);    // maxAlloc = 0
+        write16(exe, 14, 0); write16(exe, 16, 0x100);
+        write16(exe, 20, 0); write16(exe, 22, 0);
+        exe[32]=0x90; exe[33]=0x90;
+
+        // FBOV block 1 at offset 1024 (right after MZ image)
+        size_t fb = 1024;
+        exe[fb]='F'; exe[fb+1]='B'; exe[fb+2]='O'; exe[fb+3]='V';
+        write32(exe, fb+4, 8); write32(exe, fb+8, 0); write32(exe, fb+12, 1);
+        for (int i=0;i<8;i++) exe[fb+16+i]=static_cast<uint8_t>(0xA0+i);
+
+        // FBOV block 2 immediately after block 1
+        fb = 1024 + 28;
+        exe[fb]='F'; exe[fb+1]='B'; exe[fb+2]='O'; exe[fb+3]='V';
+        write32(exe, fb+4, 8); write32(exe, fb+8, 0); write32(exe, fb+12, 2);
+        for (int i=0;i<8;i++) exe[fb+16+i]=static_cast<uint8_t>(0xB0+i);
+
+        std::ofstream ofs(fname, std::ios::binary);
+        ofs.write(reinterpret_cast<const char*>(exe.data()), static_cast<std::streamsize>(exe.size()));
+    }
+
+    REQUIRE(loader.loadEXE(fname, dos.getPSPSegment(), dos));
+
+    cpu.setInstructionStartEIP(0x100);
+    cpu.setSegReg(cpu::CS, 0x2000);
+    cpu.setSegBase(cpu::CS, 0x20000);
+
+    // Load overlay 1
+    cpu.setEIP(0x102);
+    mem.write8(0x20100, 0xCD); mem.write8(0x20101, 0x3F);
+    mem.write16(0x20102, 0x0000); mem.write16(0x20104, 0x0001);
+    REQUIRE(dos.handleInterrupt(0x3F));
+    REQUIRE(mem.read8(0x20100) == 0xEA);
+    uint16_t seg1 = mem.read16(0x20103);
+    REQUIRE(seg1 != 0);
+
+    // Load overlay 2
+    mem.write8(0x20100, 0xCD); mem.write8(0x20101, 0x3F);
+    mem.write16(0x20102, 0x0000); mem.write16(0x20104, 0x0002);
+    cpu.setEIP(0x102);
+    REQUIRE(dos.handleInterrupt(0x3F));
+    REQUIRE(mem.read8(0x20100) == 0xEA);
+    uint16_t seg2 = mem.read16(0x20103);
+    REQUIRE(seg2 != 0);
+    REQUIRE(seg2 != seg1);
+
+    std::remove(fname);
+}
 

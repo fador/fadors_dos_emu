@@ -2344,3 +2344,296 @@ TEST_CASE("DPMI 0300h INT 2Fh AX=1500h MSCDEX installation check returns uninsta
     REQUIRE((retECX & 0xFFFF) == 0x0000);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// DPMI 0302h — Zero SS:SP fallback stack
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("DPMI 0302h with zero SS:SP uses fallback stack", "[dpmi][translation]") {
+    DPMITestEnv env;
+
+    uint32_t structAddr = DPMITestEnv::SCRATCH_ADDR;
+    for (int i = 0; i < 50; ++i) env.mem.write8(structAddr + i, 0);
+
+    // Set up RM call with SS=0, SP=0, CS:IP=0:0 → triggers IVT lookup
+    // and DPMI must supply fallback stack (SS=0x0070, SP=0x03F0)
+    env.mem.write32(structAddr + 0x1C, 0x1200); // AX = INT 12h function
+    env.mem.write16(structAddr + 0x20, 0);      // FLAGS
+    env.mem.write16(structAddr + 0x2A, 0);      // IP = 0 (→ use IVT for INT BL)
+    env.mem.write16(structAddr + 0x2C, 0);      // CS = 0 (→ use IVT)
+    env.mem.write16(structAddr + 0x2E, 0);      // SP = 0
+    env.mem.write16(structAddr + 0x30, 0);      // SS = 0
+
+    env.cpu.setReg16(cpu::AX, 0x0302);
+    env.cpu.setReg8(cpu::BL, 0x12); // INT 12h (memory size — always succeeds)
+    env.cpu.setSegBase(cpu::ES, 0);
+    env.cpu.setReg32(cpu::EDI, structAddr);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+
+    // Should succeed with fallback stack
+    REQUIRE(!env.carrySet());
+
+    // INT 12h returns 640 (0x0280) in AX
+    uint16_t retAX = env.mem.read16(structAddr + 0x1C);
+    REQUIRE(retAX == 640);
+
+    // SS and SP should have been set to fallback values
+    uint16_t retSS = env.mem.read16(structAddr + 0x30);
+    uint16_t retSP = env.mem.read16(structAddr + 0x2E);
+    REQUIRE(retSS == 0x0070); // DPMI fallback segment
+    REQUIRE(retSP >= 0x03C0); // near top of fallback stack
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DPMI 0205h — Chain wrapper preservation when restoring original HLE stub
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("DPMI 0205h preserves chain wrapper when restoring HLE stub", "[dpmi][int][chain]") {
+    DPMITestEnv env;
+
+    // First, set a custom PM vector for INT 0x21 (simulates app hook)
+    env.cpu.setReg16(cpu::AX, 0x0205);
+    env.cpu.setReg8(cpu::BL, 0x21);
+    env.cpu.setReg16(cpu::CX, 0x0077);
+    env.cpu.setReg32(cpu::EDX, 0x00012345);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+
+    // Verify it was stored
+    env.cpu.setReg16(cpu::AX, 0x0204);
+    env.cpu.setReg8(cpu::BL, 0x21);
+    env.dpmi.handleInt31();
+    REQUIRE(env.cpu.getReg16(cpu::CX) == 0x0077);
+    REQUIRE(env.cpu.getReg32(cpu::EDX) == 0x00012345);
+
+    // Now simulate the extender restoring the original HLE stub
+    // (selector 0x30, offset 0x0100 + vec*16)
+    env.cpu.setReg16(cpu::AX, 0x0205);
+    env.cpu.setReg8(cpu::BL, 0x21);
+    env.cpu.setReg16(cpu::CX, 0x0030);
+    env.cpu.setReg32(cpu::EDX, 0x0000 + 0x0100 + 0x21 * 16);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet()); // Must succeed
+
+    // Now read back — should still return 0x0077:0x12345 (the chain wrapper)
+    // because 0205h detected this is a "restore HLE stub" call and skipped
+    // overwriting m_pmVectors
+    env.cpu.setReg16(cpu::AX, 0x0204);
+    env.cpu.setReg8(cpu::BL, 0x21);
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+    // The m_pmVectors should still hold the chain wrapper
+    REQUIRE(env.cpu.getReg16(cpu::CX) == 0x0077);
+    REQUIRE(env.cpu.getReg32(cpu::EDX) == 0x00012345);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DPMI 000Ch — Set Descriptor forces Present and DPL bits
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("DPMI 000Ch set descriptor forces Present=1 and DPL=3", "[dpmi][desc]") {
+    DPMITestEnv env;
+
+    // Allocate descriptor
+    env.cpu.setReg16(cpu::AX, 0x0000);
+    env.cpu.setReg16(cpu::CX, 1);
+    env.dpmi.handleInt31();
+    uint16_t sel = env.cpu.getReg16(cpu::AX);
+    REQUIRE(!env.carrySet());
+
+    // Build a descriptor with access byte = 0x00 (not present, DPL=0)
+    // This is what a program might try to build
+    uint32_t base = 0x00100000;
+    uint32_t limit = 0xFFFF;
+    uint32_t low = (limit & 0xFFFF) | ((base & 0xFFFF) << 16);
+    uint32_t high = ((base >> 16) & 0xFF) |
+                    (0x00 << 8) |           // access = 0 (not present!)
+                    (limit & 0x000F0000) |
+                    (base & 0xFF000000);
+
+    env.mem.write32(DPMITestEnv::SCRATCH_ADDR, low);
+    env.mem.write32(DPMITestEnv::SCRATCH_ADDR + 4, high);
+
+    env.cpu.setReg16(cpu::AX, 0x000C);
+    env.cpu.setReg16(cpu::BX, sel);
+    env.cpu.setSegBase(cpu::ES, 0);
+    env.cpu.setReg32(cpu::EDI, DPMITestEnv::SCRATCH_ADDR);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+
+    // Read back via 0x000B
+    env.cpu.setReg16(cpu::AX, 0x000B);
+    env.cpu.setReg16(cpu::BX, sel);
+    env.cpu.setReg32(cpu::EDI, DPMITestEnv::SCRATCH_ADDR + 0x100);
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+
+    uint32_t readHigh = env.mem.read32(DPMITestEnv::SCRATCH_ADDR + 0x100 + 4);
+    uint8_t accessByte = (readHigh >> 8) & 0xFF;
+
+    // Present bit must be forced to 1
+    REQUIRE((accessByte & 0x80) != 0);
+    // DPL must be forced to 3
+    REQUIRE((accessByte & 0x60) == 0x60);
+    // Type bits should be preserved (data R/W = 0x02)
+    REQUIRE((accessByte & 0x0F) == 0x02);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DPMI 0503h — Resize with zero new size uses size=1
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("DPMI 0503h resize with zero size uses minimum size", "[dpmi][memory]") {
+    DPMITestEnv env;
+
+    // Allocate a block first
+    uint32_t size = 64 * 1024;
+    env.cpu.setReg16(cpu::AX, 0x0501);
+    env.cpu.setReg16(cpu::BX, static_cast<uint16_t>(size >> 16));
+    env.cpu.setReg16(cpu::CX, static_cast<uint16_t>(size & 0xFFFF));
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+    uint32_t handle = (static_cast<uint32_t>(env.cpu.getReg16(cpu::SI)) << 16) |
+                      env.cpu.getReg16(cpu::DI);
+
+    // Resize to zero — should be treated as size=1
+    env.cpu.setReg16(cpu::AX, 0x0503);
+    env.cpu.setReg16(cpu::BX, 0);
+    env.cpu.setReg16(cpu::CX, 0);
+    env.cpu.setReg16(cpu::SI, static_cast<uint16_t>(handle >> 16));
+    env.cpu.setReg16(cpu::DI, static_cast<uint16_t>(handle & 0xFFFF));
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+
+    // Free it
+    env.cpu.setReg16(cpu::AX, 0x0502);
+    env.cpu.setReg16(cpu::SI, static_cast<uint16_t>(handle >> 16));
+    env.cpu.setReg16(cpu::DI, static_cast<uint16_t>(handle & 0xFFFF));
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DPMI 0204h — 16-bit client returns 16-bit DX instead of 32-bit EDX
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("DPMI 0204h returns 16-bit DX for non-32-bit client", "[dpmi][int]") {
+    // Use a non-32-bit client (force m_is32BitClient = false)
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic{true};
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    hw::DPMI dpmi(cpu, mem);
+    bios.initialize();
+    dos.initialize();
+    dpmi.setDOS(&dos);
+    dpmi.setBIOS(&bios);
+
+    // Enter DPMI with 16-bit flag (AX bit 0 = 0)
+    uint16_t rmCS = 0x1000, rmIP = 0x100;
+    cpu.setSegReg(cpu::CS, rmCS);
+    cpu.setSegReg(cpu::DS, 0x2000);
+    cpu.setSegReg(cpu::SS, 0x0000);
+    cpu.setReg16(cpu::SP, 0xFFFC);
+    uint16_t sp = cpu.getReg16(cpu::SP);
+    sp -= 2; mem.write16(sp, rmCS);
+    sp -= 2; mem.write16(sp, rmIP);
+    cpu.setReg16(cpu::SP, sp);
+    cpu.setReg16(cpu::AX, 0x0000); // 16-bit client!
+    REQUIRE(dpmi.handleEntry());
+
+    // Set up segment bases for linear addressing
+    cpu.setSegBase(cpu::ES, 0);
+
+    // Set a PM vector with a known 32-bit offset
+    cpu.setReg16(cpu::AX, 0x0205);
+    cpu.setReg8(cpu::BL, 0x10);
+    cpu.setReg16(cpu::CX, 0x0044);
+    cpu.setReg32(cpu::EDX, 0x0000ABCD); // offset fits in 16 bits, but 32-bit set
+    dpmi.handleInt31();
+    REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+
+    // Now read back — for a 16-bit client, DX should be the low 16 bits only
+    cpu.setReg16(cpu::AX, 0x0204);
+    cpu.setReg8(cpu::BL, 0x10);
+    dpmi.handleInt31();
+    REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(cpu.getReg16(cpu::CX) == 0x0044);
+    REQUIRE(cpu.getReg16(cpu::DX) == 0xABCD);
+    // EDX high word should be unaffected (but DX gives correct low 16)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DPMI 0600h/0604h — Page lock returns success, page size is 4096
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("DPMI 0600h lock with address range succeeds", "[dpmi][page]") {
+    DPMITestEnv env;
+
+    // Lock a specific linear region
+    env.cpu.setReg16(cpu::AX, 0x0600);
+    env.cpu.setReg16(cpu::BX, 0x0010); // linear addr high
+    env.cpu.setReg16(cpu::CX, 0x0000); // linear addr low
+    env.cpu.setReg16(cpu::SI, 0x0000); // size high
+    env.cpu.setReg16(cpu::DI, 0x1000); // size low (4096 bytes)
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+
+    // Page size should be 4096
+    env.cpu.setReg16(cpu::AX, 0x0604);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+    REQUIRE(env.cpu.getReg16(cpu::BX) == 0);
+    REQUIRE(env.cpu.getReg16(cpu::CX) == 4096);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DPMI 0302h — Full register preservation after RM call round-trip
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("DPMI 0302h preserves segment registers after RM call", "[dpmi][translation]") {
+    DPMITestEnv env;
+
+    // Save current PM segment registers
+    uint16_t savedCS = env.cpu.getSegReg(cpu::CS);
+    uint16_t savedDS = env.cpu.getSegReg(cpu::DS);
+    uint16_t savedSS = env.cpu.getSegReg(cpu::SS);
+    uint16_t savedES = env.cpu.getSegReg(cpu::ES);
+
+    uint32_t structAddr = DPMITestEnv::SCRATCH_ADDR;
+    for (int i = 0; i < 50; ++i) env.mem.write8(structAddr + i, 0);
+
+    // Set up RM call for INT 12h (get memory size — simple, always succeeds)
+    env.mem.write32(structAddr + 0x1C, 0);      // EAX
+    env.mem.write16(structAddr + 0x20, 0);      // FLAGS
+    env.mem.write16(structAddr + 0x22, 0x2000); // ES for RM call
+    env.mem.write16(structAddr + 0x24, 0x2000); // DS for RM call
+    env.mem.write16(structAddr + 0x2E, 0xFFF0); // SP
+    env.mem.write16(structAddr + 0x30, 0x3000); // SS
+
+    env.cpu.setReg16(cpu::AX, 0x0302);
+    env.cpu.setReg8(cpu::BL, 0x12); // INT 12h
+    env.cpu.setSegBase(cpu::ES, 0);
+    env.cpu.setReg32(cpu::EDI, structAddr);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+
+    REQUIRE(!env.carrySet());
+
+    // PM segment registers must be fully restored
+    REQUIRE(env.cpu.getSegReg(cpu::CS) == savedCS);
+    REQUIRE(env.cpu.getSegReg(cpu::DS) == savedDS);
+    REQUIRE(env.cpu.getSegReg(cpu::SS) == savedSS);
+    REQUIRE(env.cpu.getSegReg(cpu::ES) == savedES);
+}
+
