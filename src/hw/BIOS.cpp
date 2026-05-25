@@ -1655,7 +1655,7 @@ void BIOS::handleSystemService() {
   case 0xC0: { // Get System Configuration
     // BIOS Configuration Table at F000:FFD0
     uint32_t tableAddr = 0xFFFD0;
-    m_memory.write16(tableAddr, 8);       // Length
+    m_memory.write16(tableAddr, 10);       // Length (includes 2-byte length field + 8 data bytes)
     m_memory.write8(tableAddr + 2, 0xFC); // Model: AT
     m_memory.write8(tableAddr + 3, 0x01); // Submodel
     m_memory.write8(tableAddr + 4, 0x00); // Revision
