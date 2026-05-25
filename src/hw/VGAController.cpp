@@ -84,12 +84,16 @@ uint8_t VGAController::read8(uint16_t port) {
             // Bit 0: Display Enable (1 during retrace)
             // Bit 3: Vertical Retrace (1 during retrace)
             // Programs busy-wait in tight loops reading this port.
-            // Simulate by cycling through display/retrace states based on
-            // read count rather than wall clock (our CPU is much slower
-            // than real hardware). After ~32 reads in display period,
-            // enter retrace for ~4 reads, then cycle back.
-            m_retraceReadCount++;
-            bool inRetrace = (m_retraceReadCount % 36) >= 32;
+            // Use wall-clock time to simulate a 70 Hz refresh cycle
+            // (~14.3 ms per frame, ~0.7 ms retrace period).
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                now - m_retraceEpoch).count();
+            // 70 Hz = 14285714 ns per frame. Retrace is ~5% (~714286 ns).
+            constexpr int64_t FRAME_NS = 14285714;
+            constexpr int64_t RETRACE_NS = FRAME_NS / 20;
+            int64_t pos = elapsed % FRAME_NS;
+            bool inRetrace = (pos >= (FRAME_NS - RETRACE_NS));
             return inRetrace ? 0x09 : 0x00;
         }
 

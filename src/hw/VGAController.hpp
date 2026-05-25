@@ -60,9 +60,9 @@ private:
     uint8_t m_dacReadIndex = 0;
     uint8_t m_dacColorCycle = 0; // 0=R, 1=G, 2=B
 
-    // VGA timing: simulate retrace using port read counter.
-    // After a certain number of reads, transition between retrace/display.
-    uint32_t m_retraceReadCount = 0;
+    // VGA timing: simulate retrace using wall-clock time at 70 Hz.
+    std::chrono::steady_clock::time_point m_retraceEpoch = 
+        std::chrono::steady_clock::now();
 
     // Sequencer registers (port 0x3C4/0x3C5)
     uint8_t m_seqIndex = 0;
