@@ -289,8 +289,8 @@ TEST_CASE("PM original HLE return restores full privilege-change frame", "[Inter
 
     decoder.step();
 
-    REQUIRE(cpu.getSegReg(cpu::CS) == 0x0008);
-    REQUIRE(cpu.getEIP() == 0x000F01CC);
+    REQUIRE(cpu.getSegReg(cpu::CS) == 0x0030);
+    REQUIRE(cpu.getEIP() == 0x00000430);
     REQUIRE(cpu.getReg16(cpu::SP) == static_cast<uint16_t>(spBefore - 20));
 
     decoder.step();

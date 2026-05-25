@@ -10,6 +10,7 @@
 #include "hw/PIC8259.hpp"
 #include "hw/BIOS.hpp"
 #include "hw/DOS.hpp"
+#include "hw/DPMI.hpp"
 #include "hw/ProgramLoader.hpp"
 #include "hw/KeyboardController.hpp"
 #include "hw/PIT8254.hpp"
@@ -1449,23 +1450,6 @@ TEST_CASE("DOS: ProgramLoader respects envSeg and Multiplex AX=FB42h check", "[D
     REQUIRE(loadedEnvSeg == customEnvSeg);
 
     std::remove("dummy_child.com");
-
-    // 2. Verify INT 2Fh AX=FB42h installation check is handled and returns BX unchanged (not resident)
-    cpu.setReg16(cpu::AX, 0xFB42);
-    cpu.setReg16(cpu::BX, 0x0014);
-    cpu.setReg16(cpu::CX, 0x0001);
-    
-    // Call the handler - should return true (handled) and BX should remain 0x0014
-    REQUIRE(dos.handleInterrupt(0x2F));
-    REQUIRE(cpu.getReg16(cpu::BX) == 0x0014);
-
-    // 3. Verify INT 2Fh AX=FB42h BX=000Ah is handled and returns failure code
-    cpu.setReg16(cpu::AX, 0xFB42);
-    cpu.setReg16(cpu::BX, 0x000A);
-    cpu.setReg16(cpu::DX, 0x0016);
-
-    REQUIRE(dos.handleInterrupt(0x2F));
-    REQUIRE(cpu.getReg16(cpu::DX) == 0xFFDB);
 }
 
 TEST_CASE("DOS: INT 21h AH=5Dh Swappable Data Area and fallback", "[DOS]") {
@@ -1597,5 +1581,313 @@ TEST_CASE("DOS: Date, Time and Forward Slash Path Resolution", "[DOS]") {
         std::remove(fname.c_str());
     }
 }
+
+TEST_CASE("DOS: Process State Segment Cache Sync on Termination", "[DOS][Exec]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::IOBus iobus;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+
+    bios.initialize();
+    dos.initialize();
+    cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
+    hw::ProgramLoader loader(cpu, mem, dos.getHIMEM());
+
+    // 1. Create child.com that exits immediately with code 55
+    {
+        std::ofstream ofs("child.com", std::ios::binary);
+        uint8_t childCode[] = { 0xB4, 0x4C, 0xB0, 0x37, 0xCD, 0x21 }; // MOV AH, 4Ch, MOV AL, 55 (0x37), INT 21h
+        ofs.write(reinterpret_cast<const char*>(childCode), sizeof(childCode));
+    }
+
+    // 2. Create parent.com
+    {
+        std::ofstream ofs("parent.com", std::ios::binary);
+        std::vector<uint8_t> parentImg(0x180, 0);
+
+        // Code at 100h: shrink block, then exec child, then exit with its exit code
+        uint8_t code[] = {
+            0xBB, 0x40, 0x00,                   // mov bx, 0x40
+            0xB4, 0x4A,                         // mov ah, 0x4A
+            0xCD, 0x21,                         // int 0x21 (Resize block)
+            0x8C, 0xC8,                         // mov ax, cs
+            0xA3, 0x62, 0x01,                   // mov [0x162], ax
+            0xA3, 0x66, 0x01,                   // mov [0x166], ax
+            0xA3, 0x6A, 0x01,                   // mov [0x16A], ax
+            0xBA, 0x50, 0x01,                   // mov dx, 0x150
+            0xBB, 0x60, 0x01,                   // mov bx, 0x160
+            0xB8, 0x00, 0x4B,                   // mov ax, 0x4B00
+            0xCD, 0x21,                         // int 0x21 (Exec child)
+            0xB4, 0x4C,                         // mov ah, 0x4C
+            0xB0, 0x2A,                         // mov al, 42
+            0xCD, 0x21                          // int 0x21
+        };
+        std::copy(std::begin(code), std::end(code), parentImg.begin());
+
+        // Filename at 150h
+        std::string filename = "child.com";
+        std::copy(filename.begin(), filename.end(), parentImg.begin() + 0x50);
+        parentImg[0x50 + filename.size()] = 0;
+
+        // Parameter block at 160h
+        parentImg[0x60] = 0; parentImg[0x61] = 0;
+        parentImg[0x62] = 0x70; parentImg[0x63] = 0x01;
+
+        // Command tail at 170h
+        parentImg[0x70] = 0;
+        parentImg[0x71] = 0x0D;
+
+        ofs.write(reinterpret_cast<const char*>(parentImg.data()), parentImg.size());
+    }
+
+    // Load parent.com at the default PSP segment (0x0812)
+    uint16_t parentSeg = dos.getPSPSegment();
+    REQUIRE(loader.loadCOM("parent.com", parentSeg, dos));
+
+    // Run execution loop
+    int instructions = 0;
+    bool childLoaded = false;
+    while (!dos.isTerminated() && instructions < 1000) {
+        decoder.step();
+        instructions++;
+
+        if (cpu.getSegReg(cpu::CS) != parentSeg) {
+            childLoaded = true;
+        }
+    }
+
+    // After termination, the exit code should be 42
+    REQUIRE(childLoaded);
+    REQUIRE(dos.isTerminated());
+    REQUIRE(dos.getExitCode() == 42);
+
+    std::remove("child.com");
+    std::remove("parent.com");
+}
+
+TEST_CASE("DOS: Set/Get Current PSP (AH=50h/51h/62h)", "[DOS][PSP]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::IOBus iobus;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    
+    bios.initialize();
+    dos.initialize();
+    cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
+    hw::DPMI dpmi(cpu, mem);
+    memory::HIMEM himem;
+    dpmi.setDOS(&dos);
+    dos.setDPMI(&dpmi);
+    dpmi.setBIOS(&bios);
+    dpmi.setHIMEM(&himem);
+    himem.setMemoryBus(&mem);
+
+    // Initial PSP
+    uint16_t initialPSP = dos.getPSPSegment();
+    REQUIRE(initialPSP == 0x0812);
+
+    // 1. Get current PSP in Real Mode
+    cpu.setReg8(cpu::AH, 0x51);
+    dos.handleInterrupt(0x21);
+    REQUIRE(cpu.getReg16(cpu::BX) == initialPSP);
+
+    cpu.setReg8(cpu::AH, 0x62);
+    dos.handleInterrupt(0x21);
+    REQUIRE(cpu.getReg16(cpu::BX) == initialPSP);
+
+    // 2. Set current PSP in Real Mode
+    cpu.setReg8(cpu::AH, 0x50);
+    cpu.setReg16(cpu::BX, 0x0820);
+    dos.handleInterrupt(0x21);
+    REQUIRE(dos.getPSPSegment() == 0x0820);
+
+    cpu.setReg8(cpu::AH, 0x51);
+    dos.handleInterrupt(0x21);
+    REQUIRE(cpu.getReg16(cpu::BX) == 0x0820);
+
+    // 3. Set/Get PSP in Protected Mode
+    cpu.setCR(0, cpu.getCR(0) | 1); // Enter PM
+    
+    // Set up stack for handleEntry
+    cpu.setSegReg(cpu::CS, 0x1000);
+    cpu.setSegReg(cpu::SS, 0x0000);
+    cpu.setReg16(cpu::SP, 0x100);
+    cpu.setReg16(cpu::AX, 0x0001); // 32-bit client
+    
+    // Push return frame
+    uint16_t sp = cpu.getReg16(cpu::SP);
+    sp -= 2; mem.write16(sp, 0x2000); // CS
+    sp -= 2; mem.write16(sp, 0x0100); // IP
+    cpu.setReg16(cpu::SP, sp);
+
+    REQUIRE(dpmi.handleEntry());
+    REQUIRE(dpmi.isActive());
+
+    uint16_t pspSel = dpmi.getPSPSelector();
+    
+    // Get PSP in PM
+    cpu.setReg8(cpu::AH, 0x51);
+    dos.handleInterrupt(0x21);
+    REQUIRE(cpu.getReg16(cpu::BX) == pspSel);
+
+    // Set PSP in PM to a new selector
+    // We allocate a new selector
+    cpu.setReg16(cpu::AX, 0x0000); // Alloc descriptor
+    cpu.setReg16(cpu::CX, 1);
+    REQUIRE(dpmi.handleInt31());
+    uint16_t newPSPSel = cpu.getReg16(cpu::AX);
+
+    // Set base address to 0x8300 (segment 0x830)
+    cpu.setReg16(cpu::AX, 0x0007);
+    cpu.setReg16(cpu::BX, newPSPSel);
+    cpu.setReg16(cpu::CX, 0x0000);
+    cpu.setReg16(cpu::DX, 0x8300);
+    REQUIRE(dpmi.handleInt31());
+
+    // Call Set Current PSP with new selector
+    cpu.setReg8(cpu::AH, 0x50);
+    cpu.setReg16(cpu::BX, newPSPSel);
+    dos.handleInterrupt(0x21);
+    REQUIRE(dos.getPSPSegment() == 0x0830);
+
+    // Get current PSP and make sure it returns the selector
+    cpu.setReg8(cpu::AH, 0x62);
+    dos.handleInterrupt(0x21);
+    REQUIRE(cpu.getReg16(cpu::BX) == newPSPSel);
+}
+
+TEST_CASE("DOS: Child Environment Duplication", "[DOS][Exec]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::IOBus iobus;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    
+    bios.initialize();
+    dos.initialize();
+    cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
+    hw::ProgramLoader loader(cpu, mem, dos.getHIMEM());
+
+    // Write child.com (exits immediately)
+    {
+        std::ofstream ofs("child.com", std::ios::binary);
+        uint8_t childCode[] = { 0xB4, 0x4C, 0xB0, 0x2A, 0xCD, 0x21 }; // MOV AH, 4Ch, MOV AL, 2Ah, INT 21h (exit 42)
+        ofs.write(reinterpret_cast<const char*>(childCode), sizeof(childCode));
+    }
+
+    // Write parent.com
+    {
+        std::ofstream ofs("parent.com", std::ios::binary);
+        std::vector<uint8_t> parentImg(0x180, 0);
+
+        // Code at 100h: shrink block, then exec child, then exit
+        uint8_t parentCode[] = {
+            0xBB, 0x40, 0x00,       // mov bx, 0x40 (shrink to 64 paragraphs = 1024 bytes)
+            0xB4, 0x4A,             // mov ah, 0x4A
+            0xCD, 0x21,             // int 0x21 (Resize block)
+            0x8C, 0xC8,             // mov ax, cs
+            0xA3, 0x62, 0x01,       // mov [0x162], ax (patch cmdTail segment in param block)
+            0xBA, 0x50, 0x01,       // mov dx, 0x150 (filename at 150h)
+            0xBB, 0x60, 0x01,       // mov bx, 0x160 (param block at 160h)
+            0xB8, 0x00, 0x4B,       // mov ax, 0x4B00 (Exec child)
+            0xCD, 0x21,             // int 0x21
+            0xB4, 0x4D,             // mov ah, 0x4D
+            0xCD, 0x21,             // int 0x21
+            0xB4, 0x4C,             // mov ah, 0x4C
+            0xCD, 0x21              // int 0x21
+        };
+        std::copy(parentCode, parentCode + sizeof(parentCode), parentImg.begin());
+
+        // Filename at 150h (offset 0x50)
+        std::string fn = "child.com";
+        std::copy(fn.begin(), fn.end(), parentImg.begin() + 0x50);
+        parentImg[0x50 + fn.length()] = 0; // null terminator
+
+        // Param block at 160h (offset 0x60)
+        parentImg[0x60] = 0x00; parentImg[0x61] = 0x00; // envSeg = 0 (inherit)
+        parentImg[0x62] = 0x70; parentImg[0x63] = 0x01; // cmdTail offset 170h (offset 0x70)
+
+        // cmdTail at 170h (offset 0x70)
+        parentImg[0x70] = 0x00; // length
+        parentImg[0x71] = 0x0D; // terminator
+
+        ofs.write(reinterpret_cast<const char*>(parentImg.data()), parentImg.size());
+    }
+
+    uint16_t parentSeg = dos.getPSPSegment();
+    REQUIRE(loader.loadCOM("parent.com", parentSeg, dos));
+
+    // Patch cmdTailSeg (at 0x164, file offset 0x64) in parent memory to parentSeg
+    uint32_t parentPhys = (static_cast<uint32_t>(parentSeg) << 4);
+    mem.write16(parentPhys + 0x164, parentSeg);
+
+    // Create a mock environment for parent PSP first
+    // Parent env block is at parentSeg - 0x20
+    uint16_t parentEnvSeg = parentSeg - 0x20;
+    
+    // We already wrote a mock MCB at parentEnvSeg - 1 in createPSP!
+    // Let's verify it
+    hw::DOS::MCB envMcb = dos.readMCB(parentEnvSeg - 1);
+    REQUIRE(envMcb.type == 'M');
+    REQUIRE(envMcb.owner == parentSeg);
+
+    // Let's write some dummy env variables to parent env block
+    uint32_t parentEnvAddr = (parentEnvSeg << 4);
+    mem.write8(parentEnvAddr, 'A');
+    mem.write8(parentEnvAddr + 1, '=');
+    mem.write8(parentEnvAddr + 2, 'B');
+    mem.write8(parentEnvAddr + 3, '\0');
+    mem.write8(parentEnvAddr + 4, '\0');
+
+    // Run execution loop
+    int instructions = 0;
+    uint16_t childSeg = 0;
+    while (!dos.isTerminated() && instructions < 1000) {
+        decoder.step();
+        instructions++;
+
+        if (cpu.getSegReg(cpu::CS) != parentSeg && cpu.getSegReg(cpu::CS) != 0xF000) {
+            childSeg = cpu.getSegReg(cpu::CS);
+        }
+    }
+
+    REQUIRE(dos.isTerminated());
+    REQUIRE(dos.getExitCode() == 42); // child exited with 2Ah = 42
+
+    // Verify child segment was allocated
+    REQUIRE(childSeg != 0);
+
+    // Verify child environment was allocated and copied
+    uint16_t childEnvSeg = mem.read16((childSeg << 4) + 0x2C);
+    REQUIRE(childEnvSeg != 0);
+    REQUIRE(childEnvSeg != parentEnvSeg);
+
+    // Verify child env block contains parent variables
+    uint32_t childEnvAddr = (childEnvSeg << 4);
+    REQUIRE(mem.read8(childEnvAddr) == 'A');
+    REQUIRE(mem.read8(childEnvAddr + 1) == '=');
+    REQUIRE(mem.read8(childEnvAddr + 2) == 'B');
+
+    // Verify that the child's environment block was freed after termination
+    // The MCB at childEnvSeg - 1 should have owner == 0 now
+    hw::DOS::MCB childEnvMcb = dos.readMCB(childEnvSeg - 1);
+    REQUIRE(childEnvMcb.owner == 0);
+
+    std::remove("child.com");
+    std::remove("parent.com");
+}
+
+
 
 

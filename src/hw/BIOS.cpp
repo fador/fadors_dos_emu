@@ -1145,16 +1145,19 @@ void BIOS::initialize() {
   }
 
   // 2. Setup IVT (Interrupt Vector Table) vectors
-  // Each vector gets a unique HLE intercept stub at F000:(0x100 + vector * 4).
+  // Each vector gets a unique HLE intercept stub at F000:(0x100 + vector * 16).
   // We write the custom invalid opcode `0x0F 0xFF <vector>` so the CPU traps
   // directly to our HLE handlers instead of silently returning on an IRET.
   for (int v = 0; v < 256; ++v) {
-    uint16_t stubOff = HLE_STUB_BASE + static_cast<uint16_t>(v * 4);
+    uint16_t stubOff = HLE_STUB_BASE + static_cast<uint16_t>(v * 16);
     uint32_t stubPhys = (static_cast<uint32_t>(HLE_STUB_SEG) << 4) + stubOff;
     m_memory.write8(stubPhys, 0x0F);                        // Custom HLE Trap
     m_memory.write8(stubPhys + 1, 0xFF);                    // Opcode Extension
     m_memory.write8(stubPhys + 2, static_cast<uint8_t>(v)); // Vector Num
     m_memory.write8(stubPhys + 3, 0xCF); // IRET fallback just in case
+    for (int i = 4; i < 16; ++i) {
+      m_memory.write8(stubPhys + i, 0x00);                  // Padding to prevent pointer collisions
+    }
 
     m_memory.write16(v * 4, stubOff);
     m_memory.write16(v * 4 + 2, HLE_STUB_SEG);
@@ -1438,6 +1441,9 @@ bool BIOS::isOriginalIVT(uint8_t vector, uint16_t cs, uint32_t eip) const {
   // Our PM IDT points to selector 0x08 (flat) at offset F0000h + stub_offset
   uint32_t stubPhys = 0xF0000 + orig.first;
   if (eip == stubPhys)
+    return true;
+  // Protected mode match: selector 0x30 (base=0xF0000), offset matches
+  if (cs == 0x30 && eip == orig.first)
     return true;
   return false;
 }

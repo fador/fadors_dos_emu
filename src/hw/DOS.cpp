@@ -146,6 +146,7 @@ void DOS::initialize() {
 
   // Default DTA is at offset 0x80 of the loaded program PSP
   m_pspSegment = freeSeg + 1; 
+  m_currentPSPValue = m_pspSegment;
   m_dtaPtr = 0x00000080;
 }
 
@@ -441,14 +442,31 @@ void DOS::handleDOSService() {
     LOG_DOS("DOS: Set Date (ignored)");
     break;
   }
+  case 0x50: { // Set Current PSP
+    uint16_t pspVal = m_cpu.getReg16(cpu::BX);
+    m_currentPSPValue = pspVal;
+    if (m_dpmi && m_dpmi->isActive() && (m_cpu.getCR(0) & 1)) {
+      uint32_t base = m_dpmi->getSelectorBase(pspVal);
+      if (base != 0) {
+        m_pspSegment = static_cast<uint16_t>(base >> 4);
+      } else {
+        m_pspSegment = pspVal;
+      }
+    } else {
+      m_pspSegment = pspVal;
+    }
+    LOG_DOS("DOS: Set Current PSP to 0x", std::hex, pspVal, " (segment 0x", m_pspSegment, ")");
+    break;
+  }
   case 0x51:   // Get Current PSP (undocumented)
   case 0x62: { // Get Current PSP
-    // In PM, return the PSP selector (not the RM segment).
-    // DPMI spec requires INT 21h results to use PM selectors.
     if (m_dpmi && m_dpmi->isActive() && (m_cpu.getCR(0) & 1)) {
-      uint16_t pspSel = m_dpmi->getPSPSelector();
-      m_cpu.setReg16(cpu::BX, pspSel);
-      LOG_DOS("DOS: Get Current PSP (PM) -> sel 0x", std::hex, pspSel);
+      uint16_t val = m_currentPSPValue;
+      if (!(val & 0x04)) {
+        val = m_dpmi->getPSPSelector();
+      }
+      m_cpu.setReg16(cpu::BX, val);
+      LOG_DOS("DOS: Get Current PSP (PM) -> 0x", std::hex, val);
     } else {
       m_cpu.setReg16(cpu::BX, m_pspSegment);
       LOG_DOS("DOS: Get Current PSP -> 0x", std::hex, m_pspSegment);
@@ -695,7 +713,39 @@ void DOS::handleDOSService() {
     LOG_DOS("DOS: Exec '", filename, "' mode ", (int)mode);
 
     if (mode == 0) { // Load and execute
-      // Find largest free block
+      // Read parameter block from ES:BX
+      uint32_t paramBlockAddr = m_cpu.getSegBase(cpu::ES) + m_cpu.getReg16(cpu::BX);
+      uint16_t envSeg = m_memory.read16(paramBlockAddr);
+      uint16_t childEnvSeg = envSeg;
+      uint16_t envSize = 0;
+      uint16_t parentEnvSeg = 0;
+      bool allocatedEnv = false;
+
+      if (childEnvSeg == 0) {
+        // Inherit parent environment
+        parentEnvSeg = m_memory.read16((m_pspSegment << 4) + 0x2C);
+        if (parentEnvSeg != 0) {
+          MCB parentEnvMcb = readMCB(parentEnvSeg - 1);
+          if (parentEnvMcb.type == 'M' || parentEnvMcb.type == 'Z') {
+            envSize = parentEnvMcb.size; // in paragraphs
+            childEnvSeg = allocateMemory(envSize, 0xFFFF); // Temporarily owned by parent/system
+            if (childEnvSeg != 0) {
+              allocatedEnv = true;
+              // Copy contents
+              for (uint32_t i = 0; i < (static_cast<uint32_t>(envSize) << 4); ++i) {
+                m_memory.write8((childEnvSeg << 4) + i, m_memory.read8((parentEnvSeg << 4) + i));
+              }
+            } else {
+              LOG_ERROR("DOS: Exec failed: Insufficient memory to allocate child environment block.");
+              m_cpu.setReg16(cpu::AX, 0x08); // Insufficient memory
+              m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+              break;
+            }
+          }
+        }
+      }
+
+      // Find largest free block for the child program
       uint16_t current = FIRST_MCB_SEGMENT;
       uint16_t largestFree = 0;
       while (true) {
@@ -712,14 +762,28 @@ void DOS::handleDOSService() {
       uint16_t childSeg = allocateMemory(largestFree, 0xFFFF);
       if (childSeg == 0) {
         LOG_ERROR("DOS: Exec failed: Insufficient memory to allocate child process block.");
+        if (allocatedEnv && childEnvSeg != 0) {
+          freeMemory(childEnvSeg);
+        }
         m_cpu.setReg16(cpu::AX, 0x08); // Insufficient memory
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
         break;
       }
 
-      // Read parameter block from ES:BX
-      uint32_t paramBlockAddr = m_cpu.getSegBase(cpu::ES) + m_cpu.getReg16(cpu::BX);
-      uint16_t envSeg = m_memory.read16(paramBlockAddr);
+      // Finalize child environment ownership
+      if (allocatedEnv && childEnvSeg != 0) {
+        MCB childEnvMcb = readMCB(childEnvSeg - 1);
+        childEnvMcb.owner = childSeg;
+        strcpy(childEnvMcb.name, "ENV");
+        writeMCB(childEnvSeg - 1, childEnvMcb);
+      } else if (childEnvSeg != 0) {
+        // If childEnvSeg was explicitly passed, set its owner to childSeg
+        MCB envMcb = readMCB(childEnvSeg - 1);
+        if (envMcb.type == 'M' || envMcb.type == 'Z') {
+          envMcb.owner = childSeg;
+          writeMCB(childEnvSeg - 1, envMcb);
+        }
+      }
       uint32_t cmdTailPtr = m_memory.read32(paramBlockAddr + 2);
       uint16_t cmdTailOffset = cmdTailPtr & 0xFFFF;
       uint16_t cmdTailSeg = cmdTailPtr >> 16;
@@ -802,6 +866,7 @@ void DOS::handleDOSService() {
       parent.hleStack = m_cpu.getHLEStack();
 
       parent.pspSegment = m_pspSegment;
+      parent.currentPSPValue = m_currentPSPValue;
       parent.dtaPtr = m_dtaPtr;
       parent.programPath = m_programPath;
       parent.m_neAlignShift = m_neAlignShift;
@@ -820,9 +885,9 @@ void DOS::handleDOSService() {
       std::string lowerFilename = filename;
       std::transform(lowerFilename.begin(), lowerFilename.end(), lowerFilename.begin(), ::tolower);
       if (lowerFilename.length() >= 4 && lowerFilename.substr(lowerFilename.length() - 4) == ".com") {
-        loaded = loader.loadCOM(filename, childSeg, *this, args, envSeg);
+        loaded = loader.loadCOM(filename, childSeg, *this, args, childEnvSeg);
       } else {
-        loaded = loader.loadEXE(filename, childSeg, *this, args, false, envSeg);
+        loaded = loader.loadEXE(filename, childSeg, *this, args, false, childEnvSeg);
       }
 
       if (loaded) {
@@ -835,6 +900,7 @@ void DOS::handleDOSService() {
 
         // Setup child environment
         m_pspSegment = childSeg;
+        m_currentPSPValue = childSeg;
         m_dtaPtr = (static_cast<uint32_t>(childSeg) << 16) | 0x80;
 
         m_execTriggered = true;
@@ -998,6 +1064,11 @@ void DOS::terminateProcess(uint8_t exitCode, uint8_t exitType, uint16_t resident
       if (exitType == 3) {
         resizeTSRBlock(parent.childMemorySeg, residentParas);
       } else {
+        // Free child's environment block segment if one was set
+        uint16_t childEnvSeg = m_memory.read16((parent.childMemorySeg << 4) + 0x2C);
+        if (childEnvSeg != 0) {
+          freeMemory(childEnvSeg);
+        }
         freeMemory(parent.childMemorySeg);
       }
     }
@@ -1041,6 +1112,7 @@ void DOS::terminateProcess(uint8_t exitCode, uint8_t exitType, uint16_t resident
 
     // Restore DOS state
     m_pspSegment = parent.pspSegment;
+    m_currentPSPValue = parent.currentPSPValue;
     m_dtaPtr = parent.dtaPtr;
     m_programPath = parent.programPath;
     m_neAlignShift = parent.m_neAlignShift;
@@ -1054,6 +1126,7 @@ void DOS::terminateProcess(uint8_t exitCode, uint8_t exitType, uint16_t resident
 
     LOG_INFO("DOS: Restored parent process CS:EIP=", std::hex, m_cpu.getSegReg(cpu::CS), ":", m_cpu.getEIP(),
              " PSP=0x", m_pspSegment);
+    m_parentRestored = true;
   } else {
     m_terminated = true;
     m_exitCode = exitCode;

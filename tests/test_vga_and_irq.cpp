@@ -416,7 +416,7 @@ struct PMIRQTestEnv {
 
     // Set up IDT entry for vector to point to a 32-bit HLE stub
     void setupIDT_32bit_HLE(uint8_t vector) {
-        uint32_t offset = 0xF0100 + vector * 4;
+        uint32_t offset = 0xF0100 + vector * 16;
         writeIDTEntry(vector, CODE32_SEL, offset);
     }
 

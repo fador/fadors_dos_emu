@@ -44,7 +44,10 @@ public:
   bool isTerminated() const { return m_terminated; }
   uint8_t getExitCode() const { return m_exitCode; }
   uint16_t getPSPSegment() const { return m_pspSegment; }
-  void setPSPSegment(uint16_t seg) { m_pspSegment = seg; }
+  void setPSPSegment(uint16_t seg) {
+    m_pspSegment = seg;
+    m_currentPSPValue = seg;
+  }
   void setProgramPath(const std::string &path) { m_programPath = path; }
   std::string getProgramPath() const { return m_programPath; }
 
@@ -54,6 +57,9 @@ public:
 
   bool isExecTriggered() const { return m_execTriggered; }
   void clearExecTriggered() { m_execTriggered = false; }
+
+  bool isParentRestored() const { return m_parentRestored; }
+  void clearParentRestored() { m_parentRestored = false; }
 
   // VROOMM Overlay Support
   struct NESegment {
@@ -100,6 +106,7 @@ public:
 
     // DOS state
     uint16_t pspSegment;
+    uint16_t currentPSPValue;
     uint32_t dtaPtr;
     std::string programPath;
     uint16_t m_neAlignShift;
@@ -151,6 +158,7 @@ private:
   uint8_t m_exitCode = 0;
   bool m_ctrlBreakCheck = false;
   uint16_t m_pspSegment = 0x1000;
+  uint16_t m_currentPSPValue = 0x1000;
   uint16_t m_allocationStrategy = 0; // Default: Best fit
   bool m_umbLinked = false;
   KeyboardController *m_kbd = nullptr;
@@ -214,6 +222,7 @@ private:
   uint8_t m_lastChildExitCode = 0;
   uint8_t m_lastChildExitType = 0;
   bool m_execTriggered = false;
+  bool m_parentRestored = false;
 };
 
 } // namespace fador::hw

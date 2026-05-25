@@ -841,13 +841,48 @@ TEST_CASE("DPMI 0502h free invalid handle fails", "[dpmi][memory]") {
     REQUIRE(env.carrySet());
 }
 
-TEST_CASE("DPMI 0503h resize memory block stub returns error", "[dpmi][memory]") {
+TEST_CASE("DPMI 0503h resize memory block", "[dpmi][memory]") {
     DPMITestEnv env;
 
-    env.cpu.setReg16(cpu::AX, 0x0503);
+    // 1. Allocate 64KB
+    uint32_t size = 64 * 1024;
+    env.cpu.setReg16(cpu::AX, 0x0501);
+    env.cpu.setReg16(cpu::BX, static_cast<uint16_t>(size >> 16));
+    env.cpu.setReg16(cpu::CX, static_cast<uint16_t>(size & 0xFFFF));
     env.clearCarry();
     env.dpmi.handleInt31();
-    REQUIRE(env.carrySet());
+    REQUIRE(!env.carrySet());
+
+    uint32_t linearAddr = (static_cast<uint32_t>(env.cpu.getReg16(cpu::BX)) << 16) |
+                          env.cpu.getReg16(cpu::CX);
+    uint32_t handle = (static_cast<uint32_t>(env.cpu.getReg16(cpu::SI)) << 16) |
+                      env.cpu.getReg16(cpu::DI);
+
+    // 2. Resize to 128KB
+    uint32_t newSize = 128 * 1024;
+    env.cpu.setReg16(cpu::AX, 0x0503);
+    env.cpu.setReg16(cpu::BX, static_cast<uint16_t>(newSize >> 16));
+    env.cpu.setReg16(cpu::CX, static_cast<uint16_t>(newSize & 0xFFFF));
+    env.cpu.setReg16(cpu::SI, static_cast<uint16_t>(handle >> 16));
+    env.cpu.setReg16(cpu::DI, static_cast<uint16_t>(handle & 0xFFFF));
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+
+    uint32_t newLinearAddr = (static_cast<uint32_t>(env.cpu.getReg16(cpu::BX)) << 16) |
+                             env.cpu.getReg16(cpu::CX);
+    uint32_t newHandle = (static_cast<uint32_t>(env.cpu.getReg16(cpu::SI)) << 16) |
+                         env.cpu.getReg16(cpu::DI);
+    REQUIRE(newLinearAddr != 0);
+    REQUIRE(newHandle == handle);
+
+    // 3. Free resized block
+    env.cpu.setReg16(cpu::AX, 0x0502);
+    env.cpu.setReg16(cpu::SI, static_cast<uint16_t>(handle >> 16));
+    env.cpu.setReg16(cpu::DI, static_cast<uint16_t>(handle & 0xFFFF));
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -958,6 +993,10 @@ TEST_CASE("DPMI raw switch PM→RM", "[dpmi][rawswitch]") {
     REQUIRE(env.cpu.getSegReg(cpu::SS) == 0x5000);
     REQUIRE(env.cpu.getReg16(cpu::SP) == 0xFFF0);
     REQUIRE(env.cpu.getEIP() == 0x0200);
+
+    // Check system registers (RM IDTR)
+    REQUIRE(env.cpu.getIDTR().base == 0);
+    REQUIRE(env.cpu.getIDTR().limit == 0x3FF);
 }
 
 TEST_CASE("DPMI raw switch RM→PM", "[dpmi][rawswitch]") {
@@ -996,6 +1035,15 @@ TEST_CASE("DPMI raw switch RM→PM", "[dpmi][rawswitch]") {
     REQUIRE(env.cpu.getSegReg(cpu::DS) == pmDS);
     REQUIRE(env.cpu.getSegReg(cpu::ES) == pmES);
     REQUIRE(env.cpu.getSegReg(cpu::SS) == pmSS);
+
+    // Check system registers (PM GDTR/LDTR/IDTR/TR)
+    REQUIRE(env.cpu.getGDTR().base == 0xF1000);
+    REQUIRE(env.cpu.getGDTR().limit == 0x37);
+    REQUIRE(env.cpu.getIDTR().base == 0xF0800);
+    REQUIRE(env.cpu.getIDTR().limit == 0x7FF);
+    REQUIRE(env.cpu.getLDTRSelector() == 0x18);
+    REQUIRE(env.cpu.getLDTR().base == 0x1F00000);
+    REQUIRE(env.cpu.getTRSelector() == 0x20);
 }
 
 TEST_CASE("DPMI raw switch RM→PM zero-extends EDI into EIP", "[dpmi][rawswitch]") {
@@ -1237,9 +1285,9 @@ TEST_CASE("DPMI multiple memory allocations", "[dpmi][memory][stress]") {
 
 // Physical addresses used by DPMI internals (mirrors DPMI.cpp constants)
 static constexpr uint32_t IDT_PM_PHYS = 0xF0800;
-// HLE stub for vector V lives at physical 0xF0000 + 0x0100 + V*4
+// HLE stub for vector V lives at physical 0xF0000 + 0x0100 + V*16
 static constexpr uint32_t hleStubPhys(uint8_t v) {
-    return 0xF0000u + 0x0100u + static_cast<uint32_t>(v) * 4u;
+    return 0xF0000u + 0x0100u + static_cast<uint32_t>(v) * 16u;
 }
 // Encode a 32-bit interrupt-gate IDT entry (type EE = 32-bit, DPL=3)
 static uint32_t idtLow (uint16_t sel, uint32_t off) {
@@ -1280,11 +1328,12 @@ TEST_CASE("DPMI 0205h always writes IDT; sub-host passes its own wrapper", "[dpm
     env.dpmi.handleInt31();
     REQUIRE(!env.carrySet());
 
-    // Record the IDT entry for vecClient (should still be original HLE stub)
     uint32_t beforeLow  = env.mem.read32(IDT_PM_PHYS + vecClient * 8);
     uint32_t beforeHigh = env.mem.read32(IDT_PM_PHYS + vecClient * 8 + 4);
-    REQUIRE(beforeLow  == idtLow(0x0008, hleStubPhys(vecClient)));
-    REQUIRE(beforeHigh == idtHigh(hleStubPhys(vecClient)));
+    uint32_t expectedLow  = idtLow(0x0030, 0x0100 + vecClient * 16);
+    uint32_t expectedHigh = idtHigh(0x0100 + vecClient * 16);
+    REQUIRE(beforeLow  == expectedLow);
+    REQUIRE(beforeHigh == expectedHigh);
 
     // Step 2: simulate DOS/4GW's INT 31h thunk chaining to our stub for vecClient.
     // A real sub-host intercepts the client's 0205h call and substitutes its OWN
@@ -1346,8 +1395,8 @@ TEST_CASE("DPMI 0205h preserves installed chain wrapper when caller restores ori
     constexpr uint8_t vec = 0x21;
 
     // Initial state: IDT and pmVectors point at our original HLE stub.
-    uint32_t origLow = idtLow(0x0008, hleStubPhys(vec));
-    uint32_t origHigh = idtHigh(hleStubPhys(vec));
+    uint32_t origLow = idtLow(0x0030, 0x0100 + vec * 16);
+    uint32_t origHigh = idtHigh(0x0100 + vec * 16);
     REQUIRE(env.mem.read32(IDT_PM_PHYS + vec * 8) == origLow);
     REQUIRE(env.mem.read32(IDT_PM_PHYS + vec * 8 + 4) == origHigh);
 
@@ -1538,10 +1587,14 @@ TEST_CASE("isOriginalIVT returns true only for original HLE stub addresses", "[b
     bios.initialize();
 
     constexpr uint8_t vec = 0x21;
-    const uint32_t origStubPhys = 0xF0000u + 0x0100u + vec * 4u;
+    const uint32_t origStubPhys = 0xF0000u + 0x0100u + vec * 16u;
 
     SECTION("PM: selector 0x08 + orig offset → true") {
         REQUIRE(bios.isOriginalIVT(vec, 0x0008, origStubPhys));
+    }
+
+    SECTION("PM: selector 0x30 + orig relative offset → true") {
+        REQUIRE(bios.isOriginalIVT(vec, 0x0030, 0x0100u + vec * 16u));
     }
 
     SECTION("PM: any selector + orig offset → true (offset-only check)") {
@@ -1560,7 +1613,7 @@ TEST_CASE("isOriginalIVT returns true only for original HLE stub addresses", "[b
     }
 
     SECTION("RM: F000:stub_offset → true") {
-        uint16_t stubOff = static_cast<uint16_t>(0x0100u + vec * 4u);
+        uint16_t stubOff = static_cast<uint16_t>(0x0100u + vec * 16u);
         REQUIRE(bios.isOriginalIVT(vec, 0xF000, stubOff));
     }
 
@@ -1572,7 +1625,7 @@ TEST_CASE("isOriginalIVT returns true only for original HLE stub addresses", "[b
 TEST_CASE("isOriginalIVT returns false after 0x0205h changes the IDT entry", "[dpmi][int][idt]") {
     DPMITestEnv env;
     constexpr uint8_t vec = 0x2C;
-    const uint32_t origStubPhys = 0xF0000u + 0x0100u + vec * 4u;
+    const uint32_t origStubPhys = 0xF0000u + 0x0100u + vec * 16u;
 
     // Sanity: before any hook, the original address is recognised
     REQUIRE(env.bios.isOriginalIVT(vec, 0x0008, origStubPhys));
@@ -1868,7 +1921,7 @@ TEST_CASE("PM INT entry clears IF only for interrupt gates, always clears TF", "
 // Helper: compute HLE stub address for a given interrupt vector
 static constexpr uint16_t HLE_STUB_CS = 0xF000;
 static constexpr uint16_t HLE_STUB_BASE = 0x0100;
-static uint16_t hleStubIP(uint8_t vector) { return 0x0100 + static_cast<uint16_t>(vector) * 4; }
+static uint16_t hleStubIP(uint8_t vector) { return 0x0100 + static_cast<uint16_t>(vector) * 16; }
 
 TEST_CASE("DPMI 0302h calls RM DOS service INT 21h AH=30h", "[dpmi][0302]") {
     DPMITestEnv env;

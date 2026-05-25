@@ -1442,6 +1442,8 @@ void InstructionDecoder::step() {
 
   m_instrStartEIP = m_cpu.getEIP();
   m_cpu.setInstructionStartEIP(m_instrStartEIP);
+  m_cpu.setPrevInstructionCS(m_cpu.getInstructionStartCS());
+  m_cpu.setInstructionStartCS(m_cpu.getSegReg(CS));
   uint8_t opcode = fetch8();
   // Temporary diagnostic: log the next few bytes at the instruction start
   {
@@ -4695,6 +4697,16 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
       handled = true;
 
     if (handled) {
+      if (m_dos.isParentRestored()) {
+        m_dos.clearParentRestored();
+        loadSegment(CS, m_cpu.getSegReg(CS));
+        loadSegment(SS, m_cpu.getSegReg(SS));
+        loadSegment(DS, m_cpu.getSegReg(DS));
+        loadSegment(ES, m_cpu.getSegReg(ES));
+        loadSegment(FS, m_cpu.getSegReg(FS));
+        loadSegment(GS, m_cpu.getSegReg(GS));
+        break;
+      }
       if (vector == 0x21 && m_dos.isExecTriggered()) {
         m_dos.clearExecTriggered();
         loadSegment(CS, m_cpu.getSegReg(CS));
@@ -5096,15 +5108,25 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
       isOrig = m_bios.isOriginalIVT(vector, cs, eip32);
       if (isOrig) {
         if (m_dos.handleInterrupt(vector)) {
-          m_cpu.popHLEFrame();
-          if (vector == 0x21 && m_dos.isExecTriggered()) {
-            m_dos.clearExecTriggered();
+          if (m_dos.isParentRestored()) {
+            m_dos.clearParentRestored();
             loadSegment(CS, m_cpu.getSegReg(CS));
             loadSegment(SS, m_cpu.getSegReg(SS));
             loadSegment(DS, m_cpu.getSegReg(DS));
             loadSegment(ES, m_cpu.getSegReg(ES));
             loadSegment(FS, m_cpu.getSegReg(FS));
             loadSegment(GS, m_cpu.getSegReg(GS));
+          } else {
+            m_cpu.popHLEFrame();
+            if (vector == 0x21 && m_dos.isExecTriggered()) {
+              m_dos.clearExecTriggered();
+              loadSegment(CS, m_cpu.getSegReg(CS));
+              loadSegment(SS, m_cpu.getSegReg(SS));
+              loadSegment(DS, m_cpu.getSegReg(DS));
+              loadSegment(ES, m_cpu.getSegReg(ES));
+              loadSegment(FS, m_cpu.getSegReg(FS));
+              loadSegment(GS, m_cpu.getSegReg(GS));
+            }
           }
           return;
         }
@@ -5271,15 +5293,25 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
     bool isOrig = m_bios.isOriginalIVT(vector, cs, eip32);
     if (isOrig) {
       if (m_dos.handleInterrupt(vector)) {
-        m_cpu.popHLEFrame();
-        if (vector == 0x21 && m_dos.isExecTriggered()) {
-          m_dos.clearExecTriggered();
+        if (m_dos.isParentRestored()) {
+          m_dos.clearParentRestored();
           loadSegment(CS, m_cpu.getSegReg(CS));
           loadSegment(SS, m_cpu.getSegReg(SS));
           loadSegment(DS, m_cpu.getSegReg(DS));
           loadSegment(ES, m_cpu.getSegReg(ES));
           loadSegment(FS, m_cpu.getSegReg(FS));
           loadSegment(GS, m_cpu.getSegReg(GS));
+        } else {
+          m_cpu.popHLEFrame();
+          if (vector == 0x21 && m_dos.isExecTriggered()) {
+            m_dos.clearExecTriggered();
+            loadSegment(CS, m_cpu.getSegReg(CS));
+            loadSegment(SS, m_cpu.getSegReg(SS));
+            loadSegment(DS, m_cpu.getSegReg(DS));
+            loadSegment(ES, m_cpu.getSegReg(ES));
+            loadSegment(FS, m_cpu.getSegReg(FS));
+            loadSegment(GS, m_cpu.getSegReg(GS));
+          }
         }
         return;
       }
@@ -5335,7 +5367,8 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
       uint32_t high = m_memory.read32(entryAddr + 4);
       uint16_t idtSel = (low >> 16) & 0xFFFF;
       uint32_t idtOff = (low & 0xFFFF) | (high & 0xFFFF0000);
-      useHLE = (idtSel == 0x08) && (idtOff == (0xF0100u + vector * 4));
+      useHLE = ((idtSel == 0x08 && idtOff == (0xF0100u + vector * 16)) ||
+                (idtSel == 0x30 && idtOff == (0x0100u + vector * 16)));
 
       // If the IDT vector points to a 16-bit (D=0) code segment — i.e. a
       // DOS extender thunk — use HLE for vectors that have HLE handlers
@@ -5493,7 +5526,8 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
     // currently in use, causing the RM handler to overwrite the thunk's
     // local data. In that case, push the interrupt frame below the
     // current ESP like a normal same-privilege interrupt.
-    bool isOrig = (cs == 0x08 && eip32 == (0xF0100u + vector * 4));
+    bool isOrig = ((cs == 0x08 && eip32 == (0xF0100u + vector * 16)) ||
+                   (cs == 0x30 && eip32 == (0x0100u + vector * 16)));
     if (!directAppPMDispatch && !isOrig && !(m_cpu.getEFLAGS() & 0x00020000)) {
       auto &frame = m_cpu.lastHLEFrameMut();
       frame.dpmiStackSwitch = true;

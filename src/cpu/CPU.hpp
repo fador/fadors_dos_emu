@@ -371,6 +371,10 @@ public:
 
   uint32_t getInstructionStartEIP() const { return m_instructionStartEIP; }
   void setInstructionStartEIP(uint32_t val) { m_instructionStartEIP = val; }
+  uint16_t getInstructionStartCS() const { return m_instructionStartCS; }
+  void setInstructionStartCS(uint16_t val) { m_instructionStartCS = val; }
+  uint16_t getPrevInstructionCS() const { return m_prevInstructionCS; }
+  void setPrevInstructionCS(uint16_t val) { m_prevInstructionCS = val; }
 
   uint32_t getEFLAGS() const { return m_eflags; }
   void setEFLAGS(uint32_t val) { m_eflags = val; }
@@ -476,6 +480,8 @@ private:
   uint8_t m_interruptShadow{0};
   uint32_t m_eip{0};
   uint32_t m_instructionStartEIP{0};
+  uint16_t m_instructionStartCS{0xF000};
+  uint16_t m_prevInstructionCS{0xF000};
   uint32_t m_eflags{0x00000002}; // bit 1 is always reserved as 1
 
   std::array<uint32_t, 8> m_cr{};

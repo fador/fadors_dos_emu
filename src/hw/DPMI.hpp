@@ -29,6 +29,7 @@ public:
   bool isActive() const { return m_active; }
   uint16_t getPSPSelector() const { return m_clientPSPSel; }
   uint16_t getSDASelector() const { return m_sdaSel; }
+  uint32_t getSelectorBase(uint16_t selector) const;
   void reset();
 
   // Called from INT 2Fh AX=1687h — fill registers for DPMI detection

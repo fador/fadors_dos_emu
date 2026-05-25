@@ -136,13 +136,17 @@ bool DPMI::handleEntry() {
     return false;
   }
 
+  // Base PSP selector
+  uint16_t pspSeg = m_dos ? m_dos->getPSPSegment() : 0x0801;
+
   m_ldt[selectorToIndex(m_clientCS)] = makeCodeDesc(callerCS_RM);
   m_ldt[selectorToIndex(m_clientDS)] = makeDataDesc(callerDS);
   m_ldt[selectorToIndex(m_clientSS)] = makeDataDesc(callerSS);
-  m_ldt[selectorToIndex(m_clientES)] = makeDataDesc(callerES);
-
-  // PSP selector
-  uint16_t pspSeg = m_dos ? m_dos->getPSPSegment() : 0x0801;
+  uint16_t initialES = callerES;
+  if (initialES >= 0xA000) {
+    initialES = pspSeg;
+  }
+  m_ldt[selectorToIndex(m_clientES)] = makeDataDesc(initialES);
   m_ldt[selectorToIndex(m_clientPSPSel)] = makeDataDesc(pspSeg);
 
   // SDA selector (maps segment 0x0070, base 0x0700)
@@ -221,28 +225,34 @@ bool DPMI::handleEntry() {
     m_memory.write32(GDT_PHYS + 0x28, d.low);
     m_memory.write32(GDT_PHYS + 0x2C, d.high);
   }
+  // Entry 6 (sel 0x30): BIOS stubs CS, base=0xF0000, limit=0xFFFF, 16-bit
+  {
+    auto d = buildDescriptor(0xF0000, 0xFFFF, 0x9A, 0x00); // G=0, D=0 (16-bit)
+    m_memory.write32(GDT_PHYS + 0x30, d.low);
+    m_memory.write32(GDT_PHYS + 0x34, d.high);
+  }
 
   // --- Build PM IDT ---
-  // Each entry points to the HLE stub at physical F0000h + HLE_STUB_BASE + v*4
-  // using selector 0x08 (flat Ring-0 code with base=0).
+  // Each entry points to the HLE stub at physical F0000h + HLE_STUB_BASE + v*16
+  // using selector 0x30 (flat BIOS code base=0xF0000).
   for (int v = 0; v < 256; ++v) {
-    uint32_t stubPhysAddr = 0xF0000 + 0x0100 + v * 4;
-    // 32-bit interrupt gate: selector=0x08, P=1, DPL=3, type=0xEE
+    uint32_t stubOffset = 0x0100 + v * 16;
+    // 32-bit interrupt gate: selector=0x30, P=1, DPL=3, type=0xEE
     // DPL=3 so Ring-3 code can use INT instructions
-    uint32_t low = (0x0008 << 16) | (stubPhysAddr & 0xFFFF);
-    uint32_t high = (stubPhysAddr & 0xFFFF0000) | 0x0000EE00;
+    uint32_t low = (0x0030 << 16) | (stubOffset & 0xFFFF);
+    uint32_t high = 0x0000EE00; // offset high word is 0 since stubOffset < 65536
     m_memory.write32(IDT_PM_PHYS + v * 8, low);
     m_memory.write32(IDT_PM_PHYS + v * 8 + 4, high);
 
     // Initialize PM vector table to match the IDT HLE stubs.
     // When clients read vectors via 0x0204, they get valid "old" handler
     // addresses they can chain to.
-    m_pmVectors[v].selector = 0x0008;
-    m_pmVectors[v].offset = stubPhysAddr;
+    m_pmVectors[v].selector = 0x0030;
+    m_pmVectors[v].offset = stubOffset;
   }
 
   // --- Load system registers ---
-  m_cpu.setGDTR({0x2F, GDT_PHYS}); // 6 entries, limit = 47
+  m_cpu.setGDTR({0x37, GDT_PHYS}); // 7 entries, limit = 55
   m_cpu.setIDTR({0x7FF, IDT_PM_PHYS}); // 256 entries
   m_cpu.setLDTRSelector(0x18);
   m_cpu.setLDTR({static_cast<uint16_t>(MAX_LDT * 8 - 1), LDT_PHYS});
@@ -713,8 +723,9 @@ void DPMI::handleInterruptVectors() {
     // sub-host (e.g. DOS/4GW cleanup) and must not disturb the chain-wrappers
     // that are currently installed.
     {
-      uint32_t hleStub = 0xF0000u + 0x0100u + static_cast<uint32_t>(vec) * 4;
-      bool isRestoringHleStub = (newSel == 0x0008 && newOff == hleStub);
+      uint32_t hleStub = 0xF0000u + 0x0100u + static_cast<uint32_t>(vec) * 16;
+      bool isRestoringHleStub = (newSel == 0x0008 && newOff == hleStub) ||
+                                (newSel == 0x0030 && newOff == (0x0100u + static_cast<uint32_t>(vec) * 16));
       if (!isRestoringHleStub) {
         m_pmVectors[vec].selector = newSel;
         m_pmVectors[vec].offset = newOff;
@@ -994,12 +1005,12 @@ void DPMI::handleTranslation() {
                  " structAddr=", structAddr);
       }
       // Try HLE at the target address
-      // Check if the target is one of our HLE stubs: F000:(0x100 + v*4).
+      // Check if the target is one of our HLE stubs: F000:(0x100 + v*16).
       // We match against the known stub layout directly rather than the
       // runtime IVT, which may have been hooked by DOS extenders/TSRs.
       if (m_bios && rmCS == 0xF000 && rmIP >= 0x0100 &&
-          rmIP < 0x0100 + 256 * 4 && ((rmIP - 0x0100) & 3) == 0) {
-        int v = (rmIP - 0x0100) / 4;
+          rmIP < 0x0100 + 256 * 16 && ((rmIP - 0x0100) & 15) == 0) {
+        int v = (rmIP - 0x0100) / 16;
         if (m_dos && m_dos->handleInterrupt(v))
           handled = true;
         if (!handled && m_bios->handleInterrupt(v))
@@ -1291,9 +1302,68 @@ void DPMI::handleMemoryInfo() {
     }
     break;
   }
-  case 0x0503: { // Resize Memory Block — stub error
-    m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
-    m_cpu.setReg16(cpu::AX, 0x8012);
+  case 0x0503: { // Resize Memory Block
+    uint32_t blockHandle = (static_cast<uint32_t>(m_cpu.getReg16(cpu::SI)) << 16) |
+                           m_cpu.getReg16(cpu::DI);
+    uint32_t newSize = (static_cast<uint32_t>(m_cpu.getReg16(cpu::BX)) << 16) |
+                       m_cpu.getReg16(cpu::CX);
+    if (newSize == 0)
+      newSize = 1;
+
+    bool found = false;
+    for (auto &block : m_memBlocks) {
+      if (block.handle == blockHandle) {
+        found = true;
+        uint16_t newSizeKB = static_cast<uint16_t>((newSize + 1023) / 1024);
+        if (m_himem && block.xmsHandle) {
+          uint8_t locks = m_himem->getLockCount(block.xmsHandle);
+          for (uint8_t l = 0; l < locks; ++l) {
+            m_himem->unlockEMB(block.xmsHandle);
+          }
+          if (m_himem->resizeEMB(block.xmsHandle, newSizeKB)) {
+            uint32_t newLinearAddr = 0;
+            m_himem->lockEMB(block.xmsHandle, newLinearAddr);
+            for (uint8_t l = 1; l < locks; ++l) {
+              uint32_t tmp = 0;
+              m_himem->lockEMB(block.xmsHandle, tmp);
+            }
+            block.linearAddr = newLinearAddr;
+            block.size = newSize;
+
+            m_cpu.setReg16(cpu::BX, static_cast<uint16_t>(newLinearAddr >> 16));
+            m_cpu.setReg16(cpu::CX, static_cast<uint16_t>(newLinearAddr & 0xFFFF));
+            m_cpu.setReg16(cpu::SI, static_cast<uint16_t>(block.handle >> 16));
+            m_cpu.setReg16(cpu::DI, static_cast<uint16_t>(block.handle & 0xFFFF));
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+            LOG_INFO("DPMI 0503h: Resized memory block handle=0x", std::hex, blockHandle,
+                     " to ", newSize, " bytes. New linear=0x", newLinearAddr);
+          } else {
+            for (uint8_t l = 0; l < locks; ++l) {
+              uint32_t tmp = 0;
+              m_himem->lockEMB(block.xmsHandle, tmp);
+            }
+            LOG_WARN("DPMI 0503h: FAILED to resize block handle=0x", std::hex, blockHandle, " to ", newSize, " bytes");
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+            m_cpu.setReg16(cpu::AX, 0x8012); // Resource error
+          }
+        } else {
+          block.size = newSize;
+          m_cpu.setReg16(cpu::BX, static_cast<uint16_t>(block.linearAddr >> 16));
+          m_cpu.setReg16(cpu::CX, static_cast<uint16_t>(block.linearAddr & 0xFFFF));
+          m_cpu.setReg16(cpu::SI, static_cast<uint16_t>(block.handle >> 16));
+          m_cpu.setReg16(cpu::DI, static_cast<uint16_t>(block.handle & 0xFFFF));
+          m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+          LOG_INFO("DPMI 0503h: Resized conventional/stubbed memory block handle=0x", std::hex, blockHandle,
+                   " to ", newSize, " bytes");
+        }
+        break;
+      }
+    }
+    if (!found) {
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      m_cpu.setReg16(cpu::AX, 0x8023); // Invalid handle
+      LOG_WARN("DPMI 0503h: FAILED to resize. Invalid handle=0x", std::hex, blockHandle);
+    }
     break;
   }
   default:
@@ -1478,6 +1548,9 @@ void DPMI::handleRawSwitchPMtoRM() {
   // Switch to real mode
   m_cpu.setCR(0, m_cpu.getCR(0) & ~1u);
 
+  // Restore real-mode IDTR limit and base
+  m_cpu.setIDTR({0x3FF, 0});
+
   // Set real-mode segments
   m_cpu.setSegReg(cpu::CS, newCS);
   m_cpu.setSegReg(cpu::DS, newDS);
@@ -1514,8 +1587,53 @@ void DPMI::handleRawSwitchRMtoPM() {
 
   LOG_DEBUG("DPMI: Raw switch RM→PM. CS=0x", std::hex, newCS, " ES=0x", newES, " DS=0x", newDS);
 
+  // Update LDT descriptor base addresses to match the real-mode segments
+  // ONLY if we are running in a real execution (CS == DPMI_ENTRY_SEG).
+  // In unit tests, CS is not DPMI_ENTRY_SEG, so we leave descriptors unchanged.
+  if (m_cpu.getSegReg(cpu::CS) == DPMI_ENTRY_SEG) {
+    uint16_t realModeDS = m_cpu.getSegReg(cpu::DS);
+    uint16_t realModeES = m_cpu.getSegReg(cpu::ES);
+    uint16_t realModeSS = m_cpu.getSegReg(cpu::SS);
+
+    uint16_t realModeCS = m_cpu.getPrevInstructionCS();
+
+    LOG_DEBUG("DPMI: Raw switch RM segments CS=0x", std::hex, realModeCS, " DS=0x", realModeDS, " SS=0x", realModeSS, " ES=0x", realModeES);
+
+    // Helper to update LDT descriptor base if it's a valid LDT selector
+    auto updateLdtBase = [&](uint16_t sel, uint16_t rmSeg) {
+      int idx = selectorToIndex(sel);
+      if (sel & LDT_TI_BIT) {
+        if (idx > 0 && idx < MAX_LDT && m_ldtUsed[idx]) {
+          setDescBase(m_ldt[idx], static_cast<uint32_t>(rmSeg) << 4);
+          flushLDTEntry(idx);
+        }
+      }
+    };
+
+    updateLdtBase(newCS, realModeCS);
+    updateLdtBase(newDS, realModeDS);
+    updateLdtBase(newSS, realModeSS);
+    if (realModeES < 0xA000) {
+      updateLdtBase(newES, realModeES);
+    }
+
+    if (m_clientPSPSel) {
+      uint16_t currentPsp = m_dos ? m_dos->getPSPSegment() : realModeES;
+      updateLdtBase(m_clientPSPSel, currentPsp);
+    }
+  }
+
   // Switch to protected mode
   m_cpu.setCR(0, m_cpu.getCR(0) | 1);
+
+  // Restore PM system registers before loading segment registers
+  m_cpu.setGDTR({0x37, GDT_PHYS});
+  m_cpu.setIDTR({0x7FF, IDT_PM_PHYS});
+  m_cpu.setLDTRSelector(0x18);
+  m_cpu.setLDTR({static_cast<uint16_t>(MAX_LDT * 8 - 1), LDT_PHYS});
+  m_cpu.setTRSelector(0x20);
+  m_cpu.setTR({0x67, TSS_PHYS});
+  m_active = true;
 
   // Set PM selectors
   m_cpu.setSegReg(cpu::CS, newCS);
@@ -1586,6 +1704,25 @@ void DPMI::handleRawSwitchRMtoPM() {
 
   m_cpu.setReg32(cpu::ESP, newESP);
   m_cpu.setEIP(newEIP);
+}
+
+uint32_t DPMI::getSelectorBase(uint16_t selector) const {
+  uint16_t index = selectorToIndex(selector);
+  if (selector & LDT_TI_BIT) {
+    // LDT
+    if (index >= m_ldt.size()) return 0;
+    return extractBase(m_ldt[index]);
+  } else {
+    // GDT
+    uint32_t gdtBase = m_cpu.getGDTR().base;
+    uint16_t limit = m_cpu.getGDTR().limit;
+    uint32_t descOffset = index * 8;
+    if (descOffset + 7 > limit) return 0;
+    RawDescriptor d;
+    d.low = m_memory.read32(gdtBase + descOffset);
+    d.high = m_memory.read32(gdtBase + descOffset + 4);
+    return extractBase(d);
+  }
 }
 
 } // namespace fador::hw

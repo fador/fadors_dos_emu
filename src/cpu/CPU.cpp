@@ -40,6 +40,9 @@ void CPU::reset() {
   m_is32BitStack = false;
 
   m_eip = 0xFFF0;
+  m_instructionStartEIP = 0xFFF0;
+  m_instructionStartCS = 0xF000;
+  m_prevInstructionCS = 0xF000;
   m_eflags = 0x00000002;
 
   m_cr.fill(0);

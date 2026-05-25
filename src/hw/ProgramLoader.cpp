@@ -8,8 +8,6 @@
 #include <fstream>
 #include <vector>
 
-namespace fador::hw { extern memory::HIMEM *g_himem; }
-
 namespace fador::hw {
 
 namespace {
@@ -507,6 +505,14 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
         m_memory.write8(static_cast<uint32_t>(pspMcbSeg << 4), 'Z');
         LOG_INFO("ProgramLoader: Overlay-capable MCB updated – PSP block fills memory constraints");
       }
+
+      // Update PSP offset 0x02 (top of memory segment) to reflect
+      // the shrunk MCB so programs reading PSP:0x02 see the correct
+      // end of their allocated block, not the original 0xA000.
+      uint16_t newTopSegment = static_cast<uint16_t>(segment + loadedParas);
+      if (newTopSegment < 0xA000)
+        m_memory.write16((static_cast<uint32_t>(segment) << 4u) + 0x02u,
+                         newTopSegment);
     }
   }
 
@@ -648,6 +654,19 @@ void ProgramLoader::createPSP(uint16_t segment, const std::string &args,
       m_memory.write8(envAddr + i, static_cast<uint8_t>(envStr[i]));
     }
     m_memory.write16(pspAddr + 0x2C, envSegment);
+
+    // Write a mock MCB at envSegment - 1 to make it a valid block
+    if (envSegment > 0) {
+      uint16_t mcbSeg = envSegment - 1;
+      uint32_t mcbAddr = (mcbSeg << 4);
+      m_memory.write8(mcbAddr + 0, 'M');                 // type 'M'
+      m_memory.write16(mcbAddr + 1, segment);            // owned by the program PSP
+      m_memory.write16(mcbAddr + 3, 0x1F);               // size (0x20 paras minus MCB para = 0x1F)
+      m_memory.write8(mcbAddr + 8, 'E');
+      m_memory.write8(mcbAddr + 9, 'N');
+      m_memory.write8(mcbAddr + 10, 'V');
+    }
+
     LOG_INFO("ProgramLoader: Environment block created at segment 0x", std::hex,
              envSegment, ", program path: ", dosFullPath);
   }

@@ -1454,3 +1454,39 @@ TEST_CASE("x87: Borland coprocessor probe takes the 80387 branch", "[Decoder][x8
     REQUIRE((cpu.getEFLAGS() & cpu::FLAG_CARRY) != 0);
     REQUIRE((cpu.getEFLAGS() & cpu::FLAG_PARITY) == 0);
 }
+
+TEST_CASE("Decoder CS tracking", "[Decoder]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::IOBus iobus;
+    hw::DOS dos(cpu, mem);
+    hw::PIC8259 pic(true);
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    bios.initialize();
+    dos.initialize();
+    cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
+
+    cpu.setSegReg(cpu::SegRegIndex::CS, 0x1000);
+    cpu.setEIP(0x100);
+
+    // Write NOP (0x90) followed by another NOP
+    mem.write8(0x10000 + 0x100, 0x90);
+    mem.write8(0x10000 + 0x101, 0x90);
+
+    decoder.step();
+    // After first step, start CS is 0x1000, and previous CS should be the initial CS (0xF000)
+    REQUIRE(cpu.getInstructionStartCS() == 0x1000);
+    REQUIRE(cpu.getPrevInstructionCS() == 0xF000);
+
+    // Modify CS between instructions
+    cpu.setSegReg(cpu::SegRegIndex::CS, 0x2000);
+    cpu.setEIP(0x200);
+    mem.write8(0x20000 + 0x200, 0x90);
+
+    decoder.step();
+    // After second step, current start CS is 0x2000, and previous instruction's CS is 0x1000!
+    REQUIRE(cpu.getInstructionStartCS() == 0x2000);
+    REQUIRE(cpu.getPrevInstructionCS() == 0x1000);
+}
