@@ -75,66 +75,65 @@ void KeyboardController::write8(uint16_t port, uint8_t value) {
 }
 
 void KeyboardController::pushScancode(uint8_t scancode) {
+  if (m_hwScanBuffer.size() >= kMaxHWScanBuffer) {
+    m_hwScanBuffer.pop(); // Drop oldest to make room (hardware overrun)
+  }
   m_hwScanBuffer.push(scancode);
   m_status |= 0x01; // Set Output Buffer Full
 }
 
 void KeyboardController::pushKey(uint8_t ascii, uint8_t scancode) {
+  if (m_keyBuffer.size() >= kMaxKeyBuffer) {
+    m_keyBuffer.pop(); // Drop oldest (BIOS buffer full)
+  }
   m_keyBuffer.push({ascii, scancode});
 }
 
 void KeyboardController::pushKeyWithBreak(uint8_t ascii, uint8_t scancode) {
   // Push make code to hardware buffer (for port 0x60 / INT 9)
-  m_hwScanBuffer.push(scancode);
-  m_status |= 0x01;
+  pushScancode(scancode);
   ++m_pendingIRQCount;
   // Push break code to hardware buffer
-  m_hwScanBuffer.push(static_cast<uint8_t>(scancode | 0x80));
+  pushScancode(static_cast<uint8_t>(scancode | 0x80));
   ++m_pendingIRQCount;
   // Also push to BIOS buffer so INT 16h still works
   LOG_DEBUG("KBD: pushKeyWithBreak sc=0x", std::hex, (int)scancode,
             " ascii=0x", std::hex, (int)ascii);
-  m_keyBuffer.push({ascii, scancode});
+  pushKey(ascii, scancode);
 }
 
 void KeyboardController::pushMakeKey(uint8_t ascii, uint8_t scancode) {
   LOG_DEBUG("KBD: pushMakeKey sc=0x", std::hex, (int)scancode,
             " ascii=0x", std::hex, (int)ascii);
-  m_hwScanBuffer.push(scancode);
-  m_status |= 0x01;
+  pushScancode(scancode);
   ++m_pendingIRQCount;
-  m_keyBuffer.push({ascii, scancode});
+  pushKey(ascii, scancode);
 }
 
 void KeyboardController::pushBreakKey(uint8_t scancode) {
-  m_hwScanBuffer.push(static_cast<uint8_t>(scancode | 0x80));
-  m_status |= 0x01;
+  pushScancode(static_cast<uint8_t>(scancode | 0x80));
   ++m_pendingIRQCount;
 }
 
 void KeyboardController::pushMakeKeyExtended(uint8_t ascii, uint8_t scancode) {
   // Push 0xE0 prefix byte (triggers its own INT 9)
-  m_hwScanBuffer.push(0xE0);
-  m_status |= 0x01;
+  pushScancode(0xE0);
   ++m_pendingIRQCount;
   // Push actual make scancode
-  m_hwScanBuffer.push(scancode);
-  m_status |= 0x01;
+  pushScancode(scancode);
   ++m_pendingIRQCount;
   // Also push to BIOS buffer for INT 16h
   LOG_DEBUG("KBD: pushMakeKeyExtended sc=0x", std::hex, (int)scancode,
             " ascii=0x", std::hex, (int)ascii);
-  m_keyBuffer.push({ascii, scancode});
+  pushKey(ascii, scancode);
 }
 
 void KeyboardController::pushBreakKeyExtended(uint8_t scancode) {
   // Push 0xE0 prefix byte
-  m_hwScanBuffer.push(0xE0);
-  m_status |= 0x01;
+  pushScancode(0xE0);
   ++m_pendingIRQCount;
   // Push break scancode
-  m_hwScanBuffer.push(static_cast<uint8_t>(scancode | 0x80));
-  m_status |= 0x01;
+  pushScancode(static_cast<uint8_t>(scancode | 0x80));
   ++m_pendingIRQCount;
 }
 
@@ -149,8 +148,9 @@ std::pair<uint8_t, uint8_t> KeyboardController::popKey() {
     return {0, 0};
   auto entry = m_keyBuffer.front();
   m_keyBuffer.pop();
-  if (m_keyBuffer.empty())
-    m_status &= ~0x01;
+  // Do NOT clear m_status bit 0 here — that bit reflects the hardware
+  // output buffer (port 0x60), not the BIOS key buffer consumed by INT 16h.
+  // Clearing it would falsely signal "no data" to programs that poll port 0x64.
   return {entry.ascii, entry.scancode};
 }
 

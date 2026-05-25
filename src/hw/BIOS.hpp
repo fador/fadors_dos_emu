@@ -14,6 +14,7 @@ namespace fador::hw {
 class KeyboardController;
 class PIC8259;
 class PIT8254;
+class VGAController;
 
 class BIOS {
 public:
@@ -22,6 +23,9 @@ public:
 
     // Returns true if the interrupt was handled by HLE
     bool handleInterrupt(uint8_t vector);
+
+    // Set VGA controller for mode-specific register programming
+    void setVGA(VGAController* vga) { m_vga = vga; }
 
     // Send End-Of-Interrupt for a hardware interrupt vector.
     // Used when the D-bit guard suppresses thunk dispatch but BIOS has
@@ -109,6 +113,11 @@ private:
     void handleSystemService();     // INT 15h
     void handleEMSService();        // INT 67h
     void handleXMSDispatch();       // INT E0h (XMS far-call entry)
+
+    // Program VGA sequencer/GC registers to match the requested video mode
+    void programVGARegisters(uint8_t mode);
+
+    VGAController* m_vga = nullptr;
 
     struct EMSMapping {
         uint16_t handle = 0;

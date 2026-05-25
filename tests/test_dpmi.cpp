@@ -3002,3 +3002,116 @@ TEST_CASE("DPMI 0302h INT 21h AH=48h returns correct segment", "[dpmi][translati
     // AH should reflect DOS return, AL=segment on success
     REQUIRE(resultAX != 0);  // Should have allocated something
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Physical Address Mapping (INT 31h AX=0800h..0801h)
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("DPMI 0800h maps VGA framebuffer (0xA0000)", "[dpmi][phys]") {
+    DPMITestEnv env;
+
+    // Map the VGA framebuffer: physical 0xA0000, size 0x10000 (64KB)
+    uint32_t physAddr = 0xA0000;
+    uint32_t size = 0x10000;
+
+    env.cpu.setReg16(cpu::AX, 0x0800);
+    env.cpu.setReg16(cpu::BX, static_cast<uint16_t>(physAddr >> 16));
+    env.cpu.setReg16(cpu::CX, static_cast<uint16_t>(physAddr & 0xFFFF));
+    env.cpu.setReg16(cpu::SI, static_cast<uint16_t>(size >> 16));
+    env.cpu.setReg16(cpu::DI, static_cast<uint16_t>(size & 0xFFFF));
+    env.clearCarry();
+    env.dpmi.handleInt31();
+
+    REQUIRE(!env.carrySet());
+
+    // In flat model, linear address == physical address
+    uint32_t linear = (static_cast<uint32_t>(env.cpu.getReg16(cpu::BX)) << 16)
+                    | env.cpu.getReg16(cpu::CX);
+    REQUIRE(linear == physAddr);
+
+    uint32_t mappedSize = (static_cast<uint32_t>(env.cpu.getReg16(cpu::SI)) << 16)
+                        | env.cpu.getReg16(cpu::DI);
+    REQUIRE(mappedSize == size);
+}
+
+TEST_CASE("DPMI 0800h maps arbitrary physical address", "[dpmi][phys]") {
+    DPMITestEnv env;
+
+    // Map a different physical address: 0x100000, size 0x4000
+    uint32_t physAddr = 0x100000;
+    uint32_t size = 0x4000;
+
+    env.cpu.setReg16(cpu::AX, 0x0800);
+    env.cpu.setReg16(cpu::BX, static_cast<uint16_t>(physAddr >> 16));
+    env.cpu.setReg16(cpu::CX, static_cast<uint16_t>(physAddr & 0xFFFF));
+    env.cpu.setReg16(cpu::SI, static_cast<uint16_t>(size >> 16));
+    env.cpu.setReg16(cpu::DI, static_cast<uint16_t>(size & 0xFFFF));
+    env.clearCarry();
+    env.dpmi.handleInt31();
+
+    REQUIRE(!env.carrySet());
+
+    uint32_t linear = (static_cast<uint32_t>(env.cpu.getReg16(cpu::BX)) << 16)
+                    | env.cpu.getReg16(cpu::CX);
+    REQUIRE(linear == physAddr);
+}
+
+TEST_CASE("DPMI 0800h rejects address above physical limit", "[dpmi][phys]") {
+    DPMITestEnv env;
+
+    // Try to map address above 16MB limit (0x1000000)
+    uint32_t physAddr = 0x1000000; // 16MB, at the limit (rejected)
+    uint32_t size = 0x1000;
+
+    env.cpu.setReg16(cpu::AX, 0x0800);
+    env.cpu.setReg16(cpu::BX, static_cast<uint16_t>(physAddr >> 16));
+    env.cpu.setReg16(cpu::CX, static_cast<uint16_t>(physAddr & 0xFFFF));
+    env.cpu.setReg16(cpu::SI, static_cast<uint16_t>(size >> 16));
+    env.cpu.setReg16(cpu::DI, static_cast<uint16_t>(size & 0xFFFF));
+    env.clearCarry();
+    env.dpmi.handleInt31();
+
+    REQUIRE(env.carrySet());
+    REQUIRE(env.cpu.getReg16(cpu::AX) == 0x8002); // Invalid address
+}
+
+TEST_CASE("DPMI 0800h rejects zero-size mapping", "[dpmi][phys]") {
+    DPMITestEnv env;
+
+    env.cpu.setReg16(cpu::AX, 0x0800);
+    env.cpu.setReg16(cpu::BX, 0x000A); // phys = 0xA0000
+    env.cpu.setReg16(cpu::CX, 0x0000);
+    env.cpu.setReg16(cpu::SI, 0x0000);
+    env.cpu.setReg16(cpu::DI, 0x0000); // size = 0
+    env.clearCarry();
+    env.dpmi.handleInt31();
+
+    REQUIRE(env.carrySet());
+}
+
+TEST_CASE("DPMI 0801h frees physical mapping (no-op)", "[dpmi][phys]") {
+    DPMITestEnv env;
+
+    // First map something
+    env.cpu.setReg16(cpu::AX, 0x0800);
+    env.cpu.setReg16(cpu::BX, 0x000A);
+    env.cpu.setReg16(cpu::CX, 0x0000);
+    env.cpu.setReg16(cpu::SI, 0x0000);
+    env.cpu.setReg16(cpu::DI, 0x0001); // size = 1
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+
+    // Now free it
+    uint16_t linHi = env.cpu.getReg16(cpu::BX);
+    uint16_t linLo = env.cpu.getReg16(cpu::CX);
+
+    env.cpu.setReg16(cpu::AX, 0x0801);
+    env.cpu.setReg16(cpu::BX, linHi);
+    env.cpu.setReg16(cpu::CX, linLo);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+
+    // Free is a no-op success
+    REQUIRE(!env.carrySet());
+}

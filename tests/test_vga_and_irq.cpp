@@ -1323,3 +1323,121 @@ TEST_CASE("Memory: IVT/BDA area is zero-initialized", "[Memory][Init]") {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// VGA clearPlanes / MemoryBus clearVGA Tests
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_CASE("VGA: clearPlanes zeros all four plane arrays", "[VGA]") {
+    memory::MemoryBus mem;
+    hw::VGAController vga(mem);
+
+    // Write test data to all planes
+    for (int p = 0; p < 4; ++p) {
+        vga.write8(0x3C4, 2);
+        vga.write8(0x3C5, 1 << p);
+        for (uint32_t off = 0; off < 100; ++off) {
+            vga.planeWrite8(off, 0xAA);
+        }
+    }
+    // Reset map mask to all planes
+    vga.write8(0x3C4, 2);
+    vga.write8(0x3C5, 0x0F);
+
+    // Verify data was written
+    bool hasData = false;
+    for (int p = 0; p < 4 && !hasData; ++p) {
+        for (uint32_t off = 0; off < 100 && !hasData; ++off) {
+            if (vga.readPlane(p, off) != 0)
+                hasData = true;
+        }
+    }
+    REQUIRE(hasData);
+
+    // Clear all planes
+    vga.clearPlanes();
+
+    // Verify all planes are zeroed
+    for (int p = 0; p < 4; ++p) {
+        for (uint32_t off = 0; off < 100; ++off) {
+            REQUIRE(vga.readPlane(p, off) == 0);
+        }
+    }
+}
+
+TEST_CASE("VGA: MemoryBus clearVGA delegates to VGAController", "[VGA]") {
+    memory::MemoryBus mem;
+    hw::VGAController vga(mem);
+    mem.setVGA(&vga);
+
+    // Write through MemoryBus (Chain-4 default)
+    for (uint32_t addr = 0xA0000; addr < 0xA0000 + 400; ++addr) {
+        mem.write8(addr, 0x42);
+    }
+
+    // Verify some bytes in planes
+    bool hasData = false;
+    for (int p = 0; p < 4 && !hasData; ++p) {
+        if (vga.readPlane(p, 0) != 0)
+            hasData = true;
+    }
+    REQUIRE(hasData);
+
+    // Clear via MemoryBus
+    mem.clearVGA();
+
+    // Verify all planes are zeroed
+    for (int p = 0; p < 4; ++p) {
+        for (uint32_t off = 0; off < 100; ++off) {
+            REQUIRE(vga.readPlane(p, off) == 0);
+        }
+    }
+}
+
+TEST_CASE("VGA: Chain-4 full roundtrip write via MemoryBus, read via readPlane", "[VGA]") {
+    memory::MemoryBus mem;
+    hw::VGAController vga(mem);
+    mem.setVGA(&vga);
+
+    // Simulate what a DOS program does: write 320x200 bytes to 0xA0000
+    // Then verify the renderer can read them back via readPlane(offset & 3, offset >> 2)
+    constexpr int w = 320, h = 3; // Test 3 rows for speed
+
+    // Write a simple pattern: each pixel gets (y*32 + x) % 256
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            uint8_t val = static_cast<uint8_t>((y * 32 + x) & 0xFF);
+            mem.write8(0xA0000 + y * w + x, val);
+        }
+    }
+
+    // Read back the way the SDLRenderer does for chain-4:
+    //   readPlane(offset & 3, offset >> 2) where offset = y*w + x
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            uint32_t offset = y * w + x;
+            uint8_t expected = static_cast<uint8_t>((y * 32 + x) & 0xFF);
+            uint8_t actual = vga.readPlane(offset & 3, offset >> 2);
+            if (actual != expected) {
+                // Fail with context
+                REQUIRE(actual == expected);
+            }
+        }
+    }
+}
+
+TEST_CASE("VGA: clearPlanes preserves chain-4 state", "[VGA]") {
+    memory::MemoryBus mem;
+    hw::VGAController vga(mem);
+
+    REQUIRE(vga.isChain4() == true);
+    vga.clearPlanes();
+    REQUIRE(vga.isChain4() == true);
+
+    // Switch to unchained
+    vga.write8(0x3C4, 4);
+    vga.write8(0x3C5, 0x00);
+    REQUIRE(vga.isChain4() == false);
+    vga.clearPlanes();
+    REQUIRE(vga.isChain4() == false);
+}
+

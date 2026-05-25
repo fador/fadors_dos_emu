@@ -141,6 +141,7 @@ private:
   void handleVersion();          // AX=0400h
   void handleMemoryInfo();       // AX=0500h..0503h
   void handlePageLocking();       // AX=0600h-0604h
+  void handlePhysicalMapping();   // AX=0800h-0801h
   void handleVirtualInterrupt(); // AX=0900h..0902h
 };
 

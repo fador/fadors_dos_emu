@@ -186,10 +186,6 @@ void TerminalRenderer::renderGraphicsFullRes(bool force) {
     }
 
     const uint8_t* pal = m_memory.directAccess(PALETTE_BASE);
-    // For standard chained Linear256, grab a direct pointer to VRAM for fast bulk reads
-    const uint8_t* vram = (mi->layout == hw::VMemLayout::Linear256)
-                        ? m_memory.directAccess(mi->vramBase)
-                        : nullptr;
 
     // Build packed per-cell values and detect changes
     bool changed = false;
@@ -202,14 +198,8 @@ void TerminalRenderer::renderGraphicsFullRes(bool force) {
         int y0 = row * 2;
         int y1 = y0 + 1;
         for (int col = 0; col < outCols; ++col) {
-            uint8_t idx0, idx1;
-            if (vram) {
-                idx0 = vram[y0 * gfxW + col];
-                idx1 = (y1 < gfxH) ? vram[y1 * gfxW + col] : 0;
-            } else {
-                idx0 = readPixel(col, y0, videoMode);
-                idx1 = (y1 < gfxH) ? readPixel(col, y1, videoMode) : 0;
-            }
+            uint8_t idx0 = readPixel(col, y0, videoMode);
+            uint8_t idx1 = (y1 < gfxH) ? readPixel(col, y1, videoMode) : 0;
 
             auto toRGB = [pal](uint8_t idx) -> uint32_t {
                 uint8_t r6 = pal[idx * 3 + 0];

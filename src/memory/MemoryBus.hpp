@@ -29,7 +29,7 @@ public:
 
   uint16_t read16(uint32_t address) const {
     uint32_t effective = effectiveAddress(address);
-    if (effective < MEMORY_SIZE - 1) {
+    if (effective < MEMORY_SIZE - 1 && !needsPlaneRead8(effective)) {
       return static_cast<uint16_t>(m_ram[effective]) |
              (static_cast<uint16_t>(m_ram[effective + 1]) << 8);
     }
@@ -38,7 +38,7 @@ public:
 
   uint32_t read32(uint32_t address) const {
     uint32_t effective = effectiveAddress(address);
-    if (effective < MEMORY_SIZE - 3) {
+    if (effective < MEMORY_SIZE - 3 && !needsPlaneRead8(effective)) {
       return static_cast<uint32_t>(m_ram[effective]) |
              (static_cast<uint32_t>(m_ram[effective + 1]) << 8) |
              (static_cast<uint32_t>(m_ram[effective + 2]) << 16) |
@@ -99,6 +99,9 @@ public:
   // Connect VGA controller for plane-aware VRAM access
   void setVGA(hw::VGAController *vga) { m_vga = vga; }
   const hw::VGAController *getVGA() const { return m_vga; }
+
+  // Clear all VGA plane memory (used on video mode change)
+  void clearVGA();
 
 private:
   static constexpr uint32_t A20_MASK = 0xFFEFFFFF;

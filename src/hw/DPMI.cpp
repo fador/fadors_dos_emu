@@ -323,6 +323,9 @@ bool DPMI::handleInt31() {
     // Page demand paging candidates / discard — no-op success
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
     return true;
+  case 0x08:
+    handlePhysicalMapping();
+    return true;
   case 0x09:
     handleVirtualInterrupt();
     return true;
@@ -1388,6 +1391,53 @@ void DPMI::handlePageLocking() {
     break;
   default:
     LOG_WARN("DPMI: Unhandled page function 0x", std::hex, func);
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+    m_cpu.setReg16(cpu::AX, 0x8001);
+    break;
+  }
+}
+
+// ── Physical Address Mapping (AX=0800h..0801h) ──────────────────────────────
+
+void DPMI::handlePhysicalMapping() {
+  uint16_t func = m_cpu.getReg16(cpu::AX);
+  switch (func) {
+  case 0x0800: { // Map Physical Address to Linear
+    // DOS/4GW and other extenders use this to map the VGA framebuffer
+    // (physical 0xA0000) into the client's linear address space.
+    // In our flat-memory emulator (no paging), physical == linear, so
+    // we simply return the same address.
+    uint32_t physAddr = (static_cast<uint32_t>(m_cpu.getReg16(cpu::BX)) << 16)
+                      | m_cpu.getReg16(cpu::CX);
+    uint32_t size = (static_cast<uint32_t>(m_cpu.getReg16(cpu::SI)) << 16)
+                  | m_cpu.getReg16(cpu::DI);
+
+    // Validate: reject mappings above our physical memory limit
+    if (physAddr >= 0x1000000 || size == 0 ||
+        physAddr > 0x1000000 - size) {
+      LOG_WARN("DPMI 0x0800: Invalid physical mapping phys=0x", std::hex,
+               physAddr, " size=0x", size);
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      m_cpu.setReg16(cpu::AX, 0x8002); // Invalid address
+      return;
+    }
+
+    // In flat model, linear == physical
+    m_cpu.setReg16(cpu::BX, static_cast<uint16_t>(physAddr >> 16));
+    m_cpu.setReg16(cpu::CX, static_cast<uint16_t>(physAddr & 0xFFFF));
+    m_cpu.setReg16(cpu::SI, static_cast<uint16_t>(size >> 16));
+    m_cpu.setReg16(cpu::DI, static_cast<uint16_t>(size & 0xFFFF));
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+
+    LOG_DEBUG("DPMI 0x0800: Map phys=0x", std::hex, physAddr,
+              " size=0x", size, " -> linear=0x", physAddr);
+    break;
+  }
+  case 0x0801: // Free Physical Address Mapping — no-op success
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    break;
+  default:
+    LOG_WARN("DPMI: Unhandled physical mapping function 0x", std::hex, func);
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
     m_cpu.setReg16(cpu::AX, 0x8001);
     break;

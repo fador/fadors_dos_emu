@@ -207,9 +207,15 @@ void fador::hw::VGAController::planeWrite8(uint32_t offset, uint8_t value) {
                 break;
 
             case 0x01:
+                // Write Mode 1: latch copy. The CPU data byte is ignored;
+                // each plane's latch value is written back, filtered by the
+                // Bit Mask register (1=from latch, 0=preserve plane).
                 for (int plane = 0; plane < 4; ++plane) {
                     if ((m_seqMapMask & (1u << plane)) != 0) {
-                        m_planes[plane][planeOff] = m_latches[plane];
+                        m_planes[plane][planeOff] =
+                            static_cast<uint8_t>(
+                                (m_latches[plane] & m_gcBitMask) |
+                                (m_planes[plane][planeOff] & ~m_gcBitMask));
                     }
                 }
                 break;

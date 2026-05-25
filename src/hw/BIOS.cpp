@@ -4,9 +4,12 @@
 #include "KeyboardController.hpp"
 #include "PIC8259.hpp"
 #include "PIT8254.hpp"
+#include "VGAController.hpp"
 #include "VideoMode.hpp"
 #include <algorithm>
+#include <chrono>
 #include <cstring>
+#include <ctime>
 #include <fstream>
 #include <thread>
 
@@ -163,8 +166,15 @@ void BIOS::handleKeyboardIRQ() {
   // The BIOS INT 09h handler consumes the pending controller byte and
   // acknowledges IRQ1. Host input already mirrored make codes into the BIOS
   // key queue for INT 16h, so the IRQ path only needs to drain port 60h.
-  uint8_t scancode = m_kbd.read8(0x60);
-  LOG_DEBUG("BIOS INT 09h: scancode=0x", std::hex, (int)scancode);
+  // Always check status bit 0 (Output Buffer Full) before reading port 0x60
+  // to avoid processing stale/phantom scancodes.
+  uint8_t status = m_kbd.read8(0x64);
+  uint8_t scancode = 0;
+  if (status & 0x01) {
+    scancode = m_kbd.read8(0x60);
+  }
+  LOG_DEBUG("BIOS INT 09h: scancode=0x", std::hex, (int)scancode,
+            " status=0x", (int)status);
   sendEOI(0x09);
 }
 
@@ -327,7 +337,7 @@ void BIOS::handleVideoService() {
       m_memory.write16(0x44C, static_cast<uint16_t>(mi->pageSize));
       if (clearScreen) {
         if (mi->isGraphics) {
-          std::memset(m_memory.directAccess(mi->vramBase), 0, mi->pageSize);
+          m_memory.clearVGA();
         } else {
           uint32_t cells = static_cast<uint32_t>(mi->textCols) * mi->textRows;
           for (uint32_t i = 0; i < cells * 2; i += 2) {
@@ -335,6 +345,12 @@ void BIOS::handleVideoService() {
             m_memory.write8(mi->vramBase + i + 1, 0x07);
           }
         }
+      }
+      // Program VGA registers for this mode (real BIOS does this).
+      // Without this, VGA state from a previous mode (e.g. GC write
+      // mode, map mask, read map select) persists and breaks the new mode.
+      if (m_vga) {
+        programVGARegisters(al);
       }
     } else {
       // Unknown mode — default to 80x25 text
@@ -1070,6 +1086,64 @@ void BIOS::handleKeyboardService() {
   }
 }
 
+void BIOS::programVGARegisters(uint8_t mode) {
+  if (!m_vga) return;
+
+  const auto* mi = findVideoMode(mode);
+  if (!mi) return;
+
+  // Reset Sequencer to safe defaults, then apply mode-specific values
+  // Seq reg 2: Map Mask — all planes enabled for writes
+  m_vga->write8(0x3C4, 2);
+  m_vga->write8(0x3C5, 0x0F);
+
+  // Seq reg 4: Memory Mode — chain-4 for mode 13h, unchained for planar modes
+  m_vga->write8(0x3C4, 4);
+  if (mi->layout == VMemLayout::Linear256) {
+    m_vga->write8(0x3C5, 0x08); // Chain-4 enabled
+  } else if (mi->layout == VMemLayout::Planar) {
+    m_vga->write8(0x3C5, 0x00); // Chain-4 disabled
+  }
+
+  // Reset Graphics Controller to safe defaults
+  // GC reg 0: Set/Reset — all zeros
+  m_vga->write8(0x3CE, 0x00);
+  m_vga->write8(0x3CF, 0x00);
+  // GC reg 1: Enable Set/Reset — disabled
+  m_vga->write8(0x3CE, 0x01);
+  m_vga->write8(0x3CF, 0x00);
+  // GC reg 3: Data Rotate — replace (no rotate, no logical op)
+  m_vga->write8(0x3CE, 0x03);
+  m_vga->write8(0x3CF, 0x00);
+  // GC reg 4: Read Map Select — plane 0
+  m_vga->write8(0x3CE, 0x04);
+  m_vga->write8(0x3CF, 0x00);
+  // GC reg 5: Mode — write mode 0, read mode 0
+  m_vga->write8(0x3CE, 0x05);
+  m_vga->write8(0x3CF, 0x00);
+  // GC reg 8: Bit Mask — all bits enabled
+  m_vga->write8(0x3CE, 0x08);
+  m_vga->write8(0x3CF, 0xFF);
+
+  // CRTC: reset start address (page flip) and set row offset
+  // CRTC reg 0x0C-0x0D: Start Address — reset to 0
+  m_vga->write8(0x3D4, 0x0C);
+  m_vga->write8(0x3D5, 0x00);
+  m_vga->write8(0x3D4, 0x0D);
+  m_vga->write8(0x3D5, 0x00);
+
+  // CRTC reg 0x13: Offset — character-clocks between rows.
+  // For mode 13h (320 pixels, 8bpp, 8 dots/char): offset = 320/8 = 40 (0x28).
+  // For 320-wide planar modes: same value (each char = 2 bytes/plane).
+  if (mi->isGraphics && mi->width > 0) {
+    uint8_t crtcOff = static_cast<uint8_t>(mi->width / 8);
+    m_vga->write8(0x3D4, 0x13);
+    m_vga->write8(0x3D5, (crtcOff > 0) ? crtcOff : 40);
+  }
+
+  LOG_DEBUG("BIOS: Programmed VGA registers for mode 0x", std::hex, (int)mode);
+}
+
 void BIOS::initialize() {
   // 1. Setup BDA (BIOS Data Area) at 0x40:0x00
   m_memory.write8(0x449, 0x03);         // Current video mode: 80x25 color text
@@ -1451,13 +1525,85 @@ bool BIOS::isOriginalIVT(uint8_t vector, uint16_t cs, uint32_t eip) const {
 void BIOS::handleTimeService() {
   uint8_t ah = m_cpu.getReg8(cpu::AH);
   switch (ah) {
-  case 0x00: { // Read system timer
+  case 0x00: { // Read system timer (ticks since midnight)
     LOG_TRACE("BIOS INT 1Ah: Get System Time");
-    // BIOS timer tick count at 0x40:0x6C
     uint32_t ticks = m_memory.read32(0x46C);
     m_cpu.setReg16(cpu::CX, static_cast<uint16_t>(ticks >> 16));
     m_cpu.setReg16(cpu::DX, static_cast<uint16_t>(ticks & 0xFFFF));
-    m_cpu.setReg8(cpu::AL, 0); // Midnight flag
+    m_cpu.setReg8(cpu::AL, 0); // 0 = no midnight overflow
+    break;
+  }
+  case 0x01: { // Set system timer (CX:DX → BDA 0x46C)
+    LOG_TRACE("BIOS INT 1Ah: Set System Time");
+    uint32_t ticks = (static_cast<uint32_t>(m_cpu.getReg16(cpu::CX)) << 16)
+                   | m_cpu.getReg16(cpu::DX);
+    m_memory.write32(0x46C, ticks);
+    // Reset midnight flag and counter
+    m_memory.write8(0x470, 0);
+    break;
+  }
+  case 0x02: { // Read Real-Time Clock Time
+    auto now = std::chrono::system_clock::now();
+    std::time_t t = std::chrono::system_clock::to_time_t(now);
+    std::tm *lt = std::localtime(&t);
+    if (lt) {
+      auto toBcd = [](int v) -> uint8_t {
+        return static_cast<uint8_t>(((v / 10) << 4) | (v % 10));
+      };
+      m_cpu.setReg8(cpu::CH, toBcd(lt->tm_hour));
+      m_cpu.setReg8(cpu::CL, toBcd(lt->tm_min));
+      m_cpu.setReg8(cpu::DH, toBcd(lt->tm_sec));
+      m_cpu.setReg8(cpu::DL, lt->tm_isdst > 0 ? 1 : 0);
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    } else {
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+    }
+    LOG_TRACE("BIOS INT 1Ah: Read RTC Time");
+    break;
+  }
+  case 0x03: { // Set Real-Time Clock Time
+    // Store RTC time from CH(hr),CL(min),DH(sec),DL(dst).
+    // We can't modify the host system clock, so just acknowledge success.
+    LOG_TRACE("BIOS INT 1Ah: Set RTC Time");
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    break;
+  }
+  case 0x04: { // Read Real-Time Clock Date
+    auto now = std::chrono::system_clock::now();
+    std::time_t t = std::chrono::system_clock::to_time_t(now);
+    std::tm *lt = std::localtime(&t);
+    if (lt) {
+      auto toBcd = [](int v) -> uint8_t {
+        return static_cast<uint8_t>(((v / 10) << 4) | (v % 10));
+      };
+      m_cpu.setReg8(cpu::CH, toBcd((lt->tm_year + 1900) / 100)); // century (BCD)
+      m_cpu.setReg8(cpu::CL, toBcd((lt->tm_year + 1900) % 100)); // year (BCD)
+      m_cpu.setReg8(cpu::DH, toBcd(lt->tm_mon + 1));             // month (BCD)
+      m_cpu.setReg8(cpu::DL, toBcd(lt->tm_mday));                // day (BCD)
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    } else {
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+    }
+    LOG_TRACE("BIOS INT 1Ah: Read RTC Date");
+    break;
+  }
+  case 0x05: { // Set Real-Time Clock Date
+    // Store RTC date from CH(cent),CL(year),DH(month),DL(day).
+    // Can't modify host clock, acknowledge success.
+    LOG_TRACE("BIOS INT 1Ah: Set RTC Date");
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    break;
+  }
+  case 0x06: { // Set RTC Alarm
+    // CH=hours(BCD), CL=minutes(BCD), DH=seconds(BCD)
+    // Stub: alarm not implemented, return CF=1 (function not supported)
+    LOG_DEBUG("BIOS INT 1Ah: Set Alarm (stubbed)");
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+    break;
+  }
+  case 0x07: { // Reset RTC Alarm
+    LOG_DEBUG("BIOS INT 1Ah: Reset Alarm (stubbed)");
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
     break;
   }
   default:

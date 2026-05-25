@@ -5376,6 +5376,12 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
       // let them dispatch through the thunk so the application's ISR runs.
       // The thunk's 16-bit dispatch code works correctly in our CPU because
       // triggerInterrupt handles 16-bit gate frames properly.
+      //
+      // EXCEPTION: if we're already inside the thunk (16-bit code), use HLE
+      // for ALL hardware IRQs that have HLE handlers.  Dispatching a nested
+      // hardware IRQ through the same thunk corrupts its internal state
+      // (transfer stack, saved registers).  HLE consumes the scancode from
+      // port 60h and sends EOI without disrupting the thunk.
       if (!useHLE) {
         uint32_t descTableBase;
         if (idtSel & 0x04) {
@@ -5389,8 +5395,13 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
         if (!idtDesc.is32Bit) {
           // Only force HLE for vectors where BIOS has an HLE handler.
           // INT 8 (timer): has HLE + ticcount increment.
-          // INT 9 (keyboard) and others: no HLE, let thunk dispatch.
+          // INT 9 (keyboard): has HLE drain + EOI, use when inside thunk.
           if (vector == 0x08) {
+            useHLE = true;
+          } else if (vector == 0x09 && !m_cpu.is32BitCode()) {
+            // Inside the thunk (16-bit code): HLE the keyboard IRQ to
+            // avoid corrupting thunk state.  Outside the thunk we'll use
+            // directAppPMDispatch instead.
             useHLE = true;
           }
         }
@@ -5486,7 +5497,12 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
     // IDT and keeps the application's real PM handler behind INT 31h/0205h.
     // We capture that app vector when the game calls INT 31h and can deliver
     // the IRQ straight to it here, avoiding the fragile 16-bit thunk path.
-    if (vector != 0x08 && oldSs != 0xAF && oldCs != 0x57 && oldCs != 0x8F) {
+    //
+    // Only use direct dispatch when executing 32-bit code (the app).
+    // When in 16-bit code (inside the thunk), the app's handler would run
+    // on the thunk's stack, corrupting state.  In that case we fall back
+    // to HLE above for vectors that support it.
+    if (vector != 0x08 && m_cpu.is32BitCode()) {
       const auto &appVec = m_appPMVectors[vector];
       if (appVec.valid && (cs != appVec.selector || eip32 != appVec.offset)) {
         Descriptor appDesc = decodeSelector(appVec.selector);
@@ -5496,6 +5512,8 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
           cs = appVec.selector;
           eip32 = appVec.offset;
           use32 = true;
+          LOG_INFO("HW IRQ 0x", std::hex, (int)vector,
+                   " direct→PM: sel=0x", cs, " off=0x", eip32);
         }
       }
     }

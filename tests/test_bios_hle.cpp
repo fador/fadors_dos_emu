@@ -57,3 +57,50 @@ TEST_CASE("BIOS HLE INT 11h/12h/14h/15h/17h/2Fh/1Bh-1Fh stubs work", "[bios][hle
         }
     }
 }
+
+TEST_CASE("BIOS HLE INT 09h keyboard IRQ with status check", "[bios][hle][kbd]") {
+    memory::MemoryBus mem;
+    cpu::CPU cpu;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+
+    SECTION("INT 09h with data in hardware buffer reads scancode") {
+        // Push a scancode to the hardware buffer
+        kbd.pushScancode(0x1E); // 'A' make code
+        REQUIRE(kbd.read8(0x64) & 0x01); // Status: Output Buffer Full
+
+        // Handle INT 09h via HLE — should read the scancode and drain buffer
+        REQUIRE(bios.handleInterrupt(0x09));
+
+        // Buffer should now be empty
+        REQUIRE(!(kbd.read8(0x64) & 0x01));
+    }
+
+    SECTION("INT 09h with empty hardware buffer does not crash") {
+        // No scancode pushed — buffer is empty
+        REQUIRE(!(kbd.read8(0x64) & 0x01));
+
+        // handleKeyboardIRQ should check status and NOT read stale data
+        REQUIRE(bios.handleInterrupt(0x09));
+
+        // Buffer should still be empty, no side effects
+        REQUIRE(!(kbd.read8(0x64) & 0x01));
+    }
+
+    SECTION("INT 09h with multiple scancodes drains one per IRQ") {
+        kbd.pushScancode(0x1E); // 'A'
+        kbd.pushScancode(0x30); // 'B'
+
+        // First IRQ: drains first scancode
+        REQUIRE(kbd.read8(0x64) & 0x01);
+        REQUIRE(bios.handleInterrupt(0x09));
+        // Second scancode still pending
+        REQUIRE(kbd.read8(0x64) & 0x01);
+
+        // Second IRQ: drains second scancode
+        REQUIRE(bios.handleInterrupt(0x09));
+        REQUIRE(!(kbd.read8(0x64) & 0x01));
+    }
+}

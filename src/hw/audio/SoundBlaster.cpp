@@ -286,6 +286,25 @@ void SoundBlaster::processCommand(uint8_t cmd) {
   case 0xD9: // Exit auto-init 16-bit DMA
     m_autoInitDma = false;
     break;
+  case 0xD5: // Halt 16-bit DMA
+    m_dmaActive = false;
+    LOG_DEBUG("[SB] Halt 16-bit DMA");
+    break;
+  case 0xD6: // Continue 16-bit DMA
+    m_dmaActive = true;
+    LOG_DEBUG("[SB] Continue 16-bit DMA");
+    break;
+  case 0xD8: { // Speaker status
+    m_readQueue.push(m_speakerOn ? 0xFF : 0x00);
+    LOG_DEBUG("[SB] Speaker status: ", m_speakerOn ? "on" : "off");
+    break;
+  }
+  case 0xE2: { // DSP identification (SB16)
+    m_readQueue.push(0x00); // No copyright info
+    m_readQueue.push(0x00);
+    LOG_DEBUG("[SB] DSP identification requested");
+    break;
+  }
   default:
     LOG_DEBUG("Unimplemented SB command: ", std::hex, (int)cmd);
     while (!m_writeQueue.empty())
@@ -318,18 +337,19 @@ void SoundBlaster::generateSamples(float *buffer, size_t numSamples) {
 
       int dmaChannel = m_16bit ? 5 : 1;
       uint32_t addr = m_dma.getChannelAddress(dmaChannel);
+      uint16_t transferBytes = 0;
 
       if (m_16bit) {
-        // 16-bit DMA
+        // 16-bit DMA: read left sample at current address
         int16_t sL = static_cast<int16_t>(m_memory.read16(addr));
         left = static_cast<float>(sL) / 32768.0f;
-        m_dma.acknowledgeTransfer(dmaChannel, 2);
-        
+        transferBytes += 2;
+
         if (m_stereo) {
-          addr = m_dma.getChannelAddress(dmaChannel);
-          int16_t sR = static_cast<int16_t>(m_memory.read16(addr));
+          // Right sample follows left at addr+2 (word-interleaved)
+          int16_t sR = static_cast<int16_t>(m_memory.read16(addr + 2));
           right = static_cast<float>(sR) / 32768.0f;
-          m_dma.acknowledgeTransfer(dmaChannel, 2);
+          transferBytes += 2;
         } else {
           right = left;
         }
@@ -337,29 +357,32 @@ void SoundBlaster::generateSamples(float *buffer, size_t numSamples) {
         // 8-bit DMA
         uint8_t sL = m_memory.read8(addr);
         left = (static_cast<float>(sL) - 128.0f) / 128.0f;
-        m_dma.acknowledgeTransfer(dmaChannel, 1);
+        transferBytes += 1;
 
         if (m_stereo) {
-          addr = m_dma.getChannelAddress(dmaChannel);
-          uint8_t sR = m_memory.read8(addr);
+          // Right sample follows left at addr+1 (byte-interleaved)
+          uint8_t sR = m_memory.read8(addr + 1);
           right = (static_cast<float>(sR) - 128.0f) / 128.0f;
-          m_dma.acknowledgeTransfer(dmaChannel, 1);
+          transferBytes += 1;
         } else {
           right = left;
         }
       }
-      
-      m_lastSample = (left + right) * 0.5f; 
 
-      if (m_dmaLength == 0) {
+      m_lastSample = (left + right) * 0.5f;
+
+      // Advance DMA and detect Terminal Count — use DMA controller's
+      // TC signal instead of maintaining a separate m_dmaLength counter.
+      // This keeps SB and DMA in sync, avoiding the dual-tracking bug.
+      bool tc = m_dma.acknowledgeTransfer(dmaChannel, transferBytes);
+
+      if (tc) {
         triggerIRQ();
         if (!m_autoInitDma) {
           m_dmaActive = false;
-        } else {
-          m_dmaLength = m_dmaBaseLength;
         }
-      } else {
-        m_dmaLength--;
+        // For auto-init DMA, the DMA controller has already reset
+        // address and count; SB just keeps m_dmaActive = true.
       }
 
       m_sampleAccumulator -= 1.0f;

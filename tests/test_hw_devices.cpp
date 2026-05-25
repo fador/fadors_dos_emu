@@ -156,3 +156,78 @@ TEST_CASE("Hardware: Keyboard Controller", "[HW]") {
         REQUIRE(toggled);
     }
 }
+
+TEST_CASE("Hardware: Keyboard Controller status register isolation", "[HW][KBD]") {
+    KeyboardController kbd;
+
+    // Verify that popKey() (BIOS buffer) does NOT affect the hardware
+    // status register bit 0 (Output Buffer Full).  These are independent
+    // buffers — the hardware buffer is for port 0x60/INT 09h, the BIOS
+    // buffer is for INT 16h.
+    SECTION("popKey does not clear hardware status bit") {
+        // Push a scancode to the hardware buffer (sets status bit 0)
+        kbd.pushScancode(0x1E); // 'A' make code
+        REQUIRE(kbd.read8(0x64) & 0x01); // Status: Output Buffer Full
+
+        // Push a key to the BIOS buffer (INT 16h)
+        kbd.pushKey('a', 0x1E);
+
+        // Pop from BIOS buffer — must NOT clear hardware status bit 0
+        auto [ascii, sc] = kbd.popKey();
+        REQUIRE(ascii == 'a');
+        REQUIRE(sc == 0x1E);
+        REQUIRE(kbd.read8(0x64) & 0x01); // Hardware buffer still has data
+
+        // Drain hardware buffer
+        uint8_t hw = kbd.read8(0x60);
+        REQUIRE(hw == 0x1E);
+        REQUIRE(!(kbd.read8(0x64) & 0x01)); // Now both empty
+    }
+
+    SECTION("Hardware buffer empty returns last scancode, not 0") {
+        // When hardware buffer is empty, reading port 0x60 returns
+        // the last scancode (bus hold behavior), not 0.
+        uint8_t empty = kbd.read8(0x60);
+        REQUIRE(empty == 0x00); // Initial state: 0
+
+        kbd.pushScancode(0x2C); // 'Z' make code
+        uint8_t z = kbd.read8(0x60);
+        REQUIRE(z == 0x2C);
+
+        // Buffer now empty, should return last value (0x2C)
+        uint8_t stale = kbd.read8(0x60);
+        REQUIRE(stale == 0x2C); // Stale, not 0
+    }
+}
+
+TEST_CASE("Hardware: Keyboard Controller buffer limits", "[HW][KBD]") {
+    KeyboardController kbd;
+
+    SECTION("Hardware scancode buffer respects max size") {
+        // Fill beyond kMaxHWScanBuffer (64) — oldest entries dropped
+        for (int i = 0; i < 80; ++i) {
+            kbd.pushScancode(static_cast<uint8_t>(i & 0xFF));
+        }
+        // Buffer should have at most 64 entries; reading them all
+        int count = 0;
+        while (kbd.read8(0x64) & 0x01) {
+            kbd.read8(0x60);
+            ++count;
+        }
+        REQUIRE(count <= 64);
+    }
+
+    SECTION("BIOS key buffer respects max size") {
+        // Fill beyond kMaxKeyBuffer (32) — oldest entries dropped
+        for (int i = 0; i < 50; ++i) {
+            kbd.pushKey(static_cast<uint8_t>('A' + (i % 26)),
+                        static_cast<uint8_t>(0x1E + (i % 26)));
+        }
+        int count = 0;
+        while (kbd.hasKey()) {
+            kbd.popKey();
+            ++count;
+        }
+        REQUIRE(count <= 32);
+    }
+}

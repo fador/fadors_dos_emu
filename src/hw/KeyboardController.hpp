@@ -45,6 +45,11 @@ private:
     struct KeyEntry { uint8_t ascii; uint8_t scancode; };
     int m_pendingIRQCount{0};
 
+    // Real hardware limits: 8042 has 1-byte output buffer; BIOS keyboard
+    // buffer in BDA holds 15 entries (16 words, one used as head pointer).
+    static constexpr size_t kMaxHWScanBuffer = 64;
+    static constexpr size_t kMaxKeyBuffer = 32;
+
     fador::memory::MemoryBus* m_memory{nullptr};
     std::queue<KeyEntry> m_keyBuffer;         // BIOS-level buffer (for INT 16h)
     std::queue<uint8_t> m_hwScanBuffer;       // Hardware scancode buffer (for port 0x60 / INT 9)

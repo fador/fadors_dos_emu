@@ -30,9 +30,22 @@ public:
         return m_planes[plane & 3][offset & 0xFFFF];
     }
 
+    // Clear all four 64KB planes (used on video mode change)
+    void clearPlanes() {
+        for (auto& plane : m_planes)
+            plane.fill(0);
+    }
+
     // CRTC start address (for page flipping / display offset)
     uint32_t getDisplayStart() const {
         return (uint32_t(m_crtcRegs[0x0C]) << 8) | m_crtcRegs[0x0D];
+    }
+
+    // CRTC Offset register (index 0x13): number of character-clocks
+    // between consecutive rows. For chain-4 mode 13h the byte stride
+    // is offset*8; for planar Mode-X it's offset*2 bytes per plane.
+    uint8_t getCRTCOffset() const {
+        return m_crtcRegs[0x13];
     }
 
     static constexpr uint32_t PALETTE_BASE = 0xE0000;

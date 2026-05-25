@@ -946,6 +946,13 @@ void DOS::handleDOSService() {
     m_cpu.setReg8(cpu::DL, static_cast<uint8_t>(ms.count() / 10)); // 1/100 second
     break;
   }
+  case 0x2D: { // Set System Time
+    // CH=hour, CL=minute, DH=second, DL=1/100 sec
+    // Can't modify the host clock; acknowledge success.
+    m_cpu.setReg8(cpu::AL, 0);
+    LOG_DOS("DOS: Set Time (acknowledged)");
+    break;
+  }
   case 0x67: { // Set Handle Count
     uint16_t handleCount = m_cpu.getReg16(cpu::BX);
     if (m_pspSegment != 0) {
@@ -1487,7 +1494,13 @@ void DOS::handleMemoryManagement() {
 
         const uint16_t nextSeg = static_cast<uint16_t>(nextSeg32);
         const MCB next = readMCB(nextSeg);
-        if (next.owner != 0) {
+        // Merge if free (owner == 0) OR owned by the same process.
+        // Same-owner merging is non-standard DOS behavior but necessary
+        // because our emulator's DPMI layer may allocate small real-mode
+        // structures between the main block and the end of memory, which
+        // would otherwise prevent the program from expanding its own
+        // segment even though the total memory is sufficient.
+        if (next.owner != 0 && next.owner != mcb.owner) {
           break;
         }
 
@@ -1558,6 +1571,61 @@ void DOS::handleMemoryManagement() {
 
       if (expanded.size != mcb.size || expanded.type != mcb.type) {
         writeMCB(mcbSeg, expanded);
+      }
+
+      // In-place expansion failed. Try block relocation: allocate a new
+      // block of the requested size, copy data, free the old block.
+      // This mirrors C-library realloc() behavior and prevents crashes
+      // in programs (like DOOM) that assume resize always succeeds for
+      // small incremental growth.
+      //
+      // First attempt: allocate with the old block still owned.
+      uint16_t newSeg = allocateMemory(requested);
+      if (newSeg == 0) {
+        // Second attempt: temporarily free the old block so its space
+        // becomes available for the new allocation, then retry.
+        uint16_t savedOwner = mcb.owner;
+        expanded.owner = 0;
+        writeMCB(mcbSeg, expanded);
+        newSeg = allocateMemory(requested);
+        if (newSeg == 0) {
+          // Restore the old block on failure
+          expanded.owner = savedOwner;
+          writeMCB(mcbSeg, expanded);
+        }
+      }
+      if (newSeg != 0) {
+        // Copy data from old block to new block
+        uint32_t oldAddr = static_cast<uint32_t>(segment) << 4;
+        uint32_t newAddr = static_cast<uint32_t>(newSeg) << 4;
+        uint16_t copyParas = std::min(requested, mcb.size);
+        for (uint16_t p = 0; p < copyParas; ++p) {
+          for (uint16_t b = 0; b < 16; ++b) {
+            m_memory.write8(newAddr + p * 16 + b,
+                            m_memory.read8(oldAddr + p * 16 + b));
+          }
+        }
+        // Free the old block — set owner to 0 so coalesce can merge it
+        uint32_t oldMcbAddr = static_cast<uint32_t>(mcbSeg) << 4;
+        m_memory.write16(oldMcbAddr + 1, 0); // owner = 0 (free)
+        MCB freed = readMCB(mcbSeg);
+        freed.owner = 0;
+        // Re-read MCB in case readMCB updated it
+        freed = readMCB(mcbSeg);
+        coalesceFollowingFreeBlocks(freed);
+        writeMCB(mcbSeg, freed);
+
+        // Return success with new segment in ES
+        m_cpu.setSegReg(cpu::ES, newSeg);
+        if (segment == m_pspSegment) {
+          m_pspSegment = newSeg;
+          m_currentPSPValue = newSeg;
+          m_cpu.setReg16(cpu::ES, newSeg);
+        }
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+        LOG_INFO("DOS: Relocated segment ", std::hex, segment,
+                 " to 0x", newSeg, " (", requested, " paras)");
+        return;
       }
 
       m_cpu.setReg16(cpu::AX, 0x08); // Insufficient memory
@@ -1881,6 +1949,69 @@ uint16_t DOS::allocateMemory(uint16_t requested, uint16_t owner) {
     if (next > 0xFFFF || next > LAST_PARA)
       break;
     current = static_cast<uint16_t>(next);
+  }
+
+  if (bestFit == 0) {
+    // No free block found. The PSP likely owns all conventional memory.
+    // Auto-shrink the PSP to make room for this allocation.
+    // Real DOS programs shrink via INT 21h/AH=4Ah, but some neglect to.
+    uint16_t scan = FIRST_MCB_SEGMENT;
+    for (int i = 0; i < 100; ++i) {
+      MCB mcb = readMCB(scan);
+      if (mcb.owner == m_pspSegment && mcb.size > requested + 0x11u) {
+        // Shrink PSP to a minimum: keep PSP (0x10 paras) + requested + margin
+        uint16_t keepParas = requested + 0x20u; // requested + 32 paras margin
+        if (keepParas > mcb.size) keepParas = mcb.size;
+        uint16_t pspMcbSeg = scan;
+
+        mcb.type = 'M';
+        mcb.size = keepParas;
+        writeMCB(pspMcbSeg, mcb);
+
+        // Create free MCB after shrunk PSP
+        uint16_t freeMcbSeg = static_cast<uint16_t>(pspMcbSeg + keepParas + 1u);
+        if (freeMcbSeg < LAST_PARA) {
+          uint32_t freeMcbAddr = static_cast<uint32_t>(freeMcbSeg) << 4u;
+          uint16_t freeSize = static_cast<uint16_t>(LAST_PARA - freeMcbSeg);
+          m_memory.write8(freeMcbAddr, 'Z');
+          m_memory.write16(freeMcbAddr + 1u, 0u);
+          m_memory.write16(freeMcbAddr + 3u, freeSize);
+          for (int k = 0; k < 8; ++k)
+            m_memory.write8(freeMcbAddr + 8u + k, 0u);
+
+          // Update PSP top-of-memory
+          uint16_t newTop = static_cast<uint16_t>(m_pspSegment + keepParas);
+          if (newTop < 0xA000)
+            m_memory.write16((static_cast<uint32_t>(m_pspSegment) << 4u) + 0x02u, newTop);
+
+          LOG_INFO("DOS: Auto-shrunk PSP to 0x", std::hex, keepParas,
+                   " paras for allocation; free block at 0x", freeMcbSeg);
+        }
+
+        // Retry allocation — scan again for the newly created free block
+        bestFit = 0;
+        bestFitSize = 0xFFFF;
+        current = FIRST_MCB_SEGMENT;
+        while (true) {
+          MCB m2 = readMCB(current);
+          if (m2.owner == 0) {
+            if (m2.size >= requested && m2.size < bestFitSize) {
+              bestFit = current;
+              bestFitSize = m2.size;
+            }
+          }
+          if (m2.type == 'Z') break;
+          uint32_t nxt = static_cast<uint32_t>(current) + m2.size + 1;
+          if (nxt > 0xFFFF || nxt > LAST_PARA) break;
+          current = static_cast<uint16_t>(nxt);
+        }
+        break;
+      }
+      if (mcb.type == 'Z') break;
+      uint32_t nxt = static_cast<uint32_t>(scan) + mcb.size + 1;
+      if (nxt > 0xFFFF || nxt > LAST_PARA) break;
+      scan = static_cast<uint16_t>(nxt);
+    }
   }
 
   if (bestFit != 0) {

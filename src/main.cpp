@@ -211,6 +211,7 @@ int main(int argc, char *argv[]) {
     kbd.setMemoryBus(&memory);
     fador::hw::DOS dos(cpu, memory);
     fador::hw::BIOS bios(cpu, memory, kbd, pit, pic);
+    bios.setVGA(&vga);
 
     joystick.setCPU(&cpu);
 

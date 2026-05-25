@@ -916,11 +916,17 @@ void SDLRenderer::renderGraphicsMode() {
   int w = mi->width;
   int h = mi->height;
 
+  // CRTC Offset register (index 0x13) controls the actual row stride
+  // in VRAM. Games may set a virtual width wider than the visible width
+  // for smooth scrolling.  Use it when available, fall back to standard.
+  uint8_t crtcOff = m_vga.getCRTCOffset();
+
   if (mi->layout == hw::VMemLayout::Linear256 && !m_vga.isChain4()) {
     // Mode-X: Chain-4 disabled, unchained 256-color planar mode.
-    // Pixel at (x, y): plane = x % 4, offset = displayStart + y*(w/4) + x/4
+    // CRTC offset is in character-clocks; one char = 8 pixels = 2 bytes
+    // per plane in planar 8bpp mode.
     uint32_t displayStart = m_vga.getDisplayStart();
-    int rowBytes = w / 4; // 80 for 320-wide
+    int rowBytes = (crtcOff > 0) ? crtcOff * 2 : w / 4;
     for (int y = 0; y < h; ++y) {
       for (int x = 0; x < w; ++x) {
         int plane = x & 3;
@@ -930,11 +936,15 @@ void SDLRenderer::renderGraphicsMode() {
       }
     }
   } else if (mi->layout == hw::VMemLayout::Linear256) {
-    // Standard mode 13h (Chain-4): direct VRAM bulk read
-    const uint8_t *vram = m_memory.directAccess(mi->vramBase);
+    // Standard mode 13h (Chain-4): CRTC offset in character-clocks;
+    // one char = 8 pixels = 8 bytes at 8bpp.
+    uint32_t displayStart = m_vga.getDisplayStart();
+    int rowBytes = (crtcOff > 0) ? crtcOff * 8 : w;
     for (int y = 0; y < h; ++y) {
       for (int x = 0; x < w; ++x) {
-        m_framebuffer[y * m_texWidth + x] = paletteToARGB(vram[y * w + x]);
+        uint32_t vramOff = displayStart + y * rowBytes + x;
+        m_framebuffer[y * m_texWidth + x] =
+            paletteToARGB(m_vga.readPlane(vramOff & 3, vramOff >> 2));
       }
     }
   } else {

@@ -68,7 +68,15 @@ uint8_t MemoryBus::read8Slow(uint32_t address, uint32_t effectiveAddress) const 
 uint16_t MemoryBus::read16Slow(uint32_t address,
                                uint32_t effectiveAddress) const {
   if (effectiveAddress + 1 < MEMORY_SIZE) {
-    return m_ram[effectiveAddress] | (m_ram[effectiveAddress + 1] << 8);
+    uint8_t lo, hi;
+    if (needsPlaneRead8(effectiveAddress)) {
+      lo = m_vga->planeRead8(effectiveAddress - VGA_PLANAR_START);
+      hi = m_vga->planeRead8(effectiveAddress + 1 - VGA_PLANAR_START);
+    } else {
+      lo = m_ram[effectiveAddress];
+      hi = m_ram[effectiveAddress + 1];
+    }
+    return static_cast<uint16_t>(lo) | (static_cast<uint16_t>(hi) << 8);
   }
   LOG_WARN("Memory out of bounds READ 16-bit at: 0x", std::hex, address,
            " (Effective: 0x", effectiveAddress, ")");
@@ -78,9 +86,19 @@ uint16_t MemoryBus::read16Slow(uint32_t address,
 uint32_t MemoryBus::read32Slow(uint32_t address,
                                uint32_t effectiveAddress) const {
   if (effectiveAddress + 3 < MEMORY_SIZE) {
-    return m_ram[effectiveAddress] | (m_ram[effectiveAddress + 1] << 8) |
-           (m_ram[effectiveAddress + 2] << 16) |
-           (m_ram[effectiveAddress + 3] << 24);
+    uint32_t b0, b1, b2, b3;
+    if (needsPlaneRead8(effectiveAddress)) {
+      b0 = m_vga->planeRead8(effectiveAddress - VGA_PLANAR_START);
+      b1 = m_vga->planeRead8(effectiveAddress + 1 - VGA_PLANAR_START);
+      b2 = m_vga->planeRead8(effectiveAddress + 2 - VGA_PLANAR_START);
+      b3 = m_vga->planeRead8(effectiveAddress + 3 - VGA_PLANAR_START);
+    } else {
+      b0 = m_ram[effectiveAddress];
+      b1 = m_ram[effectiveAddress + 1];
+      b2 = m_ram[effectiveAddress + 2];
+      b3 = m_ram[effectiveAddress + 3];
+    }
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
   }
   LOG_WARN("Memory out of bounds READ 32-bit at: 0x", std::hex, address,
            " (Effective: 0x", effectiveAddress, ")");
@@ -197,6 +215,11 @@ uint8_t *MemoryBus::contiguousAccess(uint32_t address, uint32_t size) {
 const uint8_t *MemoryBus::contiguousAccess(uint32_t address,
                                            uint32_t size) const {
   return const_cast<MemoryBus *>(this)->contiguousAccess(address, size);
+}
+
+void MemoryBus::clearVGA() {
+  if (m_vga)
+    m_vga->clearPlanes();
 }
 
 } // namespace fador::memory
