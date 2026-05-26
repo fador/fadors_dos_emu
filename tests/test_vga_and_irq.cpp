@@ -511,7 +511,6 @@ TEST_CASE("IRQ: Keyboard PM reflection uses selector 0xAF host stack", "[IRQ][KB
     constexpr uint32_t HOST_SEG_BASE = 0x50000;
     constexpr uint32_t WRONG_DS_HOST_SP = 0x1234;
     constexpr uint32_t RIGHT_HOST_SP = 0x3456;
-    constexpr uint32_t IRQ32_FRAME_BYTES = 20;
 
     env.cpu.setLDTR({0x00FF, LDT_ADDR});
     env.cpu.setLDTRSelector(0x0018);
@@ -528,7 +527,7 @@ TEST_CASE("IRQ: Keyboard PM reflection uses selector 0xAF host stack", "[IRQ][KB
     env.decoder.injectHardwareInterrupt(0x09);
 
     REQUIRE(env.cpu.getSegReg(cpu::SS) == 0x00AF);
-    REQUIRE(env.cpu.getReg32(cpu::ESP) == RIGHT_HOST_SP - IRQ32_FRAME_BYTES);
+    REQUIRE(env.cpu.getReg32(cpu::ESP) == RIGHT_HOST_SP - 12); // EIP+CS+EFLAGS
     REQUIRE(env.cpu.getSegReg(cpu::CS) == PMIRQTestEnv::CODE16_SEL);
     REQUIRE(env.cpu.getEIP() == 0x0020);
 }
@@ -539,7 +538,6 @@ TEST_CASE("IRQ: Keyboard PM reflection accepts high selector 0xAF host stack", "
     constexpr uint32_t LDT_ADDR = 0x6000;
     constexpr uint32_t HOST_SEG_BASE = 0x50000;
     constexpr uint32_t HIGH_HOST_SP = 0xE47FC;
-    constexpr uint32_t IRQ32_FRAME_BYTES = 20;
 
     env.cpu.setLDTR({0x00FF, LDT_ADDR});
     env.cpu.setLDTRSelector(0x0018);
@@ -555,7 +553,7 @@ TEST_CASE("IRQ: Keyboard PM reflection accepts high selector 0xAF host stack", "
     env.decoder.injectHardwareInterrupt(0x09);
 
     REQUIRE(env.cpu.getSegReg(cpu::SS) == 0x00AF);
-    REQUIRE(env.cpu.getReg32(cpu::ESP) == HIGH_HOST_SP - IRQ32_FRAME_BYTES);
+    REQUIRE(env.cpu.getReg32(cpu::ESP) == HIGH_HOST_SP - 12);
     REQUIRE(env.cpu.getSegReg(cpu::CS) == PMIRQTestEnv::CODE16_SEL);
     REQUIRE(env.cpu.getEIP() == 0x0020);
 }
@@ -566,7 +564,6 @@ TEST_CASE("IRQ: Keyboard PM reflection refreshes stale 0xAF stack width", "[IRQ]
     constexpr uint32_t LDT_ADDR = 0x6000;
     constexpr uint32_t HOST_SEG_BASE = 0x50000;
     constexpr uint32_t HOST_SP = 0xE47FC;
-    constexpr uint32_t IRQ32_FRAME_BYTES = 12;
 
     env.cpu.setLDTR({0x00FF, LDT_ADDR});
     env.cpu.setLDTRSelector(0x0018);
@@ -592,7 +589,7 @@ TEST_CASE("IRQ: Keyboard PM reflection refreshes stale 0xAF stack width", "[IRQ]
 
     REQUIRE(env.cpu.getSegReg(cpu::SS) == 0x00AF);
     REQUIRE(env.cpu.is32BitStack());
-    REQUIRE(env.cpu.getReg32(cpu::ESP) == HOST_SP - IRQ32_FRAME_BYTES);
+    REQUIRE(env.cpu.getReg32(cpu::ESP) == HOST_SP - 12); // EIP+CS+EFLAGS
     REQUIRE(env.cpu.getSegReg(cpu::CS) == PMIRQTestEnv::CODE16_SEL);
     REQUIRE(env.cpu.getEIP() == 0x0020);
 }

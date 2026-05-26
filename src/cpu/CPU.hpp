@@ -139,6 +139,7 @@ public:
     uint16_t origDS = 0;          // Caller's original DS before switch
     uint16_t origES = 0;          // Caller's original ES before switch
     bool dispatchedToPM = false;  // Thunk dispatched to PM handler
+    bool gprsPreSaved = false;     // GPRs were saved at stack-switch time
     // GPRs + extra segments saved at thunk→PM dispatch, restored at PM-OK
     uint32_t savedEAX = 0, savedEBX = 0, savedECX = 0, savedEDX = 0;
     uint32_t savedESI = 0, savedEDI = 0, savedEBP = 0;
@@ -282,11 +283,13 @@ public:
         bool isHwIrq = (v >= 0x08 && v <= 0x0F) || (v >= 0x70 && v <= 0x77);
         if (isHwIrq) {
           it->dispatchedToPM = true;
-          it->savedEAX = m_regs[EAX]; it->savedEBX = m_regs[EBX];
-          it->savedECX = m_regs[ECX]; it->savedEDX = m_regs[EDX];
-          it->savedESI = m_regs[ESI]; it->savedEDI = m_regs[EDI];
-          it->savedEBP = m_regs[EBP];
-          it->savedFS = m_segRegs[FS]; it->savedGS = m_segRegs[GS];
+          if (!it->gprsPreSaved) {
+            it->savedEAX = m_regs[EAX]; it->savedEBX = m_regs[EBX];
+            it->savedECX = m_regs[ECX]; it->savedEDX = m_regs[EDX];
+            it->savedESI = m_regs[ESI]; it->savedEDI = m_regs[EDI];
+            it->savedEBP = m_regs[EBP];
+            it->savedFS = m_segRegs[FS]; it->savedGS = m_segRegs[GS];
+          }
           return true;
         }
       }

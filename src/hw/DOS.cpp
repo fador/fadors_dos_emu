@@ -1494,13 +1494,7 @@ void DOS::handleMemoryManagement() {
 
         const uint16_t nextSeg = static_cast<uint16_t>(nextSeg32);
         const MCB next = readMCB(nextSeg);
-        // Merge if free (owner == 0) OR owned by the same process.
-        // Same-owner merging is non-standard DOS behavior but necessary
-        // because our emulator's DPMI layer may allocate small real-mode
-        // structures between the main block and the end of memory, which
-        // would otherwise prevent the program from expanding its own
-        // segment even though the total memory is sufficient.
-        if (next.owner != 0 && next.owner != mcb.owner) {
+        if (next.owner != 0) {
           break;
         }
 

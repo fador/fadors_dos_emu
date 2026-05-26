@@ -92,7 +92,9 @@ uint8_t VGAController::read8(uint16_t port) {
             // 70 Hz = 14285714 ns per frame. Retrace is ~5% (~714286 ns).
             constexpr int64_t FRAME_NS = 14285714;
             constexpr int64_t RETRACE_NS = FRAME_NS / 20;
-            int64_t pos = elapsed % FRAME_NS;
+            // Handle negative elapsed (clock adjustment) safely
+            int64_t pos = (elapsed >= 0) ? (elapsed % FRAME_NS)
+                : ((FRAME_NS - ((-elapsed) % FRAME_NS)) % FRAME_NS);
             bool inRetrace = (pos >= (FRAME_NS - RETRACE_NS));
             return inRetrace ? 0x09 : 0x00;
         }

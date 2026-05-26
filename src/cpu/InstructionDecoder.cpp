@@ -3579,6 +3579,28 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     }
     loadSegment(CS, cs);
     m_cpu.setEIP(eip);
+    // If RETF returns to a dpmiStackSwitch frame's saved CS:EIP,
+    // restore the full interrupted state (same as IRET path).
+    {
+      auto poppedFrame = m_cpu.popDpmiFrameByCSEIP(cs, eip);
+      if (poppedFrame.framePhysAddr != 0 && poppedFrame.dpmiStackSwitch) {
+        m_cpu.setEIP(poppedFrame.origEIP);
+        m_cpu.setEFLAGS(poppedFrame.origEFLAGS);
+        loadSegment(SS, poppedFrame.origSS);
+        m_cpu.setReg32(ESP, poppedFrame.origESP);
+        loadSegment(DS, poppedFrame.origDS);
+        loadSegment(ES, poppedFrame.origES);
+        m_cpu.setReg32(EAX, poppedFrame.savedEAX);
+        m_cpu.setReg32(EBX, poppedFrame.savedEBX);
+        m_cpu.setReg32(ECX, poppedFrame.savedECX);
+        m_cpu.setReg32(EDX, poppedFrame.savedEDX);
+        m_cpu.setReg32(ESI, poppedFrame.savedESI);
+        m_cpu.setReg32(EDI, poppedFrame.savedEDI);
+        m_cpu.setReg32(EBP, poppedFrame.savedEBP);
+        loadSegment(FS, poppedFrame.savedFS);
+        loadSegment(GS, poppedFrame.savedGS);
+      }
+    }
     break;
   }
   case 0xCA: { // RETF imm16 Far
@@ -3598,6 +3620,28 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
       m_cpu.setReg16(SP, static_cast<uint16_t>(m_cpu.getReg16(SP) + imm));
     loadSegment(CS, cs);
     m_cpu.setEIP(eip);
+    // If RETF returns to a dpmiStackSwitch frame's saved CS:EIP,
+    // restore the full interrupted state (same as IRET path).
+    {
+      auto poppedFrame = m_cpu.popDpmiFrameByCSEIP(cs, eip);
+      if (poppedFrame.framePhysAddr != 0 && poppedFrame.dpmiStackSwitch) {
+        m_cpu.setEIP(poppedFrame.origEIP);
+        m_cpu.setEFLAGS(poppedFrame.origEFLAGS);
+        loadSegment(SS, poppedFrame.origSS);
+        m_cpu.setReg32(ESP, poppedFrame.origESP);
+        loadSegment(DS, poppedFrame.origDS);
+        loadSegment(ES, poppedFrame.origES);
+        m_cpu.setReg32(EAX, poppedFrame.savedEAX);
+        m_cpu.setReg32(EBX, poppedFrame.savedEBX);
+        m_cpu.setReg32(ECX, poppedFrame.savedECX);
+        m_cpu.setReg32(EDX, poppedFrame.savedEDX);
+        m_cpu.setReg32(ESI, poppedFrame.savedESI);
+        m_cpu.setReg32(EDI, poppedFrame.savedEDI);
+        m_cpu.setReg32(EBP, poppedFrame.savedEBP);
+        loadSegment(FS, poppedFrame.savedFS);
+        loadSegment(GS, poppedFrame.savedGS);
+      }
+    }
     break;
   }
   case 0xE8: { // CALL rel
@@ -5395,13 +5439,12 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
         if (!idtDesc.is32Bit) {
           // Only force HLE for vectors where BIOS has an HLE handler.
           // INT 8 (timer): has HLE + ticcount increment.
-          // INT 9 (keyboard): has HLE drain + EOI, use when inside thunk.
+          // INT 9 (keyboard): HLE only when already inside the thunk
+          //   (16-bit code), which avoids corrupting thunk state.
+          //   Otherwise dispatch through the thunk so the app's ISR runs.
           if (vector == 0x08) {
             useHLE = true;
           } else if (vector == 0x09 && !m_cpu.is32BitCode()) {
-            // Inside the thunk (16-bit code): HLE the keyboard IRQ to
-            // avoid corrupting thunk state.  Outside the thunk we'll use
-            // directAppPMDispatch instead.
             useHLE = true;
           }
         }
@@ -5556,6 +5599,18 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
       frame.origEFLAGS = m_cpu.getEFLAGS();
       frame.origDS = m_cpu.getSegReg(DS);
       frame.origES = m_cpu.getSegReg(ES);
+      // Save app's GPRs here (before thunk runs) so the PM handler
+      // return interception restores the app's values, not the thunk's.
+      frame.savedEAX = m_cpu.getReg32(EAX);
+      frame.savedEBX = m_cpu.getReg32(EBX);
+      frame.savedECX = m_cpu.getReg32(ECX);
+      frame.savedEDX = m_cpu.getReg32(EDX);
+      frame.savedESI = m_cpu.getReg32(ESI);
+      frame.savedEDI = m_cpu.getReg32(EDI);
+      frame.savedEBP = m_cpu.getReg32(EBP);
+      frame.savedFS = m_cpu.getSegReg(FS);
+      frame.savedGS = m_cpu.getSegReg(GS);
+      frame.gprsPreSaved = true;
 
       if (oldSs == 0xAF) {
         // Already on the host stack — don't switch.  Keep the current ESP
@@ -5589,12 +5644,16 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
         if (afValid && hostSP != 0) {
           loadSegment(cpu::SS, 0xAF);
           m_cpu.setReg32(ESP, hostSP);
-          // Force privilege-change frame: on real hardware, the HW interrupt
-          // always transitions ring 3 → ring 0, so the CPU always pushes
-          // SS:ESP.  The thunk expects a full 5-word frame (SS, ESP, FLAGS,
-          // CS, EIP).  Without this, the thunk reads garbage for SS:ESP and
-          // restores the wrong stack when it IRETs to the PM handler.
-          privChange = true;
+          // Do NOT set privChange=true here.  On real hardware the DPMI
+          // host at ring-0 receives the HW interrupt with SS:ESP pushed
+          // by the CPU (privilege change), but then REFLECTS it to the
+          // ring-3 thunk as a same-privilege frame WITHOUT SS:ESP.  The
+          // host saves SS:ESP internally and restores them on IRET-to-
+          // ring-3.  Pushing SS:ESP onto the thunk's stack causes a
+          // 4-byte-per-IRQ drift that eventually corrupts the return
+          // address and promotes a 16-bit IRET to 32-bit via the
+          // conservative override scoring.
+          privChange = false;
         } else {
           loadSegment(cpu::SS, oldSs);
         }

@@ -21,7 +21,21 @@ uint8_t PIT8254::read8(uint16_t port) {
     if (channelIdx > 2) return 0xFF;
 
     auto& ch = m_channels[channelIdx];
-    uint16_t val = ch.latched ? ch.latchedValue : ch.count;
+    // In mode 3 (square wave), the hardware counter decrements by 2 per
+    // tick, so the visible value changes at half the rate.  For timing
+    // purposes (games reading the counter to measure elapsed ticks), we
+    // scale the stored mode-2-equivalent count to reflect this.
+    uint16_t rawVal = ch.latched ? ch.latchedValue : ch.count;
+    uint16_t val = rawVal;
+    if (ch.mode == 3 && ch.reload > 0) {
+        // Convert mode-2-equivalent count to mode-3 visible count.
+        // In mode 3, counter decrements by 2, so elapsed PIT ticks
+        // from reload are half of what the mode-2 count suggests.
+        // visible = reload - (reload - count + 1) / 2, clamped even.
+        uint32_t ticksFromReload = static_cast<uint32_t>(ch.reload - rawVal);
+        uint32_t mode3Ticks = (ticksFromReload + 1) / 2;
+        val = static_cast<uint16_t>(ch.reload - mode3Ticks);
+    }
     
     uint8_t ret;
     if (ch.accessMode == 1) { // LSB only
