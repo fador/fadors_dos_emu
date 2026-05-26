@@ -571,13 +571,15 @@ void DPMI::handleDescriptorMgmt() {
       
       m_ldt[idx].low = newLow;
       m_ldt[idx].high = newHigh;
-      uint32_t newBase = extractBase(m_ldt[idx]);
+      /*
+      uint32_t newBase = extractBase(m_ldt[idx]);      
       LOG_INFO("DPMI 000Ch: Set Descriptor sel=0x", std::hex, sel,
                " base 0x", oldBase, "->0x", newBase,
                " CS=0x", m_cpu.getSegReg(cpu::CS),
                " SS=0x", m_cpu.getSegReg(cpu::SS),
                " DS=0x", m_cpu.getSegReg(cpu::DS),
                " ES=0x", m_cpu.getSegReg(cpu::ES));
+               */
       flushLDTEntry(idx);
       reloadAffectedSegments(sel);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
@@ -1007,6 +1009,7 @@ void DPMI::handleTranslation() {
       m_cpu.setSegBase(cpu::CS, static_cast<uint32_t>(rmCS) << 4);
       m_cpu.setEIP(rmIP);
       {
+        /*
         uint32_t rmEAX = m_memory.read32(structAddr + 0x1C);
         uint32_t rmEBX = m_memory.read32(structAddr + 0x10);
         uint32_t rmEDX = m_memory.read32(structAddr + 0x14);
@@ -1016,6 +1019,7 @@ void DPMI::handleTranslation() {
                  " BX=", rmEBX & 0xFFFF,
                  " DX=", rmEDX & 0xFFFF,
                  " structAddr=", structAddr);
+                 */
       }
       // Try HLE at the target address
       // Check if the target is one of our HLE stubs: F000:(0x100 + v*16).

@@ -5442,6 +5442,7 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
           // INT 9 (keyboard): HLE only when already inside the thunk
           //   (16-bit code), which avoids corrupting thunk state.
           //   Otherwise dispatch through the thunk so the app's ISR runs.
+          //   (BIOS buffer overflow bug was fixed, thunk dispatch works now.)
           if (vector == 0x08) {
             useHLE = true;
           } else if (vector == 0x09 && !m_cpu.is32BitCode()) {
@@ -5462,11 +5463,9 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
         triggerInterrupt(0x1C);
       }
 
-      // After HLE, if we're in 32-bit PM and the app has a registered
-      // handler for this vector, also deliver to the app via direct dispatch.
-      // For INT 9 (keyboard), HLE safely drained port 60h and sent EOI;
-      // the keyboard controller reports Output Buffer Full while keys
-      // are pending, so the app's ISR will still see the scancode.
+      // After HLE, emulate the Watcom timer ISR for INT 8.
+      // For INT 9, HLE handled keyboard when inside the thunk (16-bit);
+      // in 32-bit app code, we dispatch directly to the IDT handler below.
       if (vector != 0x09) {
         // INT 8 timer HLE emulation (Watcom ticcount)
         if ((m_cpu.getCR(0) & 1) && m_cpu.is32BitCode() && vector == 0x08) {
@@ -5487,10 +5486,7 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
         }
         return;
       }
-      // INT 9: HLE ran, now fall through to directAppPMDispatch below.
-      // Clear useHLE so we don't hit the "useHLE but handler returned
-      // false" bailout below.
-      useHLE = false;
+      return;
     }
     if (useHLE) {
       // The HLE path was selected (INT vector has an HLE-only handler like
@@ -5524,6 +5520,31 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
     uint8_t type = (high >> 8) & 0x0F;
     use32 = (type & 0x08) != 0;
     bool isInterruptGate = (type & 0x01) == 0;
+
+    // For INT 9 (keyboard) in 32-bit app code, dispatch directly to
+    // the IDT handler WITHOUT the fragile stack switch.  Push the
+    // 32-bit IRET frame on the app's stack and jump to the handler.
+    // The handler at CS=0x97 is 16-bit DOS/4GW code that reads port
+    // 60h, calls the app's PM handler, sends EOI, and does IRETD.
+    if (vector == 0x09 && m_cpu.is32BitCode() && use32 &&
+        cs != 0x08 && cs != 0x30) {
+      m_cpu.pushHLEFrame(true, 9);
+      m_cpu.push32(m_cpu.getEFLAGS());
+      m_cpu.push32(oldCs);
+      m_cpu.push32(m_cpu.getEIP());
+      auto &frame = m_cpu.lastHLEFrameMut();
+      uint32_t sb = m_cpu.getSegBase(SS);
+      bool s32 = m_cpu.is32BitStack();
+      uint32_t sp = s32 ? m_cpu.getReg32(ESP) : m_cpu.getReg16(SP);
+      frame.framePhysAddr = sb + sp;
+      frame.frameSP = sp;
+      frame.stackIs32 = s32;
+      frame.returnFrameBytes = 12;
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~fador::cpu::FLAG_INTERRUPT);
+      loadSegment(CS, cs);
+      m_cpu.setEIP(eip32);
+      return;
+    }
 
     auto decodeSelector = [&](uint16_t selector) -> Descriptor {
       if ((selector & 0xFFF8) == 0) {
