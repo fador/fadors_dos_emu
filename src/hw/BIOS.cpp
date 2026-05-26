@@ -163,12 +163,6 @@ bool BIOS::handleInterrupt(uint8_t vector) {
 }
 
 void BIOS::handleKeyboardIRQ() {
-  // Read port 0x60 to acknowledge the IRQ (clears Output Buffer Full).
-  // The scancode was already buffered in the keyboard controller's
-  // internal queue before the IRQ fired; reading it here drains the
-  // hardware latch but the controller remembers the last value so
-  // games that read port 0x60 directly (like DOOM) still see it.
-  // Also enqueue into BIOS keyboard buffer at 0x41E for INT 16h.
   uint8_t status = m_kbd.read8(0x64);
   uint8_t scancode = 0;
   if (status & 0x01) {
@@ -176,8 +170,18 @@ void BIOS::handleKeyboardIRQ() {
     // Enqueue into BIOS keyboard buffer (circular, 16 entries at 0x41E)
     uint16_t head = m_memory.read16(0x41A);
     uint16_t tail = m_memory.read16(0x41C);
+    // Sanity-check pointers; if corrupted, reset the buffer.
+    if (head < 0x1E || head >= 0x3E || tail < 0x1E || tail >= 0x3E ||
+        (head & 1) || (tail & 1)) {
+      LOG_ERROR("BIOS kbd buffer corrupted: head=0x", std::hex, head,
+                " tail=0x", tail, " — resetting");
+      m_memory.write16(0x41A, 0x001E);
+      m_memory.write16(0x41C, 0x001E);
+      head = 0x1E;
+      tail = 0x1E;
+    }
     uint16_t nextTail = tail + 2;
-    if (nextTail >= 0x43E) nextTail = 0x41E;
+    if (nextTail >= 0x3E) nextTail = 0x1E;
     if (nextTail != head) {
       m_memory.write16(0x400 + tail, scancode);
       m_memory.write16(0x41C, nextTail);

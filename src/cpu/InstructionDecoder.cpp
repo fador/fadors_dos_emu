@@ -5462,35 +5462,35 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
         triggerInterrupt(0x1C);
       }
 
-      // After HLE, if the vector is hooked by a DOS extender thunk and we're
-      // in 32-bit PM code, also dispatch to the app's registered PM callback
-      // (if any).  The Watcom C/C++ RTL maintains an internal ISR table;
-      // slot 0 at 0x26D3E0 holds the handler for _dos_setvect-installed ISRs.
-      // We emulate the handler's effect directly (HLE) rather than jumping
-      // into the app code, because the DOS/4GW thunk infra-structure is not
-      // functional in our HLE environment.
-      //
-      // The Watcom-compiled I_TimerISR typically compiles to:
-      //   PUSH EDX; MOV EDX,[addr]; INC EDX; ... MOV [addr],EDX; POP EDX; RET
-      // We detect the MOV EDX,[imm32] pattern (opcode 8B 15) to extract the
-      // counter address, then increment the dword at that address.
-      if ((m_cpu.getCR(0) & 1) && m_cpu.is32BitCode() && vector == 0x08) {
-        uint32_t appHandler = m_memory.read32(0x26D3E0);
-        if (appHandler != 0) {
-          // Look for: 8B 15 XX XX XX XX = MOV EDX, [imm32]
-          // Handler might start with PUSH EDX (0x52), so check offset 0 or 1.
-          uint32_t scan = appHandler;
-          if (m_memory.read8(scan) == 0x52) scan++; // skip PUSH EDX
-          if (m_memory.read8(scan) == 0x8B && m_memory.read8(scan + 1) == 0x15) {
-            uint32_t counterAddr = m_memory.read32(scan + 2);
-            if (counterAddr < fador::memory::MemoryBus::MEMORY_SIZE - 3) {
-              uint32_t val = m_memory.read32(counterAddr);
-              m_memory.write32(counterAddr, val + 1);
+      // After HLE, if we're in 32-bit PM and the app has a registered
+      // handler for this vector, also deliver to the app via direct dispatch.
+      // For INT 9 (keyboard), HLE safely drained port 60h and sent EOI;
+      // the keyboard controller reports Output Buffer Full while keys
+      // are pending, so the app's ISR will still see the scancode.
+      if (vector != 0x09) {
+        // INT 8 timer HLE emulation (Watcom ticcount)
+        if ((m_cpu.getCR(0) & 1) && m_cpu.is32BitCode() && vector == 0x08) {
+          uint32_t appHandler = m_memory.read32(0x26D3E0);
+          if (appHandler != 0) {
+            // Look for: 8B 15 XX XX XX XX = MOV EDX, [imm32]
+            // Handler might start with PUSH EDX (0x52), so check offset 0 or 1.
+            uint32_t scan = appHandler;
+            if (m_memory.read8(scan) == 0x52) scan++; // skip PUSH EDX
+            if (m_memory.read8(scan) == 0x8B && m_memory.read8(scan + 1) == 0x15) {
+              uint32_t counterAddr = m_memory.read32(scan + 2);
+              if (counterAddr < fador::memory::MemoryBus::MEMORY_SIZE - 3) {
+                uint32_t val = m_memory.read32(counterAddr);
+                m_memory.write32(counterAddr, val + 1);
+              }
             }
           }
         }
+        return;
       }
-      return;
+      // INT 9: HLE ran, now fall through to directAppPMDispatch below.
+      // Clear useHLE so we don't hit the "useHLE but handler returned
+      // false" bailout below.
+      useHLE = false;
     }
     if (useHLE) {
       // The HLE path was selected (INT vector has an HLE-only handler like
@@ -5720,7 +5720,6 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
   }
   m_cpu.setEFLAGS(entryFlags);
   loadSegment(CS, cs);
-
   m_cpu.setEIP(eip32);
 }
 

@@ -17,9 +17,7 @@ uint8_t KeyboardController::read8(uint16_t port) {
       if (m_hwScanBuffer.empty())
         m_status &= ~0x01;
     }
-    // Return last known scancode even when buffer is drained, so games
-    // that read port 0x60 after INT 9 already consumed the byte (like
-    // DOOM's keyboard handler) still get the value.
+    // Return last known scancode even when buffer is drained
     return m_lastScancode;
   } else if (port == 0x64) { // Status Port
     // Report Output Buffer Full if key data is available, so programs
