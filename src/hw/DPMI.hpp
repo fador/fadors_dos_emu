@@ -110,6 +110,7 @@ private:
   // State
   bool m_active = false;
   bool m_is32BitClient = false; // Set from AX bit 0 at DPMI entry
+  bool m_in030xHandler = false; // Re-entrancy guard for 030x calls
   std::vector<RawDescriptor> m_ldt;
   std::vector<bool> m_ldtUsed;
   std::vector<bool> m_ldtBatchAlloc; // true if allocated via batch (count > 1)

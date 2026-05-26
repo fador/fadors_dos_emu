@@ -818,6 +818,16 @@ void DPMI::handleTranslation() {
   case 0x0301: // Call Real Mode Procedure With Far Return Frame
   case 0x0302: // Call Real Mode Procedure With IRET Frame
   {
+    // Re-entrancy guard: if we're already inside a 030x handler,
+    // the caller code is likely executing garbage.  Return error.
+    if (m_in030xHandler) {
+      LOG_ERROR("DPMI 030x re-entrancy detected — bailing out");
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      m_cpu.setReg16(cpu::AX, 0x8012);
+      return;
+    }
+    m_in030xHandler = true;
+    
     bool handled = false;
     uint8_t intNo = m_cpu.getReg8(cpu::BL);
     uint32_t structAddr = getLinearAddr(cpu::ES, cpu::EDI);
@@ -1158,6 +1168,7 @@ void DPMI::handleTranslation() {
       }
     }
     #endif
+    m_in030xHandler = false;
     break;
   }
   case 0x0303: { // Allocate Real Mode Callback Address
