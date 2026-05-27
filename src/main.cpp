@@ -157,9 +157,77 @@ std::optional<uint32_t> parseLinearHexAddress(const std::string &value) {
   }
 }
 
+void printHelp(const char *programName) {
+  // clang-format off
+  std::printf(
+    "Usage: %s [OPTIONS] <program.com|exe> [program-args...]\n"
+    "\n"
+    "Fador's DOS Emulator \xe2\x80\x94 a multiplatform MS-DOS emulator written in modern C++20.\n"
+    "\n"
+    "Options:\n"
+    "  --help, -h, -?            Print this help message and exit.\n"
+    "  --himem                   Enable HIMEM/XMS extended memory support.\n"
+    "  --sdl                     Force the SDL graphical frontend (requires SDL2 build).\n"
+    "  --no-sdl                  Force headless/text-mode execution even in SDL builds.\n"
+    "  --throttle-ips=N          Pace guest execution to roughly N retired instructions/sec.\n"
+    "  --throttle-machine=name   Apply a named speed preset: %s.\n"
+    "  --stop-after=N            Stop execution after N instruction cycles and dump state.\n"
+    "  --stop-after-debugger     When --stop-after triggers, enter the interactive debugger.\n"
+    "  --dump-on-exit            Dump CPU state when the program terminates.\n"
+    "  --instruction-trace=N     Print a trace line per executed instruction for the next N.\n"
+    "  --instruction-trace-from=ADDR\n"
+    "                            Delay --instruction-trace until CS:EIP reaches this hex\n"
+    "                            linear address.\n"
+    "  --instruction-trace-step  Pause between each instruction trace line (ENTER to step,\n"
+    "                            sN to skip N, q to quit stepping, d for debugger).\n"
+    "  --trace=<cats>            Enable trace-level logging for categories: cpu, video, dos\n"
+    "                            (comma-separated).\n"
+    "  --debug=<cats>            Enable debug logging for categories: cpu, video, dos.\n"
+    "  --exec=\"asm\"              Assemble and execute instructions without loading a program.\n"
+    "                            Semicolons separate multiple instructions.\n"
+    "  --bench=name              Run in-process benchmark (decoder-loop, rep-movsb, rep-movsd).\n"
+    "  --bench-steps=N           Number of measured instruction steps for --bench.\n"
+    "  --bench-warmup=N          Number of warmup steps before --bench timing.\n"
+    "\n"
+    "Emulator flags must appear before the program path. Everything after the program\n"
+    "path is forwarded verbatim to the DOS program.\n"
+    "Use '--' to explicitly separate emulator flags from the program path and arguments.\n"
+    "\n"
+    "Interactive debugger commands (started when no program is given):\n"
+    "  s           Single-step one instruction and print a trace line.\n"
+    "  t [n] [addr]  Trace and execute n instructions, optionally waiting for an address.\n"
+    "  c           Continue execution.\n"
+    "  r           Print all registers.\n"
+    "  d [addr]    Dump memory at address (hex).\n"
+    "  u [addr] [n]  Disassemble n instructions at address.\n"
+    "  a [addr]    Enter assembly mode (blank line to exit).\n"
+    "  w addr bytes  Write hex bytes directly to memory.\n"
+    "  q           Quit emulator.\n"
+    "\n"
+    "Examples:\n"
+    "  %s game.com\n"
+    "  %s --himem --throttle-machine=486dx2-66 doom.exe\n"
+    "  %s --sdl --debug=cpu,dos program.exe\n"
+    "  %s --exec=\"MOV AX, 4C00h; INT 21h\"\n"
+    "  %s --no-sdl --bench=decoder-loop --bench-steps=5000000\n",
+    programName,
+    throttleMachinePresetList(),
+    programName, programName, programName, programName, programName);
+  // clang-format on
+}
+
 } // namespace
 
 int main(int argc, char *argv[]) {
+  // Check for --help before any system initialization
+  for (int i = 1; i < argc; ++i) {
+    std::string arg = argv[i];
+    if (arg == "--help" || arg == "-h" || arg == "-?") {
+      printHelp(argv[0]);
+      return 0;
+    }
+  }
+
   try {
 #ifdef _WIN32
     // Suppress MSVC debug runtime dialogs ("Abort/Retry/Ignore",
@@ -229,7 +297,7 @@ int main(int argc, char *argv[]) {
     fador::hw::DPMI dpmi(cpu, memory);
     dpmi.setDOS(&dos);
     dpmi.setBIOS(&bios);
-    if (auto *himem = dos.getHIMEM())
+    if (auto * himem = dos.getHIMEM())
       dpmi.setHIMEM(himem);
     dos.setDPMI(&dpmi);
 
@@ -700,15 +768,9 @@ int main(int argc, char *argv[]) {
         return 0;
       }
 
-      LOG_WARN(
-          "No program specified. Use: fadors_emu [--himem] [--sdl|--no-sdl] "
-          "[--debug=cpu,video,dos] [--throttle-ips=N] "
-          "[--throttle-machine=name] [--stop-after=N] "
-          "[--stop-after-debugger] [--dump-on-exit] "
-          "[--instruction-trace=N] [--instruction-trace-from=ADDR] "
-          "[--bench=decoder-loop|rep-movsb|rep-movsd] [--bench-steps=N] "
-          "[--bench-warmup=N] [--exec=\"asm\"] <program.com|exe> "
-          "[program-args...]");
+      LOG_WARN("No program specified.");
+      printHelp(argv[0]);
+      LOG_WARN("\nStarting interactive debugger with no loaded program.\n");
 
       // --exec mode: assemble, write to CS:IP, run, dump state
       if (!execAsm.empty()) {
@@ -792,6 +854,12 @@ int main(int argc, char *argv[]) {
 
       while (running) {
         emitInstructionTrace();
+
+        // Save prev state to catch EIP corruption
+        uint16_t prevCS = cpu.getSegReg(fador::cpu::CS);
+        uint32_t prevEIP = cpu.getEIP();
+        uint32_t prevLinear = cpu.getSegBase(fador::cpu::CS) + prevEIP;
+
         decoder.step();
         cpu.addCycles(1);
         instrCount++;
@@ -802,6 +870,65 @@ int main(int argc, char *argv[]) {
           uint32_t eip_s = cpu.getEIP();
           LOG_INFO("SAMPLE @", instrCount, ": CS=", std::hex, cs_s, " EIP=", eip_s,
                    " flags=", cpu.getEFLAGS());
+        }
+
+        // TEMP DIAG: catch EIP jumping to low-memory data area
+        // Trigger when: PM + (app CS with data EIP) or (corrupted CS >= 0x1000)
+        {
+          uint16_t cs_s = cpu.getSegReg(fador::cpu::CS);
+          uint32_t eip_s = cpu.getEIP();
+          uint32_t linear = cpu.getSegBase(fador::cpu::CS) + eip_s;
+          bool datatrip = (cpu.getCR(0) & 1) && cs_s >= 0x100 &&
+                          eip_s >= 0x3000 && eip_s < 0x5000;
+          bool cstrip = (cpu.getCR(0) & 1) && cs_s >= 0x1000;
+          if (datatrip || cstrip) {
+            LOG_ERROR("EIP CORRUPTION: CS=", std::hex, cs_s,
+                      " EIP=", eip_s, " linear=", linear,
+                      " instrCount=", std::dec, instrCount);
+            LOG_ERROR("  prevCS=", std::hex, prevCS,
+                      " prevEIP=", prevEIP, " prevLinear=", prevLinear);
+            // Disassemble the instruction at prevCS:prevEIP that caused the jump
+            LOG_ERROR("  Jump from prevCS:prevEIP (last instr before corruption)");
+            uint32_t prevPhys = prevLinear;
+            LOG_ERROR("  Opcode bytes at prev: ",
+                      std::hex, (int)memory.read8(prevPhys), " ",
+                      (int)memory.read8(prevPhys+1), " ",
+                      (int)memory.read8(prevPhys+2), " ",
+                      (int)memory.read8(prevPhys+3), " ",
+                      (int)memory.read8(prevPhys+4), " ",
+                      (int)memory.read8(prevPhys+5));
+            LOG_ERROR("EIP IN DATA AREA: CS=", std::hex, cs_s,
+                      " EIP=", eip_s, " linear=", linear,
+                      " instrCount=", std::dec, instrCount);
+            LOG_ERROR("  EAX=", std::hex, cpu.getReg32(fador::cpu::EAX),
+                      " EBX=", cpu.getReg32(fador::cpu::EBX),
+                      " ECX=", cpu.getReg32(fador::cpu::ECX),
+                      " EDX=", cpu.getReg32(fador::cpu::EDX));
+            LOG_ERROR("  ESP=", cpu.getReg32(fador::cpu::ESP),
+                      " EBP=", cpu.getReg32(fador::cpu::EBP),
+                      " ESI=", cpu.getReg32(fador::cpu::ESI),
+                      " EDI=", cpu.getReg32(fador::cpu::EDI));
+            LOG_ERROR("  SS=", cpu.getSegReg(fador::cpu::SS),
+                      " DS=", cpu.getSegReg(fador::cpu::DS),
+                      " ES=", cpu.getSegReg(fador::cpu::ES),
+                      " FS=", cpu.getSegReg(fador::cpu::FS),
+                      " GS=", cpu.getSegReg(fador::cpu::GS));
+            LOG_ERROR("  EFLAGS=", cpu.getEFLAGS(),
+                      " CR0=", cpu.getCR(0));
+            // Dump top of stack
+            uint32_t ssB = cpu.getSegBase(fador::cpu::SS);
+            uint32_t sp = cpu.is32BitStack()
+                              ? cpu.getReg32(fador::cpu::ESP)
+                              : static_cast<uint32_t>(cpu.getReg16(fador::cpu::SP));
+            LOG_ERROR("  Stack top (SS:SP=", std::hex, cpu.getSegReg(fador::cpu::SS),
+                      ":", sp, "):");
+            for (int si = 0; si < 32; si += 4) {
+              uint32_t v = memory.read32(ssB + sp + si);
+              LOG_ERROR("    +", std::dec, si, ": 0x", std::hex, v);
+            }
+            running = false;
+            break;
+          }
         }
 
         if (stopAfterCycles > 0 && instrCount >= stopAfterCycles) {

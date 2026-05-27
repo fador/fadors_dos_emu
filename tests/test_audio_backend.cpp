@@ -241,3 +241,163 @@ TEST_CASE("SoundBlaster: IRQ acknowledged by reading 0x22E", "[SB]") {
     ackStatus = sb.read8(0x22E);
     REQUIRE(ackStatus == 0x00);
 }
+
+TEST_CASE("SoundBlaster: High-Speed DMA and Force 16-bit IRQ", "[SB][DMA]") {
+    MemoryBus memory;
+    DMA8237 dma;
+    SoundBlaster sb(memory, dma, 44100.0f);
+    sb.write8(0x226, 0x01);
+    sb.write8(0x226, 0x00);
+    sb.read8(0x22A); // Consume 0xAA
+
+    int irqCount = 0;
+    sb.setIRQCallback([&irqCount]() { ++irqCount; });
+
+    SECTION("0x90 Auto-Init High-Speed 8-bit DMA") {
+        const uint32_t dmaPhysBase = 0x10000;
+        const uint16_t sampleCount = 4;
+        for (uint16_t i = 0; i < sampleCount; ++i) {
+            memory.write8(dmaPhysBase + i, static_cast<uint8_t>(128 + i * 10));
+        }
+
+        // Program DMA for channel 1 auto-init:
+        dma.write8(0x0A, 0x05);     // Mask channel 1
+        dma.write8(0x0B, 0x59);     // Mode: auto-init, read, channel 1
+        dma.write8(0x0C, 0x00);     // Clear flip-flop
+        dma.write8(0x02, 0x00);     // Address LSB
+        dma.write8(0x02, 0x00);     // Address MSB
+        dma.write8(0x83, 0x01);     // Page = 0x01
+        dma.write8(0x0C, 0x00);     // Clear flip-flop
+        dma.write8(0x03, static_cast<uint8_t>(sampleCount - 1)); // Count LSB
+        dma.write8(0x03, 0x00);     // Count MSB
+        dma.write8(0x0A, 0x01);     // Unmask channel 1
+
+        // Program DSP block size via command 0x48:
+        sb.write8(0x22C, 0x48);
+        sb.write8(0x22C, static_cast<uint8_t>((sampleCount - 1) & 0xFF)); // block size LSB
+        sb.write8(0x22C, static_cast<uint8_t>(((sampleCount - 1) >> 8) & 0xFF)); // block size MSB
+
+        // Start Auto-Init High-Speed DMA (0x90, no args)
+        sb.write8(0x22C, 0x90);
+
+        // Generate samples to consume the block
+        float buffer[16] = {};
+        sb.generateSamples(buffer, 8); // DSP rate 22050 / 44100 = 0.5, so 8 samples = 4 frames
+
+        REQUIRE(irqCount >= 1);
+        // DMA address should have wrapped back to base (auto-init)
+        REQUIRE(dma.getChannelAddress(1) == dmaPhysBase);
+    }
+
+    SECTION("0x91 Single-Cycle High-Speed 8-bit DMA") {
+        const uint32_t dmaPhysBase = 0x10000;
+        const uint16_t sampleCount = 4;
+        for (uint16_t i = 0; i < sampleCount; ++i) {
+            memory.write8(dmaPhysBase + i, static_cast<uint8_t>(128 + i * 10));
+        }
+
+        // Program DMA for channel 1 single-cycle:
+        dma.write8(0x0A, 0x05);
+        dma.write8(0x0B, 0x49); // Mode: single, read, channel 1
+        dma.write8(0x0C, 0x00);
+        dma.write8(0x02, 0x00);
+        dma.write8(0x02, 0x00);
+        dma.write8(0x83, 0x01);
+        dma.write8(0x0C, 0x00);
+        dma.write8(0x03, static_cast<uint8_t>(sampleCount - 1));
+        dma.write8(0x03, 0x00);
+        dma.write8(0x0A, 0x01);
+
+        // Program DSP block size via command 0x48:
+        sb.write8(0x22C, 0x48);
+        sb.write8(0x22C, static_cast<uint8_t>((sampleCount - 1) & 0xFF));
+        sb.write8(0x22C, static_cast<uint8_t>(((sampleCount - 1) >> 8) & 0xFF));
+
+        // Start Single-Cycle High-Speed DMA (0x91, no args)
+        sb.write8(0x22C, 0x91);
+
+        float buffer[16] = {};
+        sb.generateSamples(buffer, 8);
+
+        REQUIRE(irqCount == 1);
+        // Address should have advanced
+        REQUIRE(dma.getChannelAddress(1) == dmaPhysBase + sampleCount);
+    }
+
+    SECTION("0x98 Auto-Init High-Speed 16-bit DMA") {
+        const uint32_t dmaPhysBase = 0x20000;
+        const uint16_t sampleCount = 4; // 4 samples, 16-bit, mono (8 bytes total)
+        for (uint16_t i = 0; i < sampleCount; ++i) {
+            memory.write16(dmaPhysBase + i * 2, static_cast<int16_t>(i * 1000));
+        }
+
+        // Program DMA for channel 5 auto-init:
+        dma.write8(0xD4, 0x05);     // Mask channel 5
+        dma.write8(0xD6, 0x59);     // Mode: auto-init, read, channel 5
+        dma.write8(0xD8, 0x00);     // Clear master flip-flop
+        dma.write8(0xC4, 0x00);     // Address LSB (0x0000 words)
+        dma.write8(0xC4, 0x00);     // Address MSB
+        dma.write8(0x8B, 0x02);     // Page = 0x02 (phys 0x20000 since 2 << 16 | 0 << 1 = 0x20000)
+        dma.write8(0xD8, 0x00);     // Clear flip-flop
+        // Word count = 4 - 1 = 3 words
+        dma.write8(0xC6, 0x03);     // Count LSB
+        dma.write8(0xC6, 0x00);     // Count MSB
+        dma.write8(0xD4, 0x01);     // Unmask channel 5
+
+        // Program DSP block size via command 0x48:
+        sb.write8(0x22C, 0x48);
+        sb.write8(0x22C, static_cast<uint8_t>((sampleCount - 1) & 0xFF));
+        sb.write8(0x22C, static_cast<uint8_t>(((sampleCount - 1) >> 8) & 0xFF));
+
+        // Start 16-bit Auto-Init High-Speed DMA (0x98, no args)
+        sb.write8(0x22C, 0x98);
+
+        float buffer[16] = {};
+        sb.generateSamples(buffer, 8);
+
+        REQUIRE(irqCount >= 1);
+        REQUIRE(dma.getChannelAddress(5) == dmaPhysBase);
+    }
+
+    SECTION("0x99 Single-Cycle High-Speed 16-bit DMA") {
+        const uint32_t dmaPhysBase = 0x20000;
+        const uint16_t sampleCount = 4; // 4 samples, 16-bit, mono (8 bytes total)
+        for (uint16_t i = 0; i < sampleCount; ++i) {
+            memory.write16(dmaPhysBase + i * 2, static_cast<int16_t>(i * 1000));
+        }
+
+        // Program DMA for channel 5 single-cycle:
+        dma.write8(0xD4, 0x05);     // Mask channel 5
+        dma.write8(0xD6, 0x49);     // Mode: single, read, channel 5
+        dma.write8(0xD8, 0x00);     // Clear master flip-flop
+        dma.write8(0xC4, 0x00);     // Address LSB (0x0000 words)
+        dma.write8(0xC4, 0x00);     // Address MSB
+        dma.write8(0x8B, 0x02);     // Page = 0x02
+        dma.write8(0xD8, 0x00);     // Clear flip-flop
+        // Word count = 4 - 1 = 3 words
+        dma.write8(0xC6, 0x03);     // Count LSB
+        dma.write8(0xC6, 0x00);     // Count MSB
+        dma.write8(0xD4, 0x01);     // Unmask channel 5
+
+        // Program DSP block size via command 0x48:
+        sb.write8(0x22C, 0x48);
+        sb.write8(0x22C, static_cast<uint8_t>((sampleCount - 1) & 0xFF));
+        sb.write8(0x22C, static_cast<uint8_t>(((sampleCount - 1) >> 8) & 0xFF));
+
+        // Start 16-bit Single-Cycle High-Speed DMA (0x99, no args)
+        sb.write8(0x22C, 0x99);
+
+        float buffer[16] = {};
+        sb.generateSamples(buffer, 8);
+
+        REQUIRE(irqCount == 1);
+        // Address should have advanced by 4 words = 8 bytes
+        REQUIRE(dma.getChannelAddress(5) == dmaPhysBase + sampleCount * 2);
+    }
+
+    SECTION("0xF3 Force 16-bit IRQ") {
+        REQUIRE(irqCount == 0);
+        sb.write8(0x22C, 0xF3);
+        REQUIRE(irqCount == 1);
+    }
+}

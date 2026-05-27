@@ -52,6 +52,8 @@ void SoundBlaster::write8(uint16_t port, uint8_t value) {
       LOG_INFO("[SB] Reset Completed - Sent 0xAA");
       m_expectedArgs = 0;
       m_dmaActive = false;
+      m_highSpeed = false;
+      m_16bit = false;
     }
   } else if (port == m_basePort + 0xC) { // DSP Write Command/Data
     if (m_expectedArgs > 0) {
@@ -119,6 +121,13 @@ void SoundBlaster::write8(uint16_t port, uint8_t value) {
       case 0xCF:
         m_expectedArgs = 3;
         break; // 8-bit DMA (SB16)
+      case 0x90:
+      case 0x91:
+      case 0x98:
+      case 0x99:
+        m_expectedArgs = 0;
+        processCommand(m_currentCommand);
+        break; // High-speed DMA commands (0 args)
       case 0xE1:
         m_expectedArgs = 0;
         processCommand(m_currentCommand);
@@ -126,7 +135,11 @@ void SoundBlaster::write8(uint16_t port, uint8_t value) {
       case 0xF2:
         m_expectedArgs = 0;
         processCommand(m_currentCommand);
-        break; // Force IRQ
+        break; // Force 8-bit IRQ
+      case 0xF3:
+        m_expectedArgs = 0;
+        processCommand(m_currentCommand);
+        break; // Force 16-bit IRQ
       default:
         // No arguments needed by default
         processCommand(m_currentCommand);
@@ -156,6 +169,7 @@ void SoundBlaster::processCommand(uint8_t cmd) {
     m_autoInitDma = false;
     m_dmaActive = true;
     m_16bit = false;
+    m_highSpeed = false;
     LOG_INFO("[SB] DMA Start (Single-cycle) Channel=1 Length=", m_dmaLength);
     break;
   }
@@ -163,6 +177,7 @@ void SoundBlaster::processCommand(uint8_t cmd) {
     m_autoInitDma = true;
     m_dmaActive = true;
     m_16bit = false;
+    m_highSpeed = false;
     LOG_INFO("[SB] DMA Start (Auto-init) Channel=1 Length=", m_dmaBaseLength);
     break;
   }
@@ -241,6 +256,7 @@ void SoundBlaster::processCommand(uint8_t cmd) {
     m_autoInitDma = (cmd & 0x04) != 0;
     m_dmaActive = true;
     m_16bit = true;
+    m_highSpeed = false;
     m_stereo = (mode & 0x20) != 0;
     m_dmaBaseLength = (hi << 8) | lo;
     m_dmaLength = m_dmaBaseLength;
@@ -273,13 +289,52 @@ void SoundBlaster::processCommand(uint8_t cmd) {
     m_autoInitDma = (cmd & 0x04) != 0;
     m_dmaActive = true;
     m_16bit = false;
+    m_highSpeed = false;
     m_stereo = (mode & 0x20) != 0;
     m_dmaBaseLength = (hi << 8) | lo;
     m_dmaLength = m_dmaBaseLength;
     LOG_INFO("[SB] 8-bit DMA Start Mode=0x", std::hex, (int)mode, " Length=", m_dmaLength);
     break;
   }
-  case 0xF2: { // Force IRQ
+  case 0x90: { // 8-bit auto-init DMA High-Speed
+    m_autoInitDma = true;
+    m_dmaActive = true;
+    m_16bit = false;
+    m_highSpeed = true;
+    LOG_INFO("[SB] DMA Start (Auto-init High-Speed) Channel=1 Length=", m_dmaBaseLength);
+    break;
+  }
+  case 0x91: { // 8-bit single-cycle DMA High-Speed
+    m_dmaLength = m_dmaBaseLength;
+    m_autoInitDma = false;
+    m_dmaActive = true;
+    m_16bit = false;
+    m_highSpeed = true;
+    LOG_INFO("[SB] DMA Start (Single-cycle High-Speed) Channel=1 Length=", m_dmaLength);
+    break;
+  }
+  case 0x98: { // 16-bit auto-init DMA High-Speed
+    m_autoInitDma = true;
+    m_dmaActive = true;
+    m_16bit = true;
+    m_highSpeed = true;
+    LOG_INFO("[SB] DMA Start 16-bit (Auto-init High-Speed) Channel=5 Length=", m_dmaBaseLength);
+    break;
+  }
+  case 0x99: { // 16-bit single-cycle DMA High-Speed
+    m_dmaLength = m_dmaBaseLength;
+    m_autoInitDma = false;
+    m_dmaActive = true;
+    m_16bit = true;
+    m_highSpeed = true;
+    LOG_INFO("[SB] DMA Start 16-bit (Single-cycle High-Speed) Channel=5 Length=", m_dmaLength);
+    break;
+  }
+  case 0xF2: { // Force 8-bit IRQ
+    triggerIRQ();
+    break;
+  }
+  case 0xF3: { // Force 16-bit IRQ
     triggerIRQ();
     break;
   }
@@ -371,18 +426,24 @@ void SoundBlaster::generateSamples(float *buffer, size_t numSamples) {
 
       m_lastSample = (left + right) * 0.5f;
 
-      // Advance DMA and detect Terminal Count — use DMA controller's
-      // TC signal instead of maintaining a separate m_dmaLength counter.
-      // This keeps SB and DMA in sync, avoiding the dual-tracking bug.
       bool tc = m_dma.acknowledgeTransfer(dmaChannel, transferBytes);
 
-      if (tc) {
+      bool dspTc = false;
+      if (m_dmaLength == 0) {
+        dspTc = true;
+        if (m_autoInitDma) {
+          m_dmaLength = m_dmaBaseLength;
+        }
+      } else {
+        m_dmaLength--;
+      }
+
+      // Trigger IRQ on DMA TC or DSP block completion
+      if (tc || dspTc) {
         triggerIRQ();
         if (!m_autoInitDma) {
           m_dmaActive = false;
         }
-        // For auto-init DMA, the DMA controller has already reset
-        // address and count; SB just keeps m_dmaActive = true.
       }
 
       m_sampleAccumulator -= 1.0f;
