@@ -44,7 +44,8 @@
 - [x] VGA Controller (Text/Graphics modes)
 - [x] DMA Controller (8237)
 - [x] Joystick (game port 0x201)
-- [ ] CMOS/RTC (Optional — currently stubbed)
+- [x] CMOS/RTC (MC146818 at ports 0x70-0x71)
+  - [x] Unit tests covering all registers, RTC time, status, memory sizing, checksum, NMI mask
 
 ## Phase 4: BIOS Emulation
 - [x] System initialization (IVT setup)
@@ -180,35 +181,3 @@
 - [ ] Serial port (INT 14h) actual emulation
 - [ ] Parallel port (INT 17h) actual emulation
 - [ ] Network (packet driver / NE2000) emulation
-
-  - [x] CALL/RET, PUSH/POP, INC/DEC, NOT/NEG, MUL/DIV
-  - [x] IN/OUT, string ops, segment overrides
-  - [x] MOVZX/MOVSX, BT family, LEA, LES/LDS
-  - [x] ENTER/LEAVE, INT, XCHG, TEST, flags ops
-- [x] Debugger integration (`a` command, `w` command)
-- [x] CLI `--exec="asm"` mode for headless assembly execution
-- [x] Assembler unit tests (`test_assembler.cpp`)
-- [x] Assembler-driven interrupt integration tests (`test_int_asm.cpp`)
-  - [x] INT 10h (13 subfunctions), INT 16h, INT 1Ah
-  - [x] INT 11h, INT 12h, INT 13h (3 subfunctions)
-  - [x] INT 14h, INT 15h, INT 17h stubs
-  - [x] INT 33h (5 subfunctions), INT 2Fh
-  - [x] INT 20h, INT 21h (~20 subfunctions incl. file I/O roundtrip)
-  - [x] Full integration test (set mode + print string + terminate)
-
-## Phase 9: Audio Subsystem (Sound Blaster & AdLib)
-- [x] **Native Audio Abstraction Layer**
-  - [x] Integrate a cross-platform audio backend (e.g., SDL2 Audio) for native playback.
-  - [x] Implement robust ring-buffers and asynchronous audio callbacks to ensure latency-free audio streaming.
-- [x] **AdLib (OPL2 / YM3812) Emulation**
-  - [x] Hook I/O ports `0x388` and `0x389` for AdLib register and data access.
-  - [x] Integrate or build an OPL2 software synthesizer core.
-  - [x] Render OPL2 FM synthesis output into the PCM mixing buffer.
-- [x] **Sound Blaster Emulation (DSP & PCM)**
-  - [x] Emulate ISA DMA Controller (Intel 8237) transfers, specifically Channel 1 for background audio streaming.
-  - [x] Register Sound Blaster DSP I/O ports (Base `0x220` - `0x22F`).
-  - [x] Implement standard DSP commands including direct mode, single-cycle audio DMA, and auto-initialize audio DMA.
-  - [x] Trigger correct Sound Blaster hardware interrupts (typically IRQ 5 or 7) upon DMA completion.
-- [x] **Output Mixer**
-  - [x] Mix simultaneously playing OPL2 synth and Sound Blaster PCM streams.
-  - [x] Forward the mixed stream to the platform's native audio interface.

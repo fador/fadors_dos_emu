@@ -1,6 +1,7 @@
 #include "cpu/Assembler.hpp"
 #include "cpu/InstructionDecoder.hpp"
 #include "hw/BIOS.hpp"
+#include "hw/CMOSRTC.hpp"
 #include "hw/DMA8237.hpp"
 #include "hw/DOS.hpp"
 #include "hw/DPMI.hpp"
@@ -251,6 +252,7 @@ int main(int argc, char *argv[]) {
     fador::hw::PIT8254 pit;
     fador::hw::VGAController vga(memory);
     fador::hw::DMA8237 dma;
+    fador::hw::CMOSRTC cmos;
     fador::cpu::CPU cpu;
 
     // Connect VGA plane memory to the memory bus
@@ -271,6 +273,7 @@ int main(int argc, char *argv[]) {
     iobus.registerDevice(0x3C0, 0x3CF, &vga);
     iobus.registerDevice(0x3D0, 0x3DF, &vga);
     iobus.registerDevice(0x00, 0x0F, &dma);
+    iobus.registerDevice(0x70, 0x71, &cmos);
     iobus.registerDevice(0xC0, 0xDF, &dma);
     iobus.registerDevice(0x81, 0x8F, &dma);
     iobus.registerDevice(0x220, 0x22F, &sb);
@@ -285,6 +288,13 @@ int main(int argc, char *argv[]) {
 
     bios.initialize();
     dos.initialize();
+
+    // Set up CMOS memory sizing after BIOS/DOS init
+    cmos.setBaseMemoryKB(640);
+    // Extended memory (above 1 MiB): total physical - 1 MiB in KB
+    constexpr uint32_t kExtendedKB =
+        (fador::memory::MemoryBus::MEMORY_SIZE - 0x100000u) >> 10;
+    cmos.setExtendedMemoryKB(kExtendedKB);
 
     // Wire up HIMEM (XMS) driver: BIOS handles detection (INT 2Fh) and dispatch
     // (INT E0h)

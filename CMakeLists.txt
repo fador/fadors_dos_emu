@@ -57,7 +57,8 @@ endif()
 list(APPEND SRC_FILES "${SRC_DIR}/memory/himem/HIMEM.cpp")
 
 # Define an internal static library for the emulator core
-add_library(fadors_core STATIC ${SRC_FILES})
+add_library(fadors_core STATIC ${SRC_FILES}
+    src/hw/CMOSRTC.hpp)
 target_include_directories(fadors_core PUBLIC ${SRC_DIR})
 target_compile_definitions(fadors_core PUBLIC
     FADOR_ENABLE_DEBUG_DIAGNOSTICS=$<BOOL:${FADOR_ENABLE_DEBUG_DIAGNOSTICS}>)
@@ -96,6 +97,7 @@ set(TEST_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_interrupts.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_hw_devices.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_dma8237.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cmos_rtc.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_bios.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_dos.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_dos_memory.cpp"
