@@ -39,6 +39,7 @@ cmake --build .
 ### Options
 | Flag | Description |
 |------|-------------|
+| `--help`, `-h`, `-?` | Print usage information and exit |
 | `--himem` | Enable HIMEM/XMS support |
 | `--sdl` | Force the SDL frontend when SDL2 support is available |
 | `--no-sdl` | Force headless/text-mode execution even in SDL builds |
@@ -46,14 +47,16 @@ cmake --build .
 | `--throttle-machine=name` | Apply a rough named speed preset: `8088`, `286-12`, `386dx-33`, `486dx2-66`, or `pentium-90` |
 | `--stop-after=N` | Stop execution after N instruction cycles and dump CPU state |
 | `--stop-after-debugger` | When `--stop-after` triggers, enter the interactive debugger at that exact instruction instead of exiting |
+| `--dump-on-exit` | Dump CPU state when the program terminates |
 | `--instruction-trace=N` | Print one trace line per executed instruction for the next `N` instructions |
 | `--instruction-trace-from=ADDR` | Delay `--instruction-trace` until CS:EIP reaches the given hex linear address |
-| `--dump-on-exit` | Dump CPU state when the program terminates |
+| `--instruction-trace-step` | Pause between each instruction trace line (ENTER to step, `sN` to skip N, `q` to quit, `d` for debugger) |
+| `--trace=<cats>` | Enable trace-level logging for category `cpu`, `video`, `dos` (comma-separated) |
+| `--debug=<cats>` | Enable debug logging for categories: `cpu`, `video`, `dos` (comma-separated) |
 | `--bench=decoder-loop\|rep-movsb\|rep-movsd` | Run an in-process benchmark without loading a program |
 | `--bench-steps=N` | Number of measured instruction steps for `--bench` |
 | `--bench-warmup=N` | Number of warmup instruction steps before `--bench` timing |
 | `--exec="asm"` | Assemble and execute instructions without loading a program (semicolons separate lines) |
-| `--debug=<cats>` | Enable debug logging for categories: `cpu`, `video`, `dos` (comma-separated) |
 
 ### Examples
 ```bash
