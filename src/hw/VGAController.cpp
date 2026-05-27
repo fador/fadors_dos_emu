@@ -126,7 +126,7 @@ void VGAController::write8(uint16_t port, uint8_t value) {
         case 0x3C5:
             if (m_seqIndex == 2) m_seqMapMask = value & 0x0F;
             else if (m_seqIndex == 4) m_chain4 = (value & 0x08) != 0;
-#if FADOR_ENABLE_DEBUG_DIAGNOSTICS
+#if 0 && FADOR_ENABLE_DEBUG_DIAGNOSTICS
             LOG_INFO("VGA SEQ[", std::hex, int(m_seqIndex), "]=0x",
                      int(value), " mapMask=0x", int(m_seqMapMask),
                      " chain4=", m_chain4 ? 1 : 0);
@@ -148,7 +148,7 @@ void VGAController::write8(uint16_t port, uint8_t value) {
                 case 0x08: m_gcBitMask = value; break;
                 default: break;
             }
-#if FADOR_ENABLE_DEBUG_DIAGNOSTICS
+#if 0 && FADOR_ENABLE_DEBUG_DIAGNOSTICS
             LOG_INFO("VGA GC[", std::hex, int(m_gcIndex), "]=0x", int(value),
                      " readMap=0x", int(m_gcReadMap),
                      " mode=0x", int(m_gcMode),
@@ -160,7 +160,7 @@ void VGAController::write8(uint16_t port, uint8_t value) {
         case 0x3D4: m_crtcIndex = value; break;
         case 0x3D5:
             if (m_crtcIndex < 0x19) m_crtcRegs[m_crtcIndex] = value;
-#if FADOR_ENABLE_DEBUG_DIAGNOSTICS
+#if 0 && FADOR_ENABLE_DEBUG_DIAGNOSTICS
             LOG_INFO("VGA CRTC[", std::hex, int(m_crtcIndex), "]=0x",
                      int(value), " displayStart=0x", getDisplayStart());
 #endif

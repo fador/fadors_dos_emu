@@ -6,7 +6,7 @@ namespace fador::hw {
 PIC8259::PIC8259(bool master)
     : m_master(master)
     , m_baseVector(master ? 0x08 : 0x70)
-    , m_mask(0x00)
+    , m_mask(0xFF)
     , m_request(0)
     , m_service(0)
     , m_icwStep(0)
@@ -183,6 +183,16 @@ void PIC8259::acknowledgeInterrupt() {
             m_service |= static_cast<uint8_t>(1u << irq);
         }
     }
+}
+
+void PIC8259::unmaskIRQ(uint8_t irq) {
+    if (irq >= 8) return;
+    m_mask &= static_cast<uint8_t>(~(1u << irq));
+}
+
+bool PIC8259::isIRQInService(uint8_t irq) const {
+    if (irq >= 8) return false;
+    return (m_service & (1u << irq)) != 0;
 }
 
 } // namespace fador::hw

@@ -4915,6 +4915,16 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
                     " newHleSize=", m_cpu.hleStackSize());
         }
     } else {
+      // For unhandled hardware IRQ vectors dispatched to the default
+      // IVT stub, send EOI so the PIC doesn't stall.  Guest-hooked
+      // vectors send EOI in their own ISR.
+      if (!handled) {
+        bool isHwIrq = (vector >= 0x08 && vector <= 0x0F) ||
+                       (vector >= 0x70 && vector <= 0x77);
+        if (isHwIrq) {
+          m_bios.sendEOI(vector);
+        }
+      }
       auto hf = m_cpu.popHLEFrameForVector(vector);
       LOG_DEBUG("HLE popForVector: vec=0x", std::hex, (int)vector,
             " returnedPhys=0x", hf.framePhysAddr,
@@ -5190,7 +5200,7 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
       uint8_t targetVec = m_cpu.getReg8(BL);
       uint16_t targetSel = m_cpu.getReg16(CX);
       uint32_t targetOff = m_cpu.getReg32(EDX);
-#if FADOR_ENABLE_DEBUG_DIAGNOSTICS
+#if 0 && FADOR_ENABLE_DEBUG_DIAGNOSTICS
       static int s_appVecLog = 0;
       if (s_appVecLog < 300) {
         ++s_appVecLog;
@@ -5209,7 +5219,7 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
         m_appPMVectors[targetVec].selector = targetSel;
         m_appPMVectors[targetVec].offset = targetOff;
         m_appPMVectors[targetVec].valid = true;
-#if FADOR_ENABLE_DEBUG_DIAGNOSTICS
+#if 0 && FADOR_ENABLE_DEBUG_DIAGNOSTICS
         LOG_INFO("APP-PM-VEC-SAVED: vec=0x", std::hex,
                  static_cast<uint32_t>(targetVec),
                  " -> ", targetSel, ":", targetOff,

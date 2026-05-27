@@ -17,6 +17,12 @@ public:
     int getPendingInterrupt();
     void acknowledgeInterrupt();
 
+    // Unmask an interrupt line (clear the mask bit)
+    void unmaskIRQ(uint8_t irq);
+
+    // Check if an IRQ is currently in service (ISR bit set)
+    bool isIRQInService(uint8_t irq) const;
+
 private:
     bool m_master;
     uint8_t m_baseVector;

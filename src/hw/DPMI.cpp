@@ -738,7 +738,7 @@ void DPMI::handleInterruptVectors() {
         uint32_t low =
             (static_cast<uint32_t>(newSel) << 16) | (newOff & 0xFFFF);
         uint32_t high = (newOff & 0xFFFF0000) | 0x0000EE00;
-#if FADOR_ENABLE_DEBUG_DIAGNOSTICS
+#if 0 && FADOR_ENABLE_DEBUG_DIAGNOSTICS
         {
           static uint32_t s_0205log = 0;
           if (s_0205log < 512) {
@@ -761,7 +761,7 @@ void DPMI::handleInterruptVectors() {
       }
     }
 
-#if FADOR_ENABLE_DEBUG_DIAGNOSTICS
+#if 0 && FADOR_ENABLE_DEBUG_DIAGNOSTICS
     // Phase 6: compare authoritative m_pmVectors against physical IDT after
     // each 0205 update for this vector and key chain-critical vectors.
     {
@@ -840,7 +840,7 @@ void DPMI::handleTranslation() {
     uint32_t reqRmEdx = m_is32BitClient ? m_memory.read32(structAddr + 0x14)
                                         : m_memory.read16(structAddr + 0x14);
 
-#if FADOR_ENABLE_DEBUG_DIAGNOSTICS
+#if 0 && FADOR_ENABLE_DEBUG_DIAGNOSTICS
     // Phase 6: runtime consistency snapshot near DOS call flow that leads to
     // interrupt-chain validation.
     if (func == 0x0302) {
@@ -968,7 +968,7 @@ void DPMI::handleTranslation() {
     m_cpu.setSegBase(cpu::SS, static_cast<uint32_t>(rmSS) << 4);
     m_cpu.setReg16(cpu::SP, rmSP);
 
-    #if FADOR_ENABLE_DEBUG_DIAGNOSTICS
+    #if 0 && FADOR_ENABLE_DEBUG_DIAGNOSTICS
     if (func == 0x0302) {
       static uint32_t s_trace0302Armed = 0;
       bool interesting = ((reqRmEax & 0xFFFF) == 0x4400) ||
@@ -1102,7 +1102,7 @@ void DPMI::handleTranslation() {
     m_memory.write16(structAddr + 0x2E, m_cpu.getReg16(cpu::SP));
     m_memory.write16(structAddr + 0x30, m_cpu.getSegReg(cpu::SS));
 
-    #if FADOR_ENABLE_DEBUG_DIAGNOSTICS
+    #if 0 && FADOR_ENABLE_DEBUG_DIAGNOSTICS
     if (func == 0x0302) {
       static uint32_t s_trace0302PreRestore = 0;
       bool interesting = ((reqRmEax & 0xFFFF) == 0x4400) ||
@@ -1145,7 +1145,7 @@ void DPMI::handleTranslation() {
       m_cpu.setReg16(cpu::AX, 0x8011); // Request failed / simulation unsupported
     }
 
-    #if FADOR_ENABLE_DEBUG_DIAGNOSTICS
+    #if 0 && FADOR_ENABLE_DEBUG_DIAGNOSTICS
     if (func == 0x0302) {
       static uint32_t s_trace0302Restored = 0;
       bool mismatch = (m_cpu.getSegReg(cpu::SS) != savedSegs[cpu::SS]) ||

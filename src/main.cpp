@@ -246,7 +246,8 @@ int main(int argc, char *argv[]) {
 
     fador::memory::MemoryBus memory;
     fador::hw::IOBus iobus;
-    fador::hw::PIC8259 pic(true); // Master
+    fador::hw::PIC8259 pic(true);   // Master PIC (ports 0x20-0x21)
+    fador::hw::PIC8259 picSlave(false); // Slave PIC (ports 0xA0-0xA1)
     fador::hw::KeyboardController kbd;
     fador::hw::Joystick joystick;
     fador::hw::PIT8254 pit;
@@ -266,6 +267,7 @@ int main(int argc, char *argv[]) {
 
     // Register devices with IOBus
     iobus.registerDevice(0x20, 0x21, &pic);
+    iobus.registerDevice(0xA0, 0xA1, &picSlave);
     iobus.registerDevice(0x40, 0x43, &pit);
     iobus.registerDevice(0x60, 0x60, &kbd);
     iobus.registerDevice(0x64, 0x64, &kbd);
@@ -283,6 +285,7 @@ int main(int argc, char *argv[]) {
     fador::hw::DOS dos(cpu, memory);
     fador::hw::BIOS bios(cpu, memory, kbd, pit, pic);
     bios.setVGA(&vga);
+    bios.setSlavePIC(&picSlave);
 
     joystick.setCPU(&cpu);
 
@@ -295,6 +298,9 @@ int main(int argc, char *argv[]) {
     constexpr uint32_t kExtendedKB =
         (fador::memory::MemoryBus::MEMORY_SIZE - 0x100000u) >> 10;
     cmos.setExtendedMemoryKB(kExtendedKB);
+
+    // Wire CMOS RTC to slave PIC for IRQ8 delivery
+    cmos.setPIC(&picSlave);
 
     // Wire up HIMEM (XMS) driver: BIOS handles detection (INT 2Fh) and dispatch
     // (INT E0h)
@@ -327,8 +333,15 @@ int main(int argc, char *argv[]) {
     auto dispatchPendingHardwareInterrupt = [&](bool retireShadow) {
       if (cpu.hardwareInterruptsEnabled()) {
         int pending = pic.getPendingInterrupt();
+        if (pending == -1) {
+          pending = picSlave.getPendingInterrupt();
+        }
         if (pending != -1) {
-          pic.acknowledgeInterrupt();
+          if (pending >= 0x70) {
+            picSlave.acknowledgeInterrupt();
+          } else {
+            pic.acknowledgeInterrupt();
+          }
           decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
         }
       }
@@ -827,6 +840,7 @@ int main(int argc, char *argv[]) {
 
       bios.setInputPollCallback([&sdlRenderer]() { sdlRenderer.pollInput(); });
       bios.setIdleCallback([&sdlRenderer, &pit, &cpu, &decoder, &kbd, &pic,
+                &picSlave, &cmos,
                 &dispatchPendingHardwareInterrupt]() {
         cpu.addCycles(8);
         pit.update();
@@ -835,6 +849,10 @@ int main(int argc, char *argv[]) {
         }
         if (kbd.checkPendingIRQ()) {
           pic.raiseIRQ(1);
+        }
+        cmos.advanceTime();
+        while (cmos.checkPendingIRQ8()) {
+          picSlave.raiseIRQ(0);
         }
         dispatchPendingHardwareInterrupt(false);
         static auto lr = std::chrono::steady_clock::now();
@@ -848,11 +866,14 @@ int main(int argc, char *argv[]) {
       dos.setKeyboard(kbd);
       dos.setInputPollCallback([&sdlRenderer]() { sdlRenderer.pollInput(); });
       dos.setIdleCallback([&pit, &cpu, &decoder, &kbd, &pic,
+               &picSlave, &cmos,
                &dispatchPendingHardwareInterrupt]() {
         cpu.addCycles(8);
         pit.update();
         while (pit.checkPendingIRQ0()) { pic.raiseIRQ(0); }
         if (kbd.checkPendingIRQ()) { pic.raiseIRQ(1); }
+        cmos.advanceTime();
+        while (cmos.checkPendingIRQ8()) { picSlave.raiseIRQ(0); }
         dispatchPendingHardwareInterrupt(false);
       });
 
@@ -989,8 +1010,19 @@ int main(int argc, char *argv[]) {
           if (kbd.checkPendingIRQ()) {
             pic.raiseIRQ(1);
           }
+          cmos.advanceTime();
+          while (cmos.checkPendingIRQ8()) {
+            picSlave.raiseIRQ(0);
+          }
 
           dispatchPendingHardwareInterrupt(true);
+
+          // Handle Ctrl+Alt+Del reset
+          if (bios.shouldReset()) {
+            LOG_INFO("Reset requested — terminating");
+            running = false;
+            break;
+          }
 
           // Audio generation
           uint32_t queuedAudio = audio.getQueuedAudioSize();
@@ -1035,6 +1067,7 @@ int main(int argc, char *argv[]) {
       input.setBIOS(bios);
       bios.setInputPollCallback([&input]() { input.pollInput(); });
       bios.setIdleCallback([&renderer, &pit, &cpu, &decoder, &kbd, &pic,
+                &picSlave, &cmos,
                 &dispatchPendingHardwareInterrupt]() {
         pit.update();
         while (pit.checkPendingIRQ0()) {
@@ -1042,6 +1075,10 @@ int main(int argc, char *argv[]) {
         }
         if (kbd.checkPendingIRQ()) {
           pic.raiseIRQ(1);
+        }
+        cmos.advanceTime();
+        while (cmos.checkPendingIRQ8()) {
+          picSlave.raiseIRQ(0);
         }
         dispatchPendingHardwareInterrupt(false);
         static auto lr = std::chrono::steady_clock::now();
@@ -1055,10 +1092,13 @@ int main(int argc, char *argv[]) {
       dos.setKeyboard(kbd);
       dos.setInputPollCallback([&input]() { input.pollInput(); });
       dos.setIdleCallback([&pit, &cpu, &decoder, &kbd, &pic,
+               &picSlave, &cmos,
                &dispatchPendingHardwareInterrupt]() {
         pit.update();
         while (pit.checkPendingIRQ0()) { pic.raiseIRQ(0); }
         if (kbd.checkPendingIRQ()) { pic.raiseIRQ(1); }
+        cmos.advanceTime();
+        while (cmos.checkPendingIRQ8()) { picSlave.raiseIRQ(0); }
         dispatchPendingHardwareInterrupt(false);
       });
 
@@ -1083,8 +1123,19 @@ int main(int argc, char *argv[]) {
           if (kbd.checkPendingIRQ()) {
             pic.raiseIRQ(1);
           }
+          cmos.advanceTime();
+          while (cmos.checkPendingIRQ8()) {
+            picSlave.raiseIRQ(0);
+          }
 
           dispatchPendingHardwareInterrupt(true);
+
+          // Handle Ctrl+Alt+Del reset
+          if (bios.shouldReset()) {
+            LOG_INFO("Reset requested — terminating");
+            running = false;
+            break;
+          }
         }
 
         if (stopAfterCycles > 0 && instrCount >= stopAfterCycles) {

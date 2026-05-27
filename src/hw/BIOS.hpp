@@ -32,6 +32,13 @@ public:
     // no HLE handler — the EOI must still be sent so the PIC unblocks.
     void sendEOI(uint8_t vector);
 
+    // Set slave PIC (for IRQ8-15 EOI through port A0h)
+    void setSlavePIC(PIC8259* slave) { m_slavePic = slave; }
+
+    // Ctrl+Alt+Del reset flag
+    bool shouldReset() const { return m_resetRequested; }
+    void clearReset() { m_resetRequested = false; }
+
     // Set a callback that polls host input; called by INT 16h when blocking.
     void setInputPollCallback(std::function<void()> cb) { m_pollInput = std::move(cb); }
     void setIdleCallback(std::function<void()> cb) { m_idleCallback = std::move(cb); }
@@ -89,6 +96,8 @@ private:
     KeyboardController& m_kbd;
     PIT8254& m_pit;
     PIC8259& m_pic;
+    PIC8259* m_slavePic = nullptr;
+    bool m_resetRequested = false;
 
 
     // Simple Floppy emulation (1.44MB)
@@ -98,6 +107,7 @@ private:
     std::function<void()> m_pollInput;
     std::function<void()> m_idleCallback;
     MouseState m_mouse;
+    bool m_e0Flag = false;
 
     // INT 33h event handler callback
     uint16_t m_mouseCallbackMask = 0;

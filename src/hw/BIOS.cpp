@@ -42,7 +42,11 @@ void BIOS::sendEOI(uint8_t vector) {
   // Vectors 0x08-0x0F are master PIC (IRQ 0-7)
   // Vectors 0x70-0x77 are slave PIC (IRQ 8-15)
   if (vector >= 0x70 && vector <= 0x77) {
-    m_pic.write8(0xA0, 0x20); // slave EOI
+    if (m_slavePic) {
+      m_slavePic->write8(0xA0, 0x20); // slave EOI
+    } else {
+      m_pic.write8(0xA0, 0x20); // fallback: write via master (shared registers)
+    }
   }
   if ((vector >= 0x08 && vector <= 0x0F) ||
       (vector >= 0x70 && vector <= 0x77)) {
@@ -52,9 +56,24 @@ void BIOS::sendEOI(uint8_t vector) {
 
 bool BIOS::handleInterrupt(uint8_t vector) {
   switch (vector) {
+  case 0x02: // NMI handler stub (reached via IRQ13 redirection)
+    LOG_DEBUG("BIOS INT 02h: NMI (stubbed)");
+    return true;
   case 0x09:
     handleKeyboardIRQ();
     return true;
+  case 0x0A: { // IRQ2 — cascade from slave / LPT2 / VGA retrace
+    sendEOI(0x0A);
+    return true;
+  }
+  case 0x0F: { // IRQ7 — Parallel Printer / Spurious IRQ
+    if (!m_pic.isIRQInService(7)) {
+      LOG_DEBUG("BIOS INT 0Fh: Spurious IRQ7 ignored");
+    } else {
+      sendEOI(0x0F);
+    }
+    return true;
+  }
   case 0x10:
     handleVideoService();
     return true;
@@ -158,6 +177,28 @@ bool BIOS::handleInterrupt(uint8_t vector) {
   case 0x67: // EMS / EMM386
     handleEMSService();
     return true;
+  case 0x70: { // IRQ8 — CMOS RTC
+    sendEOI(0x70);
+    return true;
+  }
+  case 0x71: { // IRQ9 — Redirected to INT 0Ah by BIOS (AT compatibility)
+    handleInterrupt(0x0A);
+    sendEOI(0x71);
+    return true;
+  }
+  case 0x74: { // IRQ12 — PS/2 Mouse
+    sendEOI(0x74);
+    return true;
+  }
+  case 0x75: { // IRQ13 — FPU exception -> redirect to NMI (INT 02h)
+    handleInterrupt(0x02);
+    sendEOI(0x75);
+    return true;
+  }
+  case 0x76: { // IRQ14 — Hard Disk Controller
+    sendEOI(0x76);
+    return true;
+  }
   }
   return false;
 }
@@ -165,8 +206,142 @@ bool BIOS::handleInterrupt(uint8_t vector) {
 void BIOS::handleKeyboardIRQ() {
   uint8_t status = m_kbd.read8(0x64);
   uint8_t scancode = 0;
+  bool isPressed = true;
   if (status & 0x01) {
     scancode = m_kbd.read8(0x60);
+
+    // Handle E0 extended-key prefix byte
+    if (scancode == 0xE0) {
+      m_e0Flag = true;
+      sendEOI(0x09);
+      return;
+    }
+
+    bool extended = m_e0Flag;
+    m_e0Flag = false;
+
+    // Detect key press vs release: bit 7 set = break (key release)
+    if (scancode & 0x80) {
+      isPressed = false;
+      scancode &= 0x7F;
+    }
+
+    uint8_t shiftFlags = m_memory.read8(0x417);
+    uint8_t shiftFlags2 = m_memory.read8(0x418);
+
+    // Update BDA shift flags for modifiers and toggle keys
+    switch (scancode) {
+    case 0x1D: // Ctrl
+      if (extended) {
+        if (isPressed) { shiftFlags |= 0x04; shiftFlags2 |= 0x04; }
+        else { shiftFlags2 &= ~0x04; }
+      } else {
+        if (isPressed) { shiftFlags |= 0x04; shiftFlags2 |= 0x01; }
+        else { shiftFlags2 &= ~0x01; }
+      }
+      break;
+    case 0x2A: // Left Shift
+      if (isPressed) shiftFlags |= 0x02;
+      else shiftFlags &= ~0x02;
+      break;
+    case 0x36: // Right Shift
+      if (isPressed) shiftFlags |= 0x01;
+      else shiftFlags &= ~0x01;
+      break;
+    case 0x38: // Alt
+      if (extended) {
+        if (isPressed) { shiftFlags |= 0x08; shiftFlags2 |= 0x08; }
+        else { shiftFlags2 &= ~0x08; }
+      } else {
+        if (isPressed) { shiftFlags |= 0x08; shiftFlags2 |= 0x02; }
+        else { shiftFlags2 &= ~0x02; }
+      }
+      break;
+    case 0x3A: // Caps Lock (toggle on make only)
+      if (isPressed) shiftFlags ^= 0x40;
+      break;
+    case 0x45: // Num Lock (toggle on make only)
+      if (isPressed) shiftFlags ^= 0x20;
+      break;
+    case 0x46: // Scroll Lock (toggle on make only)
+      if (isPressed) shiftFlags ^= 0x10;
+      break;
+    case 0x52: // Insert (toggle on make)
+      if (isPressed) shiftFlags ^= 0x80;
+      break;
+    }
+    m_memory.write8(0x417, shiftFlags);
+    m_memory.write8(0x418, shiftFlags2);
+
+    // INT 15h/AH=4Fh Keyboard Intercept Hook (pre-processing)
+    {
+      uint16_t savedAX = m_cpu.getReg16(cpu::AX);
+      uint32_t savedFlags = m_cpu.getEFLAGS();
+      m_cpu.setReg8(cpu::AH, 0x4F);
+      m_cpu.setReg8(cpu::AL, scancode);
+      handleSystemService();
+      bool keyConsumed = !(m_cpu.getEFLAGS() & cpu::FLAG_CARRY);
+      m_cpu.setReg16(cpu::AX, savedAX);
+      if (keyConsumed) {
+        sendEOI(0x09);
+        return;
+      }
+      m_cpu.setEFLAGS(savedFlags);
+    }
+
+    // Check special key combinations
+    bool ctrl = (shiftFlags & 0x04) != 0;
+    bool alt = (shiftFlags & 0x08) != 0;
+
+    // Ctrl+Alt+Del (Delete = extended 0x53)
+    if (ctrl && alt && scancode == 0x53 && extended && isPressed) {
+      LOG_INFO("BIOS: Ctrl+Alt+Del detected — requesting reset");
+      m_resetRequested = true;
+      sendEOI(0x09);
+      return;
+    }
+
+    // Ctrl+Break (Break = 0x46 with Ctrl held)
+    if (ctrl && scancode == 0x46 && isPressed) {
+      LOG_DEBUG("BIOS: Ctrl+Break detected");
+      // Clear keyboard buffer, place 0000h, invoke INT 1Bh, set flag at 0x471
+      m_memory.write16(0x41A, 0x001E); // Reset buffer head
+      m_memory.write16(0x41C, 0x001E); // Reset buffer tail
+      m_memory.write16(0x41E, 0x0000); // Place NUL terminator
+      m_memory.write8(0x471, m_memory.read8(0x471) | 0x80); // Set Break flag
+      handleInterrupt(0x1B);
+      sendEOI(0x09);
+      return;
+    }
+
+    // SysReq (PrtSc/SysReq = 0x37)
+    if (scancode == 0x37 && isPressed) {
+      LOG_DEBUG("BIOS: SysReq detected");
+      m_cpu.setReg8(cpu::AH, 0x85);
+      handleSystemService();
+      sendEOI(0x09);
+      return;
+    }
+
+    // Shift+PrtSc (invoke INT 05h)
+    bool shift = (shiftFlags & 0x03) != 0;
+    if (shift && scancode == 0x37 && isPressed) {
+      LOG_DEBUG("BIOS: Shift+PrtSc detected — invoking INT 05h");
+      sendEOI(0x09);
+      // Let INT 05h be invoked by the guest software handler
+      // (the IVT entry at 0x05*4 is already set up)
+      return; // Don't enqueue — shift+PrtSc is handled by INT 05h
+    }
+
+    // Ctrl+NumLock (pause — tight wait loop)
+    if (ctrl && scancode == 0x45 && isPressed) {
+      LOG_DEBUG("BIOS: Ctrl+NumLock pause requested");
+      // Consume key: BIOS enters tight loop waiting for next keypress
+      // In HLE, just consume the key — the program is paused naturally
+      sendEOI(0x09);
+      return;
+    }
+
     // Enqueue into BIOS keyboard buffer (circular, 16 entries at 0x41E)
     uint16_t head = m_memory.read16(0x41A);
     uint16_t tail = m_memory.read16(0x41C);
@@ -1356,6 +1531,11 @@ void BIOS::initialize() {
   // reflection path so that a PM handler called via near CALL can return
   // to the interrupted code through IRETD.
   m_memory.write8(0xF0300, 0xCF); // IRETD (in a D=1 segment, 0xCF = IRETD)
+
+  // Unmask essential IRQs: timer (IRQ0), keyboard (IRQ1), cascade (IRQ2)
+  m_pic.unmaskIRQ(0);
+  m_pic.unmaskIRQ(1);
+  m_pic.unmaskIRQ(2); // Cascade line for slave PIC (IRQ8-15 pass through IRQ2)
 
   LOG_INFO("BIOS: BDA and IVT initialized.");
 }

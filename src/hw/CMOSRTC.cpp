@@ -140,6 +140,9 @@ void CMOSRTC::syncTime() {
 
 void CMOSRTC::initializeDefaults() {
   m_cmosRAM = {}; // all zeros
+  m_lastAdvance = std::chrono::steady_clock::now();
+  m_accumulatedUs = 0;
+  m_pendingIRQ8 = 0;
 
   // ── Status Register A (0x0A) ──────────────────────────
   // Bits 6-4 = 010 (time base = 32768 Hz)
@@ -227,6 +230,78 @@ uint8_t CMOSRTC::toBcd8(int value) {
 
 int CMOSRTC::fromBcd8(uint8_t bcd) {
   return ((bcd >> 4) & 0x0F) * 10 + (bcd & 0x0F);
+}
+
+int CMOSRTC::periodicRateHz() const {
+  uint8_t rate = m_cmosRAM[0x0A] & 0x0F;
+  if (rate == 0) return 0;
+  static const int rates[] = {
+    0, 256, 128, 8192, 4096, 2048, 1024,
+    512, 256, 128, 64, 32, 16, 8, 4, 2
+  };
+  return (rate <= 15) ? rates[rate] : 1024;
+}
+
+long long CMOSRTC::periodicIntervalUs() const {
+  int hz = periodicRateHz();
+  if (hz == 0) return 0;
+  return 1000000LL / hz;
+}
+
+bool CMOSRTC::checkAlarm() {
+  if (!(m_cmosRAM[0x0B] & 0x20)) return false; // AIE not enabled
+
+  uint8_t alarmSec = m_cmosRAM[0x01];
+  uint8_t alarmMin = m_cmosRAM[0x03];
+  uint8_t alarmHr  = m_cmosRAM[0x05];
+
+  syncTime(); // refresh current time
+
+  uint8_t curSec = m_cmosRAM[0x00];
+  uint8_t curMin = m_cmosRAM[0x02];
+  uint8_t curHr  = m_cmosRAM[0x04];
+
+  // Don't care bits: 0xC0 = "don't care" in BCD for hours, 0x80 for others
+  bool secMatch = (alarmSec & 0xC0) || (fromBcd8(alarmSec & 0x3F) == fromBcd8(curSec & 0x3F));
+  bool minMatch = (alarmMin & 0xC0) || (fromBcd8(alarmMin & 0x3F) == fromBcd8(curMin & 0x3F));
+  bool hrMatch  = (alarmHr & 0xC0)  || (fromBcd8(alarmHr & 0x3F) == fromBcd8(curHr & 0x3F));
+
+  return secMatch && minMatch && hrMatch;
+}
+
+void CMOSRTC::advanceTime() {
+  auto now = std::chrono::steady_clock::now();
+  long long elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
+      now - m_lastAdvance).count();
+  m_lastAdvance = now;
+
+  if (elapsedUs <= 0) return;
+
+  m_accumulatedUs += elapsedUs;
+
+  // Periodic interrupt
+  bool pie = (m_cmosRAM[0x0B] & 0x40) != 0;
+  if (pie) {
+    long long interval = periodicIntervalUs();
+    while (interval > 0 && m_accumulatedUs >= interval) {
+      m_accumulatedUs -= interval;
+      ++m_pendingIRQ8;
+      // Set PF (Periodic Interrupt Flag) in Status C
+      m_cmosRAM[0x0C] |= 0xC0; // IRQF + PF
+    }
+  }
+
+  // Alarm interrupt
+  if ((m_cmosRAM[0x0B] & 0x20) && checkAlarm()) {
+    ++m_pendingIRQ8;
+    m_cmosRAM[0x0C] |= 0xA0; // IRQF + AF
+  }
+}
+
+bool CMOSRTC::checkPendingIRQ8() {
+  if (m_pendingIRQ8 == 0) return false;
+  --m_pendingIRQ8;
+  return true;
 }
 
 } // namespace fador::hw

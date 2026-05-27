@@ -1073,6 +1073,9 @@ static const std::unordered_map<SDL_Scancode, KeyMapping> kKeyMap = {
     {SDL_SCANCODE_RCTRL, {0x1D, 0, 0, true}},
     {SDL_SCANCODE_LALT, {0x38, 0, 0, false}},
     {SDL_SCANCODE_RALT, {0x38, 0, 0, true}},
+    {SDL_SCANCODE_NUMLOCKCLEAR, {0x45, 0, 0, false}},
+    {SDL_SCANCODE_SCROLLLOCK, {0x46, 0, 0, false}},
+    {SDL_SCANCODE_PRINTSCREEN, {0x37, 0, 0, false}},
 };
 } // namespace
 
@@ -1152,32 +1155,30 @@ void SDLRenderer::updateShiftFlags(const SDL_KeyboardEvent &ev) {
   uint8_t flags = m_memory.read8(0x417);
 
   bool pressed = (ev.type == SDL_KEYDOWN);
+
   switch (ev.keysym.scancode) {
   case SDL_SCANCODE_RSHIFT:
-    if (pressed)
-      flags |= 0x01;
-    else
-      flags &= ~0x01;
+    flags = pressed ? (flags | 0x01) : (flags & ~0x01);
     break;
   case SDL_SCANCODE_LSHIFT:
-    if (pressed)
-      flags |= 0x02;
-    else
-      flags &= ~0x02;
+    flags = pressed ? (flags | 0x02) : (flags & ~0x02);
     break;
   case SDL_SCANCODE_LCTRL:
   case SDL_SCANCODE_RCTRL:
-    if (pressed)
-      flags |= 0x04;
-    else
-      flags &= ~0x04;
+    flags = pressed ? (flags | 0x04) : (flags & ~0x04);
     break;
   case SDL_SCANCODE_LALT:
   case SDL_SCANCODE_RALT:
-    if (pressed)
-      flags |= 0x08;
-    else
-      flags &= ~0x08;
+    flags = pressed ? (flags | 0x08) : (flags & ~0x08);
+    break;
+  case SDL_SCANCODE_NUMLOCKCLEAR:
+    if (pressed) flags ^= 0x20;
+    break;
+  case SDL_SCANCODE_SCROLLLOCK:
+    if (pressed) flags ^= 0x10;
+    break;
+  case SDL_SCANCODE_CAPSLOCK:
+    if (pressed) flags ^= 0x40;
     break;
   default:
     break;
