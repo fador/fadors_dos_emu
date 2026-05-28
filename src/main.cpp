@@ -14,6 +14,8 @@
 #include "hw/VGAController.hpp"
 #include "hw/audio/AdLib.hpp"
 #include "hw/audio/AudioBackend.hpp"
+#include "hw/audio/MidiDevice.hpp"
+#include "hw/audio/MidiSynth.hpp"
 #include "hw/audio/SoundBlaster.hpp"
 #include "ui/Debugger.hpp"
 #include "ui/InputManager.hpp"
@@ -264,6 +266,14 @@ int main(int argc, char *argv[]) {
 
     fador::hw::audio::AdLib adlib(44100.0f, &cpu.getCyclesRef());
     fador::hw::audio::SoundBlaster sb(memory, dma, 44100.0f);
+    fador::hw::audio::MidiDevice midi(0x330);
+    fador::hw::audio::MidiSynth midiSynth(adlib, 44100.0f);
+
+    midi.setEventCallback(
+        [&midiSynth](uint8_t channel, uint8_t statusType, uint8_t data1,
+                     uint8_t data2) {
+          midiSynth.handleEvent(channel, statusType, data1, data2);
+        });
 
     // Register devices with IOBus
     iobus.registerDevice(0x20, 0x21, &pic);
@@ -279,6 +289,7 @@ int main(int argc, char *argv[]) {
     iobus.registerDevice(0xC0, 0xDF, &dma);
     iobus.registerDevice(0x81, 0x8F, &dma);
     iobus.registerDevice(0x220, 0x22F, &sb);
+    iobus.registerDevice(0x330, 0x331, &midi);
     iobus.registerDevice(0x388, 0x389, &adlib);
 
     kbd.setMemoryBus(&memory);

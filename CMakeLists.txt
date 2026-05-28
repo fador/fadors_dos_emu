@@ -115,6 +115,7 @@ set(TEST_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/memory/himem/test_himem.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/memory/test_memory_bus.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_audio_backend.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_midi.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/hw/test_vga_controller.cpp"
 )
 

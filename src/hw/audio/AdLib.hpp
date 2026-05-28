@@ -52,6 +52,8 @@ public:
   uint8_t read8(uint16_t port) override;
   void write8(uint16_t port, uint8_t value) override;
 
+  void writeRegister(uint8_t reg, uint8_t val);
+
   // Render audio into an interleaved stereo float buffer
   void generateSamples(float *buffer, size_t numSamples);
 
@@ -59,8 +61,10 @@ public:
   // OPL timers)
   void updateTimers(double dt);
 
+  // Lookups mapping register bases to operator indices
+  static const int opOffsets[18];
+
 private:
-  void writeRegister(uint8_t reg, uint8_t val);
   float renderChannel(int ch);
   float computePhaseStep(uint16_t fnum, uint8_t block, float mult);
   void updateEnvelope(Operator &op, bool keyOn, double dt, uint16_t fnum,
@@ -87,9 +91,6 @@ private:
   const uint64_t *m_cpuCycles = nullptr;
   uint64_t m_lastTimerCycles = 0;
   static constexpr double CPU_FREQ = 33000000.0; // ~33 MHz 386
-
-  // Lookups mapping register bases to operator indices
-  static const int opOffsets[18];
 };
 
 } // namespace fador::hw::audio
