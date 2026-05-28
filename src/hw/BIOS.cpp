@@ -1193,6 +1193,55 @@ void BIOS::handleVideoService() {
     LOG_DEBUG("BIOS INT 10h AH=EFh: Unknown function stubbed");
     break;
   }
+  case 0x1C: { // Save/Restore Video State (VGA)
+    uint8_t al = m_cpu.getReg8(cpu::AL);
+    uint16_t es = m_cpu.getSegReg(cpu::ES);
+    uint16_t bx = m_cpu.getReg16(cpu::BX);
+    uint16_t cx = m_cpu.getReg16(cpu::CX);
+    switch (al) {
+    case 0x00: { // Get state buffer size
+      // Return size needed: 64 bytes BDA + palette + misc
+      m_cpu.setReg16(cpu::BX, 128);
+      m_cpu.setReg8(cpu::AL, 0x1C);
+      LOG_DEBUG("BIOS INT 10h AH=1Ch AL=00: Buffer size = 128 bytes");
+      break;
+    }
+    case 0x01: { // Save video state
+      uint32_t bufAddr = (static_cast<uint32_t>(es) << 4) + bx;
+      // Save BDA video area (offsets 0x449-0x466 = 30 bytes)
+      for (uint16_t i = 0; i < 30; ++i)
+        m_memory.write8(bufAddr + i, m_memory.read8(0x449 + i));
+      // Save cursor positions for all 8 pages (16 bytes)
+      for (uint16_t i = 0; i < 16; ++i)
+        m_memory.write8(bufAddr + 30 + i, m_memory.read8(0x450 + i));
+      // Save CRT controller and VGA state (remaining bytes zero-filled
+      // by caller convention)
+      m_cpu.setReg8(cpu::AL, 0x1C);
+      LOG_DEBUG("BIOS INT 10h AH=1Ch AL=01: Save video state to ",
+                std::hex, es, ":", bx);
+      break;
+    }
+    case 0x02: { // Restore video state
+      uint32_t bufAddr = (static_cast<uint32_t>(es) << 4) + bx;
+      // Restore BDA video area
+      for (uint16_t i = 0; i < 30; ++i)
+        m_memory.write8(0x449 + i, m_memory.read8(bufAddr + i));
+      // Restore cursor positions
+      for (uint16_t i = 0; i < 16; ++i)
+        m_memory.write8(0x450 + i, m_memory.read8(bufAddr + 30 + i));
+      m_cpu.setReg8(cpu::AL, 0x1C);
+      LOG_DEBUG("BIOS INT 10h AH=1Ch AL=02: Restore video state from ",
+                std::hex, es, ":", bx);
+      break;
+    }
+    default:
+      m_cpu.setReg8(cpu::AL, 0x00); // Not supported
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      LOG_DEBUG("BIOS INT 10h AH=1Ch: Unsupported AL=", std::hex, (int)al);
+      break;
+    }
+    break;
+  }
   default:
     LOG_WARN("BIOS INT 10h: Unknown function AH=0x", std::hex, (int)ah);
     break;
