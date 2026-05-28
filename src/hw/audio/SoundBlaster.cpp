@@ -354,6 +354,13 @@ void SoundBlaster::processCommand(uint8_t cmd) {
     LOG_DEBUG("[SB] Speaker status: ", m_speakerOn ? "on" : "off");
     break;
   }
+  case 0xE0: { // Identify DSP (pre-SB16: SB 1.0/2.0/Pro)
+    // Return DSP version 3.01 (Sound Blaster Pro)
+    m_readQueue.push(0x03);
+    m_readQueue.push(0x01);
+    LOG_DEBUG("[SB] Identify DSP returning v3.01 (SB Pro)");
+    break;
+  }
   case 0xE2: { // DSP identification (SB16)
     m_readQueue.push(0x00); // No copyright info
     m_readQueue.push(0x00);

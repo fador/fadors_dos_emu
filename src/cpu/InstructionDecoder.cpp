@@ -838,8 +838,16 @@ void InstructionDecoder::executeFPUOpcode(uint8_t opcode) {
       writeSt(modrm.rm, lhs);
       return;
     }
+    // D9 /3 with mod=11: FSTP ST(i) alias (used by Borland-compiled code)
+    if (modrm.reg == 3 && modrmByte >= 0xD8 && modrmByte <= 0xDF) {
+      writeSt(modrm.rm, st(0));
+      m_cpu.popFPU();
+      return;
+    }
 
     switch (modrmByte) {
+    case 0xD0:  // FNOP
+      return;
     case 0xE0:
       writeSt(0, -st(0));
       return;

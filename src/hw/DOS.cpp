@@ -1952,11 +1952,45 @@ uint16_t DOS::allocateMemory(uint16_t requested, uint16_t owner) {
     uint16_t scan = FIRST_MCB_SEGMENT;
     for (int i = 0; i < 100; ++i) {
       MCB mcb = readMCB(scan);
-      if (mcb.owner == m_pspSegment && mcb.size > requested + 0x11u) {
-        // Shrink PSP to a minimum: keep PSP (0x10 paras) + requested + margin
-        uint16_t keepParas = requested + 0x20u; // requested + 32 paras margin
-        if (keepParas > mcb.size) keepParas = mcb.size;
+      if (mcb.owner == m_pspSegment) {
         uint16_t pspMcbSeg = scan;
+        uint16_t keepParas;
+
+        if (mcb.size > requested + 0x11u) {
+          // Enough room to satisfy the request — shrink to requested + margin.
+          keepParas = requested + 0x20u;
+        } else {
+          // Request too large for available memory. Still shrink the PSP
+          // so a free block is created — the caller (INT 21h/AH=48h) will
+          // return the largest free size to the program.
+          // Use PSP offset 0x02 (top-of-memory segment) to estimate the
+          // minimum the program needs, but only if it has been updated
+          // from the initial "own everything" sentinel (0xA000).
+          uint16_t pspTop = m_memory.read16(
+              (static_cast<uint32_t>(m_pspSegment) << 4u) + 0x02u);
+          uint16_t pspClaimedParas = (pspTop > m_pspSegment)
+                                         ? static_cast<uint16_t>(pspTop - m_pspSegment)
+                                         : 0u;
+
+          if (pspClaimedParas > 0 && pspClaimedParas < mcb.size) {
+            // PSP:0x02 was already shrunk (e.g. by SETBLOCK).  Use that.
+            keepParas = pspClaimedParas;
+          } else {
+            // PSP:0x02 still shows the "own everything" value (0xA000).
+            // Shrink the PSP enough to guarantee at least a 1‑paragraph
+            // trailing free MCB so the AH=48h error path can return a
+            // non‑zero largestFree.  Compute max shrink while leaving
+            // room for the free MCB.
+            uint16_t maxKeep = static_cast<uint16_t>(LAST_PARA - pspMcbSeg - 2u);
+            if (maxKeep < mcb.size && maxKeep >= 0x10u) {
+              keepParas = maxKeep;
+            } else {
+              break; // cannot create a free block — nothing to do
+            }
+          }
+        }
+        if (keepParas > mcb.size) keepParas = mcb.size;
+        if (keepParas >= mcb.size) break; // Can't shrink — nothing to free
 
         mcb.type = 'M';
         mcb.size = keepParas;
@@ -1980,13 +2014,17 @@ uint16_t DOS::allocateMemory(uint16_t requested, uint16_t owner) {
 
           LOG_INFO("DOS: Auto-shrunk PSP to 0x", std::hex, keepParas,
                    " paras for allocation; free block at 0x", freeMcbSeg);
+        } else {
+          // No room for a trailing free MCB — revert PSP type to 'Z'
+          // so the chain stays valid.
+          m_memory.write8(static_cast<uint32_t>(pspMcbSeg << 4), 'Z');
         }
 
         // Retry allocation — scan again for the newly created free block
         bestFit = 0;
         bestFitSize = 0xFFFF;
         current = FIRST_MCB_SEGMENT;
-        while (true) {
+        for (int retryCount = 0; retryCount < 100; ++retryCount) {
           MCB m2 = readMCB(current);
           if (m2.owner == 0) {
             if (m2.size >= requested && m2.size < bestFitSize) {
