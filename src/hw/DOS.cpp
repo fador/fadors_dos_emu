@@ -1927,7 +1927,9 @@ uint16_t DOS::allocateMemory(uint16_t requested, uint16_t owner) {
 
   while (true) {
     if (mcbCount++ > 1000) {
-      LOG_ERROR("DOS: MCB chain corrupted or too long (infinite loop?)");
+      LOG_ERROR("DOS: MCB chain corrupted or too long (infinite loop?) at 0x",
+                std::hex, current);
+      dumpMCBChain();
       return 0;
     }
     MCB mcb = readMCB(current);
@@ -2071,6 +2073,9 @@ uint16_t DOS::allocateMemory(uint16_t requested, uint16_t owner) {
       uint16_t nextMcbSeg = static_cast<uint16_t>(bestFit + requested + 1);
       writeMCB(nextMcbSeg, next);
       LOG_INFO("DOS: Split block at 0x", std::hex, bestFit, " -> new free block at 0x", nextMcbSeg, " size 0x", next.size);
+      // Verify the split didn't corrupt
+      { MCB vfy = readMCB(bestFit); LOG_INFO("DOS: verify alloc MCB at 0x", std::hex, bestFit, " type=0x", (int)vfy.type, " owner=0x", vfy.owner, " size=0x", vfy.size); }
+      { MCB vfy = readMCB(nextMcbSeg); LOG_INFO("DOS: verify free MCB at 0x", std::hex, nextMcbSeg, " type=0x", (int)vfy.type, " owner=0x", vfy.owner, " size=0x", vfy.size); }
     } else {
       mcb.owner = actualOwner;
       writeMCB(bestFit, mcb);
