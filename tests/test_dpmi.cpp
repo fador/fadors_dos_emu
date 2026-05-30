@@ -746,7 +746,7 @@ TEST_CASE("DPMI 0400h get version", "[dpmi][version]") {
 
     REQUIRE(env.cpu.getReg8(cpu::AH) == 0x00); // Major = 0
     REQUIRE(env.cpu.getReg8(cpu::AL) == 0x09); // Minor = 9
-    REQUIRE(env.cpu.getReg16(cpu::BX) == 0x0005); // Flags
+    REQUIRE(env.cpu.getReg16(cpu::BX) == 0x0003); // Flags: 32-bit only (no VM)
     REQUIRE(env.cpu.getReg8(cpu::CL) == 0x04);    // CPU type (486)
     REQUIRE(env.cpu.getReg8(cpu::DH) == 0x08);    // PIC master (IRQ0=INT 08h)
     REQUIRE(env.cpu.getReg8(cpu::DL) == 0x70);    // PIC slave (IRQ8=INT 70h)

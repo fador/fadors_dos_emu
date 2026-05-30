@@ -165,7 +165,7 @@ void printHelp(const char *programName) {
   std::printf(
     "Usage: %s [OPTIONS] <program.com|exe> [program-args...]\n"
     "\n"
-    "Fador's DOS Emulator \xe2\x80\x94 a multiplatform MS-DOS emulator written in modern C++20.\n"
+    "Fador's DOS Emulator a multiplatform MS-DOS emulator written in modern C++20.\n"
     "\n"
     "Options:\n"
     "  --help, -h, -?            Print this help message and exit.\n"

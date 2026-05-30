@@ -739,6 +739,7 @@ void DOS::handleDOSService() {
   case 0x42: // Move File Pointer
   case 0x43: // Get/Set File Attributes
   case 0x45: // Duplicate File Handle
+  case 0x46: // Force Duplicate File Handle (Redirect Handle)
   case 0x56: // Rename File
   case 0x57: // Get/Set File Date and Time
     handleFileService();
@@ -2537,6 +2538,38 @@ void DOS::handleFileService() {
       m_cpu.setReg16(cpu::AX, 0x06); // Invalid handle
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
       LOG_DOS("DOS: Duplicate handle failed for invalid handle=", handle);
+    }
+  } else if (ah == 0x46) { // Force Duplicate / Redirect Handle
+    // BX = source handle, CX = target handle
+    // Makes target handle refer to the same file/device as source.
+    // If target was open, it is closed first.
+    uint16_t srcHandle = m_cpu.getReg16(cpu::BX);
+    uint16_t dstHandle = m_cpu.getReg16(cpu::CX);
+
+    if (srcHandle >= 5 && srcHandle - 5 < m_fileHandles.size() &&
+        m_fileHandles[srcHandle - 5]) {
+      // Close target handle if it was open
+      if (dstHandle >= 5 && dstHandle - 5 < m_fileHandles.size() &&
+          m_fileHandles[dstHandle - 5]) {
+        if (m_fileHandles[dstHandle - 5].use_count() == 1 &&
+            !m_fileHandles[dstHandle - 5]->isEMSDevice())
+          m_fileHandles[dstHandle - 5]->stream.close();
+        m_fileHandles[dstHandle - 5].reset();
+      } else if (dstHandle < 5) {
+        // Closing a standard handle is a no-op for redirection
+      } else if (dstHandle - 5 >= m_fileHandles.size()) {
+        // Expand handle table to accommodate the target handle
+        m_fileHandles.resize(dstHandle - 5 + 1);
+      }
+      // Redirect: target handle now points to the same FileHandle as source
+      m_fileHandles[dstHandle - 5] = m_fileHandles[srcHandle - 5];
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      LOG_DOS("DOS: Redirected handle ", srcHandle, " -> ", dstHandle);
+    } else {
+      m_cpu.setReg16(cpu::AX, 0x06); // Invalid source handle
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      LOG_DOS("DOS: Redirect handle failed — invalid source handle=",
+              srcHandle);
     }
   } else if (ah == 0x3F) { // Read from File or Device
     uint16_t handle = m_cpu.getReg16(cpu::BX);

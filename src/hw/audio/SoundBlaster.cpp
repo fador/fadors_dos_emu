@@ -219,16 +219,18 @@ uint8_t SoundBlaster::read8(uint16_t port) {
     return m_mixerIndex;
   } else if (off == 0x05) { // Mixer Data
     return readMixerRegister(m_mixerIndex);
-  } else if (off == 0x0A) { // DSP Read Data
+  } else if (off == 0x0A) { // DSP Read Data (read) / DSP Data Write (write)
     if (!m_readQueue.empty()) {
       uint8_t val = m_readQueue.front();
       m_readQueue.pop();
       return val;
     }
     return 0xFF;
-  } else if (off == 0x0C) { // DSP Write Status
-    // Bit 7 clear = ready to accept command/data
-    return 0x00;
+  } else if (off == 0x0C) { // DSP Write Status / Read-Buffer mirror
+    // Bit 7 = 1 if read data available (for programs that poll 0x22C
+    // instead of 0x22E, like WINGS.EXE); also always clear = ready for
+    // writing (bit 7 = 0 for write-buffer-empty).
+    return m_readQueue.empty() ? 0x00 : 0x80;
   } else if (off == 0x0E) { // Read-Buffer Status / 8-bit IRQ Ack
     m_irq8Pending = false;
     if (m_irqCallback) {
@@ -268,7 +270,9 @@ void SoundBlaster::write8(uint16_t port, uint8_t value) {
       m_irq8Pending = false;
       m_irq16Pending = false;
     }
-  } else if (off == 0x0C) { // DSP Write Command/Data
+  } else if (off == 0x0A || off == 0x0C) { // DSP Write Command/Data (both ports)
+    // Port 0x22A is the alternate command port used by some programs
+    // (e.g. WINGS.EXE) instead of the standard 0x22C.
     if (m_expectedArgs > 0) {
       m_writeQueue.push(value);
       m_expectedArgs--;
@@ -384,6 +388,7 @@ void SoundBlaster::processCommand(uint8_t cmd) {
     break;
   }
   case 0x1C: { // 8-bit auto-init DMA
+    m_dmaLength = m_dmaBaseLength;
     m_autoInitDma = true;
     m_dmaActive = true;
     m_16bit = false;
@@ -510,6 +515,7 @@ void SoundBlaster::processCommand(uint8_t cmd) {
 
   // ── High-speed DMA ────────────────────────────────────────────────
   case 0x90: { // 8-bit auto-init high-speed
+    m_dmaLength = m_dmaBaseLength;
     m_autoInitDma = true;
     m_dmaActive = true;
     m_16bit = false;
@@ -527,6 +533,7 @@ void SoundBlaster::processCommand(uint8_t cmd) {
     break;
   }
   case 0x98: { // 16-bit auto-init high-speed
+    m_dmaLength = m_dmaBaseLength;
     m_autoInitDma = true;
     m_dmaActive = true;
     m_16bit = true;

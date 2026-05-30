@@ -1015,8 +1015,10 @@ void DPMI::handleTranslation() {
         handled = true;
       if (!handled && m_bios && m_bios->handleInterrupt(intNo))
         handled = true;
-      if (!handled)
-        LOG_WARN("DPMI 0300h: INT 0x", std::hex, (int)intNo, " not handled. AX=0x", reqRmEax);
+      // DPMI spec: INT 31h/0300h always succeeds — the interrupt is
+      // simulated regardless of whether our HLE handlers process it.
+      // We must always return CF=0 so the caller sees success.
+      handled = true;
     } else {
       // func == 0x0301/0x0302: Call RM procedure at CS:IP from the structure
       uint16_t rmIP = m_memory.read16(structAddr + 0x2A);
@@ -1265,7 +1267,11 @@ void DPMI::handleTranslation() {
 void DPMI::handleVersion() {
   m_cpu.setReg8(cpu::AH, 0x00); // Major
   m_cpu.setReg8(cpu::AL, 0x09); // Minor (0.9)
-  m_cpu.setReg16(cpu::BX, 0x0005); // Flags: 32-bit, no reflection
+  // DPMI spec BX flags:
+  //   bit 0: 32-bit programs supported
+  //   bit 1: processor returns to real mode on reflection (not supported)
+  //   bit 2: supports virtual memory (NOT supported — must be 0)
+  m_cpu.setReg16(cpu::BX, 0x0003); // Flags: 32-bit only
   m_cpu.setReg8(cpu::CL, 0x04);    // CPU type (486)
   m_cpu.setReg8(cpu::DH, 0x08);    // PIC master base (IRQ0 = INT 08h)
   m_cpu.setReg8(cpu::DL, 0x70);    // PIC slave base (IRQ8 = INT 70h)
