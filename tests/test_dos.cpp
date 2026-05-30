@@ -2135,3 +2135,249 @@ TEST_CASE("VROOMM: FBOV multiple overlays load independently", "[DOS][VROOMM][FB
     std::remove(fname);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// INT 21h AH=0x46 — Force Duplicate / Redirect Handle
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("DOS: Redirect Handle (AH=0x46) duplicates file access", "[DOS][File]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    bios.initialize();
+    dos.initialize();
+
+    {
+        std::ofstream ofs("redirect.txt", std::ios::binary);
+        ofs << "redirect-test-data";
+    }
+
+    const std::string fname = "REDIRECT.TXT";
+    const uint32_t fnameAddr = 0x70000;
+    for (size_t i = 0; i < fname.size(); ++i)
+        mem.write8(fnameAddr + i, fname[i]);
+    mem.write8(fnameAddr + fname.size(), 0);
+
+    // Open file -> handle A
+    cpu.setSegReg(cpu::DS, 0x7000);
+    cpu.setSegBase(cpu::DS, 0x70000);
+    cpu.setReg16(cpu::DX, 0x0000);
+    cpu.setReg8(cpu::AH, 0x3D);
+    cpu.setReg8(cpu::AL, 0x00);
+    dos.handleInterrupt(0x21);
+    REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    const uint16_t hA = cpu.getReg16(cpu::AX);
+    REQUIRE(hA >= 5);
+
+    // Redirect: make a higher handle point to the same file
+    const uint16_t hB = 20; // higher than any existing handle
+    cpu.setReg8(cpu::AH, 0x46);
+    cpu.setReg16(cpu::BX, hA);
+    cpu.setReg16(cpu::CX, hB);
+    dos.handleInterrupt(0x21);
+    REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+
+    // Read from hA: first 7 bytes
+    cpu.setSegReg(cpu::DS, 0x8000);
+    cpu.setSegBase(cpu::DS, 0x80000);
+    cpu.setReg16(cpu::DX, 0x0000);
+    cpu.setReg8(cpu::AH, 0x3F);
+    cpu.setReg16(cpu::BX, hA);
+    cpu.setReg16(cpu::CX, 7);
+    dos.handleInterrupt(0x21);
+    REQUIRE(cpu.getReg16(cpu::AX) == 7);
+    std::string partA;
+    for (int i = 0; i < 7; ++i)
+        partA += static_cast<char>(mem.read8(0x80000 + i));
+    REQUIRE(partA == "redirec");
+
+    // Read from hB: should continue from same file position
+    cpu.setSegReg(cpu::DS, 0x9000);
+    cpu.setSegBase(cpu::DS, 0x90000);
+    cpu.setReg16(cpu::DX, 0x0000);
+    cpu.setReg8(cpu::AH, 0x3F);
+    cpu.setReg16(cpu::BX, hB);
+    cpu.setReg16(cpu::CX, 15);
+    dos.handleInterrupt(0x21);
+    const uint16_t bytesB = cpu.getReg16(cpu::AX);
+    REQUIRE(bytesB > 0);
+    std::string partB;
+    for (uint16_t i = 0; i < bytesB; ++i)
+        partB += static_cast<char>(mem.read8(0x90000 + i));
+    REQUIRE(partB == "t-test-data");
+
+    // Invalid source handle fails
+    cpu.setReg8(cpu::AH, 0x46);
+    cpu.setReg16(cpu::BX, 0xFFFF);
+    cpu.setReg16(cpu::CX, hA);
+    dos.handleInterrupt(0x21);
+    REQUIRE(cpu.getEFLAGS() & cpu::FLAG_CARRY);
+    REQUIRE(cpu.getReg16(cpu::AX) == 0x06);
+
+    // Cleanup
+    for (auto h : {hA, hB}) {
+        cpu.setReg8(cpu::AH, 0x3E);
+        cpu.setReg16(cpu::BX, h);
+        dos.handleInterrupt(0x21);
+        REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    }
+    std::remove("redirect.txt");
+}
+
+TEST_CASE("DOS: Redirect handle closes and replaces target", "[DOS][File]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    bios.initialize();
+    dos.initialize();
+
+    { std::ofstream("f1.txt", std::ios::binary) << "FileOne"; }
+    { std::ofstream("f2.txt", std::ios::binary) << "FileTwo"; }
+
+    auto openFile = [&](const std::string& name) -> uint16_t {
+        const uint32_t addr = 0x70000;
+        for (size_t i = 0; i < name.size(); ++i)
+            mem.write8(addr + i, name[i]);
+        mem.write8(addr + name.size(), 0);
+        cpu.setSegReg(cpu::DS, 0x7000);
+        cpu.setSegBase(cpu::DS, 0x70000);
+        cpu.setReg16(cpu::DX, 0x0000);
+        cpu.setReg8(cpu::AH, 0x3D);
+        cpu.setReg8(cpu::AL, 0x00);
+        dos.handleInterrupt(0x21);
+        REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+        return cpu.getReg16(cpu::AX);
+    };
+
+    auto readAll = [&](uint16_t h) -> std::string {
+        cpu.setSegReg(cpu::DS, 0x8000);
+        cpu.setSegBase(cpu::DS, 0x80000);
+        cpu.setReg16(cpu::DX, 0x0000);
+        cpu.setReg8(cpu::AH, 0x3F);
+        cpu.setReg16(cpu::BX, h);
+        cpu.setReg16(cpu::CX, 20);
+        dos.handleInterrupt(0x21);
+        std::string s;
+        for (uint16_t i = 0; i < cpu.getReg16(cpu::AX); ++i)
+            s += static_cast<char>(mem.read8(0x80000 + i));
+        return s;
+    };
+
+    uint16_t h1 = openFile("F1.TXT");
+    uint16_t h2 = openFile("F2.TXT");
+
+    // Before redirect: h1 reads "FileOne", h2 reads "FileTwo"
+    REQUIRE(readAll(h1) == "FileOne");
+    REQUIRE(readAll(h2) == "FileTwo");
+
+    // Reopen f1 fresh
+    uint16_t h1fresh = openFile("F1.TXT");
+
+    // Redirect h2 -> h1fresh: h2 now points to f1
+    cpu.setReg8(cpu::AH, 0x46);
+    cpu.setReg16(cpu::BX, h1fresh);
+    cpu.setReg16(cpu::CX, h2);
+    dos.handleInterrupt(0x21);
+    REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+
+    // h2 now reads "FileOne" instead of "FileTwo"
+    REQUIRE(readAll(h2) == "FileOne");
+
+    for (auto h : {h1, h2, h1fresh}) {
+        cpu.setReg8(cpu::AH, 0x3E);
+        cpu.setReg16(cpu::BX, h);
+        dos.handleInterrupt(0x21);
+    }
+    std::remove("f1.txt");
+    std::remove("f2.txt");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INT 21h AH=0x29 — Parse Filename into FCB
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("DOS: Parse Filename (AH=0x29) into FCB", "[DOS][FCB]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    bios.initialize();
+    dos.initialize();
+
+    const uint32_t srcAddr = 0x70000;
+    const uint32_t fcbAddr = 0x80000;
+
+    auto testParse = [&](const std::string& src, uint8_t flags,
+                         uint8_t expectedDrive, const std::string& expectedName,
+                         const std::string& expectedExt, bool expectWild) {
+        for (size_t i = 0; i < src.size(); ++i)
+            mem.write8(srcAddr + i, static_cast<uint8_t>(src[i]));
+        mem.write8(srcAddr + src.size(), 0);
+        for (int i = 0; i < 36; ++i)
+            mem.write8(fcbAddr + i, 0xFF);
+
+        cpu.setSegReg(cpu::DS, 0x7000);
+        cpu.setSegBase(cpu::DS, 0x70000);
+        cpu.setReg16(cpu::SI, 0x0000);
+        cpu.setSegReg(cpu::ES, 0x8000);
+        cpu.setSegBase(cpu::ES, 0x80000);
+        cpu.setReg16(cpu::DI, 0x0000);
+        cpu.setReg8(cpu::AH, 0x29);
+        cpu.setReg8(cpu::AL, flags);
+        dos.handleInterrupt(0x21);
+
+        REQUIRE(cpu.getReg8(cpu::AL) == (expectWild ? 0xFF : 0x00));
+        REQUIRE(mem.read8(fcbAddr + 0x00) == expectedDrive);
+        for (size_t i = 0; i < 8; ++i)
+            REQUIRE(mem.read8(fcbAddr + 1 + i) ==
+                    static_cast<uint8_t>(expectedName[i]));
+        for (size_t i = 0; i < 3; ++i)
+            REQUIRE(mem.read8(fcbAddr + 9 + i) ==
+                    static_cast<uint8_t>(expectedExt[i]));
+        REQUIRE(mem.read16(fcbAddr + 0x0C) == 0x0000);
+        REQUIRE(mem.read8(fcbAddr + 0x20) == 0x00);
+    };
+
+    SECTION("drive + name + extension") {
+        testParse("C:MYFILE .TXT", 0x01, 0x03, "MYFILE  ", "TXT", false);
+    }
+
+    SECTION("no drive letter") {
+        testParse("NOEXT.TXT", 0x01, 0x00, "NOEXT   ", "TXT", false);
+    }
+
+    SECTION("'?' wildcard in name") {
+        testParse("A:TEST??.DAT", 0x01, 0x01, "TEST??  ", "DAT", true);
+    }
+
+    SECTION("'*' wildcard fills name with '?'") {
+        testParse("B:STAR*.DAT", 0x01, 0x02, "STAR????", "DAT", true);
+    }
+
+    SECTION("'*' wildcard in extension") {
+        testParse("C:NOEXT.*", 0x01, 0x03, "NOEXT   ", "???", true);
+    }
+
+    SECTION("flag bit 1: don't set drive if absent") {
+        testParse("TEST.TXT", 0x03, 0xFF, "TEST    ", "TXT", false);
+    }
+
+    SECTION("flag bit 2: don't modify filename") {
+        testParse("DATA.TXT", 0x05, 0x00, "\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF", "TXT", false);
+    }
+
+    SECTION("flag bit 3: don't modify extension") {
+        testParse("DATA.TXT", 0x09, 0x00, "DATA    ", "\xFF\xFF\xFF", false);
+    }
+}
+

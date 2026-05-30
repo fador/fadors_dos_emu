@@ -545,6 +545,137 @@ void DOS::handleDOSService() {
     break;
   }
 
+  case 0x29: { // Parse Filename into FCB
+    // Input:  AL = parse flags, DS:SI -> source string, ES:DI -> FCB
+    // Output: AL = 0x00 (no wildcards) or 0xFF (wildcards found)
+    //         DS:SI points past parsed filename, ES:DI filled FCB
+    uint8_t flags = m_cpu.getReg8(cpu::AL);
+    uint32_t srcAddr = m_cpu.getSegBase(cpu::DS) + m_cpu.getReg16(cpu::SI);
+    uint32_t fcbAddr = m_cpu.getSegBase(cpu::ES) + m_cpu.getReg16(cpu::DI);
+
+    // Read source string NUL-terminated (max 128 bytes to be safe)
+    std::string src;
+    src.reserve(128);
+    for (uint32_t i = 0; i < 128; ++i) {
+      uint8_t ch = m_memory.read8(srcAddr + i);
+      if (ch == 0) break;
+      src.push_back(static_cast<char>(ch));
+    }
+
+    size_t pos = 0;
+    bool hasWildcards = false;
+
+    // Skip leading separators if flag bit 0 is set
+    if (flags & 0x01) {
+      while (pos < src.size() &&
+             (src[pos] == ' ' || src[pos] == '\t' ||
+              src[pos] == ':' || src[pos] == ';' ||
+              src[pos] == ',' || src[pos] == '=' ||
+              src[pos] == '+'))
+        ++pos;
+    }
+
+    // Parse optional drive letter (e.g., "C:" or "A:")
+    uint8_t driveByte = 0;
+    if (pos + 1 < src.size() && src[pos + 1] == ':') {
+      char driveLetter = static_cast<char>(std::toupper(static_cast<unsigned char>(src[pos])));
+      if (driveLetter >= 'A' && driveLetter <= 'Z') {
+        driveByte = static_cast<uint8_t>(driveLetter - 'A' + 1);
+        pos += 2; // skip "X:"
+      }
+    }
+
+    // Parse filename (up to 8 chars)
+    std::string name(8, ' ');
+    size_t nameIdx = 0;
+    while (pos < src.size() && nameIdx < 8) {
+      char ch = static_cast<char>(std::toupper(static_cast<unsigned char>(src[pos])));
+      if (ch == '.') break; // extension follows
+      // Common filename terminators
+      if (ch == ' ' || ch == '\t' || ch == '/' || ch == '\\' ||
+          ch == ':' || ch == ';' || ch == ',' || ch == '=' ||
+          ch == '+' || ch == '\0')
+        break;
+      // Check for wildcards
+      if (ch == '*' || ch == '?') hasWildcards = true;
+      // '*' in filename means fill rest with '?'
+      if (ch == '*') {
+        while (nameIdx < 8) name[nameIdx++] = '?';
+        ++pos; // skip the '*'
+        // If next char is '.', skip to extension parsing
+        if (pos < src.size() && src[pos] == '.') ++pos; // let extension parsing start
+        break;
+      }
+      name[nameIdx++] = ch;
+      ++pos;
+    }
+
+    // Parse extension (up to 3 chars) if '.' is found
+    std::string ext(3, ' ');
+    if (pos < src.size() && src[pos] == '.') {
+      ++pos; // skip '.'
+      size_t extIdx = 0;
+      while (pos < src.size() && extIdx < 3) {
+        char ch = static_cast<char>(std::toupper(static_cast<unsigned char>(src[pos])));
+        if (ch == ' ' || ch == '\t' || ch == '/' || ch == '\\' ||
+            ch == ':' || ch == ';' || ch == ',' || ch == '=' ||
+            ch == '+' || ch == '\0' || ch == '.')
+          break;
+        if (ch == '*' || ch == '?') hasWildcards = true;
+        if (ch == '*') {
+          while (extIdx < 3) ext[extIdx++] = '?';
+          ++pos;
+          break;
+        }
+        ext[extIdx++] = ch;
+        ++pos;
+      }
+    }
+
+    // Skip any remaining characters until a terminator
+    while (pos < src.size()) {
+      char ch = src[pos];
+      if (ch == ' ' || ch == '\t' || ch == '/' || ch == '\\' ||
+          ch == ':' || ch == ';' || ch == ',' || ch == '=' ||
+          ch == '+' || ch == '\0')
+        break;
+      ++pos;
+    }
+
+    // Write FCB (36 bytes)
+    // Offset 0: Drive number
+    if (!(flags & 0x02) || driveByte != 0)
+      m_memory.write8(fcbAddr + 0x00, driveByte);
+    else
+      m_memory.write8(fcbAddr + 0x00, 0);
+
+    // Offset 1-8: Filename
+    if (!(flags & 0x04)) {
+      for (int i = 0; i < 8; ++i)
+        m_memory.write8(fcbAddr + 0x01 + i, static_cast<uint8_t>(name[i]));
+    }
+    // Offset 9-11: Extension
+    if (!(flags & 0x08)) {
+      for (int i = 0; i < 3; ++i)
+        m_memory.write8(fcbAddr + 0x09 + i, static_cast<uint8_t>(ext[i]));
+    }
+    // Offset 0x0C-0x0D: Current block — zero
+    m_memory.write16(fcbAddr + 0x0C, 0);
+    // Offset 0x0E-0x0F: Record size — leave as-is (caller sets it)
+    // Offset 0x20: Current record — zero
+    m_memory.write8(fcbAddr + 0x20, 0);
+
+    // Advance DS:SI past the parsed filename
+    m_cpu.setReg16(cpu::SI, static_cast<uint16_t>(
+        m_cpu.getReg16(cpu::SI) + static_cast<uint16_t>(pos)));
+
+    // Set result: AL = 0xFF if wildcards found, else 0x00
+    m_cpu.setReg8(cpu::AL, hasWildcards ? 0xFF : 0x00);
+    LOG_DOS("DOS: Parse Filename '", src, "' -> FCB drive=", (int)driveByte,
+            " name='", name, "' ext='", ext, "' wild=", hasWildcards);
+    break;
+  }
+
   case 0x2E: { // Set/Reset Verify Flag (Not implemented)
     LOG_DOS("DOS: Set/Reset Verify Flag (AH=2Eh) - Not implemented");
     break;
