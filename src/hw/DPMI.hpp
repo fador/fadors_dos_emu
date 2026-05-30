@@ -103,6 +103,18 @@ private:
   // Processor exception handler vectors (INT 31h AX=0202h/0203h)
   std::array<PMVector, 32> m_excVectors{};
 
+  // Real-mode callback registry (INT 31h AX=0303h)
+  // Stores the PM handler address for each allocated callback.
+  // The callback stub at F000:(0x0060 + index*16) uses vector 0x60+index.
+  static constexpr int MAX_RM_CALLBACKS = 8;
+  struct RMCallback {
+    bool allocated = false;
+    uint16_t pmSelector = 0;
+    uint32_t pmOffset = 0;
+  };
+  std::array<RMCallback, MAX_RM_CALLBACKS> m_rmCallbacks{};
+  int m_nextCallbackIdx = 0;
+
   // Virtual interrupt flag
   bool m_virtualIF = true;
   uint16_t m_coprocessorClientFlags = 0x0001;

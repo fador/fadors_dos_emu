@@ -683,7 +683,27 @@ void DPMI::handleInterruptVectors() {
     uint16_t cs = m_cpu.getReg16(cpu::CX);
     uint16_t ip = m_cpu.getReg16(cpu::DX);
     m_memory.write16(vec * 4, ip);
-    m_memory.write16(vec * 4 + 2, cs);
+    m_memory.write16(vec * 4 + 2, cs);    
+    // If the target is a registered real-mode callback address (from INT
+    // 31h/0303h), also update the PM IDT for this vector so that
+    // triggerInterrupt() in PM dispatches directly to the PM handler.
+    // This is how Allegro hooks INT 1Ch for its music timer callback.
+    if (cs == 0xF000 && ip >= 0x0060 &&
+        ip < 0x0060 + MAX_RM_CALLBACKS * 16) {
+      int idx = (ip - 0x0060) / 16;
+      if (idx < MAX_RM_CALLBACKS && m_rmCallbacks[idx].allocated) {
+        uint16_t pmSel = m_rmCallbacks[idx].pmSelector;
+        uint32_t pmOff = m_rmCallbacks[idx].pmOffset;
+        uint32_t idtAddr = IDT_PM_PHYS + static_cast<uint32_t>(vec) * 8;
+        uint32_t low = (static_cast<uint32_t>(pmSel) << 16) | (pmOff & 0xFFFF);
+        uint32_t high = (pmOff & 0xFFFF0000) | 0x0000EE00;
+        m_memory.write32(idtAddr, low);
+        m_memory.write32(idtAddr + 4, high);
+        m_pmVectors[vec] = {pmSel, pmOff};
+        LOG_DEBUG("DPMI 0201h: callback installed for vec=0x",
+                  std::hex, (int)vec, " PM=", pmSel, ":", pmOff);
+      }
+    }    
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
     break;
   }
@@ -1175,9 +1195,35 @@ void DPMI::handleTranslation() {
     m_in030xHandler = false;
     break;
   }
-  case 0x0303: { // Allocate Real Mode Callback Address
+  case 0x0303: { // Allocate Real Mode Callback Address    
+    // DS:ESI = PM callback CS:EIP (the function to call from real mode)
+    uint16_t pmSel = m_cpu.getSegReg(cpu::DS);
+    uint32_t pmOff = m_is32BitClient ? m_cpu.getReg32(cpu::ESI)
+                                      : m_cpu.getReg16(cpu::SI);
+    // Allocate a callback slot
+    int idx = m_nextCallbackIdx;
+    if (idx >= MAX_RM_CALLBACKS) {
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      m_cpu.setReg16(cpu::AX, 0x8015); // No free callbacks
+      break;
+    }
+    m_nextCallbackIdx++;
+    m_rmCallbacks[idx] = {true, pmSel, pmOff};
+    // Callback stub is at F000:(0x0060 + idx*16).  The HLE stub there
+    // has vector 0x60+idx encoded.  Set up the PM IDT so the HLE trap
+    // can dispatch directly to the PM handler.
+    uint8_t vec = static_cast<uint8_t>(0x60 + idx);
+    uint32_t idtAddr = IDT_PM_PHYS + static_cast<uint32_t>(vec) * 8;
+    uint32_t low = (static_cast<uint32_t>(pmSel) << 16) | (pmOff & 0xFFFF);
+    uint32_t high = (pmOff & 0xFFFF0000) | 0x0000EE00; // 32-bit interrupt gate
+    m_memory.write32(idtAddr, low);
+    m_memory.write32(idtAddr + 4, high);
+    m_pmVectors[vec] = {pmSel, pmOff};
+    LOG_DEBUG("DPMI 0303h: callback #", idx, " PM=", std::hex, pmSel, ":", pmOff,
+              " vec=0x", (int)vec);
+              
     m_cpu.setReg16(cpu::CX, 0xF000);
-    m_cpu.setReg16(cpu::DX, 0x0060);
+    m_cpu.setReg16(cpu::DX, static_cast<uint16_t>(0x0060 + idx * 16));
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
     break;
   }

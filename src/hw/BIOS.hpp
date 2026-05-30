@@ -117,6 +117,7 @@ private:
     void handleVideoService();      // INT 10h
     void handleKeyboardIRQ();       // INT 09h
     void handleKeyboardService();   // INT 16h
+    static uint8_t scancodeToAscii(uint8_t scancode, uint8_t shiftFlags);
     void handleMouseService();      // INT 33h
     void handleTimeService();       // INT 1Ah
     void handleDiskService();       // INT 13h

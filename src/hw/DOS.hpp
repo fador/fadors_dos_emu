@@ -165,6 +165,11 @@ private:
   KeyboardController *m_kbd = nullptr;
   std::function<void()> m_pollInput;
   std::function<void()> m_idleCallback;
+  // Extended key handling for INT 21h AH=07h/08h
+  // When DOS reads a key with ASCII=0 (extended key like arrow keys),
+  // it returns AL=0 on the first call and the scancode on the next call.
+  bool m_hasPendingExtKey = false;
+  uint8_t m_pendingExtScancode = 0;
   // VROOMM State
   std::string m_programPath;
   uint16_t m_neAlignShift = 0;

@@ -153,7 +153,8 @@ bool BIOS::handleInterrupt(uint8_t vector) {
     m_memory.write16(0x46C, static_cast<uint16_t>(lo & 0xFFFF));
     if ((lo & 0xFFFF) == 0)
       m_memory.write16(0x46E, m_memory.read16(0x46E) + 1);
-    // INT 1Ch (user timer hook) is a no-op stub in our HLE.
+    // INT 1Ch (user timer hook) is dispatched via triggerInterrupt(0x1C)
+    // in the injectHardwareInterrupt HLE path (InstructionDecoder.cpp).
     // Send EOI to master PIC so the ISR bit is cleared and future
     // timer ticks can be delivered.
     m_pic.write8(0x20, 0x20);
@@ -201,6 +202,36 @@ bool BIOS::handleInterrupt(uint8_t vector) {
   }
   }
   return false;
+}
+
+uint8_t BIOS::scancodeToAscii(uint8_t scancode, uint8_t shiftFlags) {
+  bool shift = (shiftFlags & 0x03) != 0;
+  // Unshifted scancode → ASCII lookup table (scancodes 0x01–0x39)
+  static const uint8_t unshifted[] = {
+      0x00, 0x1B, '1',  '2',  '3',  '4',  '5',  '6',  // 01-08
+      '7',  '8',  '9',  '0',  '-',  '=',  0x08, 0x09, // 09-0F
+      'q',  'w',  'e',  'r',  't',  'y',  'u',  'i',  // 10-17
+      'o',  'p',  '[',  ']',  0x0D, 0x00, 'a',  's',  // 18-1F
+      'd',  'f',  'g',  'h',  'j',  'k',  'l',  ';',  // 20-27
+      '\'', '`',  0x00, '\\', 'z',  'x',  'c',  'v',  // 28-2F
+      'b',  'n',  'm',  ',',  '.',  '/',  0x00, '*',  // 30-37
+      ' ',                                              // 39
+  };
+  static const uint8_t shifted[] = {
+      0x00, 0x1B, '!',  '@',  '#',  '$',  '%',  '^',  // 01-08
+      '&',  '*',  '(',  ')',  '_',  '+',  0x08, 0x09, // 09-0F
+      'Q',  'W',  'E',  'R',  'T',  'Y',  'U',  'I',  // 10-17
+      'O',  'P',  '{',  '}',  0x0D, 0x00, 'A',  'S',  // 18-1F
+      'D',  'F',  'G',  'H',  'J',  'K',  'L',  ':',  // 20-27
+      '"',  '~',  0x00, '|',  'Z',  'X',  'C',  'V',  // 28-2F
+      'B',  'N',  'M',  '<',  '>',  '?',  0x00, '*',  // 30-37
+      ' ',                                              // 39
+  };
+  if (scancode >= 0x01 && scancode <= 0x39) {
+    return shift ? shifted[scancode - 1] : unshifted[scancode - 1];
+  }
+  // F1-F10 (0x3B-0x44), extended keys, etc. → ASCII 0
+  return 0;
 }
 
 void BIOS::handleKeyboardIRQ() {
@@ -342,24 +373,33 @@ void BIOS::handleKeyboardIRQ() {
       return;
     }
 
-    // Enqueue into BIOS keyboard buffer (circular, 16 entries at 0x41E)
-    uint16_t head = m_memory.read16(0x41A);
-    uint16_t tail = m_memory.read16(0x41C);
-    // Sanity-check pointers; if corrupted, reset the buffer.
-    if (head < 0x1E || head >= 0x3E || tail < 0x1E || tail >= 0x3E ||
-        (head & 1) || (tail & 1)) {
-      LOG_ERROR("BIOS kbd buffer corrupted: head=0x", std::hex, head,
-                " tail=0x", tail, " — resetting");
-      m_memory.write16(0x41A, 0x001E);
-      m_memory.write16(0x41C, 0x001E);
-      head = 0x1E;
-      tail = 0x1E;
-    }
-    uint16_t nextTail = tail + 2;
-    if (nextTail >= 0x3E) nextTail = 0x1E;
-    if (nextTail != head) {
-      m_memory.write16(0x400 + tail, scancode);
-      m_memory.write16(0x41C, nextTail);
+    // Only enqueue make codes (key press).  Break codes (key release) must
+    // NOT be placed in the BIOS keyboard buffer — real BIOS never does this.
+    if (isPressed) {
+      // Convert scancode to ASCII using shift-aware lookup table
+      uint8_t ascii = scancodeToAscii(scancode, shiftFlags);
+
+      // Enqueue into BIOS keyboard buffer (circular, 16 entries at 0x41E)
+      // Format: low byte = ASCII, high byte = scancode
+      uint16_t head = m_memory.read16(0x41A);
+      uint16_t tail = m_memory.read16(0x41C);
+      // Sanity-check pointers; if corrupted, reset the buffer.
+      if (head < 0x1E || head >= 0x3E || tail < 0x1E || tail >= 0x3E ||
+          (head & 1) || (tail & 1)) {
+        LOG_ERROR("BIOS kbd buffer corrupted: head=0x", std::hex, head,
+                  " tail=0x", tail, " — resetting");
+        m_memory.write16(0x41A, 0x001E);
+        m_memory.write16(0x41C, 0x001E);
+        head = 0x1E;
+        tail = 0x1E;
+      }
+      uint16_t nextTail = tail + 2;
+      if (nextTail >= 0x3E) nextTail = 0x1E;
+      if (nextTail != head) {
+        uint16_t keyWord = (static_cast<uint16_t>(scancode) << 8) | ascii;
+        m_memory.write16(0x400 + tail, keyWord);
+        m_memory.write16(0x41C, nextTail);
+      }
     }
   }
   LOG_DEBUG("BIOS INT 09h: scancode=0x", std::hex, (int)scancode,

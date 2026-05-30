@@ -317,6 +317,11 @@ void DOS::handleDOSService() {
     terminateProcess(0);
     return;
   case 0x01: { // Read Character with Echo (blocking)
+    if (m_hasPendingExtKey) {
+      m_hasPendingExtKey = false;
+      m_cpu.setReg8(cpu::AL, m_pendingExtScancode);
+      break;
+    }
     if (!m_kbd || !m_kbd->hasKey()) {
       if (m_pollInput)
         m_pollInput();
@@ -328,6 +333,10 @@ void DOS::handleDOSService() {
     }
     {
       auto [ascii, scancode] = m_kbd->popKey();
+      if (ascii == 0 && scancode != 0) {
+        m_hasPendingExtKey = true;
+        m_pendingExtScancode = scancode;
+      }
       m_cpu.setReg8(cpu::AL, ascii);
       if (ascii >= 0x20)
         writeCharToVRAM(ascii);
@@ -344,23 +353,40 @@ void DOS::handleDOSService() {
     if (dl != 0xFF) {
       writeCharToVRAM(dl);
     } else {
-      if (m_kbd && !m_kbd->hasKey() && m_pollInput)
-        m_pollInput();
-      if (m_idleCallback)
-        m_idleCallback();
-      if (m_kbd && m_kbd->hasKey()) {
-        auto [ascii, scancode] = m_kbd->popKey();
-        m_cpu.setReg8(cpu::AL, ascii);
+      if (m_hasPendingExtKey) {
+        m_hasPendingExtKey = false;
+        m_cpu.setReg8(cpu::AL, m_pendingExtScancode);
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_ZERO);
       } else {
-        m_cpu.setReg8(cpu::AL, 0);
-        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_ZERO);
+        if (m_kbd && !m_kbd->hasKey() && m_pollInput)
+          m_pollInput();
+        if (m_idleCallback)
+          m_idleCallback();
+        if (m_kbd && m_kbd->hasKey()) {
+          auto [ascii, scancode] = m_kbd->popKey();
+          if (ascii == 0 && scancode != 0) {
+            m_hasPendingExtKey = true;
+            m_pendingExtScancode = scancode;
+          }
+          m_cpu.setReg8(cpu::AL, ascii);
+          m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_ZERO);
+        } else {
+          m_cpu.setReg8(cpu::AL, 0);
+          m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_ZERO);
+        }
       }
     }
     break;
   }
   case 0x07:   // Direct Character Input (no echo, no Ctrl-C check)
   case 0x08: { // Character Input (no echo, Ctrl-C check)
+    // If a pending extended key scancode exists from a previous call
+    // (AL=0 returned, scancode deferred), return it now.
+    if (m_hasPendingExtKey) {
+      m_hasPendingExtKey = false;
+      m_cpu.setReg8(cpu::AL, m_pendingExtScancode);
+      break;
+    }
     if (!m_kbd || !m_kbd->hasKey()) {
       if (m_pollInput)
         m_pollInput();
@@ -374,6 +400,12 @@ void DOS::handleDOSService() {
     }
     {
       auto [ascii, scancode] = m_kbd->popKey();
+      // DOS extended key protocol: when ASCII=0 and scancode!=0,
+      // return AL=0 now and defer the scancode for the next call.
+      if (ascii == 0 && scancode != 0) {
+        m_hasPendingExtKey = true;
+        m_pendingExtScancode = scancode;
+      }
       m_cpu.setReg8(cpu::AL, ascii);
     }
     break;
