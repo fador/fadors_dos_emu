@@ -1464,8 +1464,11 @@ void DOS::setProgramDir(const std::string &programPath) {
 
   // Update DriveManager if available
   if (m_driveManager) {
-    // Default to C: drive for program dir
     char driveLetter = 'C';
+    if (!m_driveManager->isMounted(driveLetter)) {
+      m_driveManager->mount(driveLetter, m_hostRootDir, "MS-DOS_622");
+    }
+    m_driveManager->setCurrentDrive(driveLetter);
     m_driveManager->setCurrentDir(driveLetter, m_dosCurrentDir);
   }
 }
