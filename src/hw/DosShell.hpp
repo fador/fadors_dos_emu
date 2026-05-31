@@ -40,6 +40,12 @@ public:
     bool isEchoOn() const { return m_echoOn; }
     void setEchoOn(bool on) { m_echoOn = on; }
 
+    void printChar(char c);
+    void printString(const std::string& s);
+    void printLine(const std::string& s = "");
+
+    KeyboardController& getKeyboard() { return m_kbd; }
+
 private:
     DOS& m_dos;
     DriveManager& m_driveManager;
@@ -56,10 +62,6 @@ private:
     bool m_echoOn = true;
     bool m_running = true;
     std::function<void()> m_pollInput;
-
-    void printChar(char c);
-    void printString(const std::string& s);
-    void printLine(const std::string& s = "");
 
     std::string readLine();
     std::string buildPrompt();

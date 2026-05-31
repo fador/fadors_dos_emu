@@ -206,11 +206,12 @@
   - [x] AH=3Bh/47h per-drive CWD via DriveManager
   - [x] AH=36h real disk space via `std::filesystem::space()`
   - [x] `resolvePath()` delegates to DriveManager
-- [ ] **BAT Scripting** (`src/hw/BatchInterpreter.{hpp,cpp}`)
-  - [ ] `%0`-`%9` parameter substitution
-  - [ ] `%VAR%` environment variable expansion
-  - [ ] `ECHO`, `ECHO OFF`, `@`, `REM`, `PAUSE`
-  - [ ] `GOTO` / `:labels`, `IF`, `FOR`
-  - [ ] `CALL`, `SHIFT`, `ERRORLEVEL`
-  - [ ] `CHOICE` (DOS 6.22 specific)
+- [x] **BAT Scripting** (`src/hw/BatchInterpreter.{hpp,cpp}`)
+  - [x] `%0`-`%9` parameter substitution
+  - [x] `%VAR%` environment variable expansion
+  - [x] `ECHO`, `ECHO OFF`, `@`, `REM`, `PAUSE`
+  - [x] `GOTO` / `:labels`, `IF`, `FOR`
+  - [x] `CALL`, `SHIFT`, `ERRORLEVEL`
+  - [x] `CHOICE` (DOS 6.22 specific)
+  - [x] Unit tests (`test_batch.cpp` — 36 tests)
   - [ ] Unit tests (`test_batch.cpp`)

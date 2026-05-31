@@ -1,4 +1,5 @@
 #include "DosShell.hpp"
+#include "BatchInterpreter.hpp"
 #include "BIOS.hpp"
 #include "DOS.hpp"
 #include "DriveManager.hpp"
@@ -1039,8 +1040,9 @@ int DosShell::executeExternal(const ParsedCommand& cmd)
     std::transform(lowerFound.begin(), lowerFound.end(), lowerFound.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (lowerFound.size() >= 4 && lowerFound.substr(lowerFound.size() - 4) == ".bat") {
-        printLine("Batch files not yet supported");
-        return 1;
+        BatchInterpreter batch(*this);
+        std::vector<std::string> batArgs(cmd.args.begin(), cmd.args.end());
+        return batch.execute(found, batArgs);
     }
 
     uint16_t childSeg = m_dos.allocateMemory(0xFFFF, 0xFFFF);
