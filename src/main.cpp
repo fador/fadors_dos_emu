@@ -489,28 +489,7 @@ int main(int argc, char *argv[]) {
     for (int i = 1; i < argc; ++i) {
       std::string arg = argv[i];
 
-    // Apply CLI mounts
-    for (auto& m : cliMounts) {
-      if (!driveManager.mount(m.letter, m.hostPath, m.label)) {
-        LOG_ERROR("Failed to mount ", m.letter, ": to ", m.hostPath);
-        return 1;
-      }
-    }
-
-    if (!path.empty() && std::filesystem::is_directory(path)) {
-      // Path is a directory — mount as C: and start the shell
-      std::string absDir = std::filesystem::absolute(path).string();
-      if (!driveManager.mount('C', absDir, "MS-DOS_622")) {
-        LOG_ERROR("Failed to mount directory as C:");
-        return 1;
-      }
-      driveManager.setCurrentDrive('C');
-      fador::hw::DosShell shell(dos, driveManager, loader, cpu, decoder, kbd, bios, memory);
-      shell.run();
-      return 0;
-    }
-
-    if (!path.empty()) {
+      if (!path.empty()) {
         // Program path already found – everything else belongs to the program.
         // '--' after the path is a conventional shell separator; discard it.
         if (arg == "--")
@@ -602,15 +581,30 @@ int main(int argc, char *argv[]) {
         if (cats.find("dos") != std::string::npos)
           fador::utils::enabledCategories |= fador::utils::CAT_DOS;
       } else if (arg == "--") {
-        // Explicit end-of-emulator-flags sentinel; next arg is the program
-        // path.
         if (i + 1 < argc) {
           path = argv[++i];
         }
       } else {
-        // First non-flag argument is the program path.
         path = arg;
       }
+    }
+
+    // Apply CLI mounts
+    for (auto& m : cliMounts) {
+      if (!driveManager.mount(m.letter, m.hostPath, m.label)) {
+        LOG_ERROR("Failed to mount ", m.letter, ": to ", m.hostPath);
+        return 1;
+      }
+    }
+
+    if (!path.empty() && std::filesystem::is_directory(path)) {
+      // Path is a directory — mount as C: and start the shell
+      std::string absDir = std::filesystem::absolute(path).string();
+      if (!driveManager.mount('C', absDir, "MS-DOS_622")) {
+        LOG_ERROR("Failed to mount directory as C:");
+        return 1;
+      }
+      driveManager.setCurrentDrive('C');
     }
 
     if (instructionTraceFrom && instructionTraceCount == 0) {
@@ -687,6 +681,44 @@ int main(int argc, char *argv[]) {
       dumpTextVRAM();
       return false;
     };
+
+    // Helper: set up terminal input/rendering and launch the DOS shell
+    auto launchShell = [&]() {
+      renderer.clearScreen();
+      fador::ui::InputManager input(kbd);
+      input.setBIOS(bios);
+      bios.setInputPollCallback([&input]() { input.pollInput(); });
+      dos.setKeyboard(kbd);
+      dos.setInputPollCallback([&input]() { input.pollInput(); });
+      dos.setIdleCallback([&renderer, &pit, &cpu, &kbd, &pic,
+                           &picSlave, &cmos,
+                           &dispatchPendingHardwareInterrupt]() {
+        pit.update();
+        while (pit.checkPendingIRQ0()) { pic.raiseIRQ(0); }
+        if (kbd.checkPendingIRQ()) { pic.raiseIRQ(1); }
+        cmos.advanceTime();
+        while (cmos.checkPendingIRQ8()) { picSlave.raiseIRQ(0); }
+        dispatchPendingHardwareInterrupt(false);
+        static auto lr = std::chrono::steady_clock::now();
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lr)
+                .count() > 33) {
+          renderer.render();
+          lr = now;
+        }
+      });
+      cpu.setEFLAGS(cpu.getEFLAGS() | fador::cpu::FLAG_INTERRUPT);
+      fador::hw::DosShell shell(dos, driveManager, loader, cpu, decoder, kbd, bios, memory);
+      shell.setInputPollCallback([&input]() { input.pollInput(); });
+      shell.run();
+      renderer.render(true);
+    };
+
+    if (!path.empty() && driveManager.isMounted('C')) {
+      // Directory was mounted as C: — launch shell instead of loading as program
+      launchShell();
+      return 0;
+    }
 
     if (!path.empty()) {
       bool loaded = false;
@@ -843,10 +875,6 @@ int main(int argc, char *argv[]) {
         return 0;
       }
 
-      LOG_WARN("No program specified.");
-      printHelp(argv[0]);
-      LOG_WARN("\nStarting interactive debugger with no loaded program.\n");
-
       // --exec mode: assemble, write to CS:IP, run, dump state
       if (!execAsm.empty()) {
         // Replace semicolons with newlines for multi-statement support
@@ -877,10 +905,7 @@ int main(int argc, char *argv[]) {
       }
 
       // Start shell by default if no program (DOS 6.22 COMMAND.COM equivalent)
-      {
-        fador::hw::DosShell shell(dos, driveManager, loader, cpu, decoder, kbd, bios, memory);
-        shell.run();
-      }
+      launchShell();
       return 0;
     }
 
