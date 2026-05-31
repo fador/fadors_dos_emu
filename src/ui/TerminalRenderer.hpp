@@ -31,6 +31,8 @@ private:
     std::vector<CharCell> m_lastFrame;
     int m_lastTextCols = 0;
     int m_lastTextRows = 0;
+    uint8_t m_lastCurCol = 0xFF;
+    uint8_t m_lastCurRow = 0xFF;
 
     // Graphics mode state
     static constexpr int TARGET_COLS = 80; // terminal width target for downsampled mode

@@ -308,7 +308,13 @@ int main(int argc, char *argv[]) {
     dos.initialize();
 
     fador::hw::DriveManager driveManager;
-    driveManager.mount('Z', (std::filesystem::path(argv[0]).parent_path() / "tools").string(), "FADOR_UTIL");
+    {
+      auto toolsPath = std::filesystem::path(argv[0]).parent_path() / "tools";
+      std::error_code ec;
+      if (!std::filesystem::exists(toolsPath, ec))
+        std::filesystem::create_directories(toolsPath, ec);
+      driveManager.mount('Z', toolsPath.string(), "FADOR_UTIL");
+    }
     dos.setDriveManager(&driveManager);
 
     // Set up CMOS memory sizing after BIOS/DOS init

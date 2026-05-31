@@ -67,7 +67,23 @@ void TerminalRenderer::renderTextMode(bool force) {
         }
     }
 
-    if (!changed) return;
+    uint8_t curCol = m_memory.read8(0x450);
+    uint8_t curRow = m_memory.read8(0x451);
+
+    if (!changed) {
+        // Only the cursor moved — reposition without repainting
+        std::string buf;
+        buf += "\033[";
+        buf += std::to_string(curRow + 1);
+        buf += ";";
+        buf += std::to_string(curCol + 1);
+        buf += "H";
+        std::cout.write(buf.data(), buf.size());
+        std::cout.flush();
+        m_lastCurCol = curCol;
+        m_lastCurRow = curRow;
+        return;
+    }
 
     std::string buf;
     buf.reserve(cols * rows * 4);
@@ -93,14 +109,14 @@ void TerminalRenderer::renderTextMode(bool force) {
     }
     buf += "\033[0m";
     // Position terminal cursor at the emulated cursor position
-    uint8_t curRow = m_memory.read8(0x451);
-    uint8_t curCol = m_memory.read8(0x450);
     buf += "\033[";
     buf += std::to_string(curRow + 1);
     buf += ";";
     buf += std::to_string(curCol + 1);
     buf += "H";
     buf += "\033[?25h"; // Show cursor
+    m_lastCurCol = curCol;
+    m_lastCurRow = curRow;
     std::cout.write(buf.data(), buf.size());
     std::cout.flush();
 }
