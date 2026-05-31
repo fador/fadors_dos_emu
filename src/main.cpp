@@ -29,6 +29,7 @@
 #ifdef _WIN32
 #include <crtdbg.h>
 #include <cstdlib>
+#include <windows.h>
 #endif
 #ifdef HAVE_SDL2
 #include "ui/SDLRenderer.hpp"
@@ -245,6 +246,8 @@ int main(int argc, char *argv[]) {
     _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_DEBUG);
     _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
     _set_error_mode(_OUT_TO_STDERR);
+    // Set console output to UTF-8 so CP437 characters render correctly
+    SetConsoleOutputCP(CP_UTF8);
 #endif
 
     fador::utils::currentLevel = fador::utils::LogLevel::Info;
