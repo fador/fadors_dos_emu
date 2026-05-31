@@ -710,6 +710,23 @@ int main(int argc, char *argv[]) {
       cpu.setEFLAGS(cpu.getEFLAGS() | fador::cpu::FLAG_INTERRUPT);
       fador::hw::DosShell shell(dos, driveManager, loader, cpu, decoder, kbd, bios, memory);
       shell.setInputPollCallback([&input]() { input.pollInput(); });
+      shell.setIdleCallback([&renderer, &pit, &cpu, &kbd, &pic,
+                             &picSlave, &cmos,
+                             &dispatchPendingHardwareInterrupt]() {
+        pit.update();
+        while (pit.checkPendingIRQ0()) { pic.raiseIRQ(0); }
+        if (kbd.checkPendingIRQ()) { pic.raiseIRQ(1); }
+        cmos.advanceTime();
+        while (cmos.checkPendingIRQ8()) { picSlave.raiseIRQ(0); }
+        dispatchPendingHardwareInterrupt(false);
+        static auto lr = std::chrono::steady_clock::now();
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lr)
+                .count() > 33) {
+          renderer.render();
+          lr = now;
+        }
+      });
       shell.run();
       renderer.render(true);
     };

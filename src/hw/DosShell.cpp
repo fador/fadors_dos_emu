@@ -165,9 +165,11 @@ std::string DosShell::readLine()
     std::string line;
     while (true) {
         if (m_pollInput) m_pollInput();
+        if (m_idleCallback) m_idleCallback();
         while (!m_kbd.hasKey()) {
             if (m_pollInput) m_pollInput();
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            if (m_idleCallback) m_idleCallback();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         auto [ascii, scancode] = m_kbd.popKey();
         if (ascii == 0x0D) {

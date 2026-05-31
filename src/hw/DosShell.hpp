@@ -33,6 +33,7 @@ public:
     void setPromptTemplate(const std::string& tmpl);
 
     void setInputPollCallback(std::function<void()> cb) { m_pollInput = std::move(cb); }
+    void setIdleCallback(std::function<void()> cb) { m_idleCallback = std::move(cb); }
 
     int getErrorLevel() const { return m_errorLevel; }
     void setErrorLevel(int level) { m_errorLevel = level; }
@@ -62,6 +63,7 @@ private:
     bool m_echoOn = true;
     bool m_running = true;
     std::function<void()> m_pollInput;
+    std::function<void()> m_idleCallback;
 
     std::string readLine();
     std::string buildPrompt();
