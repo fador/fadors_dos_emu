@@ -661,7 +661,7 @@ TEST_CASE("INT 21h AH=30h Get DOS Version via asm", "[int][asm][dos]") {
     e.run(2);
     // Major version in AL (should be 3 or 5 depending on implementation)
     uint8_t major = e.cpu.getReg8(cpu::AL);
-    REQUIRE((major == 3 || major == 5));
+    REQUIRE((major == 3 || major == 5 || major == 6));
 }
 
 TEST_CASE("INT 21h AH=36h Get Free Disk Space via asm", "[int][asm][dos]") {

@@ -30,8 +30,9 @@
   - [x] Arithmetic (FADD, FSUB, FMUL, FDIV, FABS, FCHS, FSQRT, FPREM)
   - [x] Comparisons (FCOM, FCOMP, FCOMPP, FTST, FXAM)
   - [x] Rounding and control (FRNDINT, FWAIT, FNOP, FLDCW, FSTCW, FLDSW, FSTSW)
-  - [x] Transcendentals (FSIN, FCOS, FSINCOS, FPTAN, FPATAN, FYL2X, F2XM1)
+  - [x] Transcendentals (FSIN, FCOS, FSINCOS, FPTAN, FPATAN, FYL2X, F2XM1, FSCALE)
   - [x] Environment save/restore (FLDENV, FNSTENV, FNSAVE, FRSTOR)
+  - [x] D9 /3 FSTP ST(i) alias (Borland-compiled code)
 - [x] **Interrupt Pipeline**
   - [x] CPU exception handling
   - [x] Hardware interrupt pin routing
@@ -108,6 +109,7 @@
   - [x] Mono and stereo sample rendering
   - [x] IRQ on DMA TC and DSP block completion
   - [x] SB Pro mixer registers
+  - [x] DSP Identify command 0xE0 (SB Pro v3.01)
 - [x] **Output Mixer** — mixing AdLib + SB PCM into a single audio stream
 
 ## Phase 8: Built-in Assembler & Disassembler
@@ -170,7 +172,7 @@
 - [ ] More complete INT 10h (Video) support:
   - [x] Implement all major AH functions (mode set, cursor, page, palette, block transfer, etc.)
   - [x] Support for graphics modes (VGA, EGA, CGA)
-  - [ ] BIOS video state save/restore
+  - [x] BIOS video state save/restore (AH=1Ch)
   - [ ] VESA extensions (optional)
 - [ ] More complete INT 13h, 16h, 1Ah, 21h subfunctions
 - [ ] Fallback/logging for unhandled INTs (warn with vector/reg state)
@@ -181,3 +183,34 @@
 - [ ] Serial port (INT 14h) actual emulation
 - [ ] Parallel port (INT 17h) actual emulation
 - [ ] Network (packet driver / NE2000) emulation
+
+## Phase 12: DOS 6.22 Command Prompt (COMMAND.COM)
+- [x] **Drive Manager** (`src/hw/DriveManager.{hpp,cpp}`)
+  - [x] Drive letter → host directory mount table
+  - [x] Per-drive current working directory tracking
+  - [x] Path resolution with `..` collapse and mount-root escape prevention
+  - [x] Unit tests (`test_drive_manager.cpp`)
+- [x] **DOS Shell** (`src/hw/DosShell.{hpp,cpp}`)
+  - [x] Prompt display with `$P$G` template expansion
+  - [x] Buffered keyboard input (INT 21h AH=0Ah)
+  - [x] DOS version updated to 6.22 (AH=30h)
+  - [x] Internal commands: DIR, CD, MD, RD, COPY, DEL, REN, TYPE, TREE, MOVE
+  - [x] Internal commands: ECHO, SET, PATH, PROMPT, CLS, VER, VOL, DATE, TIME
+  - [x] Internal commands: MEM, HELP, MOUNT, UNMOUNT, EXIT, BREAK, VERIFY
+  - [x] External program execution with PATH search
+  - [x] Drive mounting via `MOUNT` command and `--mount=` CLI flag
+  - [x] Directory-as-C: mounting when directory path given as argument
+- [x] **INT 21h Updates**
+  - [x] AH=0Ah buffered keyboard input (real implementation)
+  - [x] AH=0Eh/19h drive operations delegated to DriveManager
+  - [x] AH=3Bh/47h per-drive CWD via DriveManager
+  - [x] AH=36h real disk space via `std::filesystem::space()`
+  - [x] `resolvePath()` delegates to DriveManager
+- [ ] **BAT Scripting** (`src/hw/BatchInterpreter.{hpp,cpp}`)
+  - [ ] `%0`-`%9` parameter substitution
+  - [ ] `%VAR%` environment variable expansion
+  - [ ] `ECHO`, `ECHO OFF`, `@`, `REM`, `PAUSE`
+  - [ ] `GOTO` / `:labels`, `IF`, `FOR`
+  - [ ] `CALL`, `SHIFT`, `ERRORLEVEL`
+  - [ ] `CHOICE` (DOS 6.22 specific)
+  - [ ] Unit tests (`test_batch.cpp`)

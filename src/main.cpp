@@ -11,6 +11,8 @@
 #include "hw/PIC8259.hpp"
 #include "hw/PIT8254.hpp"
 #include "hw/ProgramLoader.hpp"
+#include "hw/DriveManager.hpp"
+#include "hw/DosShell.hpp"
 #include "hw/VGAController.hpp"
 #include "hw/audio/AdLib.hpp"
 #include "hw/audio/AudioBackend.hpp"
@@ -34,6 +36,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <optional>
 #include <thread>
@@ -163,12 +166,18 @@ std::optional<uint32_t> parseLinearHexAddress(const std::string &value) {
 void printHelp(const char *programName) {
   // clang-format off
   std::printf(
-    "Usage: %s [OPTIONS] <program.com|exe> [program-args...]\n"
+    "Usage: %s [OPTIONS] [program.com|exe|directory] [program-args...]\n"
     "\n"
-    "Fador's DOS Emulator a multiplatform MS-DOS emulator written in modern C++20.\n"
+    "Fador's DOS Emulator — a multiplatform MS-DOS 6.22 emulator written in modern C++20.\n"
+    "\n"
+    "Launch modes:\n"
+    "  No arguments           Start the DOS 6.22 command prompt (Z:\\>).\n"
+    "  <directory>            Mount directory as C: and start the command prompt at C:\\>.\n"
+    "  <program.com|exe>      Load and run the program directly.\n"
     "\n"
     "Options:\n"
     "  --help, -h, -?            Print this help message and exit.\n"
+    "  --mount=L:/path           Mount host directory at drive letter L (repeatable).\n"
     "  --himem                   Enable HIMEM/XMS extended memory support.\n"
     "  --sdl                     Force the SDL graphical frontend (requires SDL2 build).\n"
     "  --no-sdl                  Force headless/text-mode execution even in SDL builds.\n"
@@ -196,26 +205,21 @@ void printHelp(const char *programName) {
     "path is forwarded verbatim to the DOS program.\n"
     "Use '--' to explicitly separate emulator flags from the program path and arguments.\n"
     "\n"
-    "Interactive debugger commands (started when no program is given):\n"
-    "  s           Single-step one instruction and print a trace line.\n"
-    "  t [n] [addr]  Trace and execute n instructions, optionally waiting for an address.\n"
-    "  c           Continue execution.\n"
-    "  r           Print all registers.\n"
-    "  d [addr]    Dump memory at address (hex).\n"
-    "  u [addr] [n]  Disassemble n instructions at address.\n"
-    "  a [addr]    Enter assembly mode (blank line to exit).\n"
-    "  w addr bytes  Write hex bytes directly to memory.\n"
-    "  q           Quit emulator.\n"
+    "DOS shell commands (when in command prompt):\n"
+    "  DIR, CD, MD, RD, COPY, DEL, REN, TYPE, TREE, MOVE, XCOPY\n"
+    "  ECHO, SET, PATH, PROMPT, CLS, VER, VOL, DATE, TIME\n"
+    "  MEM, HELP, MOUNT, UNMOUNT, BREAK, VERIFY, EXIT\n"
     "\n"
     "Examples:\n"
-    "  %s game.com\n"
+    "  %s                         Start DOS prompt at Z:\\>\n"
+    "  %s /path/to/games          Mount /path/to/games as C:, start at C:\\>\n"
+    "  %s --mount=D:/data game.com\n"
     "  %s --himem --throttle-machine=486dx2-66 doom.exe\n"
-    "  %s --sdl --debug=cpu,dos program.exe\n"
     "  %s --exec=\"MOV AX, 4C00h; INT 21h\"\n"
     "  %s --no-sdl --bench=decoder-loop --bench-steps=5000000\n",
     programName,
     throttleMachinePresetList(),
-    programName, programName, programName, programName, programName);
+    programName, programName, programName, programName, programName, programName);
   // clang-format on
 }
 
@@ -302,6 +306,10 @@ int main(int argc, char *argv[]) {
 
     bios.initialize();
     dos.initialize();
+
+    fador::hw::DriveManager driveManager;
+    driveManager.mount('Z', (std::filesystem::path(argv[0]).parent_path() / "tools").string(), "FADOR_UTIL");
+    dos.setDriveManager(&driveManager);
 
     // Set up CMOS memory sizing after BIOS/DOS init
     cmos.setBaseMemoryKB(640);
@@ -474,12 +482,35 @@ int main(int argc, char *argv[]) {
 #else
     bool useSDL = false;
 #endif
+    struct MountEntry { char letter; std::string hostPath; std::string label; };
+    std::vector<MountEntry> cliMounts;
     std::string path;
     std::string args;
     for (int i = 1; i < argc; ++i) {
       std::string arg = argv[i];
 
-      if (!path.empty()) {
+    // Apply CLI mounts
+    for (auto& m : cliMounts) {
+      if (!driveManager.mount(m.letter, m.hostPath, m.label)) {
+        LOG_ERROR("Failed to mount ", m.letter, ": to ", m.hostPath);
+        return 1;
+      }
+    }
+
+    if (!path.empty() && std::filesystem::is_directory(path)) {
+      // Path is a directory — mount as C: and start the shell
+      std::string absDir = std::filesystem::absolute(path).string();
+      if (!driveManager.mount('C', absDir, "MS-DOS_622")) {
+        LOG_ERROR("Failed to mount directory as C:");
+        return 1;
+      }
+      driveManager.setCurrentDrive('C');
+      fador::hw::DosShell shell(dos, driveManager, loader, cpu, decoder, kbd, bios, memory);
+      shell.run();
+      return 0;
+    }
+
+    if (!path.empty()) {
         // Program path already found – everything else belongs to the program.
         // '--' after the path is a conventional shell separator; discard it.
         if (arg == "--")
@@ -541,6 +572,16 @@ int main(int argc, char *argv[]) {
 #endif
       } else if (arg == "--no-sdl") {
         useSDL = false;
+      } else if (arg.find("--mount=") == 0) {
+        std::string mountSpec = arg.substr(8);
+        if (mountSpec.size() >= 3 && std::isalpha(mountSpec[0]) && mountSpec[1] == ':') {
+          char letter = static_cast<char>(std::toupper(mountSpec[0]));
+          std::string hostPath = mountSpec.substr(2);
+          cliMounts.push_back({letter, hostPath, ""});
+        } else {
+          LOG_ERROR("Invalid --mount= syntax. Use --mount=C:/path");
+          return 1;
+        }
       } else if (arg.find("--trace=") == 0) {
         fador::utils::currentLevel = fador::utils::LogLevel::Trace;
         const std::string cats = arg.substr(8);
@@ -835,8 +876,11 @@ int main(int argc, char *argv[]) {
         return 0;
       }
 
-      // Start debugger by default if no program
-      debugger.run();
+      // Start shell by default if no program (DOS 6.22 COMMAND.COM equivalent)
+      {
+        fador::hw::DosShell shell(dos, driveManager, loader, cpu, decoder, kbd, bios, memory);
+        shell.run();
+      }
       return 0;
     }
 

@@ -423,10 +423,53 @@ void DOS::handleDOSService() {
     uint32_t dx = m_cpu.getReg32(cpu::EDX);
     uint32_t bufAddr = m_cpu.getSegBase(cpu::DS) + dx;
     uint8_t maxLen = m_memory.read8(bufAddr); // First byte = max chars
-    // For now, store empty input (0 chars read, CR terminated)
-    m_memory.write8(bufAddr + 1, 0);    // Actual chars read = 0
-    m_memory.write8(bufAddr + 2, 0x0D); // CR terminator
-    LOG_DOS("DOS: Buffered Input (stubbed, max=", (int)maxLen, ")");
+    uint8_t count = 0;
+
+    while (count < maxLen) {
+      // Wait for a key
+      while (!m_kbd || !m_kbd->hasKey()) {
+        if (m_pollInput) m_pollInput();
+        if (m_idleCallback) m_idleCallback();
+        if (!m_kbd || !m_kbd->hasKey()) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+      }
+
+      auto [ascii, scancode] = m_kbd->popKey();
+
+      if (ascii == 0 && scancode != 0)
+        continue; // Skip extended keys
+
+      if (ascii == 0x03) { // Ctrl-C
+        break;
+      }
+
+      if (ascii == 0x0D) { // Enter
+        writeCharToVRAM(0x0D);
+        writeCharToVRAM(0x0A);
+        break;
+      }
+
+      if (ascii == 0x08) { // Backspace
+        if (count > 0) {
+          count--;
+          writeCharToVRAM(0x08);
+          writeCharToVRAM(' ');
+          writeCharToVRAM(0x08);
+        }
+        continue;
+      }
+
+      if (ascii >= 0x20 && ascii < 0x7F) {
+        m_memory.write8(bufAddr + 2 + count, ascii);
+        count++;
+        writeCharToVRAM(ascii);
+      }
+    }
+
+    m_memory.write8(bufAddr + 1, count);    // Actual chars read
+    m_memory.write8(bufAddr + 2 + count, 0x0D); // CR terminator
+    LOG_DOS("DOS: Buffered Input (", (int)count, " chars, max=", (int)maxLen, ")");
     break;
   }
   case 0x0B: { // Get Stdin Status
@@ -763,9 +806,9 @@ void DOS::handleDOSService() {
     break;
   }
   case 0x30: { // Get DOS Version
-    LOG_DOS("DOS: Get DOS Version (Reported: 5.0)");
-    m_cpu.setReg8(cpu::AL, 5);       // Major 5
-    m_cpu.setReg8(cpu::AH, 0);       // Minor 0
+    LOG_DOS("DOS: Get DOS Version (Reported: 6.22)");
+    m_cpu.setReg8(cpu::AL, 6);       // Major 6
+    m_cpu.setReg8(cpu::AH, 22);      // Minor 22
     m_cpu.setReg16(cpu::BX, 0xFF00); // OEM
     m_cpu.setReg16(cpu::CX, 0x0000);
     break;
@@ -1418,6 +1461,13 @@ void DOS::setProgramDir(const std::string &programPath) {
   LOG_INFO("DOS: Working directory set to '", m_currentDir, "'");
   LOG_INFO("DOS: Drive root = '", m_hostRootDir, "', DOS dir = '",
            m_dosCurrentDir, "'");
+
+  // Update DriveManager if available
+  if (m_driveManager) {
+    // Default to C: drive for program dir
+    char driveLetter = 'C';
+    m_driveManager->setCurrentDir(driveLetter, m_dosCurrentDir);
+  }
 }
 
 std::string DOS::hostToDosPath(const std::string &hostPath) {
@@ -1464,6 +1514,12 @@ std::string DOS::dosToHostPath(const std::string &dosPath) {
 }
 
 std::string DOS::resolvePath(const std::string &path) {
+  if (m_driveManager) {
+    std::string resolved = m_driveManager->resolvePath(path);
+    if (!resolved.empty())
+      return resolved;
+  }
+
   std::string resolvedStr;
   // Check for DOS drive letter prefix (e.g. "C:\foo")
   if (path.size() >= 2 && std::isalpha(static_cast<unsigned char>(path[0])) &&
@@ -1855,6 +1911,17 @@ void DOS::handleDirectoryService() {
         m_currentDir = path;
         // Update DOS-style current directory
         m_dosCurrentDir = hostToDosPath(path);
+        // Update DriveManager if available
+        if (m_driveManager) {
+          // Detect drive letter from the raw path
+          char driveLetter = 0;
+          if (rawPath.size() >= 2 && std::isalpha(static_cast<unsigned char>(rawPath[0])) && rawPath[1] == ':') {
+            driveLetter = static_cast<char>(std::toupper(static_cast<unsigned char>(rawPath[0])));
+          } else {
+            driveLetter = m_driveManager->getCurrentDriveLetter();
+          }
+          m_driveManager->setCurrentDir(driveLetter, m_dosCurrentDir);
+        }
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
         m_cpu.setReg16(cpu::AX, 0);
       } else {
@@ -1863,11 +1930,20 @@ void DOS::handleDirectoryService() {
       }
     } else if (ah == 0x47) { // GETCWD
       uint16_t si = m_cpu.getReg16(cpu::SI);
+      uint8_t dl = m_cpu.getReg8(cpu::DL);
       uint32_t outAddr = m_cpu.getSegBase(cpu::DS) + si;
 
       // DOS returns path relative to drive root (no leading backslash, no drive
       // letter)
-      std::string path = m_dosCurrentDir;
+      std::string path;
+      if (m_driveManager) {
+        uint8_t driveIdx = dl == 0 ? m_driveManager->getCurrentDriveIndex() : (dl - 1);
+        path = m_driveManager->getCurrentDir(driveIdx);
+        // Also sync local state for backward compat
+        m_dosCurrentDir = path;
+      } else {
+        path = m_dosCurrentDir;
+      }
 
       LOG_DEBUG("DOS: GETCWD returning '", path, "'");
       for (size_t i = 0; i < path.length(); ++i) {
@@ -1890,26 +1966,53 @@ void DOS::handleDriveService() {
   if (ah == 0x0E) { // Select Default Drive
     uint8_t drive = m_cpu.getReg8(cpu::DL);
     m_currentDrive = drive;
+    if (m_driveManager)
+      m_driveManager->setCurrentDrive(drive);
     LOG_DEBUG("DOS: Selected drive ", (int)m_currentDrive);
     m_cpu.setReg8(cpu::AL,
-                  5); // DOS often returns total logical drives (e.g., 5: A-E)
+                  m_driveManager ? static_cast<uint8_t>(m_driveManager->getMountedCount())
+                                 : 5); // fallback: A-E
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
   } else if (ah == 0x19) { // Get Current Default Drive
-    m_cpu.setReg8(cpu::AL, m_currentDrive);
-    LOG_DEBUG("DOS: Current drive is ", (int)m_currentDrive);
+    m_cpu.setReg8(cpu::AL, m_driveManager ? m_driveManager->getCurrentDriveIndex()
+                                          : m_currentDrive);
+    LOG_DEBUG("DOS: Current drive is ", (int)(m_driveManager ? m_driveManager->getCurrentDriveIndex() : m_currentDrive));
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
   } else if (ah == 0x36) { // Get Free Disk Space
     uint8_t drive = m_cpu.getReg8(cpu::DL);
     if (drive == 0)
-      drive = m_currentDrive + 1;
+      drive = (m_driveManager ? m_driveManager->getCurrentDriveIndex() : m_currentDrive) + 1;
 
     LOG_DEBUG("DOS: Get Free Disk Space for drive ", (int)drive);
 
-    // Mock 1GB total, 500MB free
-    // AX = Sectors per cluster
-    // BX = Number of free clusters
-    // CX = Bytes per sector
-    // DX = Total clusters
+    if (m_driveManager) {
+      char letter = static_cast<char>('A' + drive - 1);
+      std::string hostPath = m_driveManager->getHostPath(letter);
+      if (!hostPath.empty()) {
+        std::error_code ec;
+        auto space = fs::space(hostPath, ec);
+        if (!ec) {
+          constexpr uint32_t bytesPerSector = 512;
+          uint64_t totalBytes = space.capacity;
+          uint64_t freeBytes = space.available;
+          // Use 16KB clusters (32 sectors per cluster) as a reasonable default
+          constexpr uint32_t bytesPerCluster = bytesPerSector * 32;
+          uint64_t totalClusters64 = totalBytes / bytesPerCluster;
+          uint64_t freeClusters64 = freeBytes / bytesPerCluster;
+          // DOS 16-bit limits: max 65535 clusters
+          uint16_t totalClusters = totalClusters64 > 65535 ? 65535 : static_cast<uint16_t>(totalClusters64);
+          uint16_t freeClusters = freeClusters64 > 65535 ? 65535 : static_cast<uint16_t>(freeClusters64);
+          m_cpu.setReg16(cpu::AX, 32);           // Sectors per cluster
+          m_cpu.setReg16(cpu::BX, freeClusters); // Free clusters
+          m_cpu.setReg16(cpu::CX, bytesPerSector); // Bytes per sector
+          m_cpu.setReg16(cpu::DX, totalClusters);  // Total clusters
+          m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+          return;
+        }
+      }
+    }
+
+    // Fallback: Mock 1GB total, 500MB free
     m_cpu.setReg16(cpu::AX, 32);    // 32 sectors/cluster (16KB clusters)
     m_cpu.setReg16(cpu::BX, 32768); // 32768 free clusters (512MB)
     m_cpu.setReg16(cpu::CX, 512);   // 512 bytes/sector

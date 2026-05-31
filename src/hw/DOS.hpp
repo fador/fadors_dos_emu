@@ -2,6 +2,7 @@
 #include "../cpu/CPU.hpp"
 #include "../memory/MemoryBus.hpp"
 #include "../memory/himem/HIMEM.hpp"
+#include "DriveManager.hpp"
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -35,6 +36,10 @@ public:
   // DPMI host wiring
   void setDPMI(DPMI *dpmi) { m_dpmi = dpmi; }
 
+  // Drive manager wiring
+  void setDriveManager(DriveManager *dm) { m_driveManager = dm; }
+  DriveManager *getDriveManager() { return m_driveManager; }
+
   // Access to HIMEM (XMS) for BIOS dispatch wiring
   memory::HIMEM *getHIMEM() { return m_himem.get(); }
 
@@ -42,6 +47,7 @@ public:
   void initialize();
 
   bool isTerminated() const { return m_terminated; }
+  void resetTerminated() { m_terminated = false; }
   uint8_t getExitCode() const { return m_exitCode; }
   uint16_t getPSPSegment() const { return m_pspSegment; }
   void setPSPSegment(uint16_t seg) {
@@ -129,6 +135,8 @@ public:
   // Set the working directory to the program's parent directory
   void setProgramDir(const std::string &programPath);
 
+  void writeCharToVRAM(uint8_t c); // Teletype-style output to B800 VRAM
+
   // Memory Control Block (MCB)
   struct MCB {
     uint8_t type;   // 'M' (0x4D) or 'Z' (0x5A)
@@ -146,6 +154,7 @@ private:
   // HIMEM (XMS) support
   std::unique_ptr<memory::HIMEM> m_himem;
   DPMI *m_dpmi = nullptr;
+  DriveManager *m_driveManager = nullptr;
   cpu::CPU &m_cpu;
   memory::MemoryBus &m_memory;
   std::string m_currentDir = "."; // Host filesystem working directory
@@ -216,7 +225,6 @@ private:
   // Helpers
   std::string readDOSString(uint32_t address); // Read '$' terminated string
   std::string readFilename(uint32_t address);  // Read null-terminated string
-  void writeCharToVRAM(uint8_t c); // Teletype-style output to B800 VRAM
   std::string resolvePath(
       const std::string &path); // Resolve relative paths against m_currentDir
   std::string

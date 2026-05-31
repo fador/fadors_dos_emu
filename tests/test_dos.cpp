@@ -658,7 +658,7 @@ TEST_CASE("DOS: List of Lists exposes NUL and EMS device chain", "[DOS][EMS]") {
 
     cpu.setReg8(cpu::AH, 0x30);
     dos.handleInterrupt(0x21);
-    REQUIRE(cpu.getReg8(cpu::AL) == 5);
+    REQUIRE(cpu.getReg8(cpu::AL) == 6);
 
     cpu.setReg8(cpu::AH, 0x52);
     dos.handleInterrupt(0x21);
