@@ -110,6 +110,18 @@ int DosShell::executeCommand(const std::string& line)
         return rc;
     }
 
+    // Drive letter switch: "C:", "D:", etc.
+    if (upperCmd.size() == 2 && upperCmd[1] == ':' &&
+        std::isalpha(static_cast<unsigned char>(upperCmd[0]))) {
+        char letter = upperCmd[0];
+        if (m_driveManager.isMounted(letter)) {
+            m_driveManager.setCurrentDrive(letter);
+            return 0;
+        }
+        printLine("Invalid drive specification");
+        return 1;
+    }
+
     int rc = executeExternal(cmd);
     m_errorLevel = rc;
     return rc;
