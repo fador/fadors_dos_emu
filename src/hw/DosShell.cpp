@@ -190,6 +190,17 @@ std::string DosShell::readLine()
             printChar('\n');
             break;
         }
+        if (ascii == 0x09) {
+            handleTab(line);
+            continue;
+        }
+        // Any non-Tab key resets tab completion state
+        if (ascii != 0x09) {
+            if (!m_tabMatches.empty()) {
+                m_tabMatches.clear();
+                m_tabLine.clear();
+            }
+        }
         if (ascii == 0x08) {
             if (!line.empty()) {
                 line.pop_back();
@@ -205,6 +216,143 @@ std::string DosShell::readLine()
         }
     }
     return line;
+}
+
+std::vector<std::string> DosShell::findCompletions(const std::string& token)
+{
+    std::vector<std::string> results;
+    std::error_code ec;
+
+    std::string searchDir;
+    std::string prefix;
+
+    auto sepPos = token.find_last_of('\\');
+    if (sepPos == std::string::npos)
+        sepPos = token.find_last_of('/');
+
+    if (sepPos != std::string::npos) {
+        std::string dirPart = token.substr(0, sepPos);
+        prefix = token.substr(sepPos + 1);
+        auto resolved = m_driveManager.resolvePath(dirPart + "\\");
+        if (!resolved.empty() && fs::is_directory(resolved, ec))
+            searchDir = resolved;
+    } else {
+        prefix = token;
+        auto resolved = m_driveManager.resolvePath(".");
+        if (!resolved.empty())
+            searchDir = resolved;
+    }
+
+    if (searchDir.empty()) return results;
+
+    std::string upperPrefix = prefix;
+    std::transform(upperPrefix.begin(), upperPrefix.end(), upperPrefix.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+
+    for (auto& entry : fs::directory_iterator(searchDir, fs::directory_options::skip_permission_denied, ec)) {
+        auto fn = entry.path().filename().string();
+        if (fn == "." || fn == "..") continue;
+        std::string upperFn = fn;
+        std::transform(upperFn.begin(), upperFn.end(), upperFn.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+        if (upperFn.starts_with(upperPrefix)) {
+            std::string completion = fn;
+            if (entry.is_directory(ec))
+                completion += '\\';
+            results.push_back(completion);
+        }
+    }
+
+    std::sort(results.begin(), results.end());
+    return results;
+}
+
+void DosShell::handleTab(std::string& line)
+{
+    if (line != m_tabLine) {
+        // New input — find completions for the last token
+        std::string token;
+        auto lastSpace = line.find_last_of(' ');
+        if (lastSpace != std::string::npos)
+            token = line.substr(lastSpace + 1);
+        else
+            token = line;
+
+        m_tabMatches = findCompletions(token);
+        m_tabIndex = 0;
+        m_tabLine = line;
+
+        if (m_tabMatches.empty()) return;
+
+        if (m_tabMatches.size() == 1) {
+            // Single match: erase the current token and replace with completion
+            std::string completion = m_tabMatches[0];
+            for (size_t i = 0; i < token.size(); ++i) {
+                printChar('\b'); printChar(' '); printChar('\b');
+            }
+            line.erase(line.size() - token.size());
+            line += completion;
+            printString(completion);
+            m_tabLine = line;
+            return;
+        }
+
+        // Multiple matches: find common prefix
+        std::string common = m_tabMatches[0];
+        for (size_t i = 1; i < m_tabMatches.size(); ++i) {
+            auto& m = m_tabMatches[i];
+            size_t j = 0;
+            while (j < common.size() && j < m.size() &&
+                   std::toupper(static_cast<unsigned char>(common[j])) ==
+                   std::toupper(static_cast<unsigned char>(m[j])))
+                ++j;
+            common.resize(j);
+        }
+
+        if (common.size() > token.size()) {
+            // Extend to common prefix
+            std::string extension = common.substr(token.size());
+            line += extension;
+            printString(extension);
+            m_tabLine = line;
+        }
+
+        // Show all matches
+        printChar('\r');
+        printChar('\n');
+        for (auto& m : m_tabMatches) {
+            printString(m);
+            printString("  ");
+        }
+        printChar('\r');
+        printChar('\n');
+        printString(buildPrompt());
+        printString(line);
+        m_tabLine = line;
+        return;
+    }
+
+    // Same line — cycle through matches
+    if (m_tabMatches.empty()) return;
+
+    // Erase the previous completion
+    std::string token;
+    auto lastSpace = m_tabLine.find_last_of(' ');
+    if (lastSpace != std::string::npos)
+        token = m_tabLine.substr(lastSpace + 1);
+    else
+        token = m_tabLine;
+
+    for (size_t i = 0; i < token.size(); ++i) {
+        printChar('\b'); printChar(' '); printChar('\b');
+    }
+    line.erase(line.size() - token.size());
+
+    m_tabIndex = (m_tabIndex + 1) % m_tabMatches.size();
+    std::string completion = m_tabMatches[m_tabIndex];
+    line += completion;
+    printString(completion);
+    m_tabLine = line;
 }
 
 std::string DosShell::buildPrompt()

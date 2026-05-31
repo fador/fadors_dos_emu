@@ -65,8 +65,17 @@ private:
     std::function<void()> m_pollInput;
     std::function<void()> m_idleCallback;
 
+    // Tab completion state
+    std::string m_tabLine;
+    std::vector<std::string> m_tabMatches;
+    size_t m_tabIndex = 0;
+
     std::string readLine();
     std::string buildPrompt();
+
+    // Tab completion: returns the completed token
+    std::vector<std::string> findCompletions(const std::string& token);
+    void handleTab(std::string& line);
 
     struct ParsedCommand {
         std::string command;
