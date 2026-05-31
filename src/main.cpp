@@ -26,10 +26,14 @@
 #include "utils/Logger.hpp"
 #include <array>
 #include <iostream>
+#include <locale>
+#include <clocale>
 #ifdef _WIN32
 #include <crtdbg.h>
 #include <cstdlib>
 #include <windows.h>
+#include <io.h>
+#include <fcntl.h>
 #endif
 #ifdef HAVE_SDL2
 #include "ui/SDLRenderer.hpp"
@@ -248,6 +252,11 @@ int main(int argc, char *argv[]) {
     _set_error_mode(_OUT_TO_STDERR);
     // Set console output to UTF-8 so CP437 characters render correctly
     SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+    // Set C locale and C++ stream locale to UTF-8
+    setlocale(LC_ALL, ".UTF-8");
+    std::locale::global(std::locale(".UTF-8"));
+    std::cout.imbue(std::locale());
 #endif
 
     fador::utils::currentLevel = fador::utils::LogLevel::Info;

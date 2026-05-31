@@ -15,7 +15,8 @@ TerminalRenderer::TerminalRenderer(memory::MemoryBus& memory)
 }
 
 void TerminalRenderer::clearScreen() {
-    std::cout << "\033[2J\033[H" << std::flush;
+    fwrite("\033[2J\033[H", 1, 10, stdout);
+    fflush(stdout);
 }
 
 void TerminalRenderer::render(bool force) {
@@ -38,7 +39,8 @@ void TerminalRenderer::render(bool force) {
 void TerminalRenderer::renderTextMode(bool force) {
     // Restore cursor if we were in graphics mode before
     if (m_cursorHidden) {
-        std::cout << "\033[?25h" << std::flush;
+        fwrite("\033[?25h", 1, 6, stdout);
+        fflush(stdout);
         m_cursorHidden = false;
     }
 
@@ -78,8 +80,8 @@ void TerminalRenderer::renderTextMode(bool force) {
         buf += ";";
         buf += std::to_string(curCol + 1);
         buf += "H";
-        std::cout.write(buf.data(), buf.size());
-        std::cout.flush();
+        fwrite(buf.data(), 1, buf.size(), stdout);
+        fflush(stdout);
         m_lastCurCol = curCol;
         m_lastCurRow = curRow;
         return;
@@ -117,8 +119,8 @@ void TerminalRenderer::renderTextMode(bool force) {
     buf += "\033[?25h"; // Show cursor
     m_lastCurCol = curCol;
     m_lastCurRow = curRow;
-    std::cout.write(buf.data(), buf.size());
-    std::cout.flush();
+    fwrite(buf.data(), 1, buf.size(), stdout);
+    fflush(stdout);
 }
 
 uint8_t TerminalRenderer::readPixel(int x, int y, uint8_t mode) const {
@@ -169,7 +171,8 @@ uint8_t TerminalRenderer::readPixel(int x, int y, uint8_t mode) const {
 void TerminalRenderer::renderGraphicsMode(bool force) {
     // Hide terminal cursor during graphics mode
     if (!m_cursorHidden) {
-        std::cout << "\033[?25l" << std::flush;
+        fwrite("\033[?25l", 1, 6, stdout);
+        fflush(stdout);
         m_cursorHidden = true;
     }
 
@@ -280,8 +283,8 @@ void TerminalRenderer::renderGraphicsFullRes(bool force) {
         prevFg = prevBg = 0xFFFFFFFF;
     }
     buf += "\033[0m";
-    std::cout.write(buf.data(), buf.size());
-    std::cout.flush();
+    fwrite(buf.data(), 1, buf.size(), stdout);
+    fflush(stdout);
 }
 
 // ---------- Downsampled block-shade renderer ----------
@@ -423,8 +426,8 @@ void TerminalRenderer::renderGraphicsDownsampled(bool force) {
         prevFg = 0xFFFFFFFF;
     }
     buf += "\033[0m";
-    std::cout.write(buf.data(), buf.size());
-    std::cout.flush();
+    fwrite(buf.data(), 1, buf.size(), stdout);
+    fflush(stdout);
 }
 
 const char* TerminalRenderer::getAnsiColor(uint8_t color, bool background) {
