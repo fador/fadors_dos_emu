@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <locale>
 #include <iostream>
 #include <sstream>
 #include <thread>
@@ -327,6 +328,7 @@ static std::string formatDosFilename(const std::string& name)
 static std::string formatSize(uintmax_t size)
 {
     std::ostringstream ss;
+    ss.imbue(std::locale::classic());
     ss << size;
     std::string s = ss.str();
     std::string out;
@@ -487,6 +489,7 @@ int DosShell::cmdDir(const ParsedCommand& cmd)
     }
 
     std::ostringstream summary;
+    summary.imbue(std::locale::classic());
     summary << "     " << totalCount << " file(s)";
     printLine(summary.str());
     return 0;
