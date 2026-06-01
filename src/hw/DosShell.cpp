@@ -176,6 +176,10 @@ void DosShell::printLine(const std::string& s)
 std::string DosShell::readLine()
 {
     std::string line;
+    size_t cursorPos = 0;
+    m_historyIndex = -1;
+    m_savedLine.clear();
+
     while (true) {
         if (m_pollInput) m_pollInput();
         if (m_idleCallback) m_idleCallback();
@@ -185,37 +189,134 @@ std::string DosShell::readLine()
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         auto [ascii, scancode] = m_kbd.popKey();
-        if (ascii == 0x0D) {
-            printChar('\r');
-            printChar('\n');
-            break;
-        }
-        if (ascii == 0x09) {
-            handleTab(line);
-            continue;
-        }
-        // Any non-Tab key resets tab completion state
-        if (ascii != 0x09) {
+
+        // Extended keys (arrow, home, end, etc.) have ascii=0
+        if (ascii == 0 && scancode != 0) {
+            // Reset tab state on any extended key
             if (!m_tabMatches.empty()) {
                 m_tabMatches.clear();
                 m_tabLine.clear();
             }
+            switch (scancode) {
+            case 0x48: // Up arrow — previous history
+                if (!m_history.empty()) {
+                    if (m_historyIndex < 0) {
+                        m_savedLine = line;
+                        m_historyIndex = static_cast<int>(m_history.size()) - 1;
+                    } else if (m_historyIndex > 0) {
+                        --m_historyIndex;
+                    }
+                    line = m_history[m_historyIndex];
+                    cursorPos = line.size();
+                    redrawLine(line, cursorPos);
+                }
+                break;
+            case 0x50: // Down arrow — next history
+                if (m_historyIndex >= 0) {
+                    if (m_historyIndex < static_cast<int>(m_history.size()) - 1) {
+                        ++m_historyIndex;
+                        line = m_history[m_historyIndex];
+                    } else {
+                        m_historyIndex = -1;
+                        line = m_savedLine;
+                    }
+                    cursorPos = line.size();
+                    redrawLine(line, cursorPos);
+                }
+                break;
+            case 0x4B: // Left arrow
+                if (cursorPos > 0) {
+                    --cursorPos;
+                    printChar('\b');
+                }
+                break;
+            case 0x4D: // Right arrow
+                if (cursorPos < line.size()) {
+                    printChar(line[cursorPos]);
+                    ++cursorPos;
+                }
+                break;
+            case 0x47: // Home
+                moveCursor(-static_cast<int>(cursorPos), cursorPos, line);
+                cursorPos = 0;
+                break;
+            case 0x4F: // End
+                moveCursor(static_cast<int>(line.size() - cursorPos), cursorPos, line);
+                cursorPos = line.size();
+                break;
+            }
+            continue;
         }
-        if (ascii == 0x08) {
+
+        if (ascii == 0x0D) { // Enter
+            printChar('\r');
+            printChar('\n');
             if (!line.empty()) {
-                line.pop_back();
+                if (m_history.empty() || m_history.back() != line)
+                    m_history.push_back(line);
+            }
+            break;
+        }
+        if (ascii == 0x09) { // Tab
+            handleTab(line);
+            cursorPos = line.size();
+            continue;
+        }
+        // Any non-Tab key resets tab completion state
+        if (!m_tabMatches.empty()) {
+            m_tabMatches.clear();
+            m_tabLine.clear();
+        }
+        if (ascii == 0x08) { // Backspace
+            if (cursorPos > 0) {
+                line.erase(cursorPos - 1, 1);
+                --cursorPos;
                 printChar('\b');
+                // Redraw the rest of the line and clear the trailing char
+                for (size_t i = cursorPos; i < line.size(); ++i)
+                    printChar(line[i]);
                 printChar(' ');
-                printChar('\b');
+                // Move cursor back to position
+                for (size_t i = cursorPos; i <= line.size(); ++i)
+                    printChar('\b');
             }
             continue;
         }
         if (ascii >= 0x20) {
-            line += static_cast<char>(ascii);
-            printChar(static_cast<char>(ascii));
+            line.insert(cursorPos, 1, static_cast<char>(ascii));
+            ++cursorPos;
+            // Redraw from cursor position
+            for (size_t i = cursorPos - 1; i < line.size(); ++i)
+                printChar(line[i]);
+            // Move cursor back to just after the inserted char
+            for (size_t i = cursorPos; i < line.size(); ++i)
+                printChar('\b');
         }
     }
     return line;
+}
+
+void DosShell::redrawLine(const std::string& line, size_t cursorPos)
+{
+    printChar('\r');
+    printString(buildPrompt());
+    printString(line);
+    // Clear any leftover characters from a longer previous line
+    fwrite("\033[K", 1, 3, stdout);
+    // Move cursor back to the correct position
+    for (size_t i = cursorPos; i < line.size(); ++i)
+        printChar('\b');
+}
+
+void DosShell::moveCursor(int delta, size_t cursorPos, const std::string& line)
+{
+    if (delta > 0) {
+        for (int i = 0; i < delta && cursorPos + i < line.size(); ++i)
+            printChar(line[cursorPos + i]);
+    } else if (delta < 0) {
+        for (int i = 0; i < -delta && cursorPos > 0; ++i)
+            printChar('\b');
+    }
 }
 
 std::vector<std::string> DosShell::findCompletions(const std::string& token)

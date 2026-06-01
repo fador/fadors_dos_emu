@@ -70,7 +70,14 @@ private:
     std::vector<std::string> m_tabMatches;
     size_t m_tabIndex = 0;
 
+    // Command history
+    std::vector<std::string> m_history;
+    int m_historyIndex = -1;
+    std::string m_savedLine;
+
     std::string readLine();
+    void redrawLine(const std::string& line, size_t cursorPos);
+    void moveCursor(int delta, size_t cursorPos, const std::string& line);
     std::string buildPrompt();
 
     // Tab completion: returns the completed token
