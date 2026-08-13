@@ -169,8 +169,15 @@ private:
   bool m_ctrlBreakCheck = false;
   uint16_t m_pspSegment = 0x1000;
   uint16_t m_currentPSPValue = 0x1000;
-  uint16_t m_allocationStrategy = 0; // Default: Best fit
+  uint16_t m_allocationStrategy = 0; // Default: 0 = First fit
   bool m_umbLinked = false;
+  uint16_t m_lastErrorCode = 0;
+  uint8_t m_lastErrorClass = 0;
+  uint8_t m_lastErrorAction = 0;
+  uint8_t m_lastErrorLocus = 0;
+  void setExtendedError(uint16_t code, uint8_t errorClass = 0x01, uint8_t action = 0x01, uint8_t locus = 0x01);
+  void syncJFT(uint16_t handle, uint8_t sftIndex);
+
   KeyboardController *m_kbd = nullptr;
   std::function<void()> m_pollInput;
   std::function<void()> m_idleCallback;

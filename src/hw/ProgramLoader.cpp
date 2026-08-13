@@ -83,6 +83,116 @@ parseFBOVOverlays(std::ifstream &file, uint32_t startOffset, uint32_t fileSize) 
   return overlays;
 }
 
+struct FCBParseResult {
+  bool hasWildcards = false;
+  bool validDrive = true;
+};
+
+FCBParseResult parseStringToFCB(const std::string &src, size_t &pos, uint8_t *fcbOut) {
+  FCBParseResult result;
+  std::fill_n(fcbOut, 16, 0);
+
+  // Skip leading separators
+  while (pos < src.size() &&
+         (src[pos] == ' ' || src[pos] == '\t' ||
+          src[pos] == ':' || src[pos] == ';' ||
+          src[pos] == ',' || src[pos] == '=' ||
+          src[pos] == '+'))
+    ++pos;
+
+  if (pos >= src.size() || src[pos] == '\0' || src[pos] == 0x0D) {
+    // Empty parameter: drive 0, 11 spaces
+    fcbOut[0] = 0;
+    std::fill_n(fcbOut + 1, 11, ' ');
+    result.validDrive = true;
+    return result;
+  }
+
+  uint8_t driveByte = 0;
+  if (pos + 1 < src.size() && src[pos + 1] == ':') {
+    char driveLetter = static_cast<char>(std::toupper(static_cast<unsigned char>(src[pos])));
+    if (driveLetter >= 'A' && driveLetter <= 'Z') {
+      driveByte = static_cast<uint8_t>(driveLetter - 'A' + 1);
+      result.validDrive = true;
+      pos += 2;
+    } else {
+      result.validDrive = false;
+      driveByte = 0xFF;
+      pos += 2;
+    }
+  }
+
+  // Parse filename (8 chars)
+  std::string name(8, ' ');
+  size_t nameIdx = 0;
+  while (pos < src.size() && nameIdx < 8) {
+    char ch = static_cast<char>(std::toupper(static_cast<unsigned char>(src[pos])));
+    if (ch == '.') break;
+    if (ch == ' ' || ch == '\t' || ch == '/' || ch == '\\' ||
+        ch == ':' || ch == ';' || ch == ',' || ch == '=' ||
+        ch == '+' || ch == '\0' || ch == 0x0D)
+      break;
+    if (ch == '*' || ch == '?') result.hasWildcards = true;
+    if (ch == '*') {
+      while (nameIdx < 8) name[nameIdx++] = '?';
+      ++pos;
+      while (pos < src.size() && src[pos] != '.' && src[pos] != ' ' && src[pos] != '\t' &&
+             src[pos] != '/' && src[pos] != '\\' && src[pos] != ':' && src[pos] != ';' &&
+             src[pos] != ',' && src[pos] != '=' && src[pos] != '+' && src[pos] != '\0' &&
+             src[pos] != 0x0D) {
+        ++pos;
+      }
+      break;
+    }
+    name[nameIdx++] = ch;
+    ++pos;
+  }
+
+  // Parse extension (3 chars)
+  std::string ext(3, ' ');
+  if (pos < src.size() && pos < src.size() && src[pos] == '.') {
+    ++pos;
+    size_t extIdx = 0;
+    while (pos < src.size() && extIdx < 3) {
+      char ch = static_cast<char>(std::toupper(static_cast<unsigned char>(src[pos])));
+      if (ch == ' ' || ch == '\t' || ch == '/' || ch == '\\' ||
+          ch == ':' || ch == ';' || ch == ',' || ch == '=' ||
+          ch == '+' || ch == '\0' || ch == '.' || ch == 0x0D)
+        break;
+      if (ch == '*' || ch == '?') result.hasWildcards = true;
+      if (ch == '*') {
+        while (extIdx < 3) ext[extIdx++] = '?';
+        ++pos;
+        while (pos < src.size() && src[pos] != ' ' && src[pos] != '\t' &&
+               src[pos] != '/' && src[pos] != '\\' && src[pos] != ':' && src[pos] != ';' &&
+               src[pos] != ',' && src[pos] != '=' && src[pos] != '+' && src[pos] != '\0' &&
+               src[pos] != 0x0D) {
+          ++pos;
+        }
+        break;
+      }
+      ext[extIdx++] = ch;
+      ++pos;
+    }
+  }
+
+  // Skip trailing characters for this token
+  while (pos < src.size()) {
+    char ch = src[pos];
+    if (ch == ' ' || ch == '\t' || ch == '/' || ch == '\\' ||
+        ch == ':' || ch == ';' || ch == ',' || ch == '=' ||
+        ch == '+' || ch == '\0' || ch == 0x0D)
+      break;
+    ++pos;
+  }
+
+  fcbOut[0] = driveByte;
+  for (int i = 0; i < 8; ++i) fcbOut[1 + i] = static_cast<uint8_t>(name[i]);
+  for (int i = 0; i < 3; ++i) fcbOut[9 + i] = static_cast<uint8_t>(ext[i]);
+
+  return result;
+}
+
 } // namespace
 
 ProgramLoader::ProgramLoader(cpu::CPU &cpu, memory::MemoryBus &memory,
@@ -106,7 +216,7 @@ bool ProgramLoader::loadCOM(const std::string &path, uint16_t segment, DOS &dos,
   }
 
   // 1. Create PSP at segment:0000
-  createPSP(segment, args, path, envSeg);
+  auto [validDrive1, validDrive2] = createPSP(segment, args, path, envSeg);
 
   // 2. Load file data at segment:0100
   uint32_t loadAddr = (segment << 4) + 0x100;
@@ -126,6 +236,18 @@ bool ProgramLoader::loadCOM(const std::string &path, uint16_t segment, DOS &dos,
   m_cpu.setSegReg(cpu::ES, segment);
   m_cpu.setSegReg(cpu::SS, segment);
   m_cpu.setEIP(0x100);
+
+  // Initialize general-purpose registers per MS-DOS COM standard
+  uint8_t alVal = validDrive1 ? 0x00 : 0xFF;
+  uint8_t ahVal = validDrive2 ? 0x00 : 0xFF;
+  m_cpu.setReg16(cpu::AX, (static_cast<uint16_t>(ahVal) << 8) | alVal);
+  m_cpu.setReg16(cpu::BX, 0x0000);
+  m_cpu.setReg16(cpu::CX, 0x00FF);
+  m_cpu.setReg16(cpu::DX, segment);
+  m_cpu.setReg16(cpu::SI, 0x0100);
+  m_cpu.setReg16(cpu::DI, 0xFFFE);
+  m_cpu.setReg16(cpu::BP, 0x091C);
+  m_cpu.setEFLAGS(cpu::FLAG_INTERRUPT | 0x0002);
 
   // MS-DOS natively writes 0x0000 to the top of the stack for COM files.
   // This allows a simple top-level RET instruction to jump to PSP:0000 (INT 20h)
@@ -378,11 +500,10 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
                fbovOverlays.size());
     }
   }
-
   // For now, let's just use a simple load to segment:0000 (after PSP)
   // Actually, EXE load usually puts PSP at segment, and image at segment + 10h
   // (256 bytes)
-  createPSP(segment, args, path, envSeg);
+  auto [validDrive1, validDrive2] = createPSP(segment, args, path, envSeg);
 
   uint16_t loadSegment = segment + 0x10; // Image starts after 256-byte PSP
   uint32_t loadAddr = (loadSegment << 4);
@@ -407,31 +528,19 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
         uint8_t *xmsPtr = m_himem->getBlock(handle);
         if (xmsPtr) {
           std::copy(buffer.begin(), buffer.end(), xmsPtr);
-          LOG_WARN("ProgramLoader: Loaded EXE into XMS (HIMEM) at handle ",
-                   handle, ". This is not true DOS behavior.");
-          // Set CPU state to a fake segment (e.g., 0xF000) for test/demo only
-          m_cpu.setSegReg(cpu::CS, 0xF000);
-          m_cpu.setEIP(0);
-          m_cpu.setSegReg(cpu::SS, 0xF000);
-          m_cpu.setReg16(cpu::SP, 0xFFFE);
-          m_cpu.setSegReg(cpu::DS, 0xF000);
-          m_cpu.setSegReg(cpu::ES, 0xF000);
-          return true;
-        } else {
-          LOG_ERROR("ProgramLoader: Failed to get XMS block for EXE");
-          return false;
+          LOG_INFO("ProgramLoader: Allocated ", imageSize, " bytes in HIMEM, handle ", handle);
         }
       } else {
-        LOG_ERROR("ProgramLoader: Not enough XMS (HIMEM) for EXE image");
+        LOG_ERROR("ProgramLoader: Failed to allocate XMS memory for large EXE");
         return false;
       }
     } else {
-      LOG_ERROR(
-          "ProgramLoader: EXE image too large for DOS memory: loadAddr=0x",
-          std::hex, loadAddr, " size=0x", imageSize);
+      LOG_ERROR("ProgramLoader: EXE image out of DOS memory (0x", std::hex,
+                loadAddr + imageSize, " > 0x", memory::MemoryBus::MEMORY_SIZE, ")");
       return false;
     }
   } else {
+    // Write image to memory
     for (uint32_t i = 0; i < imageSize; ++i) {
       m_memory.write8(loadAddr + i, buffer[i]);
     }
@@ -445,12 +554,7 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
                                               0x02))
             << 4u,
         memory::MemoryBus::MEMORY_SIZE);
-    
-    // Fixed: Clamped zeroFillLimit to 0xA0000 to prevent wiping real video memory
-    uint32_t zeroFillLimit = std::max(loadAddr + imageSize, programLimit);
-    if (zeroFillLimit > 0xA0000) {
-      zeroFillLimit = 0xA0000;
-    }
+    uint32_t zeroFillLimit = std::min(programLimit, 0xA0000u);
     for (uint32_t addr = loadAddr + imageSize; addr < zeroFillLimit; ++addr) {
       m_memory.write8(addr, 0u);
     }
@@ -546,14 +650,26 @@ bool ProgramLoader::loadEXE(const std::string &path, uint16_t segment, DOS &dos,
   m_cpu.setSegReg(cpu::DS, segment); // DS and ES point to PSP
   m_cpu.setSegReg(cpu::ES, segment);
 
+  // Initialize general-purpose registers per MS-DOS EXE standard
+  uint8_t alVal = validDrive1 ? 0x00 : 0xFF;
+  uint8_t ahVal = validDrive2 ? 0x00 : 0xFF;
+  m_cpu.setReg16(cpu::AX, (static_cast<uint16_t>(ahVal) << 8) | alVal);
+  m_cpu.setReg16(cpu::BX, 0x0000);
+  m_cpu.setReg16(cpu::CX, 0x0000);
+  m_cpu.setReg16(cpu::DX, 0x0000);
+  m_cpu.setReg16(cpu::SI, header.ip);
+  m_cpu.setReg16(cpu::DI, header.sp);
+  m_cpu.setReg16(cpu::BP, 0x091C);
+  m_cpu.setEFLAGS(cpu::FLAG_INTERRUPT | 0x0002);
+
   LOG_INFO("ProgramLoader: Successfully loaded .EXE file: ", path,
            " at CS:EIP=", std::hex, m_cpu.getSegReg(cpu::CS), ":",
            m_cpu.getEIP());
   return true;
 }
 
-void ProgramLoader::createPSP(uint16_t segment, const std::string &args,
-                              const std::string &programPath, uint16_t envSeg) {
+std::pair<bool, bool> ProgramLoader::createPSP(uint16_t segment, const std::string &args,
+                                              const std::string &programPath, uint16_t envSeg) {
   uint32_t pspAddr = (segment << 4);
 
   // Zero the entire 256-byte PSP first so no fields contain 0xCC garbage
@@ -671,6 +787,18 @@ void ProgramLoader::createPSP(uint16_t segment, const std::string &args,
              envSegment, ", program path: ", dosFullPath);
   }
 
+  // Parse command line into FCB 1 (PSP:005Ch) and FCB 2 (PSP:006Ch)
+  size_t parsePos = 0;
+  uint8_t fcb1[16] = {};
+  uint8_t fcb2[16] = {};
+  auto res1 = parseStringToFCB(args, parsePos, fcb1);
+  auto res2 = parseStringToFCB(args, parsePos, fcb2);
+
+  for (int i = 0; i < 16; ++i) {
+    m_memory.write8(pspAddr + 0x5C + i, fcb1[i]);
+    m_memory.write8(pspAddr + 0x6C + i, fcb2[i]);
+  }
+
   // Command tail size at offset 0x80
   // In DOS, the command tail starts with a space before args.
   // If no args, length = 0 and offset 0x81 = CR.
@@ -689,6 +817,8 @@ void ProgramLoader::createPSP(uint16_t segment, const std::string &args,
     }
     m_memory.write8(pspAddr + 0x81 + len, 0x0D); // CR terminator
   }
+
+  return {res1.validDrive, res2.validDrive};
 }
 
 } // namespace fador::hw

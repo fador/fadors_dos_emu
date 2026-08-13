@@ -27,8 +27,8 @@ private:
     memory::MemoryBus& m_memory;
     memory::HIMEM* m_himem;
 
-    // Creates a 256-byte Program Segment Prefix at the given segment
-    void createPSP(uint16_t segment, const std::string& args, const std::string& programPath, uint16_t envSeg = 0);
+    // Creates a 256-byte Program Segment Prefix at the given segment, returns drive validities for FCB1/2
+    std::pair<bool, bool> createPSP(uint16_t segment, const std::string& args, const std::string& programPath, uint16_t envSeg = 0);
 };
 
 } // namespace fador::hw

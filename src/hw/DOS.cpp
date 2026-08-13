@@ -148,8 +148,29 @@ void DOS::initialize() {
   m_pspSegment = freeSeg + 1; 
   m_currentPSPValue = m_pspSegment;
   m_dtaPtr = 0x00000080;
+
+  // Initialize standard handles in default PSP's JFT
+  uint32_t defaultPspAddr = (static_cast<uint32_t>(m_pspSegment) << 4);
+  for (int i = 0; i < 5; ++i) {
+    m_memory.write8(defaultPspAddr + 0x18 + i, static_cast<uint8_t>(i));
+  }
+  for (int i = 5; i < 20; ++i) {
+    m_memory.write8(defaultPspAddr + 0x18 + i, 0xFF);
+  }
 }
 
+void DOS::setExtendedError(uint16_t code, uint8_t errorClass, uint8_t action, uint8_t locus) {
+  m_lastErrorCode = code;
+  m_lastErrorClass = errorClass;
+  m_lastErrorAction = action;
+  m_lastErrorLocus = locus;
+}
+
+void DOS::syncJFT(uint16_t handle, uint8_t sftIndex) {
+  if (m_pspSegment != 0 && handle < 20) {
+    m_memory.write8((static_cast<uint32_t>(m_pspSegment) << 4) + 0x18 + handle, sftIndex);
+  }
+}
 
 bool DOS::handleInterrupt(uint8_t vector) {
   switch (vector) {
@@ -1237,6 +1258,22 @@ void DOS::handleDOSService() {
         kListOfListsOff, " (First MCB: ", FIRST_MCB_SEGMENT, ")");
     break;
   }
+  case 0x59: { // Get Extended Error Information
+    m_cpu.setReg16(cpu::AX, m_lastErrorCode);
+    m_cpu.setReg8(cpu::BH, m_lastErrorClass);
+    m_cpu.setReg8(cpu::BL, m_lastErrorAction);
+    m_cpu.setReg8(cpu::CH, m_lastErrorLocus);
+    m_cpu.setReg8(cpu::CL, 0); // No volume label pointer
+    m_cpu.setSegReg(cpu::ES, 0);
+    m_cpu.setReg16(cpu::DI, 0);
+    m_cpu.setReg16(cpu::DX, 0);
+    m_cpu.setReg16(cpu::SI, 0);
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    LOG_DOS("DOS: Get Extended Error -> AX=0x", std::hex, m_lastErrorCode,
+            " BH=0x", (int)m_lastErrorClass, " BL=0x", (int)m_lastErrorAction,
+            " CH=0x", (int)m_lastErrorLocus);
+    break;
+  }
   case 0x5D: { // Swappable Data Area / Extended Error
     uint8_t al = m_cpu.getReg8(cpu::AL);
     if (al == 0x06) {
@@ -1684,6 +1721,7 @@ void DOS::handleMemoryManagement() {
       m_cpu.setReg16(cpu::AX, 0x0008);      // Insufficient memory
       m_cpu.setReg16(cpu::BX, largestFree); // Largest available block
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      setExtendedError(0x0008, 0x01, 0x04, 0x05);
     }
   } else if (ah == 0x49) { // Free
     uint16_t segment = m_cpu.getSegReg(cpu::ES);
@@ -1692,6 +1730,7 @@ void DOS::handleMemoryManagement() {
     } else {
       m_cpu.setReg16(cpu::AX, 0x09); // Memory block address invalid
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      setExtendedError(0x0009, 0x04, 0x05, 0x05);
     }
   } else if (ah == 0x4A) { // Resize
     uint16_t segment = m_cpu.getSegReg(cpu::ES);
@@ -1849,6 +1888,7 @@ void DOS::handleMemoryManagement() {
       uint16_t maxPossible = expanded.size;
       m_cpu.setReg16(cpu::BX, maxPossible);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      setExtendedError(0x0008, 0x01, 0x04, 0x05);
       LOG_WARN("DOS: Failed to expand segment ", std::hex, segment, " to ",
                requested, " paras (max: 0x", maxPossible, ")");
       dumpMCBChain();
@@ -1874,6 +1914,7 @@ void DOS::handleMemoryManagement() {
     } else {
       m_cpu.setReg16(cpu::AX, 0x0001); // Invalid function
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      setExtendedError(0x0001, 0x07, 0x04, 0x01);
       LOG_WARN("DOS: Unknown AH=58h AL=", std::hex, (int)al);
     }
   }
@@ -1894,6 +1935,7 @@ void DOS::handleDirectoryService() {
       } else {
         m_cpu.setReg16(cpu::AX, 0x03); // Path not found or already exists
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+        setExtendedError(0x03, 0x08, 0x03, 0x02);
       }
     } else if (ah == 0x3A) { // RMDIR
       std::string path = resolvePath(readFilename(addr));
@@ -1905,6 +1947,7 @@ void DOS::handleDirectoryService() {
         m_cpu.setReg16(cpu::AX,
                        0x05); // Access denied (or not empty/doesn't exist)
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+        setExtendedError(0x05, 0x03, 0x04, 0x02);
       }
     } else if (ah == 0x3B) { // CHDIR
       std::string rawPath = readFilename(addr);
@@ -1930,6 +1973,7 @@ void DOS::handleDirectoryService() {
       } else {
         m_cpu.setReg16(cpu::AX, 0x03); // Path not found
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+        setExtendedError(0x03, 0x08, 0x03, 0x02);
       }
     } else if (ah == 0x47) { // GETCWD
       uint16_t si = m_cpu.getReg16(cpu::SI);
@@ -2191,9 +2235,10 @@ void DOS::handleDirectorySearch() {
 
 uint16_t DOS::allocateMemory(uint16_t requested, uint16_t owner) {
   uint16_t current = FIRST_MCB_SEGMENT;
-  uint16_t bestFit = 0;
+  uint16_t chosenBlock = 0;
   uint16_t bestFitSize = 0xFFFF;
   int mcbCount = 0;
+  uint8_t strategy = static_cast<uint8_t>(m_allocationStrategy & 0x03);
 
   while (true) {
     if (mcbCount++ > 1000) {
@@ -2203,10 +2248,17 @@ uint16_t DOS::allocateMemory(uint16_t requested, uint16_t owner) {
       return 0;
     }
     MCB mcb = readMCB(current);
-    if (mcb.owner == 0) {
-      if (mcb.size >= requested && mcb.size < bestFitSize) {
-        bestFit = current;
-        bestFitSize = mcb.size;
+    if (mcb.owner == 0 && mcb.size >= requested) {
+      if (strategy == 0x00) { // First fit
+        chosenBlock = current;
+        break;
+      } else if (strategy == 0x01) { // Best fit
+        if (mcb.size < bestFitSize) {
+          chosenBlock = current;
+          bestFitSize = mcb.size;
+        }
+      } else if (strategy == 0x02) { // Last fit
+        chosenBlock = current;
       }
     }
     if (mcb.type == 'Z')
@@ -2217,7 +2269,7 @@ uint16_t DOS::allocateMemory(uint16_t requested, uint16_t owner) {
     current = static_cast<uint16_t>(next);
   }
 
-  if (bestFit == 0) {
+  if (chosenBlock == 0) {
     // No free block found. The PSP likely owns all conventional memory.
     // Auto-shrink the PSP to make room for this allocation.
     // Real DOS programs shrink via INT 21h/AH=4Ah, but some neglect to.
@@ -2293,15 +2345,22 @@ uint16_t DOS::allocateMemory(uint16_t requested, uint16_t owner) {
         }
 
         // Retry allocation — scan again for the newly created free block
-        bestFit = 0;
+        chosenBlock = 0;
         bestFitSize = 0xFFFF;
         current = FIRST_MCB_SEGMENT;
         for (int retryCount = 0; retryCount < 100; ++retryCount) {
           MCB m2 = readMCB(current);
-          if (m2.owner == 0) {
-            if (m2.size >= requested && m2.size < bestFitSize) {
-              bestFit = current;
-              bestFitSize = m2.size;
+          if (m2.owner == 0 && m2.size >= requested) {
+            if (strategy == 0x00) {
+              chosenBlock = current;
+              break;
+            } else if (strategy == 0x01) {
+              if (m2.size < bestFitSize) {
+                chosenBlock = current;
+                bestFitSize = m2.size;
+              }
+            } else if (strategy == 0x02) {
+              chosenBlock = current;
             }
           }
           if (m2.type == 'Z') break;
@@ -2318,15 +2377,15 @@ uint16_t DOS::allocateMemory(uint16_t requested, uint16_t owner) {
     }
   }
 
-  if (bestFit != 0) {
-    MCB mcb = readMCB(bestFit);
+  if (chosenBlock != 0) {
+    MCB mcb = readMCB(chosenBlock);
     uint16_t actualOwner = owner;
     if (actualOwner == 0xFFFF) {
-        actualOwner = (m_pspSegment != 0) ? m_pspSegment : (bestFit + 1);
+        actualOwner = (m_pspSegment != 0) ? m_pspSegment : (chosenBlock + 1);
     }
 
     LOG_INFO("DOS: allocateMemory(", requested, " paras) -> found block at 0x", 
-             std::hex, bestFit, " (size 0x", mcb.size, "), owner: 0x", actualOwner);
+             std::hex, chosenBlock, " (size 0x", mcb.size, "), owner: 0x", actualOwner);
 
     if (mcb.size > requested + 1) { // Split
       MCB next;
@@ -2339,18 +2398,18 @@ uint16_t DOS::allocateMemory(uint16_t requested, uint16_t owner) {
       mcb.size = requested;
       mcb.owner = actualOwner;
 
-      writeMCB(bestFit, mcb);
-      uint16_t nextMcbSeg = static_cast<uint16_t>(bestFit + requested + 1);
+      writeMCB(chosenBlock, mcb);
+      uint16_t nextMcbSeg = static_cast<uint16_t>(chosenBlock + requested + 1);
       writeMCB(nextMcbSeg, next);
-      LOG_INFO("DOS: Split block at 0x", std::hex, bestFit, " -> new free block at 0x", nextMcbSeg, " size 0x", next.size);
+      LOG_INFO("DOS: Split block at 0x", std::hex, chosenBlock, " -> new free block at 0x", nextMcbSeg, " size 0x", next.size);
       // Verify the split didn't corrupt
-      { MCB vfy = readMCB(bestFit); LOG_INFO("DOS: verify alloc MCB at 0x", std::hex, bestFit, " type=0x", (int)vfy.type, " owner=0x", vfy.owner, " size=0x", vfy.size); }
+      { MCB vfy = readMCB(chosenBlock); LOG_INFO("DOS: verify alloc MCB at 0x", std::hex, chosenBlock, " type=0x", (int)vfy.type, " owner=0x", vfy.owner, " size=0x", vfy.size); }
       { MCB vfy = readMCB(nextMcbSeg); LOG_INFO("DOS: verify free MCB at 0x", std::hex, nextMcbSeg, " type=0x", (int)vfy.type, " owner=0x", vfy.owner, " size=0x", vfy.size); }
     } else {
       mcb.owner = actualOwner;
-      writeMCB(bestFit, mcb);
+      writeMCB(chosenBlock, mcb);
     }
-    return bestFit + 1;
+    return chosenBlock + 1;
   }
   LOG_ERROR("DOS: allocateMemory(", requested, " paras) FAILED. No free block large enough.");
   return 0;
@@ -2667,14 +2726,16 @@ void DOS::handleFileService() {
 
     if (fh->stream.is_open()) {
       m_fileHandles.push_back(std::move(fh));
-      m_cpu.setReg16(cpu::AX,
-                     m_fileHandles.size() - 1 + 5); // DOS handles start at 5
+      uint16_t handle = static_cast<uint16_t>(m_fileHandles.size() - 1 + 5);
+      m_cpu.setReg16(cpu::AX, handle); // DOS handles start at 5
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      syncJFT(handle, static_cast<uint8_t>(handle));
       LOG_DOS("DOS: Created file '", hostPath,
-              "' handle=", m_fileHandles.size() - 1 + 5);
+              "' handle=", handle);
     } else {
       m_cpu.setReg16(cpu::AX, 0x03); // Path not found
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      setExtendedError(0x03, 0x08, 0x03, 0x02);
       LOG_ERROR("DOS: Failed to create file '", hostPath, "'");
     }
   } else if (ah == 0x3D) { // Open Existing File
@@ -2690,12 +2751,12 @@ void DOS::handleFileService() {
       fh->path = upperASCII(fs::path(filename).filename().string());
       fh->kind = FileHandle::Kind::EMSDevice;
       m_fileHandles.push_back(std::move(fh));
-      m_cpu.setReg16(cpu::AX,
-                     static_cast<uint16_t>(m_fileHandles.size() - 1 + 5));
+      uint16_t handle = static_cast<uint16_t>(m_fileHandles.size() - 1 + 5);
+      m_cpu.setReg16(cpu::AX, handle);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      syncJFT(handle, static_cast<uint8_t>(handle));
       LOG_DOS("DOS: Opened EMS device '",
-              m_fileHandles.back()->path, "' handle=",
-              m_fileHandles.size() - 1 + 5);
+              m_fileHandles.back()->path, "' handle=", handle);
       return;
     }
 
@@ -2731,13 +2792,16 @@ void DOS::handleFileService() {
 
     if (fh->stream.is_open()) {
       m_fileHandles.push_back(std::move(fh));
-      m_cpu.setReg16(cpu::AX, m_fileHandles.size() - 1 + 5);
+      uint16_t handle = static_cast<uint16_t>(m_fileHandles.size() - 1 + 5);
+      m_cpu.setReg16(cpu::AX, handle);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      syncJFT(handle, static_cast<uint8_t>(handle));
       LOG_DOS("DOS: Opened file '", hostPath,
-              "' handle=", m_fileHandles.size() - 1 + 5);
+              "' handle=", handle);
     } else {
       m_cpu.setReg16(cpu::AX, 0x02); // File/device not found (EMS absent)
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      setExtendedError(0x02, 0x08, 0x03, 0x02);
       LOG_DOS("DOS: Failed to open file '", hostPath, "'");
     }
   } else if (ah == 0x3E) { // Close File
@@ -2748,6 +2812,7 @@ void DOS::handleFileService() {
           !m_fileHandles[handle - 5]->isEMSDevice())
         m_fileHandles[handle - 5]->stream.close();
       m_fileHandles[handle - 5].reset(); // Free slot
+      syncJFT(handle, 0xFF);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
       LOG_DOS("DOS: Closed file handle=", handle);
     } else if (handle < 5) { // Standard handles
@@ -2756,17 +2821,18 @@ void DOS::handleFileService() {
     } else {
       m_cpu.setReg16(cpu::AX, 0x06); // Invalid handle
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      setExtendedError(0x06, 0x07, 0x04, 0x01);
     }
   } else if (ah == 0x45) { // Duplicate File Handle
     uint16_t handle = m_cpu.getReg16(cpu::BX);
     if (handle >= 5 && handle - 5 < m_fileHandles.size() &&
         m_fileHandles[handle - 5]) {
       m_fileHandles.push_back(m_fileHandles[handle - 5]);
-      m_cpu.setReg16(cpu::AX,
-                     static_cast<uint16_t>(m_fileHandles.size() - 1 + 5));
+      uint16_t newH = static_cast<uint16_t>(m_fileHandles.size() - 1 + 5);
+      m_cpu.setReg16(cpu::AX, newH);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-      LOG_DOS("DOS: Duplicated handle=", handle, " -> ",
-              m_fileHandles.size() - 1 + 5);
+      syncJFT(newH, static_cast<uint8_t>(handle));
+      LOG_DOS("DOS: Duplicated handle=", handle, " -> ", newH);
     } else if (handle < 5) {
       m_cpu.setReg16(cpu::AX, handle);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
@@ -2774,6 +2840,7 @@ void DOS::handleFileService() {
     } else {
       m_cpu.setReg16(cpu::AX, 0x06); // Invalid handle
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      setExtendedError(0x06, 0x07, 0x04, 0x01);
       LOG_DOS("DOS: Duplicate handle failed for invalid handle=", handle);
     }
   } else if (ah == 0x46) { // Force Duplicate / Redirect Handle
@@ -2801,10 +2868,12 @@ void DOS::handleFileService() {
       // Redirect: target handle now points to the same FileHandle as source
       m_fileHandles[dstHandle - 5] = m_fileHandles[srcHandle - 5];
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      syncJFT(dstHandle, static_cast<uint8_t>(srcHandle));
       LOG_DOS("DOS: Redirected handle ", srcHandle, " -> ", dstHandle);
     } else {
       m_cpu.setReg16(cpu::AX, 0x06); // Invalid source handle
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      setExtendedError(0x06, 0x07, 0x04, 0x01);
       LOG_DOS("DOS: Redirect handle failed — invalid source handle=",
               srcHandle);
     }
@@ -2842,6 +2911,7 @@ void DOS::handleFileService() {
     } else {
       m_cpu.setReg16(cpu::AX, 0x06); // Invalid handle
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      setExtendedError(0x06, 0x07, 0x04, 0x01);
     }
   } else if (ah == 0x40) { // Write to File or Device
     uint16_t handle = m_cpu.getReg16(cpu::BX);
@@ -2879,10 +2949,12 @@ void DOS::handleFileService() {
       } else {
         m_cpu.setReg16(cpu::AX, 0x1D); // Write fault
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+        setExtendedError(0x1D, 0x05, 0x01, 0x02);
       }
     } else {
       m_cpu.setReg16(cpu::AX, 0x06); // Invalid handle
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      setExtendedError(0x06, 0x07, 0x04, 0x01);
     }
   } else if (ah == 0x41) { // Delete File
     uint16_t dx = m_cpu.getReg16(cpu::DX);
@@ -2896,13 +2968,16 @@ void DOS::handleFileService() {
     if (!fs::exists(targetPath, ec)) {
       const bool parentExists =
           parentPath.empty() || fs::exists(parentPath, ec);
-      m_cpu.setReg16(cpu::AX, parentExists ? 0x02 : 0x03);
+      uint16_t err = parentExists ? 0x02 : 0x03;
+      m_cpu.setReg16(cpu::AX, err);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      setExtendedError(err, 0x08, 0x03, 0x02);
       LOG_DOS("DOS: Delete file failed for '", hostPath,
               "' (missing target)");
     } else if (fs::is_directory(targetPath, ec)) {
       m_cpu.setReg16(cpu::AX, 0x05); // Access denied
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      setExtendedError(0x05, 0x03, 0x04, 0x02);
       LOG_DOS("DOS: Delete file rejected directory '", hostPath, "'");
     } else if (fs::remove(targetPath, ec)) {
       m_cpu.setReg16(cpu::AX, 0x0000);
@@ -2911,6 +2986,7 @@ void DOS::handleFileService() {
     } else {
       m_cpu.setReg16(cpu::AX, 0x05); // Access denied / delete failure
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      setExtendedError(0x05, 0x03, 0x04, 0x02);
       LOG_ERROR("DOS: Failed to delete file '", hostPath,
                 "' error=", ec.message());
     }
@@ -2927,6 +3003,7 @@ void DOS::handleFileService() {
       if (fh->isEMSDevice()) {
         m_cpu.setReg16(cpu::AX, 0x01); // Invalid function for device
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+        setExtendedError(0x01, 0x07, 0x04, 0x01);
         LOG_DOS("DOS: Seek not supported on EMS device handle=", handle);
         return;
       }
@@ -2941,6 +3018,7 @@ void DOS::handleFileService() {
       else {
         m_cpu.setReg16(cpu::AX, 0x01); // Invalid function
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+        setExtendedError(0x01, 0x07, 0x04, 0x01);
         return;
       }
 
@@ -2956,6 +3034,7 @@ void DOS::handleFileService() {
     } else {
       m_cpu.setReg16(cpu::AX, 0x06); // Invalid handle
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      setExtendedError(0x06, 0x07, 0x04, 0x01);
     }
   } else if (ah == 0x43) { // Get/Set File Attributes
     uint16_t dx = m_cpu.getReg16(cpu::DX);
@@ -2976,6 +3055,7 @@ void DOS::handleFileService() {
       } else {
         m_cpu.setReg16(cpu::AX, 0x02); // File not found
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+        setExtendedError(0x02, 0x08, 0x03, 0x02);
       }
     } else if (al == 0x01) { // Set (Stubbed)
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
@@ -2983,6 +3063,7 @@ void DOS::handleFileService() {
     } else {
       m_cpu.setReg16(cpu::AX, 0x01); // Invalid function
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      setExtendedError(0x01, 0x07, 0x04, 0x01);
     }
   }
 }
