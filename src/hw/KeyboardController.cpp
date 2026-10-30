@@ -20,10 +20,6 @@ uint8_t KeyboardController::read8(uint16_t port) {
     // Return last known scancode even when buffer is drained
     return m_lastScancode;
   } else if (port == 0x64) { // Status Port
-    // Report Output Buffer Full if key data is available, so programs
-    // polling port 0x64→0x60 see keys even after HLE drained hw buffer.
-    if (!(m_status & 0x01) && !m_keyBuffer.empty())
-      return m_status | 0x01;
     return m_status;
   } else if (port == 0x61) { // PPI Port B
     // Bit 4 toggles on every few reads to simulate DRAM refresh timing (~15us)

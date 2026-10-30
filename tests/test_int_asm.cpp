@@ -17,6 +17,8 @@
 #include "hw/DOS.hpp"
 #include "hw/KeyboardController.hpp"
 #include "hw/PIT8254.hpp"
+#include "hw/DPMI.hpp"
+#include "memory/himem/HIMEM.hpp"
 
 using namespace fador;
 
@@ -30,6 +32,8 @@ struct IntTestEnv {
     hw::PIC8259 pic{true};
     hw::DOS dos;
     hw::BIOS bios;
+    memory::HIMEM himem;
+    hw::DPMI dpmi;
     cpu::InstructionDecoder decoder;
     cpu::Assembler assembler;
 
@@ -39,10 +43,16 @@ struct IntTestEnv {
 
     IntTestEnv()
         : dos(cpu, mem), bios(cpu, mem, kbd, pit, pic),
+          dpmi(cpu, mem),
           decoder(cpu, mem, iobus, bios, dos)
     {
         bios.initialize();
         dos.initialize();
+        dpmi.setDOS(&dos);
+        dos.setDPMI(&dpmi);
+        dpmi.setBIOS(&bios);
+        dpmi.setHIMEM(&himem);
+        himem.setMemoryBus(&mem);
         // Set PSP to match test CODE_SEG
         dos.setPSPSegment(CODE_SEG);
         // Use decoder.loadSegment() so the decoder's cached m_segBase[]
@@ -1215,4 +1225,901 @@ TEST_CASE("Full program: set mode, print string, terminate via asm", "[int][asm]
     // Program terminated
     REQUIRE(e.dos.isTerminated());
     REQUIRE(e.dos.getExitCode() == 0);
+}
+
+
+// ════════════════════════════════════════════════════════════════════════════
+//  DOS Interrupts: INT 25h, 26h, 27h, 28h, 29h, 2Ah, 2Eh, 2Fh (Extended)
+// ════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("INT 25h Absolute Disk Read via asm", "[int][asm][dos][disk]") {
+    IntTestEnv e;
+    uint32_t bufAddr = (e.cpu.getSegReg(cpu::DS) << 4) + 0x300;
+    for (int i = 0; i < 512; ++i) e.mem.write8(bufAddr + i, 0xAA);
+
+    e.assemble(
+        "MOV AL, 02h\n"
+        "MOV CX, 01h\n"
+        "MOV DX, 00h\n"
+        "MOV BX, 300h\n"
+        "INT 25h\n"
+        "POPF"
+    );
+    e.run(6);
+
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(e.cpu.getReg16(cpu::AX) == 0);
+    REQUIRE(e.mem.read8(bufAddr + 0) == 0);
+    REQUIRE(e.mem.read8(bufAddr + 511) == 0);
+
+    // Invalid drive
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble(
+        "MOV AL, 50\n"
+        "MOV CX, 01h\n"
+        "INT 25h\n"
+        "POP DX"
+    );
+    e.run(4);
+    REQUIRE((e.cpu.getEFLAGS() & cpu::FLAG_CARRY) != 0);
+    REQUIRE(e.cpu.getReg16(cpu::AX) == 0x0201);
+}
+
+TEST_CASE("INT 26h Absolute Disk Write via asm", "[int][asm][dos][disk]") {
+    IntTestEnv e;
+    e.assemble(
+        "MOV AL, 02h\n"
+        "MOV CX, 01h\n"
+        "MOV DX, 00h\n"
+        "MOV BX, 300h\n"
+        "INT 26h\n"
+        "POPF"
+    );
+    e.run(6);
+
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(e.cpu.getReg16(cpu::AX) == 0);
+
+    // Invalid drive
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble(
+        "MOV AL, 50\n"
+        "MOV CX, 01h\n"
+        "INT 26h\n"
+        "POP DX"
+    );
+    e.run(4);
+    REQUIRE((e.cpu.getEFLAGS() & cpu::FLAG_CARRY) != 0);
+    REQUIRE(e.cpu.getReg16(cpu::AX) == 0x0201);
+}
+
+TEST_CASE("INT 27h TSR via asm", "[int][asm][dos]") {
+    IntTestEnv e;
+    e.assemble(
+        "MOV DX, 100h\n"
+        "INT 27h"
+    );
+    e.run(2);
+    REQUIRE(e.dos.isTerminated());
+    REQUIRE(e.dos.getExitCode() == 0);
+}
+
+TEST_CASE("INT 28h DOS Idle via asm", "[int][asm][dos]") {
+    IntTestEnv e;
+    bool idleInvoked = false;
+    e.dos.setIdleCallback([&]() { idleInvoked = true; });
+
+    e.assemble("INT 28h");
+    e.run(1);
+    REQUIRE(idleInvoked);
+}
+
+TEST_CASE("INT 29h Fast Console Output via asm", "[int][asm][dos]") {
+    IntTestEnv e;
+    e.mem.write8(0x450, 0); // Cursor col 0
+    e.mem.write8(0x451, 0); // Cursor row 0
+    e.mem.write16(0x44A, 80); // 80 cols
+
+    e.assemble(
+        "MOV AL, 57h\n" // 'W'
+        "INT 29h"
+    );
+    e.run(2);
+
+    REQUIRE(e.mem.read8(0xB8000) == 'W');
+    REQUIRE(e.mem.read8(0x450) == 1);
+}
+
+TEST_CASE("INT 2Ah Network / Critical Section via asm", "[int][asm][dos]") {
+    IntTestEnv e;
+    e.assemble(
+        "MOV AH, 00h\n"
+        "INT 2Ah\n"
+        "MOV AH, 80h\n"
+        "INT 2Ah\n"
+        "MOV AH, 81h\n"
+        "INT 2Ah"
+    );
+    e.run(6);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(e.cpu.getReg8(cpu::AL) == 0);
+}
+
+TEST_CASE("INT 2Eh Alternate Shell Exec via asm", "[int][asm][dos]") {
+    IntTestEnv e;
+    e.assemble("INT 2Eh");
+    e.run(1);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+}
+
+TEST_CASE("INT 2Fh Multiplex extended services via asm", "[int][asm]") {
+    IntTestEnv e;
+    // AX=1200h: DOS internal installation check
+    e.assemble(
+        "MOV AX, 1200h\n"
+        "INT 2Fh"
+    );
+    e.run(2);
+    REQUIRE(e.cpu.getReg8(cpu::AL) == 0xFF);
+
+    // AX=1600h: Windows check
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble(
+        "MOV AX, 1600h\n"
+        "INT 2Fh"
+    );
+    e.run(2);
+    REQUIRE(e.cpu.getReg8(cpu::AL) == 0x00);
+
+    // AX=4A01h: HMA query
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble(
+        "MOV AX, 4A01h\n"
+        "INT 2Fh"
+    );
+    e.run(2);
+    REQUIRE((e.cpu.getEFLAGS() & cpu::FLAG_CARRY) != 0);
+    REQUIRE(e.cpu.getReg16(cpu::BX) == 0);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  INT 21h Subfunctions: STDAUX/STDPRN, DPB, Verify, True Version, IOCTL, File
+// ════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("INT 21h AH=03h/04h/05h STDAUX and STDPRN via asm", "[int][asm][dos]") {
+    IntTestEnv e;
+    e.assemble(
+        "MOV AH, 03h\n"
+        "INT 21h\n"
+        "MOV AH, 04h\n"
+        "MOV DL, 41h\n"
+        "INT 21h\n"
+        "MOV AH, 05h\n"
+        "MOV DL, 42h\n"
+        "INT 21h"
+    );
+    e.run(7);
+    REQUIRE(e.cpu.getReg8(cpu::AL) == 0);
+}
+
+TEST_CASE("INT 21h AH=1Bh/1Ch Get Allocation Info via asm", "[int][asm][dos]") {
+    IntTestEnv e;
+    // Default drive
+    e.assemble(
+        "MOV AH, 1Bh\n"
+        "INT 21h"
+    );
+    e.run(2);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(e.cpu.getReg8(cpu::AL) == 32);     // Sectors per cluster
+    REQUIRE(e.cpu.getReg16(cpu::CX) == 512);   // Bytes per sector
+    REQUIRE(e.cpu.getReg16(cpu::DX) == 65535); // Total clusters
+    uint16_t ds = e.cpu.getSegReg(cpu::DS);
+    uint16_t bx = e.cpu.getReg16(cpu::BX);
+    uint32_t mediaPhys = (static_cast<uint32_t>(ds) << 4) + bx;
+    REQUIRE(e.mem.read8(mediaPhys) == 0xF8);   // Media descriptor byte
+
+    // Specific drive DL=3 (C:)
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble(
+        "MOV AH, 1Ch\n"
+        "MOV DL, 03h\n"
+        "INT 21h"
+    );
+    e.run(3);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(e.cpu.getReg8(cpu::AL) == 32);
+
+    // Invalid drive DL=50
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble(
+        "MOV AH, 1Ch\n"
+        "MOV DL, 50\n"
+        "INT 21h"
+    );
+    e.run(3);
+    REQUIRE((e.cpu.getEFLAGS() & cpu::FLAG_CARRY) != 0);
+    REQUIRE(e.cpu.getReg8(cpu::AL) == 0xFF);
+}
+
+TEST_CASE("INT 21h AH=1Fh/32h Get Drive Parameter Block via asm", "[int][asm][dos]") {
+    IntTestEnv e;
+    // Default drive DPB
+    e.assemble(
+        "MOV AH, 1Fh\n"
+        "INT 21h"
+    );
+    e.run(2);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(e.cpu.getReg8(cpu::AL) == 0x00);
+    uint16_t ds = e.cpu.getSegReg(cpu::DS);
+    uint16_t bx = e.cpu.getReg16(cpu::BX);
+    uint32_t dpbPhys = (static_cast<uint32_t>(ds) << 4) + bx;
+    REQUIRE(e.mem.read16(dpbPhys + 2) == 512); // Bytes per sector
+
+    // Specific drive DL=3 (C:)
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble(
+        "MOV AH, 32h\n"
+        "MOV DL, 03h\n"
+        "INT 21h"
+    );
+    e.run(3);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(e.cpu.getReg8(cpu::AL) == 0x00);
+    ds = e.cpu.getSegReg(cpu::DS);
+    bx = e.cpu.getReg16(cpu::BX);
+    dpbPhys = (static_cast<uint32_t>(ds) << 4) + bx;
+    REQUIRE(e.mem.read8(dpbPhys + 0) == 2); // Drive C: = 2
+
+    // Invalid drive DL=99
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble(
+        "MOV AH, 32h\n"
+        "MOV DL, 99\n"
+        "INT 21h"
+    );
+    e.run(3);
+    REQUIRE((e.cpu.getEFLAGS() & cpu::FLAG_CARRY) != 0);
+    REQUIRE(e.cpu.getReg8(cpu::AL) == 0xFF);
+}
+
+TEST_CASE("INT 21h AH=2Eh/54h Set and Get Verify Flag via asm", "[int][asm][dos]") {
+    IntTestEnv e;
+    e.assemble(
+        "MOV AH, 54h\n"
+        "INT 21h"
+    );
+    e.run(2);
+    REQUIRE(e.cpu.getReg8(cpu::AL) == 0x00);
+
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble(
+        "MOV AH, 2Eh\n"
+        "MOV AL, 01h\n"
+        "INT 21h\n"
+        "MOV AH, 54h\n"
+        "INT 21h"
+    );
+    e.run(5);
+    REQUIRE(e.cpu.getReg8(cpu::AL) == 0x01);
+    REQUIRE(e.dos.getVerifyFlag() == true);
+
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble(
+        "MOV AH, 2Eh\n"
+        "MOV AL, 00h\n"
+        "INT 21h\n"
+        "MOV AH, 54h\n"
+        "INT 21h"
+    );
+    e.run(5);
+    REQUIRE(e.cpu.getReg8(cpu::AL) == 0x00);
+    REQUIRE(e.dos.getVerifyFlag() == false);
+}
+
+TEST_CASE("INT 21h AX=3306h Get True DOS Version via asm", "[int][asm][dos]") {
+    IntTestEnv e;
+    e.assemble(
+        "MOV AX, 3306h\n"
+        "INT 21h"
+    );
+    e.run(2);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(e.cpu.getReg8(cpu::BL) == 6);
+    REQUIRE(e.cpu.getReg8(cpu::BH) == 22);
+    REQUIRE(e.cpu.getReg8(cpu::DL) == 0);
+    REQUIRE(e.cpu.getReg8(cpu::DH) == 0x10);
+}
+
+TEST_CASE("INT 21h AH=44h IOCTL Input/Output Status and Block Info via asm", "[int][asm][dos]") {
+    IntTestEnv e;
+    // AL=00h: Check STDAUX (BX=3) and STDPRN (BX=4)
+    e.assemble(
+        "MOV AH, 44h\n"
+        "MOV AL, 00h\n"
+        "MOV BX, 03h\n"
+        "INT 21h"
+    );
+    e.run(4);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE((e.cpu.getReg16(cpu::DX) & 0x80) != 0);
+
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble(
+        "MOV AH, 44h\n"
+        "MOV AL, 00h\n"
+        "MOV BX, 04h\n"
+        "INT 21h"
+    );
+    e.run(4);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE((e.cpu.getReg16(cpu::DX) & 0x80) != 0);
+
+    // AL=06h: Get input status for STDOUT (handle 1)
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble(
+        "MOV AH, 44h\n"
+        "MOV AL, 06h\n"
+        "MOV BX, 01h\n"
+        "INT 21h"
+    );
+    e.run(4);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+
+    // AL=07h: Get output status for STDOUT (handle 1) -> ready (0xFF)
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble(
+        "MOV AH, 44h\n"
+        "MOV AL, 07h\n"
+        "MOV BX, 01h\n"
+        "INT 21h"
+    );
+    e.run(4);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(e.cpu.getReg8(cpu::AL) == 0xFF);
+
+    // AL=08h: Check block device removable
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble(
+        "MOV AH, 44h\n"
+        "MOV AL, 08h\n"
+        "MOV BL, 01h\n"
+        "INT 21h"
+    );
+    e.run(4);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(e.cpu.getReg16(cpu::AX) == 0x0000); // Removable
+
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble(
+        "MOV AH, 44h\n"
+        "MOV AL, 08h\n"
+        "MOV BL, 03h\n"
+        "INT 21h"
+    );
+    e.run(4);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(e.cpu.getReg16(cpu::AX) == 0x0001); // Fixed
+
+    // AL=09h: Check block device remote -> DX=0802h (local)
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble(
+        "MOV AH, 44h\n"
+        "MOV AL, 09h\n"
+        "MOV BL, 03h\n"
+        "INT 21h"
+    );
+    e.run(4);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(e.cpu.getReg16(cpu::DX) == 0x0802);
+}
+
+TEST_CASE("INT 21h AH=56h Rename File via asm", "[int][asm][dos][file]") {
+    IntTestEnv e;
+    const char* oldName = "test_old_name.tmp";
+    const char* newName = "test_new_name.tmp";
+    std::filesystem::remove(oldName);
+    std::filesystem::remove(newName);
+
+    // Create old file
+    e.writeString(0x200, oldName);
+    e.assemble("MOV AH, 3Ch\nMOV CX, 0\nMOV DX, 200h\nINT 21h\nMOV BX, AX\nMOV AH, 3Eh\nINT 21h");
+    e.run(7);
+    REQUIRE(std::filesystem::exists(oldName));
+
+    // Rename oldName -> newName via AH=56h (DS:DX=old, ES:DI=new)
+    e.writeString(0x300, newName);
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble(
+        "MOV AH, 56h\n"
+        "MOV DX, 200h\n"
+        "MOV DI, 300h\n"
+        "INT 21h"
+    );
+    e.run(4);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(!std::filesystem::exists(oldName));
+    REQUIRE(std::filesystem::exists(newName));
+
+    // Rename again -> fails with CF=1, AX=0x02
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble(
+        "MOV AH, 56h\n"
+        "MOV DX, 200h\n"
+        "MOV DI, 300h\n"
+        "INT 21h"
+    );
+    e.run(4);
+    REQUIRE((e.cpu.getEFLAGS() & cpu::FLAG_CARRY) != 0);
+    REQUIRE(e.cpu.getReg16(cpu::AX) == 0x02);
+
+    std::filesystem::remove(newName);
+}
+
+TEST_CASE("INT 21h AH=57h Get and Set File Date and Time via asm", "[int][asm][dos][file]") {
+    IntTestEnv e;
+    const char* fname = "test_datetime.tmp";
+    std::filesystem::remove(fname);
+
+    e.writeString(0x200, fname);
+    e.assemble("MOV AH, 3Ch\nMOV CX, 0\nMOV DX, 200h\nINT 21h");
+    e.run(4);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    uint16_t handle = e.cpu.getReg16(cpu::AX);
+
+    // Set custom time=0x1234, date=0x5678 (AL=01h)
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble(
+        "MOV AH, 57h\n"
+        "MOV AL, 01h\n"
+        "MOV CX, 1234h\n"
+        "MOV DX, 5678h\n"
+        "INT 21h"
+    );
+    e.cpu.setReg16(cpu::BX, handle);
+    e.run(5);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+
+    // Get time/date back (AL=00h)
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble(
+        "MOV AH, 57h\n"
+        "MOV AL, 00h\n"
+        "INT 21h"
+    );
+    e.cpu.setReg16(cpu::BX, handle);
+    e.run(3);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(e.cpu.getReg16(cpu::CX) == 0x1234);
+    REQUIRE(e.cpu.getReg16(cpu::DX) == 0x5678);
+
+    // Close file
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble("MOV AH, 3Eh\nINT 21h");
+    e.cpu.setReg16(cpu::BX, handle);
+    e.run(2);
+
+    std::filesystem::remove(fname);
+}
+
+TEST_CASE("INT 21h AH=5Ah Create Temporary File via asm", "[int][asm][dos][file]") {
+    IntTestEnv e;
+    e.writeString(0x200, ".\\");
+    e.assemble(
+        "MOV AH, 5Ah\n"
+        "MOV CX, 00h\n"
+        "MOV DX, 200h\n"
+        "INT 21h"
+    );
+    e.run(4);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    uint16_t handle = e.cpu.getReg16(cpu::AX);
+    REQUIRE(handle >= 5);
+
+    uint32_t base = (e.cpu.getSegReg(cpu::DS) << 4) + 0x200;
+    std::string genPath;
+    for (int i = 0; i < 64; ++i) {
+        char ch = static_cast<char>(e.mem.read8(base + i));
+        if (ch == 0) break;
+        genPath += ch;
+    }
+    REQUIRE(genPath.size() > 2);
+
+    // Close handle
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble("MOV AH, 3Eh\nINT 21h");
+    e.cpu.setReg16(cpu::BX, handle);
+    e.run(2);
+
+    std::filesystem::remove(genPath);
+}
+
+TEST_CASE("INT 21h AH=5Bh Create New File via asm", "[int][asm][dos][file]") {
+    IntTestEnv e;
+    const char* fname = "test_newfile.tmp";
+    std::filesystem::remove(fname);
+
+    e.writeString(0x200, fname);
+    e.assemble(
+        "MOV AH, 5Bh\n"
+        "MOV CX, 00h\n"
+        "MOV DX, 200h\n"
+        "INT 21h"
+    );
+    e.run(4);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    uint16_t handle = e.cpu.getReg16(cpu::AX);
+    REQUIRE(handle >= 5);
+
+    // Attempting create on existing file fails
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble(
+        "MOV AH, 5Bh\n"
+        "MOV CX, 00h\n"
+        "MOV DX, 200h\n"
+        "INT 21h"
+    );
+    e.run(4);
+    REQUIRE((e.cpu.getEFLAGS() & cpu::FLAG_CARRY) != 0);
+    REQUIRE(e.cpu.getReg16(cpu::AX) == 0x50);
+
+    // Close handle
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble("MOV AH, 3Eh\nINT 21h");
+    e.cpu.setReg16(cpu::BX, handle);
+    e.run(2);
+
+    std::filesystem::remove(fname);
+}
+
+TEST_CASE("INT 21h AH=68h Commit File via asm", "[int][asm][dos][file]") {
+    IntTestEnv e;
+    const char* fname = "test_commit.tmp";
+    std::filesystem::remove(fname);
+
+    e.writeString(0x200, fname);
+    e.assemble(
+        "MOV AH, 3Ch\n"
+        "MOV CX, 00h\n"
+        "MOV DX, 200h\n"
+        "INT 21h"
+    );
+    e.run(4);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    uint16_t handle = e.cpu.getReg16(cpu::AX);
+
+    // Commit file
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble(
+        "MOV AH, 68h\n"
+        "INT 21h"
+    );
+    e.cpu.setReg16(cpu::BX, handle);
+    e.run(2);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(e.cpu.getReg16(cpu::AX) == 0);
+
+    // Commit invalid handle
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble(
+        "MOV AH, 68h\n"
+        "MOV BX, 99\n"
+        "INT 21h"
+    );
+    e.run(3);
+    REQUIRE((e.cpu.getEFLAGS() & cpu::FLAG_CARRY) != 0);
+    REQUIRE(e.cpu.getReg16(cpu::AX) == 0x06);
+
+    // Close handle
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.assemble("MOV AH, 3Eh\nINT 21h");
+    e.cpu.setReg16(cpu::BX, handle);
+    e.run(2);
+
+    std::filesystem::remove(fname);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  DPMI Services via Assembler & InstructionDecoder
+// ════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("INT 2Fh AX=1687h DPMI Installation Query via asm", "[int][asm][dpmi]") {
+    IntTestEnv e;
+    e.assemble(
+        "MOV AX, 1687h\n"
+        "INT 2Fh"
+    );
+    e.run(2);
+    REQUIRE(e.cpu.getReg16(cpu::AX) == 0x0000);  // DPMI available
+    REQUIRE((e.cpu.getReg16(cpu::BX) & 1) != 0); // 32-bit clients supported
+    REQUIRE(e.cpu.getReg8(cpu::CL) == 0x03);     // 386 processor
+    REQUIRE(e.cpu.getReg8(cpu::DH) == 0x00);     // Major version 0
+    REQUIRE(e.cpu.getReg8(cpu::DL) == 0x09);     // Minor version 9
+    REQUIRE(e.cpu.getReg16(cpu::SI) == 0x0000);  // 0 paras private data
+    REQUIRE(e.cpu.getSegReg(cpu::ES) == 0xF000); // Entry point segment
+    REQUIRE(e.cpu.getReg16(cpu::DI) == 0x0050);  // Entry point offset
+}
+
+TEST_CASE("INT 2Fh AX=1686h Get CPU Mode via asm", "[int][asm][dpmi]") {
+    IntTestEnv e;
+    // In real mode
+    e.assemble(
+        "MOV AX, 1686h\n"
+        "INT 2Fh"
+    );
+    e.run(2);
+    REQUIRE(e.cpu.getReg16(cpu::AX) == 0x0000); // 0 = Real Mode
+}
+
+TEST_CASE("DPMI entry and protected mode execution via asm", "[int][asm][dpmi]") {
+    IntTestEnv e;
+    REQUIRE(!e.dpmi.isActive());
+    REQUIRE((e.cpu.getCR(0) & 1) == 0); // Real mode
+
+    // 1. Enter PM via CALL 0F000h:0050h
+    // 2. Execute MOV DX, 55AAh in PM
+    // 3. Query CPU mode via INT 2Fh AX=1686h in PM
+    e.assemble(
+        "MOV AX, 0001h\n"
+        "CALL 0F000h:0050h\n"
+        "MOV DX, 55AAh\n"
+        "MOV AX, 1686h\n"
+        "INT 2Fh"
+    );
+    // 1: MOV AX, 1
+    // 2: CALL 0F000h:0050h (jumps to F000:0050)
+    // 3: 0F FF E1 at F000:0050 (HLE trap switches to PM and returns)
+    // 4: MOV DX, 55AAh
+    // 5: MOV AX, 1686h
+    // 6: INT 2Fh
+    e.run(6);
+
+    REQUIRE(e.dpmi.isActive());
+    REQUIRE((e.cpu.getCR(0) & 1) != 0); // Protected mode active!
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(e.cpu.getReg16(cpu::DX) == 0x55AA);
+    REQUIRE(e.cpu.getReg16(cpu::AX) == 0x0001); // 1 = Protected Mode!
+}
+
+TEST_CASE("INT 31h AX=0003h Get Selector Increment via asm in PM", "[int][asm][dpmi]") {
+    IntTestEnv e;
+    e.assemble(
+        "MOV AX, 0001h\n"
+        "CALL 0F000h:0050h\n"
+        "MOV AX, 0003h\n"
+        "INT 31h"
+    );
+    e.run(5);
+    REQUIRE(e.dpmi.isActive());
+    REQUIRE((e.cpu.getCR(0) & 1) != 0);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(e.cpu.getReg16(cpu::AX) == 0x0008); // Selector increment = 8
+}
+
+TEST_CASE("INT 31h AX=0000h/0001h Allocate and Free Descriptors via asm in PM", "[int][asm][dpmi]") {
+    IntTestEnv e;
+    e.assemble(
+        "MOV AX, 0001h\n"
+        "CALL 0F000h:0050h\n"
+        "MOV AX, 0000h\n"
+        "MOV CX, 0001h\n"
+        "INT 31h\n"
+        "MOV BX, AX\n"
+        "MOV AX, 0001h\n"
+        "INT 31h"
+    );
+    // 1: MOV AX, 1
+    // 2: CALL
+    // 3: DPMI entry HLE
+    // 4: MOV AX, 0000h
+    // 5: MOV CX, 0001h
+    // 6: INT 31h (alloc descriptor)
+    // 7: MOV BX, AX
+    // 8: MOV AX, 0001h
+    // 9: INT 31h (free descriptor)
+    e.run(9);
+    REQUIRE(e.dpmi.isActive());
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    // Check that allocated selector was an LDT selector (bit 2 set) with RPL=3
+    uint16_t sel = e.cpu.getReg16(cpu::BX);
+    REQUIRE((sel & 0x04) != 0);
+    REQUIRE((sel & 0x03) == 3);
+}
+
+TEST_CASE("INT 31h AX=0200h/0201h Get/Set RM Interrupt Vector via asm in PM", "[int][asm][dpmi]") {
+    IntTestEnv e;
+    e.assemble(
+        "MOV AX, 0001h\n"
+        "CALL 0F000h:0050h\n"
+        // Set vector 65h to 1234h:5678h
+        "MOV AX, 0201h\n"
+        "MOV BL, 65h\n"
+        "MOV CX, 1234h\n"
+        "MOV DX, 5678h\n"
+        "INT 31h\n"
+        // Read it back
+        "MOV AX, 0200h\n"
+        "MOV BL, 65h\n"
+        "INT 31h"
+    );
+    e.run(11);
+    REQUIRE(e.dpmi.isActive());
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(e.cpu.getReg16(cpu::CX) == 0x1234);
+    REQUIRE(e.cpu.getReg16(cpu::DX) == 0x5678);
+}
+
+TEST_CASE("INT 31h AX=0501h/0502h Extended Memory Allocate and Free via asm in PM", "[int][asm][dpmi]") {
+    IntTestEnv e;
+    e.assemble(
+        "MOV AX, 0001h\n"
+        "CALL 0F000h:0050h\n"
+        // Allocate 64KB block (BX:CX = 0x0001:0x0000)
+        "MOV AX, 0501h\n"
+        "MOV BX, 0001h\n"
+        "MOV CX, 0000h\n"
+        "INT 31h\n"
+        // Free block using handle in SI:DI
+        "MOV AX, 0502h\n"
+        "INT 31h"
+    );
+    e.run(8);
+    REQUIRE(e.dpmi.isActive());
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+}
+
+TEST_CASE("INT 31h AX=0300h Simulate RM Interrupt via asm in PM", "[int][asm][dpmi]") {
+    IntTestEnv e;
+    // Enter PM first
+    e.assemble(
+        "MOV AX, 0001h\n"
+        "CALL 0F000h:0050h\n"
+        "NOP"
+    );
+    e.run(4);
+    REQUIRE(e.dpmi.isActive());
+
+    // Prepare Real Mode Call Structure at DS:0x200 (linear = DS.base + 0x200)
+    uint32_t dsBase = e.cpu.getSegBase(cpu::DS);
+    uint32_t structAddr = dsBase + 0x200;
+    for (int i = 0; i < 50; ++i) {
+        e.mem.write8(structAddr + i, 0);
+    }
+    // Set EAX in call structure (offset 0x1C) = 0x3000 (INT 21h AH=30h Get DOS Version)
+    e.mem.write32(structAddr + 0x1C, 0x00003000);
+
+    // Now execute INT 31h AX=0300h BL=21h ES:DI=DS:0200h
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    // Point ES to DS so ES:DI points to the call structure
+    e.cpu.setSegReg(cpu::ES, e.cpu.getSegReg(cpu::DS));
+    e.decoder.loadSegment(cpu::ES, e.cpu.getSegReg(cpu::DS));
+
+    e.assemble(
+        "MOV AX, 0300h\n"
+        "MOV BL, 21h\n"
+        "MOV BH, 00h\n"
+        "MOV CX, 0000h\n"
+        "MOV DI, 0200h\n"
+        "INT 31h"
+    );
+    e.run(6);
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+
+    // Verify DOS version in the call structure (offset 0x1C = EAX)
+    // AL = 5 (major), AH = 0 (minor) -> AX = 0x0005
+    uint32_t retEAX = e.mem.read32(structAddr + 0x1C);
+    REQUIRE((retEAX & 0xFF) == 6); // DOS 6.22
+    REQUIRE(((retEAX >> 8) & 0xFF) == 22);
+}
+
+TEST_CASE("INT 31h AX=0006h/0007h/0008h Base and Limit via asm in PM", "[int][asm][dpmi]") {
+    IntTestEnv e;
+    e.assemble(
+        "MOV AX, 0001h\n"
+        "CALL 0F000h:0050h\n"
+        // 1. Allocate 1 descriptor
+        "MOV AX, 0000h\n"
+        "MOV CX, 0001h\n"
+        "INT 31h\n"
+        "MOV BX, AX\n"          // Save selector in BX
+        // 2. Set base address to 0x00025000 (CX:DX = 0x0002:0x5000)
+        "MOV AX, 0007h\n"
+        "MOV CX, 0002h\n"
+        "MOV DX, 5000h\n"
+        "INT 31h\n"
+        // 3. Set segment limit to 0x0FFF (CX:DX = 0x0000:0x0FFF)
+        "MOV AX, 0008h\n"
+        "MOV CX, 0000h\n"
+        "MOV DX, 0FFFh\n"
+        "INT 31h\n"
+        // 4. Read base back
+        "MOV AX, 0006h\n"
+        "INT 31h\n"
+        // 5. Free descriptor
+        "MOV AX, 0001h\n"
+        "INT 31h"
+    );
+    e.run(18);
+    REQUIRE(e.dpmi.isActive());
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(e.cpu.getReg16(cpu::CX) == 0x0002);
+    REQUIRE(e.cpu.getReg16(cpu::DX) == 0x5000);
+}
+
+TEST_CASE("INT 31h AX=0100h/0101h DOS Memory Block via asm in PM", "[int][asm][dpmi]") {
+    IntTestEnv e;
+    e.assemble(
+        "MOV AX, 0001h\n"
+        "CALL 0F000h:0050h\n"
+        // Allocate 16 paragraphs (256 bytes) of DOS memory
+        "MOV AX, 0100h\n"
+        "MOV BX, 0010h\n"
+        "INT 31h\n"
+        // Free DOS memory using selector in DX
+        "MOV AX, 0101h\n"
+        "INT 31h"
+    );
+    e.run(8);
+    REQUIRE(e.dpmi.isActive());
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+}
+
+TEST_CASE("INT 31h AX=0400h Get Version via asm in PM", "[int][asm][dpmi]") {
+    IntTestEnv e;
+    e.assemble(
+        "MOV AX, 0001h\n"
+        "CALL 0F000h:0050h\n"
+        "MOV AX, 0400h\n"
+        "INT 31h"
+    );
+    e.run(5);
+    REQUIRE(e.dpmi.isActive());
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(e.cpu.getReg8(cpu::AH) == 0);       // Major version 0
+    REQUIRE(e.cpu.getReg8(cpu::AL) == 9);       // Minor version 9
+    REQUIRE((e.cpu.getReg16(cpu::BX) & 1) != 0);// 32-bit client support
+    REQUIRE(e.cpu.getReg8(cpu::CL) == 4);       // 486 processor
+}
+
+TEST_CASE("INT 31h AX=0604h Get Page Size via asm in PM", "[int][asm][dpmi]") {
+    IntTestEnv e;
+    e.assemble(
+        "MOV AX, 0001h\n"
+        "CALL 0F000h:0050h\n"
+        "MOV AX, 0604h\n"
+        "INT 31h"
+    );
+    e.run(5);
+    REQUIRE(e.dpmi.isActive());
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(e.cpu.getReg16(cpu::BX) == 0);
+    REQUIRE(e.cpu.getReg16(cpu::CX) == 4096);
+}
+
+TEST_CASE("INT 31h AX=0900h/0901h/0902h Virtual Interrupt State via asm in PM", "[int][asm][dpmi]") {
+    IntTestEnv e;
+    e.assemble(
+        "MOV AX, 0001h\n"
+        "CALL 0F000h:0050h\n"
+        // 1. Disable virtual interrupts (AX=0900h)
+        "MOV AX, 0900h\n"
+        "INT 31h\n"
+        // 2. Query virtual interrupts (AX=0902h) -> should be 0
+        "MOV AX, 0902h\n"
+        "INT 31h\n"
+        "MOV BL, AL\n"
+        // 3. Enable virtual interrupts (AX=0901h)
+        "MOV AX, 0901h\n"
+        "INT 31h\n"
+        // 4. Query virtual interrupts (AX=0902h) -> should be 1
+        "MOV AX, 0902h\n"
+        "INT 31h\n"
+        "MOV BH, AL"
+    );
+    e.run(13);
+    REQUIRE(e.dpmi.isActive());
+    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    REQUIRE(e.cpu.getReg8(cpu::BL) == 0); // was disabled
+    REQUIRE(e.cpu.getReg8(cpu::BH) == 1); // was enabled
 }

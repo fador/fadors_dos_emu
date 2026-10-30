@@ -180,6 +180,82 @@ bool DOS::handleInterrupt(uint8_t vector) {
   case 0x21: // DOS API
     handleDOSService();
     return true;
+  case 0x25: { // Absolute Disk Read
+    uint8_t drive = m_cpu.getReg8(cpu::AL);
+    uint16_t cx = m_cpu.getReg16(cpu::CX);
+    // Push caller flags on stack (INT 25h/26h leaves flags on stack)
+    m_cpu.push16(static_cast<uint16_t>(m_cpu.getEFLAGS() & 0xFFFF));
+    if (drive > 25) {
+      m_cpu.setReg16(cpu::AX, 0x0201); // Unknown unit / drive not ready
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      return true;
+    }
+    uint32_t bufAddr = 0;
+    uint32_t numSectors = 0;
+    if (cx == 0xFFFF) { // Extended disk packet (>32MB)
+      uint16_t ds = m_cpu.getSegReg(cpu::DS);
+      uint16_t bx = m_cpu.getReg16(cpu::BX);
+      uint32_t pktAddr = (static_cast<uint32_t>(ds) << 4) + bx;
+      numSectors = m_memory.read16(pktAddr + 4);
+      uint16_t bufOff = m_memory.read16(pktAddr + 6);
+      uint16_t bufSeg = m_memory.read16(pktAddr + 8);
+      bufAddr = (static_cast<uint32_t>(bufSeg) << 4) + bufOff;
+    } else {
+      numSectors = cx;
+      bufAddr = m_cpu.getSegBase(cpu::DS) + m_cpu.getReg16(cpu::BX);
+    }
+    uint32_t totalBytes = numSectors * 512;
+    for (uint32_t i = 0; i < totalBytes; ++i) {
+      m_memory.write8(bufAddr + i, 0);
+    }
+    m_cpu.setReg16(cpu::AX, 0x0000);
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    LOG_DOS("DOS: INT 25h Absolute Disk Read drive=", (int)drive, " sectors=", numSectors);
+    return true;
+  }
+  case 0x26: { // Absolute Disk Write
+    uint8_t drive = m_cpu.getReg8(cpu::AL);
+    m_cpu.push16(static_cast<uint16_t>(m_cpu.getEFLAGS() & 0xFFFF));
+    if (drive > 25) {
+      m_cpu.setReg16(cpu::AX, 0x0201);
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      return true;
+    }
+    m_cpu.setReg16(cpu::AX, 0x0000);
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    LOG_DOS("DOS: INT 26h Absolute Disk Write drive=", (int)drive);
+    return true;
+  }
+  case 0x27: { // Terminate and Stay Resident (TSR, DOS 1.x style)
+    uint16_t dx = m_cpu.getReg16(cpu::DX);
+    uint16_t residentParas = (dx + 15) >> 4;
+    LOG_DOS("DOS: INT 27h TSR paragraphs=", residentParas);
+    terminateProcess(0, 3, residentParas);
+    return true;
+  }
+  case 0x28: { // DOS Idle
+    if (m_idleCallback) {
+      m_idleCallback();
+    }
+    return true;
+  }
+  case 0x29: { // Fast Console Output
+    uint8_t al = m_cpu.getReg8(cpu::AL);
+    writeCharToVRAM(al);
+    return true;
+  }
+  case 0x2A: { // Network / Critical Section
+    uint8_t ah = m_cpu.getReg8(cpu::AH);
+    if (ah == 0x00) {
+      m_cpu.setReg8(cpu::AL, 0x00); // Network not installed
+    }
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    return true;
+  }
+  case 0x2E: { // Alternate Shell Exec Command
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    return true;
+  }
   case 0x3F: { // Overlay Manager / Generic Proxy (VROOMM / FBOV)
     uint16_t cs = m_cpu.getSegReg(cpu::CS);
 
@@ -241,6 +317,22 @@ bool DOS::handleInterrupt(uint8_t vector) {
     // Let XMS calls (AX=4300h/4310h) fall through to BIOS handler
     if (ax == 0x4300 || ax == 0x4310)
       return false;
+    if (ax == 0x1200) {
+      // DOS 3.0+ internal - installation check
+      m_cpu.setReg8(cpu::AL, 0xFF);
+      return true;
+    }
+    if (ax == 0x1600) {
+      // Windows 3.x/9x installation check: 00h = not running
+      m_cpu.setReg8(cpu::AL, 0x00);
+      return true;
+    }
+    if (ax == 0x4A01 || ax == 0x4A02) {
+      // DOS 5+ HMA allocate / query
+      m_cpu.setReg16(cpu::BX, 0x0000);
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      return true;
+    }
     if (ax == 0xFB42) {
       uint16_t bx = m_cpu.getReg16(cpu::BX);
       LOG_DEBUG("DOS: INT 2Fh AX=FB42h Borland DPMILOAD subfunction BX=0x", std::hex, bx);
@@ -347,6 +439,8 @@ void DOS::handleDOSService() {
       if (m_pollInput)
         m_pollInput();
       if (!m_kbd || !m_kbd->hasKey()) {
+        if (m_idleCallback)
+          m_idleCallback();
         m_cpu.setEIP(m_cpu.getInstructionStartEIP());
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         return;
@@ -367,6 +461,21 @@ void DOS::handleDOSService() {
   case 0x02: { // Print Character
     uint8_t c = m_cpu.getReg8(cpu::DL);
     writeCharToVRAM(c);
+    break;
+  }
+  case 0x03: { // STDAUX - Read Character from Auxiliary Device
+    m_cpu.setReg8(cpu::AL, 0x00);
+    LOG_DOS("DOS: STDAUX read -> AL=0x00");
+    break;
+  }
+  case 0x04: { // STDAUX - Write Character to Auxiliary Device
+    uint8_t dl = m_cpu.getReg8(cpu::DL);
+    LOG_DOS("DOS: STDAUX write char 0x", std::hex, (int)dl);
+    break;
+  }
+  case 0x05: { // STDPRN - Write Character to Printer
+    uint8_t dl = m_cpu.getReg8(cpu::DL);
+    LOG_DOS("DOS: STDPRN write char 0x", std::hex, (int)dl);
     break;
   }
   case 0x06: { // Direct Console I/O
@@ -740,8 +849,15 @@ void DOS::handleDOSService() {
     break;
   }
 
-  case 0x2E: { // Set/Reset Verify Flag (Not implemented)
-    LOG_DOS("DOS: Set/Reset Verify Flag (AH=2Eh) - Not implemented");
+  case 0x2E: { // Set/Reset Verify Flag
+    uint8_t al = m_cpu.getReg8(cpu::AL);
+    m_verifyFlag = (al != 0);
+    LOG_DOS("DOS: Set Verify Flag -> ", (int)m_verifyFlag);
+    break;
+  }
+  case 0x54: { // Get Verify Flag
+    m_cpu.setReg8(cpu::AL, m_verifyFlag ? 0x01 : 0x00);
+    LOG_DOS("DOS: Get Verify Flag -> ", (int)m_verifyFlag);
     break;
   }
   case 0x0D: { // Disk Reset (Flush Buffers)
@@ -750,6 +866,10 @@ void DOS::handleDOSService() {
   }
   case 0x0E: // Select Default Drive
   case 0x19: // Get Current Default Drive
+  case 0x1B: // Get Allocation Info for Default Drive
+  case 0x1C: // Get Allocation Info for Specified Drive
+  case 0x1F: // Get DPB for Default Drive
+  case 0x32: // Get DPB for Specified Drive
   case 0x36: // Get Free Disk Space
     handleDriveService();
     break;
@@ -823,6 +943,14 @@ void DOS::handleDOSService() {
       // Get boot drive
       m_cpu.setReg8(cpu::DL, 3); // C: drive
       LOG_DOS("DOS: Get Boot Drive -> C:");
+    } else if (al == 0x06) {
+      // Get True DOS Version (DOS 5+)
+      m_cpu.setReg8(cpu::BL, 6);    // Major 6
+      m_cpu.setReg8(cpu::BH, 22);   // Minor 22
+      m_cpu.setReg8(cpu::DL, 0);    // Revision 0
+      m_cpu.setReg8(cpu::DH, 0x10); // DOS in HMA
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      LOG_DOS("DOS: Get True DOS Version -> 6.22");
     }
     break;
   }
@@ -847,6 +975,10 @@ void DOS::handleDOSService() {
         info = 0x80 | 0x02; // STDOUT - char device
       else if (bx == 2)
         info = 0x80 | 0x02; // STDERR - char device
+      else if (bx == 3)
+        info = 0x80 | 0x00; // STDAUX - char device
+      else if (bx == 4)
+        info = 0x80 | 0x04; // STDPRN - char device
       else if (bx >= 5 && bx - 5 < m_fileHandles.size() &&
                m_fileHandles[bx - 5]) {
         if (m_fileHandles[bx - 5]->isEMSDevice())
@@ -917,8 +1049,65 @@ void DOS::handleDOSService() {
         LOG_DOS("DOS: EMS IOCTL subfn=0x", std::hex, (int)subfn,
                 " not implemented");
       }
+    } else if (al == 0x06) { // Get Input Status
+      if (bx <= 2) {
+        bool ready = (m_kbd && m_kbd->hasKey());
+        m_cpu.setReg8(cpu::AL, ready ? 0xFF : 0x00);
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      } else if (bx == 3) {
+        m_cpu.setReg8(cpu::AL, 0x00); // STDAUX not ready
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      } else if (bx == 4) {
+        m_cpu.setReg8(cpu::AL, 0xFF); // STDPRN ready
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      } else if (bx >= 5 && bx - 5 < m_fileHandles.size() && m_fileHandles[bx - 5]) {
+        auto &fh = m_fileHandles[bx - 5];
+        if (fh->isEMSDevice()) {
+          m_cpu.setReg8(cpu::AL, 0xFF);
+        } else {
+          bool atEof = fh->stream.eof();
+          m_cpu.setReg8(cpu::AL, atEof ? 0x00 : 0xFF);
+        }
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      } else {
+        m_cpu.setReg16(cpu::AX, 0x06); // Invalid handle
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      }
+    } else if (al == 0x07) { // Get Output Status
+      if (bx <= 4) {
+        m_cpu.setReg8(cpu::AL, 0xFF); // Always ready
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      } else if (bx >= 5 && bx - 5 < m_fileHandles.size() && m_fileHandles[bx - 5]) {
+        m_cpu.setReg8(cpu::AL, 0xFF);
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      } else {
+        m_cpu.setReg16(cpu::AX, 0x06); // Invalid handle
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      }
+    } else if (al == 0x08) { // Check if Block Device Removable
+      uint8_t bl = m_cpu.getReg8(cpu::BL);
+      uint8_t drive = (bl == 0) ? (m_currentDrive + 1) : bl;
+      if (drive > 26) {
+        m_cpu.setReg16(cpu::AX, 0x000F); // Invalid drive
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      } else {
+        uint16_t fixed = (drive <= 2) ? 0x0000 : 0x0001; // A/B removable, C+ fixed
+        m_cpu.setReg16(cpu::AX, fixed);
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      }
+    } else if (al == 0x09) { // Check if Block Device Remote
+      uint8_t bl = m_cpu.getReg8(cpu::BL);
+      uint8_t drive = (bl == 0) ? (m_currentDrive + 1) : bl;
+      if (drive > 26) {
+        m_cpu.setReg16(cpu::AX, 0x000F);
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      } else {
+        m_cpu.setReg16(cpu::DX, 0x0802); // Local block device
+        m_cpu.setReg16(cpu::AX, 0x0000);
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      }
     } else {
-      // Other IOCTL subfunction – stub as unsupported
+      // Other IOCTL subfunction - stub as unsupported
       m_cpu.setReg16(cpu::AX, 0x01); // Function not supported
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
       LOG_DOS("DOS: IOCTL AL=", (int)al, " not implemented");
@@ -937,6 +1126,10 @@ void DOS::handleDOSService() {
   case 0x46: // Force Duplicate File Handle (Redirect Handle)
   case 0x56: // Rename File
   case 0x57: // Get/Set File Date and Time
+  case 0x5A: // Create Temporary File
+  case 0x5B: // Create New File
+  case 0x68: // Commit File
+  case 0x6A: // Commit File (duplicate)
     handleFileService();
     break;
   case 0x4B: { // Exec
@@ -2025,6 +2218,68 @@ void DOS::handleDriveService() {
                                           : m_currentDrive);
     LOG_DEBUG("DOS: Current drive is ", (int)(m_driveManager ? m_driveManager->getCurrentDriveIndex() : m_currentDrive));
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+  } else if (ah == 0x1B || ah == 0x1C) { // Get Allocation Info for Default / Specific Drive
+    uint8_t drive = 0;
+    if (ah == 0x1B) {
+      drive = m_driveManager ? m_driveManager->getCurrentDriveIndex() : m_currentDrive;
+    } else {
+      uint8_t dl = m_cpu.getReg8(cpu::DL);
+      drive = (dl == 0) ? (m_driveManager ? m_driveManager->getCurrentDriveIndex() : m_currentDrive)
+                        : (dl - 1);
+    }
+    if (drive > 25) {
+      m_cpu.setReg8(cpu::AL, 0xFF); // Invalid drive
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+    } else {
+      uint32_t mediaDescPhys = (static_cast<uint32_t>(kListOfListsSeg) << 4) + 0x01E0;
+      uint8_t mediaDesc = (drive < 2) ? 0xF0 : 0xF8;
+      m_memory.write8(mediaDescPhys, mediaDesc);
+
+      m_cpu.setSegReg(cpu::DS, kListOfListsSeg);
+      m_cpu.setReg16(cpu::BX, 0x01E0);
+      m_cpu.setReg8(cpu::AL, 32);     // Sectors per cluster
+      m_cpu.setReg16(cpu::CX, 512);   // Bytes per sector
+      m_cpu.setReg16(cpu::DX, 65535); // Total clusters
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      LOG_DEBUG("DOS: Get Allocation Info drive ", (int)drive);
+    }
+  } else if (ah == 0x1F || ah == 0x32) { // Get DPB for Default / Specific Drive
+    uint8_t drive = 0;
+    if (ah == 0x1F) {
+      drive = m_driveManager ? m_driveManager->getCurrentDriveIndex() : m_currentDrive;
+    } else {
+      uint8_t dl = m_cpu.getReg8(cpu::DL);
+      drive = (dl == 0) ? (m_driveManager ? m_driveManager->getCurrentDriveIndex() : m_currentDrive)
+                        : (dl - 1);
+    }
+    if (drive > 25) {
+      m_cpu.setReg8(cpu::AL, 0xFF); // Invalid drive
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+    } else {
+      uint32_t dpbPhys = (static_cast<uint32_t>(kListOfListsSeg) << 4) + 0x0200;
+      m_memory.write8(dpbPhys + 0x00, drive);              // Drive number (0=A, 1=B, 2=C)
+      m_memory.write8(dpbPhys + 0x01, 0x00);               // Unit number within driver
+      m_memory.write16(dpbPhys + 0x02, 512);               // Bytes per sector
+      m_memory.write8(dpbPhys + 0x04, 31);                 // Highest sector in cluster (32 - 1)
+      m_memory.write8(dpbPhys + 0x05, 5);                  // Cluster shift (2^5 = 32)
+      m_memory.write16(dpbPhys + 0x06, 1);                 // Starting sector of first FAT
+      m_memory.write8(dpbPhys + 0x08, 2);                  // Number of FATs
+      m_memory.write16(dpbPhys + 0x09, 512);               // Number of root directory entries
+      m_memory.write16(dpbPhys + 0x0B, 33);                // First data sector
+      m_memory.write16(dpbPhys + 0x0D, 65535);             // Highest cluster number
+      m_memory.write8(dpbPhys + 0x0F, 32);                 // Sectors per FAT
+      m_memory.write16(dpbPhys + 0x11, 32);                // Root directory sector
+      m_memory.write32(dpbPhys + 0x13, farPtr(kListOfListsSeg, kDos5NulHeaderOff)); // Driver header
+      m_memory.write8(dpbPhys + 0x17, (drive < 2) ? 0xF0 : 0xF8); // Media descriptor
+      m_memory.write8(dpbPhys + 0x18, 0x00);               // Accessed flag
+      m_memory.write32(dpbPhys + 0x19, 0xFFFFFFFF);        // Pointer to next DPB
+
+      m_cpu.setSegReg(cpu::DS, kListOfListsSeg);
+      m_cpu.setReg16(cpu::BX, 0x0200);
+      m_cpu.setReg8(cpu::AL, 0x00); // Success
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      LOG_DEBUG("DOS: Get DPB drive ", (int)drive);
+    }
   } else if (ah == 0x36) { // Get Free Disk Space
     uint8_t drive = m_cpu.getReg8(cpu::DL);
     if (drive == 0)
@@ -2725,6 +2980,11 @@ void DOS::handleFileService() {
                                   std::ios::trunc | std::ios::in);
 
     if (fh->stream.is_open()) {
+      std::time_t t = std::time(nullptr);
+      if (std::tm *now = std::localtime(&t)) {
+        fh->fileTime = ((now->tm_hour & 0x1F) << 11) | ((now->tm_min & 0x3F) << 5) | ((now->tm_sec / 2) & 0x1F);
+        fh->fileDate = (((now->tm_year + 1900 - 1980) & 0x7F) << 9) | ((now->tm_mon + 1) << 5) | (now->tm_mday & 0x1F);
+      }
       m_fileHandles.push_back(std::move(fh));
       uint16_t handle = static_cast<uint16_t>(m_fileHandles.size() - 1 + 5);
       m_cpu.setReg16(cpu::AX, handle); // DOS handles start at 5
@@ -2791,6 +3051,11 @@ void DOS::handleFileService() {
     fh->stream.open(hostPath, mode);
 
     if (fh->stream.is_open()) {
+      std::time_t t = std::time(nullptr);
+      if (std::tm *now = std::localtime(&t)) {
+        fh->fileTime = ((now->tm_hour & 0x1F) << 11) | ((now->tm_min & 0x3F) << 5) | ((now->tm_sec / 2) & 0x1F);
+        fh->fileDate = (((now->tm_year + 1900 - 1980) & 0x7F) << 9) | ((now->tm_mon + 1) << 5) | (now->tm_mday & 0x1F);
+      }
       m_fileHandles.push_back(std::move(fh));
       uint16_t handle = static_cast<uint16_t>(m_fileHandles.size() - 1 + 5);
       m_cpu.setReg16(cpu::AX, handle);
@@ -3064,6 +3329,185 @@ void DOS::handleFileService() {
       m_cpu.setReg16(cpu::AX, 0x01); // Invalid function
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
       setExtendedError(0x01, 0x07, 0x04, 0x01);
+    }
+  } else if (ah == 0x56) { // Rename File
+    uint16_t dx = m_cpu.getReg16(cpu::DX);
+    uint32_t oldAddr = m_cpu.getSegBase(cpu::DS) + dx;
+    std::string oldFilename = readFilename(oldAddr);
+    std::string oldHostPath = resolvePath(oldFilename);
+
+    uint16_t di = m_cpu.getReg16(cpu::DI);
+    uint32_t newAddr = m_cpu.getSegBase(cpu::ES) + di;
+    std::string newFilename = readFilename(newAddr);
+    std::string newHostPath = resolvePath(newFilename);
+
+    std::error_code ec;
+    if (!fs::exists(oldHostPath, ec)) {
+      m_cpu.setReg16(cpu::AX, 0x02); // File not found
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      setExtendedError(0x02);
+      LOG_DOS("DOS: Rename failed, source not found: '", oldHostPath, "'");
+    } else if (fs::exists(newHostPath, ec)) {
+      m_cpu.setReg16(cpu::AX, 0x05); // Access denied / already exists
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      setExtendedError(0x05);
+      LOG_DOS("DOS: Rename failed, destination already exists: '", newHostPath, "'");
+    } else {
+      fs::rename(oldHostPath, newHostPath, ec);
+      if (ec) {
+        m_cpu.setReg16(cpu::AX, 0x05); // Access denied
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+        setExtendedError(0x05);
+        LOG_DOS("DOS: Rename failed: ", ec.message());
+      } else {
+        for (auto &fh : m_fileHandles) {
+          if (fh && fh->path == oldHostPath) {
+            fh->path = newHostPath;
+          }
+        }
+        m_cpu.setReg16(cpu::AX, 0x0000);
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+        LOG_DOS("DOS: Renamed '", oldHostPath, "' to '", newHostPath, "'");
+      }
+    }
+  } else if (ah == 0x57) { // Get/Set File Date and Time
+    uint8_t al = m_cpu.getReg8(cpu::AL);
+    uint16_t bx = m_cpu.getReg16(cpu::BX);
+    if (!(bx >= 5 && bx - 5 < m_fileHandles.size() && m_fileHandles[bx - 5])) {
+      m_cpu.setReg16(cpu::AX, 0x06); // Invalid handle
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      setExtendedError(0x06);
+    } else if (al == 0x00) { // Get Date and Time
+      auto &fh = m_fileHandles[bx - 5];
+      m_cpu.setReg16(cpu::CX, fh->fileTime);
+      m_cpu.setReg16(cpu::DX, fh->fileDate);
+      m_cpu.setReg16(cpu::AX, 0x0000);
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      LOG_DOS("DOS: Get File Date/Time handle=", bx, " time=0x", std::hex, fh->fileTime, " date=0x", fh->fileDate);
+    } else if (al == 0x01) { // Set Date and Time
+      auto &fh = m_fileHandles[bx - 5];
+      fh->fileTime = m_cpu.getReg16(cpu::CX);
+      fh->fileDate = m_cpu.getReg16(cpu::DX);
+      m_cpu.setReg16(cpu::AX, 0x0000);
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      LOG_DOS("DOS: Set File Date/Time handle=", bx, " time=0x", std::hex, fh->fileTime, " date=0x", fh->fileDate);
+    } else {
+      m_cpu.setReg16(cpu::AX, 0x01); // Invalid function
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      setExtendedError(0x01);
+    }
+  } else if (ah == 0x5A) { // Create Temporary File
+    uint16_t dx = m_cpu.getReg16(cpu::DX);
+    uint32_t pathAddr = m_cpu.getSegBase(cpu::DS) + dx;
+    std::string dirPath = readFilename(pathAddr);
+    if (!dirPath.empty() && dirPath.back() != '\\' && dirPath.back() != '/') {
+      dirPath += '\\';
+    }
+
+    char tempName[16];
+    std::string fullPath;
+    std::string hostPath;
+    bool found = false;
+
+    for (int attempt = 0; attempt < 100; ++attempt) {
+      snprintf(tempName, sizeof(tempName), "T%07u.TMP", m_tempFileCounter++);
+      fullPath = dirPath + tempName;
+      hostPath = resolvePath(fullPath);
+      std::error_code ec;
+      if (!fs::exists(hostPath, ec)) {
+        found = true;
+        break;
+      }
+    }
+
+    if (!found) {
+      m_cpu.setReg16(cpu::AX, 0x04); // Too many open files
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      setExtendedError(0x04);
+      return;
+    }
+
+    uint32_t appendOffset = pathAddr;
+    while (m_memory.read8(appendOffset) != 0) {
+      appendOffset++;
+    }
+    if (appendOffset > pathAddr && m_memory.read8(appendOffset - 1) != '\\' && m_memory.read8(appendOffset - 1) != '/') {
+      m_memory.write8(appendOffset++, '\\');
+    }
+    for (size_t i = 0; tempName[i] != '\0'; ++i) {
+      m_memory.write8(appendOffset++, static_cast<uint8_t>(tempName[i]));
+    }
+    m_memory.write8(appendOffset, 0);
+
+    auto fh = std::make_shared<FileHandle>();
+    fh->path = hostPath;
+    fh->stream.open(hostPath, std::ios::out | std::ios::binary | std::ios::trunc | std::ios::in);
+    if (fh->stream.is_open()) {
+      std::time_t t = std::time(nullptr);
+      if (std::tm *now = std::localtime(&t)) {
+        fh->fileTime = ((now->tm_hour & 0x1F) << 11) | ((now->tm_min & 0x3F) << 5) | ((now->tm_sec / 2) & 0x1F);
+        fh->fileDate = (((now->tm_year + 1900 - 1980) & 0x7F) << 9) | ((now->tm_mon + 1) << 5) | (now->tm_mday & 0x1F);
+      }
+      m_fileHandles.push_back(std::move(fh));
+      uint16_t handle = static_cast<uint16_t>(m_fileHandles.size() - 1 + 5);
+      m_cpu.setReg16(cpu::AX, handle);
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      syncJFT(handle, static_cast<uint8_t>(handle));
+      LOG_DOS("DOS: Created temporary file '", hostPath, "' handle=", handle);
+    } else {
+      m_cpu.setReg16(cpu::AX, 0x03); // Path not found
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      setExtendedError(0x03);
+    }
+  } else if (ah == 0x5B) { // Create New File (fails if already exists)
+    uint16_t dx = m_cpu.getReg16(cpu::DX);
+    uint32_t nameAddr = m_cpu.getSegBase(cpu::DS) + dx;
+    std::string filename = readFilename(nameAddr);
+    std::string hostPath = resolvePath(filename);
+
+    std::error_code ec;
+    if (fs::exists(hostPath, ec)) {
+      m_cpu.setReg16(cpu::AX, 0x50); // File already exists
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      setExtendedError(0x50);
+      LOG_DOS("DOS: Create New File failed, '", hostPath, "' already exists");
+      return;
+    }
+
+    auto fh = std::make_shared<FileHandle>();
+    fh->path = hostPath;
+    fh->stream.open(hostPath, std::ios::out | std::ios::binary | std::ios::trunc | std::ios::in);
+    if (fh->stream.is_open()) {
+      std::time_t t = std::time(nullptr);
+      if (std::tm *now = std::localtime(&t)) {
+        fh->fileTime = ((now->tm_hour & 0x1F) << 11) | ((now->tm_min & 0x3F) << 5) | ((now->tm_sec / 2) & 0x1F);
+        fh->fileDate = (((now->tm_year + 1900 - 1980) & 0x7F) << 9) | ((now->tm_mon + 1) << 5) | (now->tm_mday & 0x1F);
+      }
+      m_fileHandles.push_back(std::move(fh));
+      uint16_t handle = static_cast<uint16_t>(m_fileHandles.size() - 1 + 5);
+      m_cpu.setReg16(cpu::AX, handle);
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      syncJFT(handle, static_cast<uint8_t>(handle));
+      LOG_DOS("DOS: Created new file '", hostPath, "' handle=", handle);
+    } else {
+      m_cpu.setReg16(cpu::AX, 0x03); // Path not found
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      setExtendedError(0x03);
+    }
+  } else if (ah == 0x68 || ah == 0x6A) { // Commit File (Flush Buffers)
+    uint16_t bx = m_cpu.getReg16(cpu::BX);
+    if (bx <= 4) {
+      m_cpu.setReg16(cpu::AX, 0x0000);
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    } else if (bx >= 5 && bx - 5 < m_fileHandles.size() && m_fileHandles[bx - 5]) {
+      m_fileHandles[bx - 5]->stream.flush();
+      m_cpu.setReg16(cpu::AX, 0x0000);
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      LOG_DOS("DOS: Committed file handle ", bx);
+    } else {
+      m_cpu.setReg16(cpu::AX, 0x06); // Invalid handle
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      setExtendedError(0x06);
     }
   }
 }

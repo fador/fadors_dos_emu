@@ -47,6 +47,7 @@ public:
   void initialize();
 
   bool isTerminated() const { return m_terminated; }
+  bool getVerifyFlag() const { return m_verifyFlag; }
   void resetTerminated() { m_terminated = false; }
   uint8_t getExitCode() const { return m_exitCode; }
   uint16_t getPSPSegment() const { return m_pspSegment; }
@@ -167,6 +168,8 @@ private:
   bool m_terminated = false;
   uint8_t m_exitCode = 0;
   bool m_ctrlBreakCheck = false;
+  bool m_verifyFlag = false;
+  uint32_t m_tempFileCounter = 1;
   uint16_t m_pspSegment = 0x1000;
   uint16_t m_currentPSPValue = 0x1000;
   uint16_t m_allocationStrategy = 0; // Default: 0 = First fit
@@ -206,6 +209,8 @@ private:
     std::string path;
     Kind kind = Kind::File;
     std::fstream stream;
+    uint16_t fileTime = 0;
+    uint16_t fileDate = 0;
 
     bool isEMSDevice() const { return kind == Kind::EMSDevice; }
   };

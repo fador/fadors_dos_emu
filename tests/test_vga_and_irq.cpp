@@ -486,16 +486,16 @@ TEST_CASE("IRQ: D-bit guard forces HLE for 16-bit thunk IDT target", "[IRQ]") {
 TEST_CASE("IRQ: Unhandled HLE vector sends EOI and returns", "[IRQ]") {
     PMIRQTestEnv env;
 
-    // Vector 0x09 (keyboard IRQ) has no BIOS HLE handler, but IDT target
-    // is 16-bit, so D-bit guard sets useHLE=true.  The sendEOI fallback
-    // should fire.
+    // Vector has an HLE IDT target but no BIOS HLE handler.
+    // The sendEOI fallback should fire and drop the interrupt.
 
-    SECTION("Keyboard IRQ does not crash when no HLE handler exists") {
+    SECTION("Unhandled HLE vector does not crash and leaves CPU state unchanged") {
+        env.setupIDT_32bit_HLE(0x0E); // IRQ 6 (floppy): no BIOS HLE handler
         uint32_t eipBefore = env.cpu.getEIP();
         uint16_t csBefore = env.cpu.getSegReg(cpu::CS);
         uint32_t espBefore = env.cpu.getReg32(cpu::ESP);
 
-        env.decoder.injectHardwareInterrupt(0x09);
+        env.decoder.injectHardwareInterrupt(0x0E);
 
         // CPU state should be unchanged — the interrupt was silently dropped
         REQUIRE(env.cpu.getEIP() == eipBefore);

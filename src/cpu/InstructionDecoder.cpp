@@ -5539,31 +5539,6 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
     use32 = (type & 0x08) != 0;
     bool isInterruptGate = (type & 0x01) == 0;
 
-    // For INT 9 (keyboard) in 32-bit app code, dispatch directly to
-    // the IDT handler WITHOUT the fragile stack switch.  Push the
-    // 32-bit IRET frame on the app's stack and jump to the handler.
-    // The handler at CS=0x97 is 16-bit DOS/4GW code that reads port
-    // 60h, calls the app's PM handler, sends EOI, and does IRETD.
-    if (vector == 0x09 && m_cpu.is32BitCode() && use32 &&
-        cs != 0x08 && cs != 0x30) {
-      m_cpu.pushHLEFrame(true, 9);
-      m_cpu.push32(m_cpu.getEFLAGS());
-      m_cpu.push32(oldCs);
-      m_cpu.push32(m_cpu.getEIP());
-      auto &frame = m_cpu.lastHLEFrameMut();
-      uint32_t sb = m_cpu.getSegBase(SS);
-      bool s32 = m_cpu.is32BitStack();
-      uint32_t sp = s32 ? m_cpu.getReg32(ESP) : m_cpu.getReg16(SP);
-      frame.framePhysAddr = sb + sp;
-      frame.frameSP = sp;
-      frame.stackIs32 = s32;
-      frame.returnFrameBytes = 12;
-      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~fador::cpu::FLAG_INTERRUPT);
-      loadSegment(CS, cs);
-      m_cpu.setEIP(eip32);
-      return;
-    }
-
     auto decodeSelector = [&](uint16_t selector) -> Descriptor {
       if ((selector & 0xFFF8) == 0) {
         return {0, 0, false, false, 0, 0, true};

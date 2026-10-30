@@ -1,6 +1,8 @@
 /docs
 /build
 /.cache
+/.vscode
+/test_dos_dirs
 *.txt
 *.py
 *.log

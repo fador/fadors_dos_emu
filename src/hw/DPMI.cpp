@@ -60,6 +60,8 @@ void DPMI::handleDetect() {
   m_memBlocks.clear();
   m_nextBlockHandle = 1;
   m_sdaSel = 0;
+  m_rmCallbacks = {};
+  m_nextCallbackIdx = 0;
   for (auto &desc : m_ldt) {
     desc.low = 0;
     desc.high = 0;
@@ -589,6 +591,26 @@ void DPMI::handleDescriptorMgmt() {
     }
     break;
   }
+  case 0x000D: { // Allocate Specific LDT Descriptor
+    uint16_t sel = m_cpu.getReg16(cpu::BX);
+    int idx = selectorToIndex(sel);
+    if ((sel & LDT_TI_BIT) == 0 || idx <= 0 || idx >= MAX_LDT) {
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      m_cpu.setReg16(cpu::AX, 0x8022); // Invalid selector
+      break;
+    }
+    if (m_ldtUsed[idx]) {
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      m_cpu.setReg16(cpu::AX, 0x8011); // Descriptor unavailable
+      break;
+    }
+    m_ldtUsed[idx] = true;
+    m_ldtBatchAlloc[idx] = false;
+    m_ldt[idx] = buildDescriptor(0, 0xFFFF, 0xF2, 0x00);
+    flushLDTEntry(idx);
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    break;
+  }
   default:
     LOG_WARN("DPMI: Unhandled descriptor function 0x", std::hex, func);
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
@@ -617,6 +639,13 @@ void DPMI::handleDOSMemory() {
         flushLDTEntry(selectorToIndex(sel));
         m_cpu.setReg16(cpu::DX, sel);
         m_cpu.setReg16(cpu::AX, seg);
+      } else {
+        m_cpu.setSegReg(cpu::ES, seg);
+        m_cpu.setReg8(cpu::AH, 0x49);
+        if (m_dos)
+          m_dos->handleInterrupt(0x21);
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+        m_cpu.setReg16(cpu::AX, 0x8011);
       }
     }
     break;
@@ -634,6 +663,7 @@ void DPMI::handleDOSMemory() {
       freeDescriptor(sel);
     } else {
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      m_cpu.setReg16(cpu::AX, 0x8022);
     }
     break;
   }
@@ -656,6 +686,7 @@ void DPMI::handleDOSMemory() {
       }
     } else {
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      m_cpu.setReg16(cpu::AX, 0x8022);
     }
     break;
   }
@@ -970,6 +1001,19 @@ void DPMI::handleTranslation() {
       rmSP = 0x03F0; // safe top-of-segment offset
     }
 
+    // DPMI Spec: CX = number of words to copy from PM stack to RM stack
+    uint16_t copyWords = static_cast<uint16_t>(savedRegs[cpu::ECX]);
+    if (copyWords > 0) {
+      uint32_t pmSSBase = savedSegBases[cpu::SS];
+      uint32_t pmSP = savedIs32Stack ? savedRegs[cpu::ESP] : (savedRegs[cpu::ESP] & 0xFFFF);
+      uint32_t rmSSBase = static_cast<uint32_t>(rmSS) << 4;
+      for (int i = copyWords - 1; i >= 0; --i) {
+        rmSP -= 2;
+        uint16_t word = m_memory.read16(pmSSBase + pmSP + i * 2);
+        m_memory.write16(rmSSBase + rmSP, word);
+      }
+    }
+
     // Temporarily set RM state for the call
     m_cpu.setEFLAGS((m_cpu.getEFLAGS() & 0xFFFF0000) | rmFlags);
     m_cpu.setIs32BitCode(false);
@@ -1197,19 +1241,24 @@ void DPMI::handleTranslation() {
     m_in030xHandler = false;
     break;
   }
-  case 0x0303: { // Allocate Real Mode Callback Address    
+  case 0x0303: { // Allocate Real Mode Callback Address
     // DS:ESI = PM callback CS:EIP (the function to call from real mode)
     uint16_t pmSel = m_cpu.getSegReg(cpu::DS);
     uint32_t pmOff = m_is32BitClient ? m_cpu.getReg32(cpu::ESI)
-                                      : m_cpu.getReg16(cpu::SI);
-    // Allocate a callback slot
-    int idx = m_nextCallbackIdx;
-    if (idx >= MAX_RM_CALLBACKS) {
+                                       : m_cpu.getReg16(cpu::SI);
+    // Find first unallocated callback slot
+    int idx = -1;
+    for (int i = 0; i < MAX_RM_CALLBACKS; ++i) {
+      if (!m_rmCallbacks[i].allocated) {
+        idx = i;
+        break;
+      }
+    }
+    if (idx < 0) {
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
       m_cpu.setReg16(cpu::AX, 0x8015); // No free callbacks
       break;
     }
-    m_nextCallbackIdx++;
     m_rmCallbacks[idx] = {true, pmSel, pmOff};
     // Callback stub is at F000:(0x0060 + idx*16).  The HLE stub there
     // has vector 0x60+idx encoded.  Set up the PM IDT so the HLE trap
@@ -1230,6 +1279,20 @@ void DPMI::handleTranslation() {
     break;
   }
   case 0x0304: { // Free Real Mode Callback Address
+    uint16_t seg = m_cpu.getReg16(cpu::CX);
+    uint16_t off = m_cpu.getReg16(cpu::DX);
+    if (seg == 0xF000 && off >= 0x0060 &&
+        off < 0x0060 + MAX_RM_CALLBACKS * 16 &&
+        ((off - 0x0060) % 16) == 0) {
+      int idx = (off - 0x0060) / 16;
+      if (idx < MAX_RM_CALLBACKS && m_rmCallbacks[idx].allocated) {
+        m_rmCallbacks[idx].allocated = false;
+        m_rmCallbacks[idx].pmSelector = 0;
+        m_rmCallbacks[idx].pmOffset = 0;
+        uint8_t vec = static_cast<uint8_t>(0x60 + idx);
+        m_pmVectors[vec] = {0, 0};
+      }
+    }
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
     break;
   }
@@ -1449,6 +1512,8 @@ void DPMI::handlePageLocking() {
   switch (func) {
   case 0x0600: // Lock Linear Region — no-op success
   case 0x0601: // Unlock Linear Region — no-op success
+  case 0x0602: // Mark Real Mode Region as Pageable — no-op success
+  case 0x0603: // Relock Real Mode Region — no-op success
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
     break;
   case 0x0604: // Get Page Size

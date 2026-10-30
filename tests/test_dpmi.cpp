@@ -3115,3 +3115,179 @@ TEST_CASE("DPMI 0801h frees physical mapping (no-op)", "[dpmi][phys]") {
     // Free is a no-op success
     REQUIRE(!env.carrySet());
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Additional DPMI Verification Tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("DPMI 000Dh allocate specific LDT descriptor", "[dpmi][ldt]") {
+    DPMITestEnv env;
+
+    // Build specific selector: index 0x25, TI=1, RPL=3 -> (0x25 << 3) | 7 = 0x12F
+    uint16_t targetSel = static_cast<uint16_t>((0x25 << 3) | 0x07);
+
+    // Allocate specific selector
+    env.cpu.setReg16(cpu::AX, 0x000D);
+    env.cpu.setReg16(cpu::BX, targetSel);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+
+    // Allocating the same selector again must fail (0x8011: descriptor unavailable)
+    env.cpu.setReg16(cpu::AX, 0x000D);
+    env.cpu.setReg16(cpu::BX, targetSel);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(env.carrySet());
+    REQUIRE(env.cpu.getReg16(cpu::AX) == 0x8011);
+
+    // Allocating a non-LDT selector (TI=0) must fail (0x8022: invalid selector)
+    uint16_t gdtSel = static_cast<uint16_t>((0x25 << 3) | 0x03); // TI=0
+    env.cpu.setReg16(cpu::AX, 0x000D);
+    env.cpu.setReg16(cpu::BX, gdtSel);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(env.carrySet());
+    REQUIRE(env.cpu.getReg16(cpu::AX) == 0x8022);
+
+    // Free the specific descriptor with 0001h
+    env.cpu.setReg16(cpu::AX, 0x0001);
+    env.cpu.setReg16(cpu::BX, targetSel);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+
+    // Now allocating it again with 000Dh must succeed
+    env.cpu.setReg16(cpu::AX, 0x000D);
+    env.cpu.setReg16(cpu::BX, targetSel);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+}
+
+TEST_CASE("DPMI 0602h/0603h mark pageable and relock region succeed", "[dpmi][page]") {
+    DPMITestEnv env;
+
+    // 0602h: Mark Real Mode Region as Pageable
+    env.cpu.setReg16(cpu::AX, 0x0602);
+    env.cpu.setReg16(cpu::BX, 0x0001);
+    env.cpu.setReg16(cpu::CX, 0x0000);
+    env.cpu.setReg16(cpu::SI, 0x0000);
+    env.cpu.setReg16(cpu::DI, 0x1000);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+
+    // 0603h: Relock Real Mode Region
+    env.cpu.setReg16(cpu::AX, 0x0603);
+    env.cpu.setReg16(cpu::BX, 0x0001);
+    env.cpu.setReg16(cpu::CX, 0x0000);
+    env.cpu.setReg16(cpu::SI, 0x0000);
+    env.cpu.setReg16(cpu::DI, 0x1000);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+}
+
+TEST_CASE("DPMI 0300h copies PM stack words to RM stack when CX > 0", "[dpmi][translation]") {
+    DPMITestEnv env;
+
+    constexpr uint32_t CALL_STRUCT = 0x25000;
+    constexpr uint16_t INIT_RM_SS = 0x1500;
+    constexpr uint16_t INIT_RM_SP = 0x0200;
+
+    // Zero call structure
+    for (int i = 0; i < 50; i++) env.mem.write8(CALL_STRUCT + i, 0);
+
+    // Initial RM SS:SP
+    env.mem.write16(CALL_STRUCT + 0x2E, INIT_RM_SP);
+    env.mem.write16(CALL_STRUCT + 0x30, INIT_RM_SS);
+
+    // Prepare PM stack with 2 words (0xAA55, 0x1234)
+    uint32_t pmSSBase = env.cpu.getSegBase(cpu::SS);
+    uint32_t pmSP = env.cpu.getReg32(cpu::ESP);
+    env.mem.write16(pmSSBase + pmSP, 0xAA55);
+    env.mem.write16(pmSSBase + pmSP + 2, 0x1234);
+
+    // Call INT 28h (DOS idle - safe no-op) with CX = 2 words to copy
+    env.cpu.setReg16(cpu::AX, 0x0300);
+    env.cpu.setReg8(cpu::BL, 0x28);
+    env.cpu.setReg8(cpu::BH, 0x00);
+    env.cpu.setReg16(cpu::CX, 2);
+    env.cpu.setReg32(cpu::EDI, CALL_STRUCT);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+
+    REQUIRE(!env.carrySet());
+
+    // Verify words copied to RM stack at 0x1500:0x01FC and 0x1500:0x01FE
+    uint32_t rmSSBase = static_cast<uint32_t>(INIT_RM_SS) << 4;
+    REQUIRE(env.mem.read16(rmSSBase + INIT_RM_SP - 4) == 0xAA55);
+    REQUIRE(env.mem.read16(rmSSBase + INIT_RM_SP - 2) == 0x1234);
+
+    // Call structure SP should be updated to INIT_RM_SP - 4
+    REQUIRE(env.mem.read16(CALL_STRUCT + 0x2E) == INIT_RM_SP - 4);
+}
+
+TEST_CASE("DPMI 0303h callback slot reuse after freeing", "[dpmi][callback]") {
+    DPMITestEnv env;
+
+    uint16_t callbacks[8];
+    // Allocate 8 callbacks (filling all available slots)
+    for (int i = 0; i < 8; ++i) {
+        env.cpu.setReg16(cpu::AX, 0x0303);
+        env.cpu.setSegReg(cpu::DS, 0x0017);
+        env.cpu.setReg32(cpu::ESI, 0x1000 + i * 0x100);
+        env.clearCarry();
+        env.dpmi.handleInt31();
+        REQUIRE(!env.carrySet());
+        REQUIRE(env.cpu.getReg16(cpu::CX) == 0xF000);
+        callbacks[i] = env.cpu.getReg16(cpu::DX);
+        REQUIRE(callbacks[i] == static_cast<uint16_t>(0x0060 + i * 16));
+    }
+
+    // 9th allocation must fail (0x8015: no free callbacks)
+    env.cpu.setReg16(cpu::AX, 0x0303);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(env.carrySet());
+    REQUIRE(env.cpu.getReg16(cpu::AX) == 0x8015);
+
+    // Free callback #3 (DX = callbacks[3] = 0x0090)
+    env.cpu.setReg16(cpu::AX, 0x0304);
+    env.cpu.setReg16(cpu::CX, 0xF000);
+    env.cpu.setReg16(cpu::DX, callbacks[3]);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+
+    // Now an allocation must succeed and reuse slot #3
+    env.cpu.setReg16(cpu::AX, 0x0303);
+    env.cpu.setSegReg(cpu::DS, 0x0017);
+    env.cpu.setReg32(cpu::ESI, 0x9999);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+    REQUIRE(env.cpu.getReg16(cpu::DX) == callbacks[3]);
+}
+
+TEST_CASE("DPMI 0101h/0102h error reporting for invalid selector", "[dpmi][dosmem]") {
+    DPMITestEnv env;
+
+    // 0101h: Free DOS memory with invalid selector
+    env.cpu.setReg16(cpu::AX, 0x0101);
+    env.cpu.setReg16(cpu::DX, 0xFFF0); // Invalid selector
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(env.carrySet());
+    REQUIRE(env.cpu.getReg16(cpu::AX) == 0x8022);
+
+    // 0102h: Resize DOS memory with invalid selector
+    env.cpu.setReg16(cpu::AX, 0x0102);
+    env.cpu.setReg16(cpu::DX, 0xFFF0);
+    env.cpu.setReg16(cpu::BX, 10);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(env.carrySet());
+    REQUIRE(env.cpu.getReg16(cpu::AX) == 0x8022);
+}

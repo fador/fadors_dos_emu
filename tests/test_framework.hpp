@@ -26,9 +26,10 @@ struct RegisterTest {
     }
 };
 
-static std::set<std::string> g_executed_sections;
-static std::vector<std::string> g_stack;
-static bool g_entered_new;
+inline std::set<std::string> g_executed_sections;
+inline std::vector<std::string> g_stack;
+inline bool g_entered_new;
+inline std::string g_last_entered_path;
 
 inline bool enter_section(const char* name) {
     std::string path;
@@ -40,6 +41,7 @@ inline bool enter_section(const char* name) {
 
     g_stack.push_back(name);
     g_entered_new = true;
+    g_last_entered_path = path;
     return true;
 }
 
@@ -81,6 +83,7 @@ inline int run_all_tests() {
         while (true) {
             g_stack.clear();
             g_entered_new = false;
+            g_last_entered_path.clear();
             g_executed_sections = local_executed;
             try {
                 test.func();
@@ -96,10 +99,7 @@ inline int run_all_tests() {
 
             if (!g_entered_new) break;
             
-            std::string path;
-            for (auto& s : g_stack) path += s + "/";
-            if (!path.empty()) path.pop_back();
-            local_executed.insert(path);
+            local_executed.insert(g_last_entered_path);
         }
         
         if (!te_failed) {
