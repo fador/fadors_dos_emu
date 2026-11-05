@@ -1037,12 +1037,12 @@ TEST_CASE("DPMI raw switch RM→PM", "[dpmi][rawswitch]") {
     REQUIRE(env.cpu.getSegReg(cpu::SS) == pmSS);
 
     // Check system registers (PM GDTR/LDTR/IDTR/TR)
-    REQUIRE(env.cpu.getGDTR().base == 0xF1000);
+    REQUIRE(env.cpu.getGDTR().base == hw::DPMI::kGdtPhys);
     REQUIRE(env.cpu.getGDTR().limit == 0x37);
-    REQUIRE(env.cpu.getIDTR().base == 0xF0800);
+    REQUIRE(env.cpu.getIDTR().base == hw::DPMI::kIdtPhys);
     REQUIRE(env.cpu.getIDTR().limit == 0x7FF);
     REQUIRE(env.cpu.getLDTRSelector() == 0x18);
-    REQUIRE(env.cpu.getLDTR().base == 0x1F00000);
+    REQUIRE(env.cpu.getLDTR().base == hw::DPMI::kLdtPhys);
     REQUIRE(env.cpu.getTRSelector() == 0x20);
 }
 
@@ -1284,7 +1284,7 @@ TEST_CASE("DPMI multiple memory allocations", "[dpmi][memory][stress]") {
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Physical addresses used by DPMI internals (mirrors DPMI.cpp constants)
-static constexpr uint32_t IDT_PM_PHYS = 0xF0800;
+static constexpr uint32_t IDT_PM_PHYS = hw::DPMI::kIdtPhys;
 // HLE stub for vector V lives at physical 0xF0000 + 0x0100 + V*16
 static constexpr uint32_t hleStubPhys(uint8_t v) {
     return 0xF0000u + 0x0100u + static_cast<uint32_t>(v) * 16u;
@@ -3059,8 +3059,8 @@ TEST_CASE("DPMI 0800h maps arbitrary physical address", "[dpmi][phys]") {
 TEST_CASE("DPMI 0800h rejects address above physical limit", "[dpmi][phys]") {
     DPMITestEnv env;
 
-    // Try to map address above 16MB limit (0x1000000)
-    uint32_t physAddr = 0x1000000; // 16MB, at the limit (rejected)
+    // Try to map an address at the end of emulated physical memory
+    uint32_t physAddr = memory::MemoryBus::MEMORY_SIZE; // at the limit (rejected)
     uint32_t size = 0x1000;
 
     env.cpu.setReg16(cpu::AX, 0x0800);
@@ -3073,6 +3073,23 @@ TEST_CASE("DPMI 0800h rejects address above physical limit", "[dpmi][phys]") {
 
     REQUIRE(env.carrySet());
     REQUIRE(env.cpu.getReg16(cpu::AX) == 0x8002); // Invalid address
+}
+
+TEST_CASE("DPMI 0800h maps the VBE linear framebuffer", "[dpmi][phys]") {
+    DPMITestEnv env;
+    uint32_t physAddr = memory::MemoryBus::VBE_LFB_BASE;
+    uint32_t size = memory::MemoryBus::VBE_VRAM_SIZE;
+    env.cpu.setReg16(cpu::AX, 0x0800);
+    env.cpu.setReg16(cpu::BX, static_cast<uint16_t>(physAddr >> 16));
+    env.cpu.setReg16(cpu::CX, static_cast<uint16_t>(physAddr & 0xFFFF));
+    env.cpu.setReg16(cpu::SI, static_cast<uint16_t>(size >> 16));
+    env.cpu.setReg16(cpu::DI, static_cast<uint16_t>(size & 0xFFFF));
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+    uint32_t linear = (static_cast<uint32_t>(env.cpu.getReg16(cpu::BX)) << 16)
+                    | env.cpu.getReg16(cpu::CX);
+    REQUIRE(linear == physAddr);
 }
 
 TEST_CASE("DPMI 0800h rejects zero-size mapping", "[dpmi][phys]") {

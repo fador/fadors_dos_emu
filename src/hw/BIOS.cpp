@@ -939,7 +939,7 @@ void BIOS::handleVideoService() {
   }
   case 0x10: { // DAC/Palette Functions
     uint8_t al = m_cpu.getReg8(cpu::AL);
-    constexpr uint32_t PAL = 0xE0000;
+    uint8_t *PAL = m_memory.dacPalette();
     switch (al) {
     case 0x00: // Set Individual Palette Register
       LOG_DEBUG("BIOS INT 10h AH=10h AL=00h: Set Palette Reg BL=",
@@ -964,9 +964,9 @@ void BIOS::handleVideoService() {
     case 0x10: { // Set Individual DAC Register
       uint16_t reg = m_cpu.getReg16(cpu::BX);
       if (reg < 256) {
-        m_memory.write8(PAL + reg * 3 + 0, m_cpu.getReg8(cpu::DH) & 0x3F);
-        m_memory.write8(PAL + reg * 3 + 1, m_cpu.getReg8(cpu::CH) & 0x3F);
-        m_memory.write8(PAL + reg * 3 + 2, m_cpu.getReg8(cpu::CL) & 0x3F);
+        PAL[reg * 3 + 0] = static_cast<uint8_t>(m_cpu.getReg8(cpu::DH) & 0x3F);
+        PAL[reg * 3 + 1] = static_cast<uint8_t>(m_cpu.getReg8(cpu::CH) & 0x3F);
+        PAL[reg * 3 + 2] = static_cast<uint8_t>(m_cpu.getReg8(cpu::CL) & 0x3F);
       }
       LOG_DEBUG("BIOS INT 10h AH=10h AL=10h: Set DAC Reg ", reg);
       break;
@@ -978,12 +978,9 @@ void BIOS::handleVideoService() {
       uint16_t dx = m_cpu.getReg16(cpu::DX);
       uint32_t addr = (es << 4) + dx;
       for (uint16_t i = 0; i < count && (first + i) < 256; ++i) {
-        m_memory.write8(PAL + (first + i) * 3 + 0,
-                        m_memory.read8(addr + i * 3 + 0) & 0x3F);
-        m_memory.write8(PAL + (first + i) * 3 + 1,
-                        m_memory.read8(addr + i * 3 + 1) & 0x3F);
-        m_memory.write8(PAL + (first + i) * 3 + 2,
-                        m_memory.read8(addr + i * 3 + 2) & 0x3F);
+        PAL[(first + i) * 3 + 0] = static_cast<uint8_t>(m_memory.read8(addr + i * 3 + 0) & 0x3F);
+        PAL[(first + i) * 3 + 1] = static_cast<uint8_t>(m_memory.read8(addr + i * 3 + 1) & 0x3F);
+        PAL[(first + i) * 3 + 2] = static_cast<uint8_t>(m_memory.read8(addr + i * 3 + 2) & 0x3F);
       }
       LOG_DEBUG("BIOS INT 10h AH=10h AL=12h: Set DAC Block first=", first,
                 " count=", count);
@@ -992,9 +989,9 @@ void BIOS::handleVideoService() {
     case 0x15: { // Read Individual DAC Register
       uint16_t reg = m_cpu.getReg16(cpu::BX);
       if (reg < 256) {
-        m_cpu.setReg8(cpu::DH, m_memory.read8(PAL + reg * 3 + 0));
-        m_cpu.setReg8(cpu::CH, m_memory.read8(PAL + reg * 3 + 1));
-        m_cpu.setReg8(cpu::CL, m_memory.read8(PAL + reg * 3 + 2));
+        m_cpu.setReg8(cpu::DH, PAL[reg * 3 + 0]);
+        m_cpu.setReg8(cpu::CH, PAL[reg * 3 + 1]);
+        m_cpu.setReg8(cpu::CL, PAL[reg * 3 + 2]);
       }
       break;
     }
@@ -1006,11 +1003,11 @@ void BIOS::handleVideoService() {
       uint32_t addr = (es << 4) + dx;
       for (uint16_t i = 0; i < count && (first + i) < 256; ++i) {
         m_memory.write8(addr + i * 3 + 0,
-                        m_memory.read8(PAL + (first + i) * 3 + 0));
+                        PAL[(first + i) * 3 + 0]);
         m_memory.write8(addr + i * 3 + 1,
-                        m_memory.read8(PAL + (first + i) * 3 + 1));
+                        PAL[(first + i) * 3 + 1]);
         m_memory.write8(addr + i * 3 + 2,
-                        m_memory.read8(PAL + (first + i) * 3 + 2));
+                        PAL[(first + i) * 3 + 2]);
       }
       LOG_DEBUG("BIOS INT 10h AH=10h AL=17h: Read DAC Block first=", first,
                 " count=", count);
@@ -1460,40 +1457,40 @@ void BIOS::initialize() {
     m_memory.write8(0xB8000 + i + 1, 0x07);
   }
 
-  // Initialize VGA DAC palette at 0xE0000 (256 entries x 3 bytes = 768 bytes)
+  // Initialize the VGA DAC palette (256 entries x 3 bytes = 768 bytes)
   // Standard CGA colors first (6-bit VGA values, 0-63)
   static const uint8_t cgaPal[16][3] = {
       {0, 0, 0},    {0, 0, 42},   {0, 42, 0},   {0, 42, 42},
       {42, 0, 0},   {42, 0, 42},  {42, 21, 0},  {42, 42, 42},
       {21, 21, 21}, {21, 21, 63}, {21, 63, 21}, {21, 63, 63},
       {63, 21, 21}, {63, 21, 63}, {63, 63, 21}, {63, 63, 63}};
-  constexpr uint32_t PAL = 0xE0000;
+  uint8_t *PAL = m_memory.dacPalette();
   for (int i = 0; i < 16; ++i) {
-    m_memory.write8(PAL + i * 3 + 0, cgaPal[i][0]);
-    m_memory.write8(PAL + i * 3 + 1, cgaPal[i][1]);
-    m_memory.write8(PAL + i * 3 + 2, cgaPal[i][2]);
+    PAL[i * 3 + 0] = static_cast<uint8_t>(cgaPal[i][0]);
+    PAL[i * 3 + 1] = static_cast<uint8_t>(cgaPal[i][1]);
+    PAL[i * 3 + 2] = static_cast<uint8_t>(cgaPal[i][2]);
   }
   // 16-31: Grayscale ramp
   for (int i = 0; i < 16; ++i) {
     uint8_t v = static_cast<uint8_t>(i * 63 / 15);
-    m_memory.write8(PAL + (16 + i) * 3 + 0, v);
-    m_memory.write8(PAL + (16 + i) * 3 + 1, v);
-    m_memory.write8(PAL + (16 + i) * 3 + 2, v);
+    PAL[(16 + i) * 3 + 0] = static_cast<uint8_t>(v);
+    PAL[(16 + i) * 3 + 1] = static_cast<uint8_t>(v);
+    PAL[(16 + i) * 3 + 2] = static_cast<uint8_t>(v);
   }
   // 32-247: 6x6x6 color cube
   for (int i = 0; i < 216; ++i) {
     uint8_t r = static_cast<uint8_t>((i / 36) * 12 + 3);
     uint8_t g = static_cast<uint8_t>(((i % 36) / 6) * 12 + 3);
     uint8_t b = static_cast<uint8_t>((i % 6) * 12 + 3);
-    m_memory.write8(PAL + (32 + i) * 3 + 0, r);
-    m_memory.write8(PAL + (32 + i) * 3 + 1, g);
-    m_memory.write8(PAL + (32 + i) * 3 + 2, b);
+    PAL[(32 + i) * 3 + 0] = static_cast<uint8_t>(r);
+    PAL[(32 + i) * 3 + 1] = static_cast<uint8_t>(g);
+    PAL[(32 + i) * 3 + 2] = static_cast<uint8_t>(b);
   }
   // 248-255: Black
   for (int i = 248; i < 256; ++i) {
-    m_memory.write8(PAL + i * 3 + 0, 0);
-    m_memory.write8(PAL + i * 3 + 1, 0);
-    m_memory.write8(PAL + i * 3 + 2, 0);
+    PAL[i * 3 + 0] = static_cast<uint8_t>(0);
+    PAL[i * 3 + 1] = static_cast<uint8_t>(0);
+    PAL[i * 3 + 2] = static_cast<uint8_t>(0);
   }
 
   // 2. Setup IVT (Interrupt Vector Table) vectors
@@ -2052,8 +2049,9 @@ void BIOS::handleSystemService() {
     // Return 0 if HIMEM is present, otherwise return total.
     uint16_t extKB = 0;
     if (!m_himem) {
-      extKB =
-          static_cast<uint16_t>((memory::MemoryBus::MEMORY_SIZE / 1024) - 1024);
+      // AX is 16-bit: report at most 64 MiB - 1 KiB (like real BIOSes)
+      uint32_t kb = (memory::MemoryBus::XMS_LIMIT / 1024) - 1024;
+      extKB = static_cast<uint16_t>(kb > 0xFFFF ? 0xFFFF : kb);
     }
     m_cpu.setReg16(cpu::AX, extKB);
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
@@ -2064,8 +2062,9 @@ void BIOS::handleSystemService() {
     if (al == 0x01) { // Get memory size for >64M configurations
       // AX/CX = configured memory 1M to 16M, in K
       // BX/DX = configured memory above 16M, in 64K blocks
-      uint16_t mem1to16 = 15 * 1024;          // 15MB
-      uint16_t memAbove16 = (48 * 1024) / 64; // 48MB / 64K = 768
+      uint16_t mem1to16 = 15 * 1024; // 15MB
+      uint16_t memAbove16 = static_cast<uint16_t>(
+          (memory::MemoryBus::XMS_LIMIT - 0x1000000u) / 0x10000u);
 
       m_cpu.setReg16(cpu::AX, mem1to16);
       m_cpu.setReg16(cpu::CX, mem1to16);
@@ -2074,7 +2073,8 @@ void BIOS::handleSystemService() {
 
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
       LOG_DEBUG(
-          "BIOS INT 15h AH=E801h: Reported 15MB (AX/CX) and 48MB (BX/DX)");
+          "BIOS INT 15h AH=E801h: Reported 15MB (AX/CX) + ", memAbove16,
+          " x 64K (BX/DX)");
     } else {
       m_cpu.setReg8(cpu::AH, 0x86);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);

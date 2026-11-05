@@ -1,5 +1,6 @@
 #pragma once
 #include "../utils/Logger.hpp"
+#include <array>
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
@@ -12,6 +13,16 @@ namespace fador::memory {
 class MemoryBus {
 public:
   static constexpr uint32_t MEMORY_SIZE = 128 * 1024 * 1024; // 128MB
+
+  // Physical memory map above 1 MiB:
+  //   0x00100000 .. XMS_LIMIT-1        XMS / DPMI memory pool
+  //   VBE_LFB_BASE .. +VBE_VRAM_SIZE   SVGA video memory (VBE linear FB)
+  //   SYSTEM_RESERVED_BASE ..          host-owned tables (DPMI LDT, ...)
+  // Nothing a program can allocate overlaps video memory or the tables.
+  static constexpr uint32_t VBE_LFB_BASE = 0x07000000;
+  static constexpr uint32_t VBE_VRAM_SIZE = 8 * 1024 * 1024;
+  static constexpr uint32_t XMS_LIMIT = VBE_LFB_BASE;
+  static constexpr uint32_t SYSTEM_RESERVED_BASE = VBE_LFB_BASE + VBE_VRAM_SIZE;
 
 
   MemoryBus();
@@ -105,6 +116,14 @@ public:
   // Clear all VGA plane memory (used on video mode change)
   void clearVGA();
 
+  // VGA DAC palette RAM: 256 entries x (R,G,B), 6 bits each.  It lives
+  // outside the guest-visible address space (it used to be stored at
+  // E000:0000, where EMS page frames, UMBs and ROM scanners could clobber
+  // or read it).
+  static constexpr uint32_t DAC_SIZE = 256 * 3;
+  uint8_t *dacPalette() { return m_dac.data(); }
+  const uint8_t *dacPalette() const { return m_dac.data(); }
+
 private:
   static constexpr uint32_t A20_MASK = 0xFFEFFFFF;
   static constexpr uint32_t IVT_BDA_LIMIT = 0x400;
@@ -156,6 +175,7 @@ private:
   // lazily by the OS: constructing a MemoryBus no longer touches (and
   // commits) every page up front.
   std::unique_ptr<uint8_t[], FreeDeleter> m_ram;
+  std::array<uint8_t, DAC_SIZE> m_dac{};
   bool m_a20Enabled{false};
   hw::VGAController *m_vga = nullptr;
 };

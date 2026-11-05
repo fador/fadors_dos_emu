@@ -36,7 +36,6 @@ private:
 
     // Graphics mode state
     static constexpr int TARGET_COLS = 80; // terminal width target for downsampled mode
-    static constexpr uint32_t PALETTE_BASE = 0xE0000;
 
     bool m_fullResolution = false; // true = half-block pixel-perfect, false = downsampled ASCII
     std::vector<uint32_t> m_lastGraphicsFrame; // packed RGB per cell (fg<<24|bg or just color)

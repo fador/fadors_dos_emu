@@ -327,7 +327,7 @@ int main(int argc, char *argv[]) {
     cmos.setBaseMemoryKB(640);
     // Extended memory (above 1 MiB): total physical - 1 MiB in KB
     constexpr uint32_t kExtendedKB =
-        (fador::memory::MemoryBus::MEMORY_SIZE - 0x100000u) >> 10;
+        (fador::memory::MemoryBus::XMS_LIMIT - 0x100000u) >> 10;
     cmos.setExtendedMemoryKB(kExtendedKB);
 
     // Wire CMOS RTC to slave PIC for IRQ8 delivery

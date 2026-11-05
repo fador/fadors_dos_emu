@@ -204,7 +204,7 @@ void TerminalRenderer::renderGraphicsFullRes(bool force) {
         force = true;
     }
 
-    const uint8_t* pal = m_memory.directAccess(PALETTE_BASE);
+    const uint8_t* pal = m_memory.dacPalette();
 
     // Build packed per-cell values and detect changes
     bool changed = false;
@@ -337,7 +337,7 @@ void TerminalRenderer::renderGraphicsDownsampled(bool force) {
     }
 
     bool changed = false;
-    const uint8_t* pal = m_memory.directAccess(PALETTE_BASE);
+    const uint8_t* pal = m_memory.dacPalette();
 
     // Brightness threshold below which a pixel is considered "dark/black"
     constexpr int darkThreshold = 16;

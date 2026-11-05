@@ -8,7 +8,7 @@ namespace fador::hw {
 
 // VGA I/O port emulation for DAC palette access, retrace status,
 // Sequencer (plane mask) and Graphics Controller (read map select).
-// The palette is stored in memory at PALETTE_BASE (256 * 3 bytes, 6-bit RGB).
+// The DAC palette is held by MemoryBus::dacPalette() (256 * 3 bytes, 6-bit RGB).
 class VGAController : public IODevice {
 public:
     explicit VGAController(memory::MemoryBus& memory);
@@ -48,7 +48,6 @@ public:
         return m_crtcRegs[0x13];
     }
 
-    static constexpr uint32_t PALETTE_BASE = 0xE0000;
     static constexpr uint32_t VGA_WINDOW_START = 0xA0000;
     static constexpr uint32_t VGA_WINDOW_SIZE = 0x10000; // 64KB
 

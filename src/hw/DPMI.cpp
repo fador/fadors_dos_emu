@@ -9,10 +9,14 @@ namespace fador::hw {
 
 // Physical addresses for DPMI tables (must not conflict with HLE stubs,
 // VGA palette, or BIOS config table)
-static constexpr uint32_t GDT_PHYS = 0xF1000; // 5 entries (40 bytes)
-static constexpr uint32_t IDT_PM_PHYS = 0xF0800; // 256 entries (2048 bytes)
-static constexpr uint32_t TSS_PHYS = 0xF3000; // 104 bytes
-static constexpr uint32_t LDT_PHYS = 0x1F00000; // 31MB — safe from conventional/UMA
+// Host system tables.  The IDT and GDT must not overlap the per-vector
+// HLE stubs at F000:0100..F000:10FF (they used to live at F0800/F1000 and
+// overwrote the stubs of vectors 70h-F3h).  The LDT lives in the reserved
+// region above the XMS pool so large DPMI allocations cannot clobber it.
+static constexpr uint32_t GDT_PHYS = DPMI::kGdtPhys;
+static constexpr uint32_t IDT_PM_PHYS = DPMI::kIdtPhys;
+static constexpr uint32_t TSS_PHYS = DPMI::kTssPhys;
+static constexpr uint32_t LDT_PHYS = DPMI::kLdtPhys;
 
 // ── Constructor ──────────────────────────────────────────────────────────────
 DPMI::DPMI(cpu::CPU &cpu, memory::MemoryBus &memory)
@@ -1544,9 +1548,11 @@ void DPMI::handlePhysicalMapping() {
     uint32_t size = (static_cast<uint32_t>(m_cpu.getReg16(cpu::SI)) << 16)
                   | m_cpu.getReg16(cpu::DI);
 
-    // Validate: reject mappings above our physical memory limit
-    if (physAddr >= 0x1000000 || size == 0 ||
-        physAddr > 0x1000000 - size) {
+    // Validate: reject mappings beyond emulated physical memory (this
+    // includes the VBE linear framebuffer at MemoryBus::VBE_LFB_BASE).
+    constexpr uint32_t kPhysLimit = memory::MemoryBus::MEMORY_SIZE;
+    if (physAddr >= kPhysLimit || size == 0 ||
+        physAddr > kPhysLimit - size) {
       LOG_WARN("DPMI 0x0800: Invalid physical mapping phys=0x", std::hex,
                physAddr, " size=0x", size);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);

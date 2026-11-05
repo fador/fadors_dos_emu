@@ -53,6 +53,13 @@ public:
   static constexpr uint16_t DPMI_ENTRY_SEG = 0xF000;
   static constexpr uint16_t DPMI_ENTRY_OFF = 0x0050;
 
+  // Physical locations of the host's protected-mode system tables.
+  static constexpr uint32_t kIdtPhys = 0xF4000;  // 256 gates (2 KiB)
+  static constexpr uint32_t kGdtPhys = 0xF4800;  // 7 descriptors
+  static constexpr uint32_t kTssPhys = 0xF3000;  // 104 bytes
+  static constexpr uint32_t kLdtPhys =
+      memory::MemoryBus::SYSTEM_RESERVED_BASE;    // 8192 descriptors (64 KiB)
+
 private:
   // GDT descriptor raw bytes (8 bytes each)
   struct RawDescriptor {

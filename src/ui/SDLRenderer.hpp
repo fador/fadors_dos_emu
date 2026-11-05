@@ -62,7 +62,6 @@ private:
   // Pixel buffer (ARGB8888)
   std::vector<uint32_t> m_framebuffer;
 
-  static constexpr uint32_t PALETTE_BASE = 0xE0000;
 
   void renderTextMode();
   void renderGraphicsMode();
@@ -74,7 +73,6 @@ private:
   uint32_t paletteToARGB(uint8_t index) const;
 
   // CP437 bitmap font (8x16)
-  static const uint8_t kFont8x16[256][16];
 
   // Handle an SDL key event
   void handleSDLKey(const SDL_KeyboardEvent &ev);

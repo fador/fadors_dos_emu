@@ -73,7 +73,8 @@ public:
   void setMemoryBus(MemoryBus *bus) { m_memBus = bus; }
 
 private:
-  static constexpr uint32_t XMS_SIZE = 127 * 1024 * 1024; // 127MB XMS
+  // XMS pool: from 1 MiB up to the start of SVGA video memory.
+  static constexpr uint32_t XMS_SIZE = MemoryBus::XMS_LIMIT - 0x100000;
   static constexpr int MAX_HANDLES = 128;
 
   // The XMS pool lives in the MemoryBus starting at 1MB.

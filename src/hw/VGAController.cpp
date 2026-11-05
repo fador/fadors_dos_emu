@@ -45,7 +45,7 @@ uint8_t VGAController::read8(uint16_t port) {
         case 0x3C7: return 0x03; // DAC state
         case 0x3C8: return m_dacWriteIndex;
         case 0x3C9: {
-            uint8_t val = m_memory.read8(PALETTE_BASE + m_dacReadIndex * 3 + m_dacColorCycle);
+            uint8_t val = m_memory.dacPalette()[m_dacReadIndex * 3 + m_dacColorCycle];
             if (++m_dacColorCycle >= 3) { m_dacColorCycle = 0; m_dacReadIndex++; }
             return val;
         }
@@ -124,7 +124,7 @@ void VGAController::write8(uint16_t port, uint8_t value) {
             m_dacColorCycle = 0;
             break;
         case 0x3C9:
-            m_memory.write8(PALETTE_BASE + m_dacWriteIndex * 3 + m_dacColorCycle, value & 0x3F);
+            m_memory.dacPalette()[m_dacWriteIndex * 3 + m_dacColorCycle] = value & 0x3F;
             if (++m_dacColorCycle >= 3) { m_dacColorCycle = 0; m_dacWriteIndex++; }
             break;
 
