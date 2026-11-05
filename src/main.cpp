@@ -33,6 +33,9 @@
 #include <crtdbg.h>
 #include <cstdio>
 #include <cstdlib>
+#ifndef NOMINMAX
+#define NOMINMAX // keep std::min / std::max usable
+#endif
 #include <windows.h>
 #include <io.h>
 #include <fcntl.h>
@@ -768,13 +771,17 @@ int main(int argc, char *argv[]) {
           return 1;
         }
       } else if (arg.find("--io-trace=") == 0) {
-        unsigned first = 0, last = 0;
-        char dash = 0;
         const std::string spec = arg.substr(11);
-        const int n = std::sscanf(spec.c_str(), "%x%c%x", &first, &dash, &last);
-        if (n == 1)
-          last = first;
-        if ((n != 1 && (n != 3 || dash != '-')) || first > last || last > 0xFFFF) {
+        char *end = nullptr;
+        const unsigned long first = std::strtoul(spec.c_str(), &end, 16);
+        unsigned long last = first;
+        bool ok = end != spec.c_str();
+        if (ok && *end == '-') {
+          const char *hi = end + 1;
+          last = std::strtoul(hi, &end, 16);
+          ok = end != hi;
+        }
+        if (!ok || *end != '\0' || first > last || last > 0xFFFF) {
           LOG_ERROR("Invalid --io-trace= range. Use --io-trace=220-22F (hex)");
           return 1;
         }
@@ -1170,7 +1177,7 @@ int main(int argc, char *argv[]) {
       const double hwDt =
           std::chrono::duration<double>(hwNow - lastHardware).count();
       lastHardware = hwNow;
-      sb.advance(std::min(hwDt, 0.1));
+      sb.advance((std::min)(hwDt, 0.1));
       pit.update();
       while (pit.checkPendingIRQ0())
         pic.raiseIRQ(0);
