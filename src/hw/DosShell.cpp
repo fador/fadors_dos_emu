@@ -9,6 +9,7 @@
 #include "../cpu/InstructionDecoder.hpp"
 #include "../memory/MemoryBus.hpp"
 #include "../utils/Logger.hpp"
+#include <cstring>
 #include <algorithm>
 #include <chrono>
 #include <cctype>

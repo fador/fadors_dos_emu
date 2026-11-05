@@ -2,8 +2,18 @@
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
+#include <string>
+#include <vector>
 
 namespace fador::hw {
+
+namespace {
+// True when a relative path climbs above its base (portable across
+// wchar_t (Windows) and char (POSIX) native path encodings).
+bool escapesRoot(const std::filesystem::path& rel) {
+  return !rel.empty() && *rel.begin() == std::filesystem::path("..");
+}
+} // namespace
 
 bool DriveManager::mount(char letter, const std::string& hostPath, const std::string& label) {
   auto idx = letterToIndex(letter);
@@ -89,7 +99,7 @@ bool DriveManager::setCurrentDir(uint8_t driveIndex, const std::string& dosDir) 
 
   auto mountRoot = std::filesystem::path(m_mounts[driveIndex]);
   auto rel = std::filesystem::relative(canonical, mountRoot, ec);
-  if (ec || rel.empty() || rel.native().starts_with(L".."))
+  if (ec || rel.empty() || escapesRoot(rel))
     return false;
 
   m_currentDir[driveIndex] = hostToDosStyle(rel.string());
@@ -146,7 +156,7 @@ std::string DriveManager::resolvePath(const std::string& dosPath) const {
   auto canonical = std::filesystem::canonical(abs, ec);
   if (!ec) {
     auto rel = std::filesystem::relative(canonical, mountRoot, ec);
-    if (!ec && !rel.empty() && !rel.native().starts_with(L".."))
+    if (!ec && !rel.empty() && !escapesRoot(rel))
       return canonical.string();
     return {};
   }
@@ -156,7 +166,7 @@ std::string DriveManager::resolvePath(const std::string& dosPath) const {
     normAbs = abs;
 
   auto rel = std::filesystem::relative(normAbs, mountRoot, ec);
-  if (ec || rel.empty() || rel.native().starts_with(L".."))
+  if (ec || rel.empty() || escapesRoot(rel))
     return {};
 
   return normAbs.string();

@@ -246,7 +246,7 @@ TEST_CASE("DriveManager: Path Resolution - Security (no escape)", "[drive_manage
             auto rel = std::filesystem::relative(canon, mountRoot, ec);
             REQUIRE(!ec);
             REQUIRE(!rel.empty());
-            REQUIRE(!rel.native().starts_with(L".."));
+            REQUIRE(*rel.begin() != std::filesystem::path(".."));
         }
     }
 

@@ -3,6 +3,8 @@
 #include <vector>
 #include <map>
 #include <functional>
+#include <cstdint>
+#include <cstddef>
 
 namespace fador::hw {
 
