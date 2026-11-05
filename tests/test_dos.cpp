@@ -2496,3 +2496,49 @@ TEST_CASE("DOS: write-only open starts at offset 0; zero-length write truncates"
     }
     std::remove("trunc.txt");
 }
+
+TEST_CASE("DOS: a new handle takes the lowest free number", "[DOS][File]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    bios.initialize();
+    dos.initialize();
+
+    { std::ofstream ofs("handles.txt"); ofs << "x"; }
+    const std::string fname = "handles.txt";
+    for (size_t i = 0; i < fname.size(); ++i) mem.write8(0x20000 + i, fname[i]);
+    mem.write8(0x20000 + fname.size(), 0);
+    auto open = [&]() {
+        cpu.setSegReg(cpu::DS, 0x2000);
+        cpu.setSegBase(cpu::DS, 0x20000);
+        cpu.setReg16(cpu::DX, 0);
+        cpu.setReg16(cpu::AX, 0x3D00);
+        dos.handleInterrupt(0x21);
+        REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+        return cpu.getReg16(cpu::AX);
+    };
+    auto close = [&](uint16_t h) {
+        cpu.setReg8(cpu::AH, 0x3E);
+        cpu.setReg16(cpu::BX, h);
+        dos.handleInterrupt(0x21);
+        REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    };
+
+    const uint16_t a = open();
+    const uint16_t b = open();
+    REQUIRE(b == a + 1);
+    close(a);
+    REQUIRE(open() == a);      // reused, not b + 1
+    close(a);
+    close(b);
+    // Opening and closing many times never climbs past the first handles
+    for (int i = 0; i < 30; ++i)
+        close(open());
+    REQUIRE(open() == a);
+    close(a);
+    std::remove("handles.txt");
+}

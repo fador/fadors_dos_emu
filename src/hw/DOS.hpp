@@ -226,6 +226,7 @@ private:
     bool isEMSDevice() const { return kind == Kind::EMSDevice; }
   };
   std::vector<std::shared_ptr<FileHandle>> m_fileHandles;
+  uint16_t storeHandle(std::shared_ptr<FileHandle> fh);
 
   static constexpr uint16_t FIRST_MCB_SEGMENT = 0x0800;
   static constexpr uint16_t LAST_PARA = 0x9FFF;

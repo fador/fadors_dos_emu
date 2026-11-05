@@ -1772,6 +1772,19 @@ std::string DOS::readFilename(uint32_t address) {
   return result;
 }
 
+// Like DOS, a new handle takes the lowest free number (C runtimes keep
+// fixed tables of 20 handles and treat larger numbers as errors).
+uint16_t DOS::storeHandle(std::shared_ptr<FileHandle> fh) {
+  for (size_t i = 0; i < m_fileHandles.size(); ++i) {
+    if (!m_fileHandles[i]) {
+      m_fileHandles[i] = std::move(fh);
+      return static_cast<uint16_t>(i + 5);
+    }
+  }
+  m_fileHandles.push_back(std::move(fh));
+  return static_cast<uint16_t>(m_fileHandles.size() - 1 + 5);
+}
+
 void DOS::setProgramDir(const std::string &programPath) {
   fs::path p = fs::absolute(programPath);
   m_programPath = p.string();
@@ -3247,8 +3260,7 @@ void DOS::handleFileService() {
         fh->fileTime = ((now->tm_hour & 0x1F) << 11) | ((now->tm_min & 0x3F) << 5) | ((now->tm_sec / 2) & 0x1F);
         fh->fileDate = (((now->tm_year + 1900 - 1980) & 0x7F) << 9) | ((now->tm_mon + 1) << 5) | (now->tm_mday & 0x1F);
       }
-      m_fileHandles.push_back(std::move(fh));
-      uint16_t handle = static_cast<uint16_t>(m_fileHandles.size() - 1 + 5);
+      uint16_t handle = storeHandle(std::move(fh));
       m_cpu.setReg16(cpu::AX, handle); // DOS handles start at 5
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
       syncJFT(handle, static_cast<uint8_t>(handle));
@@ -3272,8 +3284,7 @@ void DOS::handleFileService() {
       auto fh = std::make_shared<FileHandle>();
       fh->path = upperASCII(fs::path(filename).filename().string());
       fh->kind = FileHandle::Kind::EMSDevice;
-      m_fileHandles.push_back(std::move(fh));
-      uint16_t handle = static_cast<uint16_t>(m_fileHandles.size() - 1 + 5);
+      uint16_t handle = storeHandle(std::move(fh));
       m_cpu.setReg16(cpu::AX, handle);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
       syncJFT(handle, static_cast<uint8_t>(handle));
@@ -3339,8 +3350,7 @@ void DOS::handleFileService() {
         fh->fileTime = ((now->tm_hour & 0x1F) << 11) | ((now->tm_min & 0x3F) << 5) | ((now->tm_sec / 2) & 0x1F);
         fh->fileDate = (((now->tm_year + 1900 - 1980) & 0x7F) << 9) | ((now->tm_mon + 1) << 5) | (now->tm_mday & 0x1F);
       }
-      m_fileHandles.push_back(std::move(fh));
-      uint16_t handle = static_cast<uint16_t>(m_fileHandles.size() - 1 + 5);
+      uint16_t handle = storeHandle(std::move(fh));
       m_cpu.setReg16(cpu::AX, handle);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
       syncJFT(handle, static_cast<uint8_t>(handle));
@@ -3375,8 +3385,7 @@ void DOS::handleFileService() {
     uint16_t handle = m_cpu.getReg16(cpu::BX);
     if (handle >= 5 && handle - 5 < m_fileHandles.size() &&
         m_fileHandles[handle - 5]) {
-      m_fileHandles.push_back(m_fileHandles[handle - 5]);
-      uint16_t newH = static_cast<uint16_t>(m_fileHandles.size() - 1 + 5);
+      uint16_t newH = storeHandle(m_fileHandles[handle - 5]);
       m_cpu.setReg16(cpu::AX, newH);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
       syncJFT(newH, static_cast<uint8_t>(handle));
@@ -3755,8 +3764,7 @@ void DOS::handleFileService() {
         fh->fileTime = ((now->tm_hour & 0x1F) << 11) | ((now->tm_min & 0x3F) << 5) | ((now->tm_sec / 2) & 0x1F);
         fh->fileDate = (((now->tm_year + 1900 - 1980) & 0x7F) << 9) | ((now->tm_mon + 1) << 5) | (now->tm_mday & 0x1F);
       }
-      m_fileHandles.push_back(std::move(fh));
-      uint16_t handle = static_cast<uint16_t>(m_fileHandles.size() - 1 + 5);
+      uint16_t handle = storeHandle(std::move(fh));
       m_cpu.setReg16(cpu::AX, handle);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
       syncJFT(handle, static_cast<uint8_t>(handle));
@@ -3790,8 +3798,7 @@ void DOS::handleFileService() {
         fh->fileTime = ((now->tm_hour & 0x1F) << 11) | ((now->tm_min & 0x3F) << 5) | ((now->tm_sec / 2) & 0x1F);
         fh->fileDate = (((now->tm_year + 1900 - 1980) & 0x7F) << 9) | ((now->tm_mon + 1) << 5) | (now->tm_mday & 0x1F);
       }
-      m_fileHandles.push_back(std::move(fh));
-      uint16_t handle = static_cast<uint16_t>(m_fileHandles.size() - 1 + 5);
+      uint16_t handle = storeHandle(std::move(fh));
       m_cpu.setReg16(cpu::AX, handle);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
       syncJFT(handle, static_cast<uint8_t>(handle));
