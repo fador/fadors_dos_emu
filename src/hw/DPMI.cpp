@@ -1059,7 +1059,8 @@ void DPMI::handleTranslation() {
     #endif
 
     if (func == 0x0300) {
-      LOG_DEBUG("DPMI 0300h: Simulate RM INT 0x", std::hex, (int)intNo);
+      LOG_DEBUG("DPMI 0300h: Simulate RM INT 0x", std::hex, (int)intNo,
+                " AX=0x", m_cpu.getReg16(cpu::AX));
       if (m_dos && m_dos->handleInterrupt(intNo))
         handled = true;
       if (!handled && m_bios && m_bios->handleInterrupt(intNo))

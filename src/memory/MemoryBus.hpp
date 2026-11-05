@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <cstdlib>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -116,6 +117,12 @@ public:
   // Clear all VGA plane memory (used on video mode change)
   void clearVGA();
 
+  // Optional diagnostic hook invoked (in the slow path only) for accesses
+  // beyond emulated physical memory, e.g. to log the faulting CS:EIP.
+  void setOutOfBoundsHandler(std::function<void(uint32_t address, bool write)> h) {
+    m_oobHandler = std::move(h);
+  }
+
   // VGA DAC palette RAM: 256 entries x (R,G,B), 6 bits each.  It lives
   // outside the guest-visible address space (it used to be stored at
   // E000:0000, where EMS page frames, UMBs and ROM scanners could clobber
@@ -176,6 +183,11 @@ private:
   // commits) every page up front.
   std::unique_ptr<uint8_t[], FreeDeleter> m_ram;
   std::array<uint8_t, DAC_SIZE> m_dac{};
+  std::function<void(uint32_t, bool)> m_oobHandler;
+  void reportOutOfBounds(uint32_t address, bool write) const {
+    if (m_oobHandler)
+      m_oobHandler(address, write);
+  }
   bool m_a20Enabled{false};
   hw::VGAController *m_vga = nullptr;
 };

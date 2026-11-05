@@ -584,6 +584,27 @@ int main(int argc, char *argv[]) {
     });
     // ── End crash handler installation ───────────────────────────────────
 
+    // Report where out-of-range physical accesses come from (rate-limited)
+    memory.setOutOfBoundsHandler([&cpu, &debugger](uint32_t addr, bool write) {
+      static int reported = 0;
+      if (reported >= 8)
+        return;
+      ++reported;
+      LOG_WARN("Out-of-range ", write ? "write" : "read", " 0x", std::hex,
+               addr, " at CS:EIP=", cpu.getSegReg(fador::cpu::CS), ":",
+               cpu.getInstructionStartEIP(), " EAX=", cpu.getReg32(fador::cpu::EAX),
+               " EBX=", cpu.getReg32(fador::cpu::EBX), " ECX=",
+               cpu.getReg32(fador::cpu::ECX), " EDX=", cpu.getReg32(fador::cpu::EDX),
+               " ESI=", cpu.getReg32(fador::cpu::ESI), " EDI=",
+               cpu.getReg32(fador::cpu::EDI), " EBP=", cpu.getReg32(fador::cpu::EBP),
+               " ESP=", cpu.getReg32(fador::cpu::ESP),
+               " CSbase=", cpu.getSegBase(fador::cpu::CS), " DSbase=",
+               cpu.getSegBase(fador::cpu::DS), " ESbase=",
+               cpu.getSegBase(fador::cpu::ES), " SSbase=",
+               cpu.getSegBase(fador::cpu::SS), " ES=", cpu.getSegReg(fador::cpu::ES));
+      (void)debugger;
+    });
+
     LOG_INFO("System initialized successfully.");
 
     // Parse command line:
@@ -620,6 +641,7 @@ int main(int argc, char *argv[]) {
     bool headless = false;          // --headless: no rendering, no host input
     double maxSeconds = 0.0;        // --max-seconds=N wall-clock limit
     std::string screenshotPath;     // --screenshot=FILE.png at exit
+    double screenshotAt = -1.0;     // --screenshot-at=T: capture at T s instead
     ScriptedKeys scriptedKeys;      // --keys=T:KEY,...
     struct MountEntry { char letter; std::string hostPath; std::string label; };
     std::vector<MountEntry> cliMounts;
@@ -697,6 +719,8 @@ int main(int argc, char *argv[]) {
         maxSeconds = std::stod(arg.substr(14));
       } else if (arg.find("--screenshot=") == 0) {
         screenshotPath = arg.substr(13);
+      } else if (arg.find("--screenshot-at=") == 0) {
+        screenshotAt = std::stod(arg.substr(16));
       } else if (arg.find("--keys=") == 0) {
         std::string error;
         if (!scriptedKeys.parse(arg.substr(7), error)) {
@@ -1247,6 +1271,17 @@ int main(int argc, char *argv[]) {
         auto now = std::chrono::steady_clock::now();
         pollHostInput();
         scriptedKeys.service(now - runStart, kbd);
+        if (screenshotAt >= 0 && !screenshotPath.empty() &&
+            now - runStart >= std::chrono::duration<double>(screenshotAt)) {
+          fador::ui::FrameRenderer frame(memory, vga);
+          frame.setBIOS(&bios);
+          if (frame.render(false) && frame.savePNG(screenshotPath))
+            LOG_INFO("Screenshot written to ", screenshotPath, " (",
+                     frame.width(), "x", frame.height(), ") at ",
+                     screenshotAt, " s");
+          screenshotAt = -1.0;
+          screenshotPath.clear(); // do not overwrite it at exit
+        }
         serviceAudio(now);
         maybeRender(now);
         if (quitRequested()) {

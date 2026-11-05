@@ -1188,6 +1188,49 @@ void DOS::handleDOSService() {
     }
     break;
   }
+  case 0x6C: { // Extended Open/Create (DOS 4+)
+    // DS:SI = name, BL = access/sharing mode, CX = attributes,
+    // DL = action: bits 0-3 if file exists (0 fail, 1 open, 2 replace),
+    //              bits 4-7 if file is missing (0 fail, 1 create)
+    const uint16_t si = m_cpu.getReg16(cpu::SI);
+    const uint8_t mode = m_cpu.getReg8(cpu::BL);
+    const uint8_t action = m_cpu.getReg8(cpu::DL);
+    const std::string name = readFilename(m_cpu.getSegBase(cpu::DS) + si);
+    const std::string host = resolvePath(name);
+    std::error_code ec;
+    const bool exists = !host.empty() && fs::exists(host, ec);
+    uint16_t result = 0;
+    if (exists) {
+      if ((action & 0x0F) == 0x01) {
+        m_cpu.setReg8(cpu::AH, 0x3D);
+        m_cpu.setReg8(cpu::AL, mode & 0x7F);
+        result = 1; // opened
+      } else if ((action & 0x0F) == 0x02) {
+        m_cpu.setReg8(cpu::AH, 0x3C);
+        result = 3; // replaced
+      } else {
+        m_cpu.setReg16(cpu::AX, 0x50); // file exists
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+        setExtendedError(0x50, 0x0C, 0x03, 0x02);
+        break;
+      }
+    } else if ((action & 0xF0) == 0x10) {
+      m_cpu.setReg8(cpu::AH, 0x3C);
+      result = 2; // created
+    } else {
+      m_cpu.setReg16(cpu::AX, 0x02); // file not found
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      setExtendedError(0x02, 0x08, 0x03, 0x02);
+      break;
+    }
+    const uint16_t savedDX = m_cpu.getReg16(cpu::DX);
+    m_cpu.setReg16(cpu::DX, si);
+    handleFileService();
+    m_cpu.setReg16(cpu::DX, savedDX);
+    if (!(m_cpu.getEFLAGS() & cpu::FLAG_CARRY))
+      m_cpu.setReg16(cpu::CX, result);
+    break;
+  }
   case 0x3C: // Create File
   case 0x3D: // Open File
   case 0x3E: // Close File
@@ -3155,7 +3198,9 @@ void DOS::handleFileService() {
     if (accessMode == 0)
       mode |= std::ios::in;
     else if (accessMode == 1)
-      mode |= std::ios::out | std::ios::app;
+      // Write-only: DOS opens at offset 0 without truncating.  (ios::app
+      // would force every write to the end of the file.)
+      mode |= std::ios::in | std::ios::out;
     else
       mode |= std::ios::in | std::ios::out;
 
@@ -3309,6 +3354,30 @@ void DOS::handleFileService() {
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
         LOG_DOS("DOS: Ignored write of ", bytesToWrite,
                 " bytes to EMS device handle=", handle);
+        return;
+      }
+
+      if (bytesToWrite == 0) {
+        // DOS semantics: a zero-length write truncates (or extends) the
+        // file to the current file position.  C libraries use this for
+        // O_TRUNC/ftruncate/chsize.
+        fh->stream.clear();
+        fh->stream.flush();
+        std::streamoff pos = fh->stream.tellp();
+        std::error_code ec;
+        if (pos >= 0)
+          fs::resize_file(fh->path, static_cast<std::uintmax_t>(pos), ec);
+        fh->stream.seekp(pos);
+        fh->stream.seekg(pos);
+        if (pos < 0 || ec) {
+          m_cpu.setReg16(cpu::AX, 0x05); // Access denied
+          m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+          setExtendedError(0x05, 0x03, 0x04, 0x02);
+        } else {
+          m_cpu.setReg16(cpu::AX, 0);
+          m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+          LOG_DOS("DOS: Truncated handle=", handle, " at ", pos);
+        }
         return;
       }
 

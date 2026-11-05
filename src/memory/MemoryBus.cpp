@@ -63,6 +63,7 @@ uint8_t MemoryBus::read8Slow(uint32_t address, uint32_t effectiveAddress) const 
     }
     return m_ram[effectiveAddress];
   }
+  reportOutOfBounds(address, false);
   LOG_WARN("Memory out of bounds READ 8-bit at: 0x", std::hex, address,
            " (Effective: 0x", effectiveAddress, ")");
   return 0xFF;
@@ -81,6 +82,7 @@ uint16_t MemoryBus::read16Slow(uint32_t address,
     }
     return static_cast<uint16_t>(lo) | (static_cast<uint16_t>(hi) << 8);
   }
+  reportOutOfBounds(address, false);
   LOG_WARN("Memory out of bounds READ 16-bit at: 0x", std::hex, address,
            " (Effective: 0x", effectiveAddress, ")");
   return 0xFFFF;
@@ -103,6 +105,7 @@ uint32_t MemoryBus::read32Slow(uint32_t address,
     }
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
   }
+  reportOutOfBounds(address, false);
   LOG_WARN("Memory out of bounds READ 32-bit at: 0x", std::hex, address,
            " (Effective: 0x", effectiveAddress, ")");
   return 0xFFFFFFFF;
@@ -125,6 +128,7 @@ void MemoryBus::write8Slow(uint32_t address, uint32_t effectiveAddress,
                 (char)(value >= 32 && value < 127 ? value : '.'), "')");
     }
   } else {
+    reportOutOfBounds(address, true);
     LOG_WARN("Memory out of bounds WRITE 8-bit at: 0x", std::hex, address,
              " (Effective: 0x", effectiveAddress, ") val: 0x",
              static_cast<int>(value));
@@ -151,6 +155,7 @@ void MemoryBus::write16Slow(uint32_t address, uint32_t effectiveAddress,
                 value, " ('", (char)(c1 >= 32 && c1 < 127 ? c1 : '.'), "')");
     }
   } else {
+    reportOutOfBounds(address, true);
     LOG_WARN("Memory out of bounds WRITE 16-bit at: 0x", std::hex, address,
              " (Effective: 0x", effectiveAddress, ") val: 0x", value);
   }
@@ -180,6 +185,7 @@ void MemoryBus::write32Slow(uint32_t address, uint32_t effectiveAddress,
                 (char)(c2 >= 32 && c2 < 127 ? c2 : '.'), "')");
     }
   } else {
+    reportOutOfBounds(address, true);
     LOG_WARN("Memory out of bounds WRITE 32-bit at: 0x", std::hex, address,
              " (Effective: 0x", effectiveAddress, ") val: 0x", value);
   }

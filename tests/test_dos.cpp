@@ -2416,3 +2416,68 @@ TEST_CASE("DOS: Truename (AH=60h) canonicalizes paths", "[DOS][Truename]") {
     REQUIRE(truename("c:/games/../doom/doom.exe") == "C:\\DOOM\\DOOM.EXE");
     REQUIRE(truename("C:\\A\\.\\B") == "C:\\A\\B");
 }
+
+TEST_CASE("DOS: write-only open starts at offset 0; zero-length write truncates", "[DOS][File]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::DOS dos(cpu, mem);
+    dos.initialize();
+    {
+        std::ofstream ofs("trunc.txt", std::ios::binary);
+        ofs << "0123456789";
+    }
+    auto putName = [&](const std::string& n) {
+        for (size_t i = 0; i < n.size(); ++i)
+            mem.write8(0x20000 + static_cast<uint32_t>(i), static_cast<uint8_t>(n[i]));
+        mem.write8(0x20000 + static_cast<uint32_t>(n.size()), 0);
+        cpu.setSegReg(cpu::DS, 0x2000);
+    };
+
+    SECTION("open for writing, overwrite, then truncate") {
+        putName("TRUNC.TXT");
+        cpu.setReg16(cpu::DX, 0);
+        cpu.setReg16(cpu::AX, 0x3D01); // open write-only
+        dos.handleInterrupt(0x21);
+        REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+        uint16_t h = cpu.getReg16(cpu::AX);
+
+        mem.write8(0x30000, 'A');
+        mem.write8(0x30001, 'B');
+        cpu.setSegReg(cpu::DS, 0x3000);
+        cpu.setReg16(cpu::DX, 0);
+        cpu.setReg16(cpu::BX, h);
+        cpu.setReg16(cpu::CX, 2);
+        cpu.setReg8(cpu::AH, 0x40);
+        dos.handleInterrupt(0x21);
+        REQUIRE(cpu.getReg16(cpu::AX) == 2);
+
+        cpu.setReg16(cpu::CX, 0); // truncate at offset 2
+        cpu.setReg8(cpu::AH, 0x40);
+        dos.handleInterrupt(0x21);
+        REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+
+        cpu.setReg8(cpu::AH, 0x3E);
+        dos.handleInterrupt(0x21);
+
+        std::ifstream ifs("trunc.txt", std::ios::binary);
+        std::string content((std::istreambuf_iterator<char>(ifs)), {});
+        REQUIRE(content == "AB");
+    }
+
+    SECTION("AH=6Ch replace-if-exists truncates and reports CX=3") {
+        putName("TRUNC.TXT");
+        cpu.setReg16(cpu::SI, 0);
+        cpu.setReg8(cpu::BL, 0x01);
+        cpu.setReg16(cpu::CX, 0);
+        cpu.setReg8(cpu::DL, 0x12);
+        cpu.setReg8(cpu::AH, 0x6C);
+        dos.handleInterrupt(0x21);
+        REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+        REQUIRE(cpu.getReg16(cpu::CX) == 3);
+        cpu.setReg16(cpu::BX, cpu.getReg16(cpu::AX));
+        cpu.setReg8(cpu::AH, 0x3E);
+        dos.handleInterrupt(0x21);
+        REQUIRE(std::filesystem::file_size("trunc.txt") == 0);
+    }
+    std::remove("trunc.txt");
+}
