@@ -4,6 +4,7 @@
 #include "../hw/KeyboardController.hpp"
 #include "../hw/VGAController.hpp"
 #include "../memory/MemoryBus.hpp"
+#include "FrameRenderer.hpp"
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
 #include <cstdint>
@@ -24,7 +25,10 @@ public:
               hw::VGAController &vga);
   ~SDLRenderer();
 
-  void setBIOS(hw::BIOS &bios) { m_bios = &bios; }
+  void setBIOS(hw::BIOS &bios) {
+    m_bios = &bios;
+    m_frame.setBIOS(&bios);
+  }
 
   // Renders the current VRAM state to the SDL window
   void render(bool force = false);
@@ -48,7 +52,6 @@ private:
 
   int m_texWidth = 0;
   int m_texHeight = 0;
-  uint8_t m_lastVideoMode = 0xFF;
   bool m_quit = false;
 
   // Sub-pixel fractional trackers for precision mouse delta scaling
@@ -59,20 +62,9 @@ private:
   // Window scale factor for small resolutions
   static constexpr int SCALE = 3;
 
-  // Pixel buffer (ARGB8888)
-  std::vector<uint32_t> m_framebuffer;
-
-
-  void renderTextMode();
-  void renderGraphicsMode();
-
-  // Read a single pixel from VRAM given the current video mode
-  uint8_t readPixel(int x, int y, uint8_t mode) const;
-
-  // Convert 6-bit VGA palette entry to ARGB8888
-  uint32_t paletteToARGB(uint8_t index) const;
-
-  // CP437 bitmap font (8x16)
+  // Backend-independent rasteriser shared with the headless screenshots
+  FrameRenderer m_frame;
+  uint32_t m_lastModeKey = 0xFFFFFFFFu;
 
   // Handle an SDL key event
   void handleSDLKey(const SDL_KeyboardEvent &ev);

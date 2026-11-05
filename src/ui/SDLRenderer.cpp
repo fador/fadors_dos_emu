@@ -12,30 +12,12 @@ namespace fador::ui {
 
 
 // ── Standard 16-color CGA/EGA palette (ARGB8888) ──────────────────────
-static constexpr uint32_t kCGAPalette[16] = {
-    0xFF000000, // 0  Black
-    0xFF0000AA, // 1  Blue
-    0xFF00AA00, // 2  Green
-    0xFF00AAAA, // 3  Cyan
-    0xFFAA0000, // 4  Red
-    0xFFAA00AA, // 5  Magenta
-    0xFFAA5500, // 6  Brown
-    0xFFAAAAAA, // 7  Light Gray
-    0xFF555555, // 8  Dark Gray
-    0xFF5555FF, // 9  Light Blue
-    0xFF55FF55, // 10 Light Green
-    0xFF55FFFF, // 11 Light Cyan
-    0xFFFF5555, // 12 Light Red
-    0xFFFF55FF, // 13 Light Magenta
-    0xFFFFFF55, // 14 Yellow
-    0xFFFFFFFF, // 15 White
-};
 
 // ── Construction / destruction ─────────────────────────────────────────
 
 SDLRenderer::SDLRenderer(memory::MemoryBus &memory, hw::KeyboardController &kbd,
                          hw::VGAController &vga)
-    : m_memory(memory), m_kbd(kbd), m_vga(vga) {
+    : m_memory(memory), m_kbd(kbd), m_vga(vga), m_frame(memory, vga) {
   SDL_SetMainReady();
   if (SDL_Init(SDL_INIT_VIDEO) < 0) {
     LOG_ERROR("SDL_Init failed: ", SDL_GetError());
@@ -72,7 +54,6 @@ SDLRenderer::SDLRenderer(memory::MemoryBus &memory, hw::KeyboardController &kbd,
       SDL_CreateTexture(m_renderer, SDL_PIXELFORMAT_ARGB8888,
                         SDL_TEXTUREACCESS_STREAMING, m_texWidth, m_texHeight);
 
-  m_framebuffer.resize(m_texWidth * m_texHeight, 0xFF000000);
 }
 
 SDLRenderer::~SDLRenderer() {
@@ -85,98 +66,29 @@ SDLRenderer::~SDLRenderer() {
   SDL_Quit();
 }
 
-// ── Pixel helpers ──────────────────────────────────────────────────────
-
-uint32_t SDLRenderer::paletteToARGB(uint8_t index) const {
-  const uint8_t *pal = m_memory.dacPalette();
-  uint8_t r6 = pal[index * 3 + 0];
-  uint8_t g6 = pal[index * 3 + 1];
-  uint8_t b6 = pal[index * 3 + 2];
-  uint8_t r = (r6 << 2) | (r6 >> 4);
-  uint8_t g = (g6 << 2) | (g6 >> 4);
-  uint8_t b = (b6 << 2) | (b6 >> 4);
-  return 0xFF000000u | (uint32_t(r) << 16) | (uint32_t(g) << 8) | b;
-}
-
-uint8_t SDLRenderer::readPixel(int x, int y, uint8_t mode) const {
-  const auto *mi = hw::findVideoMode(mode);
-  if (!mi)
-    return 0;
-
-  switch (mi->layout) {
-  case hw::VMemLayout::Linear256:
-    return m_memory.read8(mi->vramBase + y * mi->width + x);
-  case hw::VMemLayout::CGA4: {
-    uint32_t bank = (y & 1) ? 0x2000 : 0;
-    uint32_t off = bank + (y >> 1) * 80 + (x >> 2);
-    uint8_t shift = (3 - (x & 3)) * 2;
-    return (m_memory.read8(mi->vramBase + off) >> shift) & 0x03;
-  }
-  case hw::VMemLayout::CGA2: {
-    uint32_t bank = (y & 1) ? 0x2000 : 0;
-    uint32_t off = bank + (y >> 1) * 80 + (x >> 3);
-    uint8_t bit = 7 - (x & 7);
-    return (m_memory.read8(mi->vramBase + off) >> bit) & 1;
-  }
-  case hw::VMemLayout::Planar: {
-    uint32_t byteOff = (y * mi->width + x) / 8;
-    uint8_t bit = 7 - (x & 7);
-    uint32_t planeSize = (static_cast<uint32_t>(mi->width) * mi->height) / 8;
-    uint8_t pixel = 0;
-    for (int p = 0; p < 4; ++p) {
-      if (m_memory.read8(mi->vramBase + p * planeSize + byteOff) & (1 << bit))
-        pixel |= (1 << p);
-    }
-    return pixel;
-  }
-  default:
-    return 0;
-  }
-}
-
 // ── Rendering ──────────────────────────────────────────────────────────
 
 void SDLRenderer::render(bool /*force*/) {
-  if (!m_window || !m_renderer || !m_texture)
+  if (!m_window || !m_renderer)
     return;
 
-  uint8_t videoMode = m_memory.read8(0x449);
-  const auto *mi = hw::findVideoMode(videoMode);
-  if(!mi) {
-    LOG_WARN("Unknown video mode: ", std::hex, int(videoMode), std::dec);
+  if (!m_frame.render(true) || m_frame.width() <= 0 || m_frame.height() <= 0)
     return;
-  }
 
-  // Determine required texture dimensions
-  int needW, needH;
-  if (mi && mi->isGraphics) {
-    needW = mi->width;
-    needH = mi->height;
-  } else {
-    // Text mode: render at 8×16 font size × text dimensions
-    uint16_t cols = m_memory.read16(0x44A);
-    uint8_t rows = m_memory.read8(0x484) + 1;
-    if (cols == 0)
-      cols = 80;
-    if (rows == 0)
-      rows = 25;
-    needW = cols * 8;
-    needH = rows * 16;
-  }
-
-  // Recreate texture if dimensions changed
-  if (needW != m_texWidth || needH != m_texHeight ||
-      videoMode != m_lastVideoMode) {
-        LOG_INFO("Video mode ", std::hex, int(videoMode), std::dec,
-                 " requires texture size ", needW, "x", needH);
-    m_texWidth = needW;
-    m_texHeight = needH;
+  // Recreate the texture when the resolution / mode changes
+  if (!m_texture || m_frame.width() != m_texWidth ||
+      m_frame.height() != m_texHeight || m_frame.modeKey() != m_lastModeKey) {
+    LOG_INFO("Video mode key 0x", std::hex, m_frame.modeKey(), std::dec,
+             " requires texture size ", m_frame.width(), "x", m_frame.height());
+    m_texWidth = m_frame.width();
+    m_texHeight = m_frame.height();
     if (m_texture)
       SDL_DestroyTexture(m_texture);
     m_texture =
         SDL_CreateTexture(m_renderer, SDL_PIXELFORMAT_ARGB8888,
                           SDL_TEXTUREACCESS_STREAMING, m_texWidth, m_texHeight);
-    m_framebuffer.resize(m_texWidth * m_texHeight, 0xFF000000);
+    if (!m_texture)
+      return;
     // Resize window to fit (with scale)
     int scale = SCALE;
     // For higher-res modes, reduce scale so window isn't enormous
@@ -199,18 +111,12 @@ void SDLRenderer::render(bool /*force*/) {
     }
 
     SDL_SetWindowSize(m_window, targetW, targetH);
-    m_lastVideoMode = videoMode;
-  }
-
-  if (mi && mi->isGraphics) {
-    renderGraphicsMode();
-  } else {
-    renderTextMode();
+    m_lastModeKey = m_frame.modeKey();
   }
 
   // Upload framebuffer to texture and present
-  SDL_UpdateTexture(m_texture, nullptr, m_framebuffer.data(),
-                    m_texWidth * sizeof(uint32_t));
+  SDL_UpdateTexture(m_texture, nullptr, m_frame.pixels().data(),
+                    m_texWidth * static_cast<int>(sizeof(uint32_t)));
   SDL_RenderClear(m_renderer);
 
   // Preserve texture aspect ratio regardless of window size (letterbox).
@@ -226,112 +132,6 @@ void SDLRenderer::render(bool /*force*/) {
   SDL_Rect dst{(winW - dstW) / 2, (winH - dstH) / 2, dstW, dstH};
   SDL_RenderCopy(m_renderer, m_texture, nullptr, &dst);
   SDL_RenderPresent(m_renderer);
-}
-
-void SDLRenderer::renderTextMode() {
-  uint16_t cols = m_memory.read16(0x44A);
-  uint8_t rows = m_memory.read8(0x484) + 1;
-  if (cols == 0)
-    cols = 80;
-  if (rows == 0)
-    rows = 25;
-
-  uint32_t vramBase = 0xB8000;
-
-  for (int row = 0; row < rows; ++row) {
-    for (int col = 0; col < cols; ++col) {
-      uint8_t ch = m_memory.read8(vramBase + (row * cols + col) * 2);
-      uint8_t attr = m_memory.read8(vramBase + (row * cols + col) * 2 + 1);
-
-      uint32_t fgColor = kCGAPalette[attr & 0x0F];
-      uint32_t bgColor = kCGAPalette[(attr >> 4) & 0x07];
-
-      const uint8_t *glyph = kVGAFont8x16[ch];
-
-      for (int gy = 0; gy < 16; ++gy) {
-        uint8_t bits = glyph[gy];
-        int py = row * 16 + gy;
-        if (py >= m_texHeight)
-          break;
-        for (int gx = 0; gx < 8; ++gx) {
-          int px = col * 8 + gx;
-          if (px >= m_texWidth)
-            break;
-          m_framebuffer[py * m_texWidth + px] =
-              (bits & (0x80 >> gx)) ? fgColor : bgColor;
-        }
-      }
-    }
-  }
-
-  // Draw cursor
-  uint8_t curRow = m_memory.read8(0x451);
-  uint8_t curCol = m_memory.read8(0x450);
-  if (curRow < rows && curCol < cols) {
-    uint8_t attr = m_memory.read8(vramBase + (curRow * cols + curCol) * 2 + 1);
-    uint32_t curColor = kCGAPalette[attr & 0x0F];
-    for (int gy = 14; gy < 16; ++gy) {
-      int py = curRow * 16 + gy;
-      if (py >= m_texHeight)
-        break;
-      for (int gx = 0; gx < 8; ++gx) {
-        int px = curCol * 8 + gx;
-        if (px >= m_texWidth)
-          break;
-        m_framebuffer[py * m_texWidth + px] = curColor;
-      }
-    }
-  }
-}
-
-void SDLRenderer::renderGraphicsMode() {
-  uint8_t videoMode = m_memory.read8(0x449);
-  const auto *mi = hw::findVideoMode(videoMode);
-  if (!mi)
-    return;
-
-  int w = mi->width;
-  int h = mi->height;
-
-  // CRTC Offset register (index 0x13) controls the actual row stride
-  // in VRAM. Games may set a virtual width wider than the visible width
-  // for smooth scrolling.  Use it when available, fall back to standard.
-  uint8_t crtcOff = m_vga.getCRTCOffset();
-
-  if (mi->layout == hw::VMemLayout::Linear256 && !m_vga.isChain4()) {
-    // Mode-X: Chain-4 disabled, unchained 256-color planar mode.
-    // CRTC offset is in character-clocks; one char = 8 pixels = 2 bytes
-    // per plane in planar 8bpp mode.
-    uint32_t displayStart = m_vga.getDisplayStart();
-    int rowBytes = (crtcOff > 0) ? crtcOff * 2 : w / 4;
-    for (int y = 0; y < h; ++y) {
-      for (int x = 0; x < w; ++x) {
-        int plane = x & 3;
-        uint32_t offset = displayStart + y * rowBytes + (x >> 2);
-        m_framebuffer[y * m_texWidth + x] =
-            paletteToARGB(m_vga.readPlane(plane, offset));
-      }
-    }
-  } else if (mi->layout == hw::VMemLayout::Linear256) {
-    // Standard mode 13h (Chain-4): CRTC offset in character-clocks;
-    // one char = 8 pixels = 8 bytes at 8bpp.
-    uint32_t displayStart = m_vga.getDisplayStart();
-    int rowBytes = (crtcOff > 0) ? crtcOff * 8 : w;
-    for (int y = 0; y < h; ++y) {
-      for (int x = 0; x < w; ++x) {
-        uint32_t vramOff = displayStart + y * rowBytes + x;
-        m_framebuffer[y * m_texWidth + x] =
-            paletteToARGB(m_vga.readPlane(vramOff & 3, vramOff >> 2));
-      }
-    }
-  } else {
-    for (int y = 0; y < h; ++y) {
-      for (int x = 0; x < w; ++x) {
-        m_framebuffer[y * m_texWidth + x] =
-            paletteToARGB(readPixel(x, y, videoMode));
-      }
-    }
-  }
 }
 
 // ── Input handling ─────────────────────────────────────────────────────
