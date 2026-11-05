@@ -2,6 +2,7 @@
 #include "../hw/VGAController.hpp"
 #include <algorithm>
 #include <iostream>
+#include <new>
 
 namespace fador::memory {
 
@@ -21,7 +22,9 @@ bool intersectsRange(uint32_t start, uint32_t size, uint32_t rangeStart,
 } // namespace
 
 MemoryBus::MemoryBus() {
-  m_ram.resize(MEMORY_SIZE, 0);
+  m_ram.reset(static_cast<uint8_t *>(std::calloc(MEMORY_SIZE, 1)));
+  if (!m_ram)
+    throw std::bad_alloc();
 
   // Fill conventional memory above BDA (0x500–0x9FFFF) with a non-zero
   // pattern that includes periodic zero bytes.  On real hardware this

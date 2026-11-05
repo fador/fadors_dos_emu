@@ -1,6 +1,8 @@
 #pragma once
 #include "../utils/Logger.hpp"
 #include <cstdint>
+#include <cstdlib>
+#include <memory>
 #include <vector>
 
 namespace fador::hw { class VGAController; }
@@ -147,7 +149,13 @@ private:
   void write32Slow(uint32_t address, uint32_t effectiveAddress,
                    uint32_t value);
 
-  std::vector<uint8_t> m_ram;
+  struct FreeDeleter {
+    void operator()(uint8_t *p) const { std::free(p); }
+  };
+  // calloc()-backed so the 128 MiB of guest RAM is zero pages supplied
+  // lazily by the OS: constructing a MemoryBus no longer touches (and
+  // commits) every page up front.
+  std::unique_ptr<uint8_t[], FreeDeleter> m_ram;
   bool m_a20Enabled{false};
   hw::VGAController *m_vga = nullptr;
 };
