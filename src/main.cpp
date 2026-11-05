@@ -395,7 +395,8 @@ int main(int argc, char *argv[]) {
     memory.setVGA(&vga);
 
     fador::hw::audio::AudioBackend audio;
-    audio.init(44100, 2, 1024);
+    // The host audio device is opened after the command line is parsed
+    // (headless runs never open one).
 
     fador::hw::audio::AdLib adlib(44100.0f, &cpu.getCyclesRef());
     fador::hw::audio::SoundBlaster sb(memory, dma, 44100.0f);
@@ -765,8 +766,8 @@ int main(int argc, char *argv[]) {
       }
     }
 
-    if (headless)
-      audio.close(); // unattended runs never open a host audio device
+    if (!headless)
+      audio.init(44100, 2, 1024);
 
     // Apply CLI mounts
     for (auto& m : cliMounts) {
