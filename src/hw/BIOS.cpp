@@ -56,6 +56,11 @@ void BIOS::sendEOI(uint8_t vector) {
 
 bool BIOS::handleInterrupt(uint8_t vector) {
   switch (vector) {
+  case VBE_PM_SET_WINDOW:      // VBE 2.0 protected-mode entry points
+  case VBE_PM_SET_DISPLAY_START: // (reached via 0F FF traps in the
+  case VBE_PM_SET_PALETTE:     //  4F0Ah code table, not via INT)
+    handleVbeProtectedMode(vector);
+    return true;
   case 0x02: // NMI handler stub (reached via IRQ13 redirection)
     LOG_DEBUG("BIOS INT 02h: NMI (stubbed)");
     return true;

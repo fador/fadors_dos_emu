@@ -4675,6 +4675,10 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
       // Vector 0xE3 = DPMI raw switch RM→PM (reached via JMP FAR).
       // Handlers already set CS:EIP and mode state — no IRET simulation.
       // Sync InstructionDecoder's segment base cache.
+      if (hw::BIOS::isCallStyleTrap(vector)) {
+        // VBE PM entry points: continue with the RET that follows the trap
+        break;
+      }
       if (vector == 0xE1 || vector == 0xE2 || vector == 0xE3) {
         loadSegment(CS, m_cpu.getSegReg(CS));
         loadSegment(SS, m_cpu.getSegReg(SS));

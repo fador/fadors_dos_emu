@@ -112,6 +112,15 @@ public:
     static constexpr uint32_t EMS_IMPORT_RECORD_PHYS = 0xF1100;
     // VBE ROM data (OEM strings, mode list, window function) at F000:C000
     static constexpr uint16_t VBE_ROM_OFFSET = 0xC000;
+    // Trap vectors used by the VBE 2.0 protected-mode interface (4F0Ah).
+    // The PM code is "0F FF <vector>; RET", executed with a near CALL by
+    // the application, so these vectors return without an IRET frame.
+    static constexpr uint8_t VBE_PM_SET_WINDOW = 0xE5;
+    static constexpr uint8_t VBE_PM_SET_DISPLAY_START = 0xE6;
+    static constexpr uint8_t VBE_PM_SET_PALETTE = 0xE7;
+    static bool isCallStyleTrap(uint8_t vector) {
+        return vector >= VBE_PM_SET_WINDOW && vector <= VBE_PM_SET_PALETTE;
+    }
 
 private:
     // Original IVT entries written during initialize().
@@ -142,6 +151,7 @@ private:
 
     void handleVideoService();      // INT 10h
     void handleVbeService();        // INT 10h AH=4Fh (VESA BIOS Extensions)
+    void handleVbeProtectedMode(uint8_t vector); // 4F0Ah PM entry points
     void initializeVbeRom();        // VBE info strings / mode list in ROM
     void resetVbeState();           // back to a standard VGA mode
     VbeState m_vbe;

@@ -56,6 +56,7 @@ constexpr uint16_t kProductName = 0x40;
 constexpr uint16_t kProductRev = 0x60;
 constexpr uint16_t kModeList = 0x80;      // word list, 0xFFFF terminated
 constexpr uint16_t kWindowFunc = 0xE0;    // far-callable bank switch
+constexpr uint16_t kPmTable = 0x100;      // 4F0Ah protected-mode table
 
 } // namespace
 
@@ -86,6 +87,30 @@ void BIOS::initializeVbeRom() {
     p += 2;
   }
   m_memory.write16(p, 0xFFFF);
+
+  // VBE 2.0 protected-mode interface table (returned by 4F0Ah):
+  //   +0 offset of SetWindow, +2 SetDisplayStart, +4 SetPrimaryPalette,
+  //   +6 offset of the I/O-port / memory list (both empty, FFFFh-terminated)
+  // Each entry point is "0F FF <trap>; C3" so it works wherever the client
+  // copies the table.
+  {
+    const uint32_t t = base + kPmTable;
+    m_memory.write16(t + 0, 0x0010);
+    m_memory.write16(t + 2, 0x0014);
+    m_memory.write16(t + 4, 0x0018);
+    m_memory.write16(t + 6, 0x000C);
+    m_memory.write16(t + 0x0C, 0xFFFF); // port list terminator
+    m_memory.write16(t + 0x0E, 0xFFFF); // memory list terminator
+    const uint8_t traps[3] = {VBE_PM_SET_WINDOW, VBE_PM_SET_DISPLAY_START,
+                              VBE_PM_SET_PALETTE};
+    for (int i = 0; i < 3; ++i) {
+      const uint32_t code = t + 0x10 + i * 4;
+      m_memory.write8(code + 0, 0x0F);
+      m_memory.write8(code + 1, 0xFF);
+      m_memory.write8(code + 2, traps[i]);
+      m_memory.write8(code + 3, 0xC3); // RET
+    }
+  }
 
   // Real-mode window function (ModeInfo.WinFuncPtr): programs FAR CALL it
   // with BX/DX as for 4F05h.  PUSH AX; MOV AX,4F05h; INT 10h; POP AX; RETF
@@ -354,13 +379,71 @@ void BIOS::handleVbeService() {
     m_cpu.setReg16(cpu::AX, (bl <= 0x01) ? kVbeOk : kVbeFailed);
     break;
   }
+  case 0x0A: // Return VBE protected-mode interface
+    if (m_cpu.getReg8(cpu::BL) != 0x00) {
+      m_cpu.setReg16(cpu::AX, kVbeFailed);
+      break;
+    }
+    m_cpu.setSegReg(cpu::ES, HLE_STUB_SEG);
+    m_cpu.setReg16(cpu::DI, static_cast<uint16_t>(VBE_ROM_OFFSET + kPmTable));
+    m_cpu.setReg16(cpu::CX, 0x001C); // table length
+    m_cpu.setReg16(cpu::AX, kVbeOk);
+    break;
   default:
-    // 4F0Ah (protected-mode interface), 4F10h (power management),
+    // 4F10h (power management),
     // 4F15h (DDC) and anything newer: report "function call failed" so
     // callers fall back to the real-mode/INT 10h paths.
     LOG_DEBUG("VBE: unsupported function AX=0x", std::hex,
               m_cpu.getReg16(cpu::AX));
     m_cpu.setReg16(cpu::AX, kVbeFailed);
+    break;
+  }
+}
+
+// VBE 2.0 protected-mode entry points.  Called with the client's PM
+// registers; the display-start address is in plane units (bytes / 4).
+void BIOS::handleVbeProtectedMode(uint8_t vector) {
+  if (m_vbe.mode == 0)
+    return;
+  switch (vector) {
+  case VBE_PM_SET_WINDOW: {
+    if (m_cpu.getReg8(cpu::BL) != 0)
+      return;
+    uint32_t bank = m_cpu.getReg16(cpu::DX);
+    if (static_cast<uint64_t>(bank) * 0x10000u >= MemoryBus::VBE_VRAM_SIZE)
+      return;
+    m_vbe.bank = bank;
+    if (m_vga)
+      m_vga->setSvgaWindow(true, MemoryBus::VBE_LFB_BASE + bank * 0x10000u);
+    break;
+  }
+  case VBE_PM_SET_DISPLAY_START: {
+    const uint32_t planeAddr = (static_cast<uint32_t>(m_cpu.getReg16(cpu::DX)) << 16) |
+                               m_cpu.getReg16(cpu::CX);
+    const uint32_t byteAddr = planeAddr * 4;
+    if (m_vbe.pitch != 0) {
+      const uint32_t bpp = bytesPerPixel(m_vbe.bpp);
+      m_vbe.startY = byteAddr / m_vbe.pitch;
+      m_vbe.startX = (byteAddr % m_vbe.pitch) / bpp;
+    }
+    break;
+  }
+  case VBE_PM_SET_PALETTE: {
+    const uint16_t count = m_cpu.getReg16(cpu::CX);
+    const uint16_t first = m_cpu.getReg16(cpu::DX);
+    const uint32_t table = m_cpu.getSegBase(cpu::ES) +
+                           (m_cpu.is32BitCode() ? m_cpu.getReg32(cpu::EDI)
+                                                : m_cpu.getReg16(cpu::DI));
+    uint8_t *pal = m_memory.dacPalette();
+    for (uint32_t i = 0; i < count && first + i < 256; ++i) {
+      uint8_t *rgb = pal + (first + i) * 3;
+      rgb[2] = m_memory.read8(table + i * 4 + 0) & 0x3F;
+      rgb[1] = m_memory.read8(table + i * 4 + 1) & 0x3F;
+      rgb[0] = m_memory.read8(table + i * 4 + 2) & 0x3F;
+    }
+    break;
+  }
+  default:
     break;
   }
 }
