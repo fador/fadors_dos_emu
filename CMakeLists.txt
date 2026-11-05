@@ -127,3 +127,11 @@ target_link_libraries(fadors_tests PRIVATE fadors_core)
 target_include_directories(fadors_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests")
 
 add_test(NAME fadors_tests COMMAND fadors_tests)
+
+# Differential CPU tester (host x86-64 CPU vs. interpreter).  Needs to run
+# generated code natively, so it is only built on x86-64 POSIX hosts.
+if(UNIX AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+    add_executable(cpu_fuzz tools/cpu_fuzz.cpp)
+    target_link_libraries(cpu_fuzz PRIVATE fadors_core)
+    add_test(NAME cpu_fuzz COMMAND cpu_fuzz 200000 1)
+endif()

@@ -129,6 +129,8 @@ private:
   // General ALU operation evaluator covering Math and Logic EFLAGS
   uint32_t aluOp(uint8_t op, uint32_t dest, uint32_t src, int size);
 
+  void setMulOverflow(bool overflow);
+
   // INC/DEC helpers that preserve CF (per x86 spec)
   uint32_t incOp(uint32_t val, int size);
   uint32_t decOp(uint32_t val, int size);
