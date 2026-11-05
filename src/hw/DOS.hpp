@@ -61,6 +61,17 @@ public:
   // Memory allocation for internal use (ProgramLoader)
   uint16_t allocateMemory(uint16_t paragraphs, uint16_t owner = 0xFFFF);
   bool freeMemory(uint16_t segment);
+  // Largest block AH=48h could allocate now (adjacent free blocks merge).
+  uint16_t largestFreeBlock();
+  // Shrinks the block of the current PSP to `paragraphs` and frees the
+  // rest (the shell keeps only a small resident part, like COMMAND.COM).
+  bool shrinkCurrentPSPBlock(uint16_t paragraphs);
+  // Allocates an environment block holding `vars` ("NAME=VALUE" each) and
+  // the program name; returns its segment or 0.
+  uint16_t buildEnvironment(const std::vector<std::string> &vars,
+                            const std::string &programName);
+  // Frees every memory block owned by `psp` (process termination).
+  void freeBlocksOwnedBy(uint16_t psp);
 
   bool isExecTriggered() const { return m_execTriggered; }
   void clearExecTriggered() { m_execTriggered = false; }

@@ -1277,19 +1277,8 @@ void DOS::handleDOSService() {
         break;
       }
 
-      // Find largest free block for the child program
-      uint16_t current = FIRST_MCB_SEGMENT;
-      uint16_t largestFree = 0;
-      while (true) {
-        MCB mcb = readMCB(current);
-        if (mcb.owner == 0 && mcb.size > largestFree) {
-          largestFree = mcb.size;
-        }
-        if (mcb.type == 'Z') break;
-        uint32_t next = (uint32_t)current + mcb.size + 1;
-        if (next > 0xFFFF || next > LAST_PARA) break;
-        current = static_cast<uint16_t>(next);
-      }
+      // The child program gets the largest free block
+      const uint16_t largestFree = largestFreeBlock();
 
       uint16_t childSeg = allocateMemory(largestFree, 0xFFFF);
       if (childSeg == 0) {
@@ -1787,14 +1776,32 @@ void DOS::setProgramDir(const std::string &programPath) {
   fs::path p = fs::absolute(programPath);
   m_programPath = p.string();
   m_currentDir = p.parent_path().string();
-  // Drive root = parent of program directory, DOS current dir = program dir
-  // name
   fs::path progDir = p.parent_path();
-  m_hostRootDir = progDir.parent_path().string();
-  if (m_hostRootDir.empty())
-    m_hostRootDir = progDir.string();
-  // DOS current directory = last component of host path, uppercased
-  std::string dirName = progDir.filename().string();
+  // A C: drive mounted with --mount that contains the program keeps its
+  // root; the current directory becomes the program's directory below it.
+  // Otherwise the drive root is the parent of the program directory and the
+  // DOS current directory is the program directory's name.
+  bool insideMountedC = false;
+  std::string dirName;
+  if (m_driveManager && m_driveManager->isMounted('C')) {
+    const fs::path root =
+        fs::weakly_canonical(fs::absolute(m_driveManager->getHostPath('C')));
+    const fs::path rel = fs::weakly_canonical(progDir).lexically_relative(root);
+    if (!rel.empty() && *rel.begin() != "..") {
+      insideMountedC = true;
+      m_hostRootDir = root.string();
+      if (rel != ".") {
+        dirName = rel.generic_string();
+        std::replace(dirName.begin(), dirName.end(), '/', '\\');
+      }
+    }
+  }
+  if (!insideMountedC) {
+    m_hostRootDir = progDir.parent_path().string();
+    if (m_hostRootDir.empty())
+      m_hostRootDir = progDir.string();
+    dirName = progDir.filename().string();
+  }
   std::transform(dirName.begin(), dirName.end(), dirName.begin(), ::toupper);
   m_dosCurrentDir = dirName;
   LOG_INFO("DOS: Working directory set to '", m_currentDir, "'");
@@ -1854,6 +1861,30 @@ std::string DOS::canonicalDosPath(const std::string &in) const {
   for (size_t i = 0; i < parts.size(); ++i)
     out += (i ? "\\" : "") + parts[i];
   return out;
+}
+
+uint16_t DOS::buildEnvironment(const std::vector<std::string> &vars,
+                               const std::string &programName) {
+  std::vector<uint8_t> block;
+  for (const auto &v : vars) {
+    block.insert(block.end(), v.begin(), v.end());
+    block.push_back(0);
+  }
+  if (block.empty())
+    block.push_back(0);
+  block.push_back(0); // end of the variables
+  block.push_back(0x01);
+  block.push_back(0x00);
+  block.insert(block.end(), programName.begin(), programName.end());
+  block.push_back(0);
+  const uint16_t paras = static_cast<uint16_t>((block.size() + 15) / 16);
+  const uint16_t seg = allocateMemory(paras, 0xFFFF);
+  if (seg == 0)
+    return 0;
+  const uint32_t dst = static_cast<uint32_t>(seg) << 4;
+  for (size_t i = 0; i < block.size(); ++i)
+    m_memory.write8(dst + static_cast<uint32_t>(i), block[i]);
+  return seg;
 }
 
 uint16_t DOS::buildChildEnvironment(uint16_t sourceSeg,
@@ -2090,15 +2121,7 @@ void DOS::handleMemoryManagement() {
       m_cpu.setReg16(cpu::AX, segment);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
     } else {
-      // Find largest free block for error return
-      uint16_t current = FIRST_MCB_SEGMENT;
-      uint16_t largestFree = 0;
-      while (true) {
-        MCB mcb = readMCB(current);
-        if (mcb.owner == 0 && mcb.size > largestFree) largestFree = mcb.size;
-        if (mcb.type == 'Z') break;
-        current = static_cast<uint16_t>(current + mcb.size + 1);
-      }
+      const uint16_t largestFree = largestFreeBlock();
       m_cpu.setReg16(cpu::AX, 0x0008);      // Insufficient memory
       m_cpu.setReg16(cpu::BX, largestFree); // Largest available block
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
@@ -2203,61 +2226,9 @@ void DOS::handleMemoryManagement() {
         writeMCB(mcbSeg, expanded);
       }
 
-      // In-place expansion failed. Try block relocation: allocate a new
-      // block of the requested size, copy data, free the old block.
-      // This mirrors C-library realloc() behavior and prevents crashes
-      // in programs (like DOOM) that assume resize always succeeds for
-      // small incremental growth.
-      //
-      // First attempt: allocate with the old block still owned.
-      uint16_t newSeg = allocateMemory(requested);
-      if (newSeg == 0) {
-        // Second attempt: temporarily free the old block so its space
-        // becomes available for the new allocation, then retry.
-        uint16_t savedOwner = mcb.owner;
-        expanded.owner = 0;
-        writeMCB(mcbSeg, expanded);
-        newSeg = allocateMemory(requested);
-        if (newSeg == 0) {
-          // Restore the old block on failure
-          expanded.owner = savedOwner;
-          writeMCB(mcbSeg, expanded);
-        }
-      }
-      if (newSeg != 0) {
-        // Copy data from old block to new block
-        uint32_t oldAddr = static_cast<uint32_t>(segment) << 4;
-        uint32_t newAddr = static_cast<uint32_t>(newSeg) << 4;
-        uint16_t copyParas = std::min(requested, mcb.size);
-        for (uint16_t p = 0; p < copyParas; ++p) {
-          for (uint16_t b = 0; b < 16; ++b) {
-            m_memory.write8(newAddr + p * 16 + b,
-                            m_memory.read8(oldAddr + p * 16 + b));
-          }
-        }
-        // Free the old block — set owner to 0 so coalesce can merge it
-        uint32_t oldMcbAddr = static_cast<uint32_t>(mcbSeg) << 4;
-        m_memory.write16(oldMcbAddr + 1, 0); // owner = 0 (free)
-        MCB freed = readMCB(mcbSeg);
-        freed.owner = 0;
-        // Re-read MCB in case readMCB updated it
-        freed = readMCB(mcbSeg);
-        coalesceFollowingFreeBlocks(freed);
-        writeMCB(mcbSeg, freed);
-
-        // Return success with new segment in ES
-        m_cpu.setSegReg(cpu::ES, newSeg);
-        if (segment == m_pspSegment) {
-          m_pspSegment = newSeg;
-          m_currentPSPValue = newSeg;
-          m_cpu.setReg16(cpu::ES, newSeg);
-        }
-        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-        LOG_INFO("DOS: Relocated segment ", std::hex, segment,
-                 " to 0x", newSeg, " (", requested, " paras)");
-        return;
-      }
-
+      // Like DOS, never move the block: callers (DOS extenders keeping
+      // tables in it, for example) handle the failure themselves using the
+      // largest size returned in BX.
       m_cpu.setReg16(cpu::AX, 0x08); // Insufficient memory
       uint16_t maxPossible = expanded.size;
       m_cpu.setReg16(cpu::BX, maxPossible);
@@ -2707,6 +2678,24 @@ uint16_t DOS::allocateMemory(uint16_t requested, uint16_t owner) {
       return 0;
     }
     MCB mcb = readMCB(current);
+    // Like DOS, merge a free block with the free blocks that follow it
+    // before judging its size.
+    if (mcb.owner == 0 && mcb.type == 'M') {
+      bool merged = false;
+      while (mcb.type == 'M') {
+        const uint32_t nextSeg = static_cast<uint32_t>(current) + mcb.size + 1;
+        if (nextSeg >= LAST_PARA)
+          break;
+        const MCB next = readMCB(static_cast<uint16_t>(nextSeg));
+        if (next.owner != 0 || (next.type != 'M' && next.type != 'Z'))
+          break;
+        mcb.type = next.type;
+        mcb.size = static_cast<uint16_t>(mcb.size + 1 + next.size);
+        merged = true;
+      }
+      if (merged)
+        writeMCB(current, mcb);
+    }
     if (mcb.owner == 0 && mcb.size >= requested) {
       if (strategy == 0x00) { // First fit
         chosenBlock = current;
@@ -2874,6 +2863,72 @@ uint16_t DOS::allocateMemory(uint16_t requested, uint16_t owner) {
   return 0;
 }
 
+uint16_t DOS::largestFreeBlock() {
+  uint16_t current = FIRST_MCB_SEGMENT;
+  uint32_t largest = 0, run = 0;
+  for (int i = 0; i < 4096; ++i) {
+    const MCB mcb = readMCB(current);
+    if (mcb.type != 'M' && mcb.type != 'Z')
+      break;
+    if (mcb.owner == 0) {
+      // A free block directly after another one merges with it (its MCB
+      // paragraph becomes usable too).
+      run = run ? run + 1 + mcb.size : mcb.size;
+      largest = std::max(largest, run);
+    } else {
+      run = 0;
+    }
+    if (mcb.type == 'Z')
+      break;
+    const uint32_t next = static_cast<uint32_t>(current) + mcb.size + 1;
+    if (next >= LAST_PARA)
+      break;
+    current = static_cast<uint16_t>(next);
+  }
+  return static_cast<uint16_t>(std::min<uint32_t>(largest, 0xFFFF));
+}
+
+void DOS::freeBlocksOwnedBy(uint16_t psp) {
+  uint16_t current = FIRST_MCB_SEGMENT;
+  for (int i = 0; i < 4096; ++i) {
+    MCB mcb = readMCB(current);
+    if (mcb.type != 'M' && mcb.type != 'Z')
+      break;
+    if (mcb.owner == psp) {
+      mcb.owner = 0;
+      writeMCB(current, mcb);
+    }
+    if (mcb.type == 'Z')
+      break;
+    const uint32_t next = static_cast<uint32_t>(current) + mcb.size + 1;
+    if (next >= LAST_PARA)
+      break;
+    current = static_cast<uint16_t>(next);
+  }
+}
+
+bool DOS::shrinkCurrentPSPBlock(uint16_t paragraphs) {
+  const uint16_t mcbSeg = static_cast<uint16_t>(m_pspSegment - 1);
+  MCB mcb = readMCB(mcbSeg);
+  if ((mcb.type != 'M' && mcb.type != 'Z') || mcb.owner != m_pspSegment)
+    return false;
+  if (mcb.size <= paragraphs + 1u)
+    return true;
+  MCB rest;
+  rest.type = mcb.type;
+  rest.owner = 0;
+  rest.size = static_cast<uint16_t>(mcb.size - paragraphs - 1);
+  for (auto &c : rest.name)
+    c = 0;
+  mcb.type = 'M';
+  mcb.size = paragraphs;
+  writeMCB(mcbSeg, mcb);
+  writeMCB(static_cast<uint16_t>(mcbSeg + paragraphs + 1), rest);
+  m_memory.write16((static_cast<uint32_t>(m_pspSegment) << 4) + 0x02,
+                   static_cast<uint16_t>(m_pspSegment + paragraphs));
+  return true;
+}
+
 void DOS::dumpMCBChain() {
   uint16_t current = FIRST_MCB_SEGMENT;
   LOG_INFO("--- DOS MCB Chain Dump ---");
@@ -2888,10 +2943,6 @@ void DOS::dumpMCBChain() {
              " Owner: 0x", mcb.owner, " Size: ", std::dec, mcb.size, " paras");
     if (mcb.type == 'Z')
       break;
-    if (mcb.size == 0) {
-      LOG_WARN("DOS: MCB with size 0 at 0x", std::hex, current);
-      break;
-    }
     uint32_t next = (uint32_t)current + mcb.size + 1;
     if (next >= LAST_PARA)
       break;
