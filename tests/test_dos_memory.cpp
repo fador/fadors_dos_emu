@@ -88,9 +88,11 @@ TEST_CASE("DOS: Memory Management (MCB)", "[DOS][Memory]") {
         uint32_t mcbAddr = (seg - 1) << 4;
         REQUIRE(memory.read16(mcbAddr + 3) == 0x50);
 
-        // Next MCB should be free
+        // Next MCB should be free.  It is 'Z' when the released tail was
+        // coalesced with the trailing free block, 'M' otherwise.
         uint32_t nextMcbAddr = (seg + 0x50) << 4;
-        REQUIRE(memory.read8(nextMcbAddr) == 'M');
+        REQUIRE((memory.read8(nextMcbAddr) == 'M' ||
+                 memory.read8(nextMcbAddr) == 'Z'));
         REQUIRE(memory.read16(nextMcbAddr + 1) == 0);
     }
 

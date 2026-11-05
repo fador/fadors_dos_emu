@@ -196,7 +196,11 @@ uint8_t *MemoryBus::contiguousAccess(uint32_t address, uint32_t size) {
     return effectiveAddress < MEMORY_SIZE ? &m_ram[effectiveAddress] : nullptr;
   }
 
-  if (!m_a20Enabled && size - 1 > A20_MASK - effectiveAddress) {
+  // With A20 masked, a range that crosses a 1 MiB boundary wraps around
+  // (bit 20 is forced to zero), so it is not contiguous in host memory.
+  if (!m_a20Enabled &&
+      (static_cast<uint64_t>(effectiveAddress) >> 20) !=
+          ((static_cast<uint64_t>(effectiveAddress) + size - 1) >> 20)) {
     return nullptr;
   }
 

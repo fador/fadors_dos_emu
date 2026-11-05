@@ -30,6 +30,9 @@ TEST_CASE("CPU: Addressing Modes (16-bit)", "[Decoder][Addressing]") {
     cpu.setReg16(BP, 0x2000);
     cpu.setSegReg(DS, 0x3000);
     cpu.setSegReg(SS, 0x4000);
+    // The decoder caches segment bases per step(); refresh it explicitly
+    // because these tests call the EA helpers directly.
+    decoder.syncSegments();
 
     SECTION("BX + SI") {
         ModRM modrm = {0, 0, 0}; // [BX + SI]
@@ -103,6 +106,9 @@ TEST_CASE("CPU: Addressing Modes (32-bit)", "[Decoder][Addressing]") {
     cpu.setReg32(ESP, 0x20000);
     cpu.setSegReg(DS, 0x3000);
     cpu.setSegReg(SS, 0x4000);
+    // The decoder caches segment bases per step(); refresh it explicitly
+    // because these tests call the EA helpers directly.
+    decoder.syncSegments();
 
     SECTION("Simple register [EBX]") {
         ModRM modrm = {0, 0, 3}; // [EBX]

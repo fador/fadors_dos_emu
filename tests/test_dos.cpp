@@ -105,8 +105,9 @@ TEST_CASE("DOS Emulation and Program Loading", "[DOS]") {
         SECTION("Get DOS Version") {
             cpu.setReg8(cpu::AH, 0x30);
             dos.handleInterrupt(0x21);
-            REQUIRE(cpu.getReg8(cpu::AL) == 3);
-            REQUIRE(cpu.getReg8(cpu::AH) == 30);
+            // The emulated kernel reports MS-DOS 6.22
+            REQUIRE(cpu.getReg8(cpu::AL) == 6);
+            REQUIRE(cpu.getReg8(cpu::AH) == 22);
         }
 
     SECTION("DOS File I/O: Open, Read, Close") {
@@ -2336,7 +2337,7 @@ TEST_CASE("DOS: Parse Filename (AH=0x29) into FCB", "[DOS][FCB]") {
         cpu.setReg8(cpu::AL, flags);
         dos.handleInterrupt(0x21);
 
-        REQUIRE(cpu.getReg8(cpu::AL) == (expectWild ? 0xFF : 0x00));
+        REQUIRE(cpu.getReg8(cpu::AL) == (expectWild ? 0x01 : 0x00));
         REQUIRE(mem.read8(fcbAddr + 0x00) == expectedDrive);
         for (size_t i = 0; i < 8; ++i)
             REQUIRE(mem.read8(fcbAddr + 1 + i) ==
@@ -2349,7 +2350,7 @@ TEST_CASE("DOS: Parse Filename (AH=0x29) into FCB", "[DOS][FCB]") {
     };
 
     SECTION("drive + name + extension") {
-        testParse("C:MYFILE .TXT", 0x01, 0x03, "MYFILE  ", "TXT", false);
+        testParse("C:MYFILE.TXT", 0x01, 0x03, "MYFILE  ", "TXT", false);
     }
 
     SECTION("no drive letter") {
@@ -2372,12 +2373,16 @@ TEST_CASE("DOS: Parse Filename (AH=0x29) into FCB", "[DOS][FCB]") {
         testParse("TEST.TXT", 0x03, 0xFF, "TEST    ", "TXT", false);
     }
 
-    SECTION("flag bit 2: don't modify filename") {
-        testParse("DATA.TXT", 0x05, 0x00, "\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF", "TXT", false);
+    SECTION("flag bit 2: keep filename when none is specified") {
+        testParse(".TXT", 0x05, 0x00, "\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF", "TXT", false);
     }
 
-    SECTION("flag bit 3: don't modify extension") {
-        testParse("DATA.TXT", 0x09, 0x00, "DATA    ", "\xFF\xFF\xFF", false);
+    SECTION("flag bit 3: keep extension when none is specified") {
+        testParse("DATA", 0x09, 0x00, "DATA    ", "\xFF\xFF\xFF", false);
+    }
+
+    SECTION("names longer than 8 characters are truncated") {
+        testParse("LONGFILENAME.TXT", 0x01, 0x00, "LONGFILE", "TXT", false);
     }
 }
 

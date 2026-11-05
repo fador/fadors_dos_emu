@@ -183,7 +183,10 @@ bool InstructionDecoder::tryFastRepMovs(uint32_t elementSize) {
 }
 
 bool InstructionDecoder::currentOperandSize32() const {
-  return m_hasPrefix66 ? !m_cpu.is32BitCode() : m_cpu.is32BitCode();
+  // m_hasPrefix66 already holds the *effective* operand size for the
+  // current instruction (CS default size XOR the 0x66 prefix), so it must
+  // not be XORed against the code-segment size a second time.
+  return m_hasPrefix66;
 }
 
 SIB InstructionDecoder::decodeSIB(uint8_t byte) {
@@ -5779,4 +5782,4 @@ void InstructionDecoder::loadSegment(SegRegIndex seg, uint16_t selector) {
   syncSegments();
 }
 
-} // namespace fador::cpu
+} // namespace fador::cpu

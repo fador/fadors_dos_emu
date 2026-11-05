@@ -34,6 +34,16 @@ public:
 
   static std::string normalizeDosPath(const std::string& path);
 
+  // Map a DOS-relative path (components separated by '/' or '\\') onto an
+  // existing host path below `base`, matching each component
+  // case-insensitively.  DOS file names are case-insensitive, but POSIX
+  // host file systems are not, so "EXAMPLE.DAT" must find "example.dat".
+  // Components that do not exist are appended unchanged (so newly created
+  // files keep the name the program asked for).  On case-insensitive hosts
+  // the exact-match fast path always hits and this is effectively free.
+  static std::string matchHostCase(const std::string& base,
+                                   const std::string& relative);
+
   std::string getVolumeLabel(char letter) const;
   void setVolumeLabel(char letter, const std::string& label);
 

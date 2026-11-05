@@ -157,8 +157,9 @@ TEST_CASE("BIOS Emulation Services", "[BIOS]") {
         decoder.step();
         REQUIRE(cpu.getEFLAGS() & cpu::FLAG_ZERO); // ZF=1 means no key
 
-        // Push a key
-        kbd.pushScancode(0x1E); // 'A'
+        // Push a key into the BIOS type-ahead buffer (a raw scancode on
+        // port 60h only becomes visible to INT 16h after INT 9 runs)
+        kbd.pushKey('a', 0x1E);
         cpu.setEIP(0x100);
         decoder.step();
         REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_ZERO)); // ZF=0 means key present

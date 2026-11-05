@@ -9,7 +9,7 @@ TEST_CASE("MemoryBus: Basic Initialization", "[MemoryBus]") {
     MemoryBus bus;
 
     SECTION("Memory size is correct") {
-        REQUIRE(MemoryBus::MEMORY_SIZE == 64 * 1024 * 1024);
+        REQUIRE(MemoryBus::MEMORY_SIZE == 128 * 1024 * 1024);
     }
 
     SECTION("IVT and BDA are zero initialized") {

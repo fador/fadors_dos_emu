@@ -54,12 +54,14 @@ TEST_CASE("DOS: Directory Operations", "[DOS][Directory]") {
             if (c == 0) break;
             result += c;
         }
-        REQUIRE(result == "newdir");
+        // DOS reports directory names in upper case
+        REQUIRE(result == "NEWDIR");
 
         // RMDIR "newdir"
-        // First go back to root
+        // First go back to the parent directory
         memory.write8(0x2000, '.');
-        memory.write8(0x2001, 0);
+        memory.write8(0x2001, '.');
+        memory.write8(0x2002, 0);
         cpu.setReg8(AH, 0x3B);
         cpu.setReg16(DX, 0x2000);
         dos.handleInterrupt(0x21);

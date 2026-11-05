@@ -158,8 +158,9 @@ TEST_CASE("CPU: Stack pointer wraparound edge cases", "[CPU][Stack]") {
         cpu.setReg16(cpu::SP, sp);
         REQUIRE(cpu.getReg16(cpu::SP) == 0xFFFE);
         // Verify all values were written at correct addresses
-        REQUIRE(mem.read16(0x10000 + 0xFFFE) == 0xAA00);
-        REQUIRE(mem.read16(0x10004) == 0xAA03);
+        // First push (i=0) landed at SP=4, the last one wrapped to 0xFFFE
+        REQUIRE(mem.read16(0x10004) == 0xAA00);
+        REQUIRE(mem.read16(0x10000 + 0xFFFE) == 0xAA03);
     }
 }
 

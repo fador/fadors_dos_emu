@@ -96,7 +96,14 @@ uint8_t VGAController::read8(uint16_t port) {
             int64_t pos = (elapsed >= 0) ? (elapsed % FRAME_NS)
                 : ((FRAME_NS - ((-elapsed) % FRAME_NS)) % FRAME_NS);
             bool inRetrace = (pos >= (FRAME_NS - RETRACE_NS));
-            return inRetrace ? 0x09 : 0x00;
+            if (inRetrace)
+                return 0x09;
+            // Bit 0 alone also pulses during horizontal blanking
+            // (31.47 kHz line rate, ~20% of each scan line), which code
+            // waiting for "display enable" relies on.
+            constexpr int64_t LINE_NS = 31778;
+            constexpr int64_t HBLANK_NS = LINE_NS / 5;
+            return ((pos % LINE_NS) >= (LINE_NS - HBLANK_NS)) ? 0x01 : 0x00;
         }
 
         default:

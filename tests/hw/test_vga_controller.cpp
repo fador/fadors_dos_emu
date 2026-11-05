@@ -1,6 +1,7 @@
 #include "../test_framework.hpp"
 #include "hw/VGAController.hpp"
 #include "memory/MemoryBus.hpp"
+#include <chrono>
 
 using namespace fador::hw;
 using namespace fador::memory;
@@ -87,23 +88,23 @@ TEST_CASE("Hardware: VGA Controller", "[HW][VGA]") {
     }
 
     SECTION("Retrace Simulation") {
-        // Simulate reading 0x3DA
-        // In the implementation, m_retraceReadCount increments.
-        // It's display state for the first 32 reads, then retrace for 4.
-
-        // Let's read 32 times. All should be display mode (0x00).
-        for (int i = 0; i < 31; ++i) { // after 31 reads count is 31, % 36 = 31 < 32
-            REQUIRE(vga.read8(0x3DA) == 0x00);
+        // 0x3DA is driven by a wall-clock 70 Hz frame model: within two
+        // frames (~29 ms) we must observe display time (0x00), horizontal
+        // blanking (bit 0 only) and vertical retrace (bits 0 and 3).
+        bool sawDisplay = false, sawHBlank = false, sawVRetrace = false;
+        auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start <
+               std::chrono::milliseconds(60)) {
+            uint8_t v = vga.read8(0x3DA);
+            REQUIRE((v & ~0x09) == 0);
+            if (v == 0x00) sawDisplay = true;
+            if (v == 0x01) sawHBlank = true;
+            if (v == 0x09) sawVRetrace = true;
+            if (sawDisplay && sawHBlank && sawVRetrace) break;
         }
-
-        // 32nd read: count becomes 32, % 36 = 32 >= 32 (retrace mode)
-        REQUIRE(vga.read8(0x3DA) == 0x09);
-        REQUIRE(vga.read8(0x3DA) == 0x09);
-        REQUIRE(vga.read8(0x3DA) == 0x09);
-        REQUIRE(vga.read8(0x3DA) == 0x09);
-
-        // 36th read: count becomes 36, % 36 = 0 < 32 (display mode again)
-        REQUIRE(vga.read8(0x3DA) == 0x00);
+        REQUIRE(sawDisplay);
+        REQUIRE(sawHBlank);
+        REQUIRE(sawVRetrace);
     }
 
     SECTION("Plane-aware VRAM access") {

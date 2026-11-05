@@ -89,6 +89,13 @@ TEST_CASE("DOS: Directory Search", "[DOS][Search]") {
         constexpr uint32_t dtaAddr = (static_cast<uint32_t>(dtaSegment) << 4) +
                                      dtaOffset;
 
+        {
+            // Lower-case host name: the DOS search must match it
+            // case-insensitively and report it in upper case.
+            std::ofstream shp("arrow.shp", std::ios::binary);
+            shp << "shape";
+        }
+
         cpu.setSegReg(DS, dtaSegment);
         cpu.setReg16(DX, dtaOffset);
         cpu.setReg8(AH, 0x1A);
@@ -163,7 +170,7 @@ TEST_CASE("DOS: Path Traversal Prevention via Find First/Next", "[DOS][Search][S
         // Note: Unless testDir has a file literally called passwd or something weird, it should set carry
         // or return safe data. Either way, it shouldn't successfully read /etc/passwd attributes.
         REQUIRE((cpu.getEFLAGS() & FLAG_CARRY) != 0);
-        REQUIRE(cpu.getReg16(AX) == 0x02); // File not found or 0x03 Path not found
+        REQUIRE((cpu.getReg16(AX) == 0x02 || cpu.getReg16(AX) == 0x03)); // File/Path not found
     }
 
     fs::current_path(originalDir);

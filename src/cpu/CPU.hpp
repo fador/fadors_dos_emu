@@ -95,7 +95,15 @@ public:
   void setSegReg(uint8_t index, uint16_t value) {
     uint8_t seg = index % 6;
     m_segRegs[seg] = value;
-    m_dirtySegmentMask |= static_cast<uint8_t>(1u << seg);
+    if (!(m_cr[0] & 1) || (m_eflags & 0x00020000)) {
+      // Real/V86 mode: the base is simply selector*16, so keep the cached
+      // base coherent immediately (HLE services read getSegBase()).
+      m_segBase[seg] = static_cast<uint32_t>(value) << 4;
+      m_dirtySegmentMask =
+          static_cast<uint8_t>(m_dirtySegmentMask & ~(1u << seg));
+    } else {
+      m_dirtySegmentMask |= static_cast<uint8_t>(1u << seg);
+    }
     ++m_segmentStateVersion;
   }
 

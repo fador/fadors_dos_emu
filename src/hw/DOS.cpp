@@ -775,13 +775,25 @@ void DOS::handleDOSService() {
       if (ch == '*') {
         while (nameIdx < 8) name[nameIdx++] = '?';
         ++pos; // skip the '*'
-        // If next char is '.', skip to extension parsing
-        if (pos < src.size() && src[pos] == '.') ++pos; // let extension parsing start
+        // Skip any further name characters; a following '.' is left in
+        // place so the extension parser below picks it up.
+        while (pos < src.size() && src[pos] != '.' && src[pos] != ' ' &&
+               src[pos] != '\t' && src[pos] != '/' && src[pos] != '\\' &&
+               src[pos] != ':' && src[pos] != ';' && src[pos] != ',' &&
+               src[pos] != '=' && src[pos] != '+')
+          ++pos;
         break;
       }
       name[nameIdx++] = ch;
       ++pos;
     }
+    // Names longer than 8 characters are truncated: skip the excess so the
+    // extension is still found.
+    while (pos < src.size() && src[pos] != '.' && src[pos] != ' ' &&
+           src[pos] != '\t' && src[pos] != '/' && src[pos] != '\\' &&
+           src[pos] != ':' && src[pos] != ';' && src[pos] != ',' &&
+           src[pos] != '=' && src[pos] != '+')
+      ++pos;
 
     // Parse extension (up to 3 chars) if '.' is found
     std::string ext(3, ' ');
@@ -815,20 +827,21 @@ void DOS::handleDOSService() {
       ++pos;
     }
 
-    // Write FCB (36 bytes)
+    // Write FCB (36 bytes).  Flag bits 1-3 mean "only modify this field if
+    // it was actually specified in the string" (RBIL INT 21/AH=29h).
+    const bool nameSpecified = nameIdx > 0;
+    const bool extSpecified = ext != std::string(3, ' ');
     // Offset 0: Drive number
     if (!(flags & 0x02) || driveByte != 0)
       m_memory.write8(fcbAddr + 0x00, driveByte);
-    else
-      m_memory.write8(fcbAddr + 0x00, 0);
 
     // Offset 1-8: Filename
-    if (!(flags & 0x04)) {
+    if (!(flags & 0x04) || nameSpecified) {
       for (int i = 0; i < 8; ++i)
         m_memory.write8(fcbAddr + 0x01 + i, static_cast<uint8_t>(name[i]));
     }
     // Offset 9-11: Extension
-    if (!(flags & 0x08)) {
+    if (!(flags & 0x08) || extSpecified) {
       for (int i = 0; i < 3; ++i)
         m_memory.write8(fcbAddr + 0x09 + i, static_cast<uint8_t>(ext[i]));
     }
@@ -842,8 +855,13 @@ void DOS::handleDOSService() {
     m_cpu.setReg16(cpu::SI, static_cast<uint16_t>(
         m_cpu.getReg16(cpu::SI) + static_cast<uint16_t>(pos)));
 
-    // Set result: AL = 0xFF if wildcards found, else 0x00
-    m_cpu.setReg8(cpu::AL, hasWildcards ? 0xFF : 0x00);
+    // Result: AL = 00h no wildcards, 01h wildcards present,
+    // FFh invalid drive specifier.
+    uint8_t result = hasWildcards ? 0x01 : 0x00;
+    if (driveByte != 0 && m_driveManager &&
+        !m_driveManager->isMounted(static_cast<char>('A' + driveByte - 1)))
+      result = 0xFF;
+    m_cpu.setReg8(cpu::AL, result);
     LOG_DOS("DOS: Parse Filename '", src, "' -> FCB drive=", (int)driveByte,
             " name='", name, "' ext='", ext, "' wild=", hasWildcards);
     break;
@@ -1740,10 +1758,10 @@ std::string DOS::dosToHostPath(const std::string &dosPath) {
                  [](char c) { return c == '\\' ? '/' : c; });
   // If path starts with /, it's absolute from drive root
   if (!path.empty() && path[0] == '/') {
-    return (fs::path(m_hostRootDir) / path.substr(1)).string();
+    return DriveManager::matchHostCase(m_hostRootDir, path.substr(1));
   }
   // Relative path — resolve from current directory
-  return (fs::path(m_currentDir) / path).string();
+  return DriveManager::matchHostCase(m_currentDir, path);
 }
 
 std::string DOS::resolvePath(const std::string &path) {
@@ -1769,8 +1787,8 @@ std::string DOS::resolvePath(const std::string &path) {
     if (p.is_absolute())
       resolvedStr = path;
     else
-      // Resolve relative to m_currentDir
-      resolvedStr = (fs::path(m_currentDir) / p).string();
+      // Resolve relative to m_currentDir (case-insensitively, like DOS)
+      resolvedStr = DriveManager::matchHostCase(m_currentDir, path);
   }
 
   // Security check: ensure the resolved path stays within m_hostRootDir
@@ -1780,7 +1798,9 @@ std::string DOS::resolvePath(const std::string &path) {
   auto [rootEnd, nothing] = std::mismatch(rootPath.begin(), rootPath.end(), resolvedPath.begin(), resolvedPath.end());
   if (rootEnd != rootPath.end()) {
       LOG_WARN("DOS: Path traversal attempt blocked: ", path);
-      return rootPath.string();
+      // An empty result makes every caller fail with "file/path not found"
+      // instead of silently operating on the drive root.
+      return {};
   }
 
   return resolvedPath.string();
@@ -2325,7 +2345,7 @@ void DOS::handleDriveService() {
 
 // Case-insensitive DOS wildcard match: '?' matches any single char, '*' matches
 // any sequence
-static bool dosWildcardMatch(const std::string &pattern,
+static bool globMatchNoCase(const std::string &pattern,
                              const std::string &name) {
   size_t pi = 0, ni = 0;
   size_t starP = std::string::npos, starN = 0;
@@ -2349,6 +2369,23 @@ static bool dosWildcardMatch(const std::string &pattern,
   while (pi < pattern.size() && pattern[pi] == '*')
     ++pi;
   return pi == pattern.size();
+}
+
+// DOS wildcard semantics: the base name and the extension are matched
+// separately (like the FCB '????????.???' form), so "*.*" also matches
+// names without an extension and "*" matches only extension-less names.
+static bool dosWildcardMatch(const std::string &pattern,
+                             const std::string &name) {
+  auto split = [](const std::string &s) {
+    size_t dot = s.rfind('.');
+    if (dot == std::string::npos)
+      return std::pair<std::string, std::string>(s, std::string());
+    return std::pair<std::string, std::string>(s.substr(0, dot),
+                                               s.substr(dot + 1));
+  };
+  auto [patBase, patExt] = split(pattern);
+  auto [nameBase, nameExt] = split(name);
+  return globMatchNoCase(patBase, nameBase) && globMatchNoCase(patExt, nameExt);
 }
 
 void DOS::handleDirectorySearch() {
@@ -2406,7 +2443,13 @@ void DOS::handleDirectorySearch() {
     uint8_t attr = m_cpu.getReg8(cpu::CL);
 
     // Separate directory and filename pattern
-    fs::path resolved = fs::path(resolvePath(rawPattern));
+    std::string resolvedStr = resolvePath(rawPattern);
+    if (resolvedStr.empty()) {
+      m_cpu.setReg16(cpu::AX, 0x03); // Path not found
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      return;
+    }
+    fs::path resolved = fs::path(resolvedStr);
     std::string searchDir;
     std::string filePattern;
     if (fs::is_directory(resolved)) {
@@ -3021,6 +3064,18 @@ void DOS::handleFileService() {
     }
 
     std::string hostPath = resolvePath(filename);
+
+    // Directories (and unresolvable names) cannot be opened as files.
+    // std::ifstream happily "opens" a directory on POSIX hosts.
+    {
+      std::error_code dirEc;
+      if (!hostPath.empty() && fs::is_directory(hostPath, dirEc)) {
+        m_cpu.setReg16(cpu::AX, 0x05); // Access denied
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+        setExtendedError(0x05, 0x07, 0x04, 0x02);
+        return;
+      }
+    }
 
     auto fh = std::make_shared<FileHandle>();
     fh->path = hostPath;

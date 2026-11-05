@@ -889,17 +889,20 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
     }
 
     SECTION("x87: FNSAVE and FRSTOR roundtrip 16-bit real-mode state") {
+        // Push first (TOP 0 -> 7 -> 6), then set a status/tag word that is
+        // consistent with that stack: TOP=6, ST0/ST1 (regs 6,7) valid,
+        // all other registers empty.
+        cpu.pushFPU(3.5);
+        cpu.pushFPU(-2.25);
         cpu.setFPUControlWord(0x027F);
         cpu.setFPUStatusWord(static_cast<uint16_t>(cpu::FPU_STATUS_C2 |
                                                    (6u << 11)));
-        cpu.setFPUTagWord(0x00F0);
+        cpu.setFPUTagWord(0x0FFF);
         cpu.setFPUInstructionPointer(0x1234);
         cpu.setFPUInstructionSelector(0x5678);
         cpu.setFPULastOpcode(0x0321);
         cpu.setFPUDataPointer(0x9ABC);
         cpu.setFPUDataSelector(0xDEF0);
-        cpu.pushFPU(3.5);
-        cpu.pushFPU(-2.25);
 
         mem.write8(0x100, 0xDD); mem.write8(0x101, 0x36); // FNSAVE [3100h]
         mem.write16(0x102, 0x3100);
@@ -915,7 +918,7 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
         REQUIRE(mem.read16(0x3100) == 0x027F);
         REQUIRE(mem.read16(0x3102) == static_cast<uint16_t>(cpu::FPU_STATUS_C2 |
                                                             (6u << 11)));
-        REQUIRE(mem.read16(0x3104) == 0x00F0);
+        REQUIRE(mem.read16(0x3104) == 0x0FFF);
         REQUIRE(mem.read16(0x3106) == 0x79B4);
         REQUIRE(mem.read16(0x3108) == 0x5321);
         REQUIRE(mem.read16(0x310A) == 0x89BC);
@@ -924,19 +927,20 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
         REQUIRE(cpu.getFPUStatusWord() == 0);
         REQUIRE(cpu.isFPURegisterEmpty(0));
 
-        decoder.step();
-        decoder.step();
-        decoder.step();
+        decoder.step(); // FRSTOR
 
         REQUIRE(cpu.getFPUControlWord() == 0x027F);
         REQUIRE(cpu.getFPUStatusWord() == static_cast<uint16_t>(cpu::FPU_STATUS_C2 |
                                                                 (6u << 11)));
-        REQUIRE(cpu.getFPUTagWord() == 0x00F0);
+        REQUIRE(cpu.getFPUTagWord() == 0x0FFF);
         REQUIRE(cpu.getFPUInstructionPointer() == 0x579B4);
         REQUIRE(cpu.getFPUInstructionSelector() == 0);
         REQUIRE(cpu.getFPULastOpcode() == 0x0321);
         REQUIRE(cpu.getFPUDataPointer() == 0xE89BC);
         REQUIRE(cpu.getFPUDataSelector() == 0);
+
+        decoder.step(); // FSTP qword [3200h]
+        decoder.step(); // FSTP qword [3208h]
         REQUIRE(std::fabs(readF64(0x3200) - (-2.25)) < 1e-12);
         REQUIRE(std::fabs(readF64(0x3208) - 3.5) < 1e-12);
         REQUIRE(cpu.isFPURegisterEmpty(0));
@@ -968,7 +972,7 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
 
         REQUIRE(mem.read32(0x3100) == 0x027F);
         REQUIRE(mem.read32(0x3104) == (cpu::FPU_STATUS_C2 | (6u << 11)));
-        REQUIRE(mem.read32(0x3108) == 0x00F0);
+        REQUIRE(mem.read32(0x3108) == 0x0FFF);
         REQUIRE(mem.read32(0x310C) == 0x12345678);
         REQUIRE(mem.read32(0x3110) == ((static_cast<uint32_t>(0x0321) << 16) | 0x1357));
         REQUIRE(mem.read32(0x3114) == 0x87654321);
@@ -977,19 +981,20 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
         REQUIRE(cpu.getFPUStatusWord() == 0);
         REQUIRE(cpu.isFPURegisterEmpty(0));
 
-        decoder.step();
-        decoder.step();
-        decoder.step();
+        decoder.step(); // FRSTOR
 
         REQUIRE(cpu.getFPUControlWord() == 0x027F);
         REQUIRE(cpu.getFPUStatusWord() == static_cast<uint16_t>(cpu::FPU_STATUS_C2 |
                                                                 (6u << 11)));
-        REQUIRE(cpu.getFPUTagWord() == 0x00F0);
+        REQUIRE(cpu.getFPUTagWord() == 0x0FFF);
         REQUIRE(cpu.getFPUInstructionPointer() == 0x12345678);
         REQUIRE(cpu.getFPUInstructionSelector() == 0x1357);
         REQUIRE(cpu.getFPULastOpcode() == 0x0321);
         REQUIRE(cpu.getFPUDataPointer() == 0x87654321);
         REQUIRE(cpu.getFPUDataSelector() == 0x2468);
+
+        decoder.step(); // FSTP qword [3200h]
+        decoder.step(); // FSTP qword [3208h]
         REQUIRE(std::fabs(readF64(0x3200) - (-2.25)) < 1e-12);
         REQUIRE(std::fabs(readF64(0x3208) - 3.5) < 1e-12);
         REQUIRE(cpu.isFPURegisterEmpty(0));

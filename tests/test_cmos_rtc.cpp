@@ -571,7 +571,7 @@ TEST_CASE("CMOSRTC: independent instances", "[HW][CMOS]") {
   SECTION("modifying one does not affect the other") {
     writeReg(cmos1, 0x14, 0x00);
     uint8_t equip2 = readReg(cmos2, 0x14);
-    REQUIRE(equip2 == 0x4D); // Default unchanged
+    REQUIRE(equip2 == 0x43); // Default unchanged
   }
 
   SECTION("memory configuration is per-instance") {

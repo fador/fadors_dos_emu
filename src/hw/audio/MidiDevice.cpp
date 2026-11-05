@@ -137,8 +137,7 @@ void MidiDevice::handleCommand(uint8_t cmd) {
     sendAck();
     enterUartMode();
     return;
-  case 0xFF: // Reset
-    sendAck();
+  case 0xFF: // Reset (resetDevice() queues the single ACK)
     resetDevice();
     return;
   case 0x01: // MIDI stop
@@ -214,7 +213,9 @@ void MidiDevice::enterUartMode() {
 }
 
 void MidiDevice::resetDevice() {
-  m_uartMode = true;
+  // A reset returns the MPU-401 to "intelligent" mode; programs then send
+  // 0x3F to switch to UART mode.
+  m_uartMode = false;
   m_expectingParam = false;
   m_paramsExpected = 0;
   m_paramsReceived = 0;

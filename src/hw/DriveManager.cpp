@@ -13,7 +13,67 @@ namespace {
 bool escapesRoot(const std::filesystem::path& rel) {
   return !rel.empty() && *rel.begin() == std::filesystem::path("..");
 }
+
+bool iequals(const std::string& a, const std::string& b) {
+  if (a.size() != b.size())
+    return false;
+  for (size_t i = 0; i < a.size(); ++i) {
+    if (std::toupper(static_cast<unsigned char>(a[i])) !=
+        std::toupper(static_cast<unsigned char>(b[i])))
+      return false;
+  }
+  return true;
+}
 } // namespace
+
+std::string DriveManager::matchHostCase(const std::string& base,
+                                        const std::string& relative) {
+  namespace fs = std::filesystem;
+  fs::path current(base);
+  std::string component;
+  bool missing = false; // once a component is missing, stop scanning
+  auto flush = [&]() {
+    if (component.empty())
+      return;
+    if (component == "." ) {
+      component.clear();
+      return;
+    }
+    std::error_code ec;
+    if (!missing && component != "..") {
+      fs::path exact = current / component;
+      if (!fs::exists(exact, ec)) {
+        bool found = false;
+        for (fs::directory_iterator it(current, ec), end; !ec && it != end;
+             it.increment(ec)) {
+          std::string name = it->path().filename().string();
+          if (iequals(name, component)) {
+            current /= name;
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          missing = true;
+          current /= component;
+        }
+      } else {
+        current = std::move(exact);
+      }
+    } else {
+      current /= component;
+    }
+    component.clear();
+  };
+  for (char ch : relative) {
+    if (ch == '/' || ch == '\\')
+      flush();
+    else
+      component += ch;
+  }
+  flush();
+  return current.string();
+}
 
 bool DriveManager::mount(char letter, const std::string& hostPath, const std::string& label) {
   auto idx = letterToIndex(letter);
@@ -87,7 +147,7 @@ bool DriveManager::setCurrentDir(uint8_t driveIndex, const std::string& dosDir) 
   if (normalized.front() == '\\')
     normalized.erase(normalized.begin());
 
-  auto hostDir = m_mounts[driveIndex] + "\\" + normalized;
+  auto hostDir = matchHostCase(m_mounts[driveIndex], normalized);
   std::error_code ec;
   auto abs = std::filesystem::absolute(hostDir, ec);
   if (ec)
@@ -145,8 +205,8 @@ std::string DriveManager::resolvePath(const std::string& dosPath) const {
   normalized = collapsePath(normalized);
 
   std::filesystem::path mountRoot(m_mounts[idx]);
-  std::filesystem::path dosPart = std::filesystem::path(normalized.substr(1));
-  std::filesystem::path combined = mountRoot / dosPart;
+  std::filesystem::path combined(
+      matchHostCase(m_mounts[idx], normalized.substr(1)));
 
   std::error_code ec;
   auto abs = std::filesystem::absolute(combined, ec);

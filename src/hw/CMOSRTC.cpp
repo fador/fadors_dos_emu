@@ -70,9 +70,9 @@ void CMOSRTC::write8(uint16_t port, uint8_t value) {
       m_cmosRAM[0x0A] = (m_cmosRAM[0x0A] & 0x80) | (value & 0x70) | (value & 0x0F);
       return;
     }
-    // Status Register B: mask read-only reserved bits
+    // Status Register B: all eight bits (including SET, bit 7) are R/W
     if (idx == 0x0B) {
-      m_cmosRAM[0x0B] = value & 0x7F;
+      m_cmosRAM[0x0B] = value;
       return;
     }
     // Status Register C and D are read-only
@@ -191,7 +191,7 @@ void CMOSRTC::initializeDefaults() {
   // Bit 3-2 = reserved
   // Bit 1 = math coprocessor present (1)
   // Bit 0 = boot from floppy (0 = not specified)
-  m_cmosRAM[0x14] = 0x4D; // 2 floppy drives, VGA, coprocessor
+  m_cmosRAM[0x14] = 0x43; // 2 floppy drives, VGA, coprocessor, floppy present
 
   // ── Memory Sizing ────────────────────────────────────
   // Base memory: initially 640 KiB (typical)
