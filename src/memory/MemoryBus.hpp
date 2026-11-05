@@ -91,6 +91,104 @@ public:
     write32Slow(address, e, value);
   }
 
+  // ── Linear (CPU-side) accesses ──────────────────────────────────────
+  // The CPU addresses memory linearly; with CR0.PG set, linear addresses
+  // go through the guest's two-level page tables.  Everything else in the
+  // emulator (BIOS/DOS HLE, renderers, DMA) keeps using the physical
+  // read*/write* functions above.  Without paging the two are identical.
+  // Fast path: same single range check as the physical accessors, but
+  // against m_linearLimit, which is 0 while paging is on so every access
+  // falls through to the translating slow path at no extra cost.
+  uint8_t lread8(uint32_t a) const {
+    const uint32_t e = a & m_a20Mask;
+    if (isPlainLinear(e, 1)) [[likely]]
+      return m_ram[e];
+    return lread8Slow(a);
+  }
+  uint16_t lread16(uint32_t a) const {
+    const uint32_t e = a & m_a20Mask;
+    if (isPlainLinear(e, 2)) [[likely]] {
+      uint16_t v;
+      std::memcpy(&v, &m_ram[e], sizeof(v));
+      return v;
+    }
+    return lread16Slow(a);
+  }
+  uint32_t lread32(uint32_t a) const {
+    const uint32_t e = a & m_a20Mask;
+    if (isPlainLinear(e, 4)) [[likely]] {
+      uint32_t v;
+      std::memcpy(&v, &m_ram[e], sizeof(v));
+      return v;
+    }
+    return lread32Slow(a);
+  }
+  void lwrite8(uint32_t a, uint8_t v) {
+    const uint32_t e = a & m_a20Mask;
+    if (!m_traceWrites && isPlainLinear(e, 1)) [[likely]] {
+      m_ram[e] = v;
+      return;
+    }
+    lwrite8Slow(a, v);
+  }
+  void lwrite16(uint32_t a, uint16_t v) {
+    const uint32_t e = a & m_a20Mask;
+    if (!m_traceWrites && isPlainLinear(e, 2)) [[likely]] {
+      std::memcpy(&m_ram[e], &v, sizeof(v));
+      return;
+    }
+    lwrite16Slow(a, v);
+  }
+  void lwrite32(uint32_t a, uint32_t v) {
+    const uint32_t e = a & m_a20Mask;
+    if (!m_traceWrites && isPlainLinear(e, 4)) [[likely]] {
+      std::memcpy(&m_ram[e], &v, sizeof(v));
+      return;
+    }
+    lwrite32Slow(a, v);
+  }
+  // Linear counterpart of contiguousAccess: with paging on, only ranges
+  // inside one page are returned (callers fall back to element-wise access).
+  uint8_t *lcontiguousAccess(uint32_t a, uint32_t size) {
+    if (!m_paging) [[likely]]
+      return contiguousAccess(a, size);
+    if (size == 0 || (a & 0xFFF) + size > 0x1000)
+      return nullptr;
+    return contiguousAccess(translate(a, true), size);
+  }
+
+  // Called by the CPU whenever CR0, CR3 or CR4 change.
+  void setPaging(bool enabled, uint32_t cr3, bool pse) {
+    m_paging = enabled;
+    m_linearLimit = enabled ? 0 : MEMORY_SIZE;
+    m_cr3 = cr3 & 0xFFFFF000u;
+    m_pse = pse;
+    flushTlb();
+  }
+  bool pagingEnabled() const { return m_paging; }
+  void flushTlb() {
+    for (auto &e : m_tlb)
+      e.tag = kTlbInvalid;
+  }
+  void invalidatePage(uint32_t linear) {
+    auto &e = m_tlb[(linear >> 12) & (kTlbSize - 1)];
+    if (e.tag == (linear >> 12))
+      e.tag = kTlbInvalid;
+  }
+  // Physical address for a linear one (used by diagnostics), no faults.
+  uint32_t linearToPhysical(uint32_t a) const {
+    return m_paging ? translate(a, false) : a;
+  }
+  // Set when a CPU access hit a not-present page; the CPU raises #PF.
+  bool takePageFault(uint32_t &linear, uint32_t &errorCode) {
+    if (!m_pageFault)
+      return false;
+    m_pageFault = false;
+    linear = m_faultLinear;
+    errorCode = m_faultError;
+    return true;
+  }
+
   // Route every write through the slow path so IVT/BDA and text-VRAM
   // writes are logged (enabled for --trace/--debug=video sessions).
   void setWriteTracing(bool enabled) { m_traceWrites = enabled; }
@@ -150,6 +248,11 @@ private:
       return false;
     return m_vga == nullptr || e >= VGA_PLANAR_END || e + n <= VGA_PLANAR_START;
   }
+  bool isPlainLinear(uint32_t e, uint32_t n) const {
+    if (static_cast<uint64_t>(e) + n > m_linearLimit)
+      return false;
+    return m_vga == nullptr || e >= VGA_PLANAR_END || e + n <= VGA_PLANAR_START;
+  }
   bool isPlainWrite(uint32_t e, uint32_t n) const {
     return !m_traceWrites && isPlain(e, n);
   }
@@ -199,6 +302,37 @@ private:
     if (m_oobHandler)
       m_oobHandler(address, write);
   }
+  // Paging state and a direct-mapped TLB of 4 KiB translations.
+  static constexpr uint32_t kTlbSize = 1024;
+  static constexpr uint32_t kTlbInvalid = 0xFFFFFFFFu;
+  struct TlbEntry {
+    uint32_t tag = kTlbInvalid; // linear page number
+    uint32_t frame = 0;         // physical page base
+    bool dirty = false;         // D bit already set in the PTE
+  };
+  mutable std::array<TlbEntry, kTlbSize> m_tlb{};
+  bool m_paging{false};
+  bool m_pse{false};
+  uint32_t m_cr3{0};
+  mutable bool m_pageFault{false};
+  mutable uint32_t m_faultLinear{0};
+  mutable uint32_t m_faultError{0};
+
+  uint32_t translate(uint32_t linear, bool write) const {
+    const auto &e = m_tlb[(linear >> 12) & (kTlbSize - 1)];
+    if (e.tag == (linear >> 12) && (!write || e.dirty)) [[likely]]
+      return e.frame | (linear & 0xFFF);
+    return walkPageTables(linear, write);
+  }
+  uint32_t walkPageTables(uint32_t linear, bool write) const;
+  uint32_t m_linearLimit{MEMORY_SIZE};
+  uint8_t lread8Slow(uint32_t a) const;
+  uint16_t lread16Slow(uint32_t a) const;
+  uint32_t lread32Slow(uint32_t a) const;
+  void lwrite8Slow(uint32_t a, uint8_t v);
+  void lwrite16Slow(uint32_t a, uint16_t v);
+  void lwrite32Slow(uint32_t a, uint32_t v);
+
   bool m_a20Enabled{false};
   uint32_t m_a20Mask{A20_MASK};
   bool m_traceWrites{false};

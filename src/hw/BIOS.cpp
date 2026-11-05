@@ -2603,6 +2603,53 @@ void BIOS::handleXMSDispatch() {
     }
     break;
   }
+  // ── XMS 3.0 super-extended functions: 32-bit sizes ──
+  case 0x88: { // Query any free extended memory
+    uint32_t largestKB = 0;
+    uint32_t totalKB = m_himem->queryFreeKB32(largestKB);
+    m_cpu.setReg32(cpu::EAX, largestKB);
+    m_cpu.setReg32(cpu::EDX, totalKB);
+    m_cpu.setReg32(cpu::ECX, memory::MemoryBus::XMS_LIMIT - 1);
+    m_cpu.setReg8(cpu::BL, 0);
+    LOG_DEBUG("XMS 88h: Largest=", largestKB, "KB Total=", totalKB, "KB");
+    break;
+  }
+  case 0x89: { // Allocate any extended memory (EDX = KB)
+    uint32_t sizeKB = m_cpu.getReg32(cpu::EDX);
+    uint16_t handle = m_himem->allocateEMB(sizeKB);
+    if (handle) {
+      m_cpu.setReg16(cpu::AX, 1);
+      m_cpu.setReg16(cpu::DX, handle);
+    } else {
+      m_cpu.setReg16(cpu::AX, 0);
+      m_cpu.setReg8(cpu::BL, m_himem->lastError());
+    }
+    break;
+  }
+  case 0x8E: { // Get extended EMB handle information
+    uint16_t handle = m_cpu.getReg16(cpu::DX);
+    if (m_himem->getHandleSizeKB(handle) == 0 &&
+        !m_himem->getBlock(handle)) {
+      m_cpu.setReg16(cpu::AX, 0);
+      m_cpu.setReg8(cpu::BL, memory::HIMEM::ERR_INVALID_HANDLE);
+      break;
+    }
+    m_cpu.setReg16(cpu::AX, 1);
+    m_cpu.setReg8(cpu::BH, m_himem->getLockCount(handle));
+    m_cpu.setReg16(cpu::CX, m_himem->getFreeHandles());
+    m_cpu.setReg32(cpu::EDX, m_himem->getHandleSizeKB(handle));
+    break;
+  }
+  case 0x8F: { // Reallocate any extended memory (EBX = new KB)
+    uint16_t handle = m_cpu.getReg16(cpu::DX);
+    if (m_himem->resizeEMB(handle, m_cpu.getReg32(cpu::EBX))) {
+      m_cpu.setReg16(cpu::AX, 1);
+    } else {
+      m_cpu.setReg16(cpu::AX, 0);
+      m_cpu.setReg8(cpu::BL, m_himem->lastError());
+    }
+    break;
+  }
   default:
     LOG_WARN("XMS: Unknown function AH=0x", std::hex, (int)ah);
     m_cpu.setReg16(cpu::AX, 0);

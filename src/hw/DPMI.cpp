@@ -41,6 +41,7 @@ void DPMI::reset() {
     desc.high = 0;
   }
   m_pmVectors = {};
+  m_deferredStubRestore = {};
   m_excVectors = {};
   m_virtualIF = true;
   m_clientCS = 0;
@@ -256,6 +257,7 @@ bool DPMI::handleEntry() {
     // addresses they can chain to.
     m_pmVectors[v].selector = 0x0030;
     m_pmVectors[v].offset = stubOffset;
+    m_deferredStubRestore[v] = false;
   }
 
   // --- Load system registers ---
@@ -787,6 +789,27 @@ void DPMI::handleInterruptVectors() {
       uint32_t hleStub = 0xF0000u + 0x0100u + static_cast<uint32_t>(vec) * 16;
       bool isRestoringHleStub = (newSel == 0x0008 && newOff == hleStub) ||
                                 (newSel == 0x0030 && newOff == (0x0100u + static_cast<uint32_t>(vec) * 16));
+      // A complete teardown, though, restores every vector in turn, ending
+      // with FFh (DOS/4GW does this right before it terminates).  Once that
+      // happens, honour all deferred restores: otherwise INT 21h/4Ch still
+      // lands in the extender's (now deinitialized) wrapper and it reports
+      // "deinitializing twice" forever.
+      if (isRestoringHleStub) {
+        m_deferredStubRestore[vec] = true;
+        if (vec == 0xFF) {
+          for (int v = 0; v < 256; ++v) {
+            if (!m_deferredStubRestore[v])
+              continue;
+            m_deferredStubRestore[v] = false;
+            const uint16_t sel = 0x0030;
+            const uint32_t off = 0x0100u + static_cast<uint32_t>(v) * 16;
+            m_pmVectors[v] = {sel, off};
+            writeIdtVector(static_cast<uint8_t>(v), sel, off);
+          }
+        }
+      } else {
+        m_deferredStubRestore[vec] = false;
+      }
       if (!isRestoringHleStub) {
         m_pmVectors[vec].selector = newSel;
         m_pmVectors[vec].offset = newOff;
@@ -1384,7 +1407,7 @@ void DPMI::handleMemoryInfo() {
     if (size == 0)
       size = 1;
 
-    uint16_t sizeKB = static_cast<uint16_t>((size + 1023) / 1024);
+    uint32_t sizeKB = static_cast<uint32_t>((uint64_t{size} + 1023) / 1024);
     uint32_t linearAddr = 0;
 
     if (m_himem) {
@@ -1453,7 +1476,8 @@ void DPMI::handleMemoryInfo() {
     for (auto &block : m_memBlocks) {
       if (block.handle == blockHandle) {
         found = true;
-        uint16_t newSizeKB = static_cast<uint16_t>((newSize + 1023) / 1024);
+        uint32_t newSizeKB =
+            static_cast<uint32_t>((uint64_t{newSize} + 1023) / 1024);
         if (m_himem && block.xmsHandle) {
           uint8_t locks = m_himem->getLockCount(block.xmsHandle);
           for (uint8_t l = 0; l < locks; ++l) {
@@ -1641,8 +1665,11 @@ bool DPMI::freeDescriptor(uint16_t selector) {
   if (idx <= 0 || idx >= MAX_LDT || !m_ldtUsed[idx])
     return false;
   m_ldtUsed[idx] = false;
-  m_ldt[idx] = {0, 0};
-  flushLDTEntry(idx);
+  // The descriptor's contents are left in place: like the descriptor cache
+  // of a real CPU (and common DPMI hosts), a segment register that still
+  // holds the selector keeps working until it is reloaded with something
+  // else.  DOS/4GW frees its selectors before it leaves protected mode and
+  // keeps running on them.  The slot is reinitialized on reallocation.
   return true;
 }
 
@@ -1685,6 +1712,12 @@ void DPMI::setDescLimit(RawDescriptor &d, uint32_t limit) {
     d.high |= 0x00800000; // G bit
   else
     d.high &= ~0x00800000U;
+}
+
+void DPMI::writeIdtVector(uint8_t vec, uint16_t sel, uint32_t off) {
+  const uint32_t idtAddr = IDT_PM_PHYS + static_cast<uint32_t>(vec) * 8;
+  m_memory.write32(idtAddr, (static_cast<uint32_t>(sel) << 16) | (off & 0xFFFF));
+  m_memory.write32(idtAddr + 4, (off & 0xFFFF0000u) | 0x0000EE00u);
 }
 
 void DPMI::flushLDTEntry(int index) {

@@ -706,48 +706,12 @@ void DOS::handleDOSService() {
     const uint32_t src = m_cpu.getSegBase(cpu::DS) + m_cpu.getReg16(cpu::SI);
     const uint32_t dst = m_cpu.getSegBase(cpu::ES) + m_cpu.getReg16(cpu::DI);
     std::string in = readFilename(src);
-    char drive = m_driveManager ? m_driveManager->getCurrentDriveLetter() : 'C';
-    std::string rest = in;
-    if (in.size() >= 2 && in[1] == ':' &&
-        std::isalpha(static_cast<unsigned char>(in[0]))) {
-      drive = static_cast<char>(std::toupper(static_cast<unsigned char>(in[0])));
-      rest = in.substr(2);
-    }
-    if (m_driveManager && !m_driveManager->isMounted(drive)) {
+    std::string out = canonicalDosPath(in);
+    if (out.empty()) {
       m_cpu.setReg16(cpu::AX, 0x0F); // invalid drive
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
       break;
     }
-    for (auto &c : rest)
-      c = (c == '/') ? '\\'
-                     : static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-    if (rest.empty() || rest[0] != '\\') {
-      std::string cwd = m_driveManager ? m_driveManager->getCurrentDir(drive)
-                                       : m_dosCurrentDir;
-      rest = "\\" + cwd + (cwd.empty() ? "" : "\\") + rest;
-    }
-    // Collapse "." and ".." components
-    std::vector<std::string> parts;
-    std::string comp;
-    auto flush = [&]() {
-      if (comp == "..") {
-        if (!parts.empty())
-          parts.pop_back();
-      } else if (!comp.empty() && comp != ".") {
-        parts.push_back(comp);
-      }
-      comp.clear();
-    };
-    for (char c : rest) {
-      if (c == '\\')
-        flush();
-      else
-        comp += c;
-    }
-    flush();
-    std::string out = std::string(1, drive) + ":\\";
-    for (size_t i = 0; i < parts.size(); ++i)
-      out += (i ? "\\" : "") + parts[i];
     if (out.size() > 127)
       out.resize(127);
     for (size_t i = 0; i < out.size(); ++i)
@@ -1293,33 +1257,24 @@ void DOS::handleDOSService() {
       // Read parameter block from ES:BX
       uint32_t paramBlockAddr = m_cpu.getSegBase(cpu::ES) + m_cpu.getReg16(cpu::BX);
       uint16_t envSeg = m_memory.read16(paramBlockAddr);
-      uint16_t childEnvSeg = envSeg;
-      uint16_t envSize = 0;
-      uint16_t parentEnvSeg = 0;
-      bool allocatedEnv = false;
-
-      if (childEnvSeg == 0) {
-        // Inherit parent environment
-        parentEnvSeg = m_memory.read16((m_pspSegment << 4) + 0x2C);
-        if (parentEnvSeg != 0) {
-          MCB parentEnvMcb = readMCB(parentEnvSeg - 1);
-          if (parentEnvMcb.type == 'M' || parentEnvMcb.type == 'Z') {
-            envSize = parentEnvMcb.size; // in paragraphs
-            childEnvSeg = allocateMemory(envSize, 0xFFFF); // Temporarily owned by parent/system
-            if (childEnvSeg != 0) {
-              allocatedEnv = true;
-              // Copy contents
-              for (uint32_t i = 0; i < (static_cast<uint32_t>(envSize) << 4); ++i) {
-                m_memory.write8((childEnvSeg << 4) + i, m_memory.read8((parentEnvSeg << 4) + i));
-              }
-            } else {
-              LOG_ERROR("DOS: Exec failed: Insufficient memory to allocate child environment block.");
-              m_cpu.setReg16(cpu::AX, 0x08); // Insufficient memory
-              m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
-              break;
-            }
-          }
-        }
+      // Like DOS, the child always gets its own copy of the environment
+      // (the caller's block, or the parent's when ES:BX->env is 0) ending
+      // with the child's program name.  DOS/16M (DOS/4GW) opens itself
+      // through that name, so the parent's name must not leak through.
+      uint16_t parentEnvSeg = envSeg != 0
+                                  ? envSeg
+                                  : m_memory.read16((m_pspSegment << 4) + 0x2C);
+      std::string childName = canonicalDosPath(
+          readFilename(m_cpu.getSegBase(cpu::DS) + dx));
+      if (childName.empty())
+        childName = filename;
+      uint16_t childEnvSeg = buildChildEnvironment(parentEnvSeg, childName);
+      bool allocatedEnv = childEnvSeg != 0;
+      if (!allocatedEnv) {
+        LOG_ERROR("DOS: Exec failed: Insufficient memory to allocate child environment block.");
+        m_cpu.setReg16(cpu::AX, 0x08); // Insufficient memory
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+        break;
       }
 
       // Find largest free block for the child program
@@ -1683,10 +1638,14 @@ void DOS::terminateProcess(uint8_t exitCode, uint8_t exitType, uint16_t resident
 
         // Free child's environment block using saved segment (not PSP:0x2C,
         // which DPMI may have overwritten with a PM selector).
-        if (parent.childEnvSeg != 0) {
+        // (The sweep above already released it when it is still owned by
+        // the child.)
+        if (parent.childEnvSeg != 0 &&
+            readMCB(parent.childEnvSeg - 1).owner != 0) {
           freeMemory(parent.childEnvSeg);
         }
-        freeMemory(parent.childMemorySeg);
+        if (readMCB(parent.childMemorySeg - 1).owner != 0)
+          freeMemory(parent.childMemorySeg);
       }
     }
 
@@ -1851,6 +1810,83 @@ void DOS::setProgramDir(const std::string &programPath) {
     m_driveManager->setCurrentDrive(driveLetter);
     m_driveManager->setCurrentDir(driveLetter, m_dosCurrentDir);
   }
+}
+
+std::string DOS::canonicalDosPath(const std::string &in) const {
+  char drive = m_driveManager ? m_driveManager->getCurrentDriveLetter() : 'C';
+  std::string rest = in;
+  if (in.size() >= 2 && in[1] == ':' &&
+      std::isalpha(static_cast<unsigned char>(in[0]))) {
+    drive = static_cast<char>(std::toupper(static_cast<unsigned char>(in[0])));
+    rest = in.substr(2);
+  }
+  if (m_driveManager && !m_driveManager->isMounted(drive)) {
+    return {};
+  }
+  for (auto &c : rest)
+    c = (c == '/') ? '\\'
+                   : static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+  if (rest.empty() || rest[0] != '\\') {
+    std::string cwd = m_driveManager ? m_driveManager->getCurrentDir(drive)
+                                     : m_dosCurrentDir;
+    rest = "\\" + cwd + (cwd.empty() ? "" : "\\") + rest;
+  }
+  // Collapse "." and ".." components
+  std::vector<std::string> parts;
+  std::string comp;
+  auto flush = [&]() {
+    if (comp == "..") {
+      if (!parts.empty())
+        parts.pop_back();
+    } else if (!comp.empty() && comp != ".") {
+      parts.push_back(comp);
+    }
+    comp.clear();
+  };
+  for (char c : rest) {
+    if (c == '\\')
+      flush();
+    else
+      comp += c;
+  }
+  flush();
+  std::string out = std::string(1, drive) + ":\\";
+  for (size_t i = 0; i < parts.size(); ++i)
+    out += (i ? "\\" : "") + parts[i];
+  return out;
+}
+
+uint16_t DOS::buildChildEnvironment(uint16_t sourceSeg,
+                                    const std::string &programName) {
+  std::vector<uint8_t> block;
+  if (sourceSeg != 0) {
+    const uint32_t base = static_cast<uint32_t>(sourceSeg) << 4;
+    // Variables run up to the first empty string (a double NUL).
+    for (uint32_t i = 0; i < 0x7FFF; ++i) {
+      const uint8_t c = m_memory.read8(base + i);
+      block.push_back(c);
+      if (c == 0 && (i == 0 || block[block.size() - 2] == 0))
+        break;
+    }
+  } else {
+    block = {0}; // empty environment: a single NUL
+  }
+  if (block.empty() || block.back() != 0)
+    block.push_back(0);
+  block.push_back(0x01); // one string follows: the program name
+  block.push_back(0x00);
+  for (char c : programName)
+    block.push_back(static_cast<uint8_t>(c));
+  block.push_back(0);
+
+  const uint16_t paras = static_cast<uint16_t>((block.size() + 15) / 16);
+  const uint16_t seg = allocateMemory(paras, 0xFFFF);
+  if (seg == 0)
+    return 0;
+  const uint32_t dst = static_cast<uint32_t>(seg) << 4;
+  for (size_t i = 0; i < block.size(); ++i)
+    m_memory.write8(dst + static_cast<uint32_t>(i), block[i]);
+  return seg;
 }
 
 std::string DOS::hostToDosPath(const std::string &hostPath) {
@@ -2083,14 +2119,9 @@ void DOS::handleMemoryManagement() {
     uint16_t mcbSeg = segment - 1;
     MCB mcb = readMCB(mcbSeg);
 
-    auto syncPspEndSegment = [&]() {
-      if (segment != m_pspSegment) {
-        return;
-      }
-      m_memory.write16((static_cast<uint32_t>(segment) << 4) + 0x02,
-                       static_cast<uint16_t>(segment + requested));
-    };
-
+    // PSP:0002h (top of memory) is set once at EXEC time; like MS-DOS,
+    // SETBLOCK leaves it alone.  DOS/32A reads it after shrinking its block
+    // to size the conventional memory it can still allocate.
     auto coalesceFollowingFreeBlocks = [&](MCB &block) {
       while (block.type == 'M') {
         const uint32_t nextSeg32 =
@@ -2141,7 +2172,6 @@ void DOS::handleMemoryManagement() {
         writeMCB(mcbSeg, mcb);
         writeMCB(newFreeSeg, next);
       }
-      syncPspEndSegment();
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
       LOG_DEBUG("DOS: Shrunk segment ", std::hex, segment, " to ", requested,
                 " paras");
@@ -2163,7 +2193,6 @@ void DOS::handleMemoryManagement() {
         } else {
           writeMCB(mcbSeg, expanded);
         }
-        syncPspEndSegment();
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
         LOG_DEBUG("DOS: Expanded segment ", std::hex, segment, " to ",
                   requested, " paras");

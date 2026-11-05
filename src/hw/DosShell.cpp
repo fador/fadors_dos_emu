@@ -35,6 +35,8 @@ DosShell::DosShell(DOS& dos, DriveManager& driveManager, ProgramLoader& loader,
     m_envVars["PATH"] = "C:\\";
     m_envVars["COMSPEC"] = "C:\\COMMAND.COM";
     m_envVars["PROMPT"] = "$P$G";
+    for (const auto& [name, value] : ProgramLoader::defaultEnvironment())
+        m_envVars[name] = value;
     registerCommands();
 }
 

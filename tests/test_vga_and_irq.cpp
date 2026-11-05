@@ -428,6 +428,17 @@ struct PMIRQTestEnv {
         mem.write32(addr + 4, high);
     }
 
+    // DOS/4GW's data selector 00AFh with its reflection-stack pointer; the
+    // 16-bit thunk workarounds only apply when it exists.
+    void installDos4gwReflectionStack() {
+        constexpr uint32_t ldt = 0x6000, hostBase = 0x50000;
+        cpu.setLDTR({0x00FF, ldt});
+        cpu.setLDTRSelector(0x0018);
+        writeDescriptor(ldt + ((0xAFu >> 3) * 8), hostBase, 0xFFFF,
+                        false, false, false);
+        mem.write32(hostBase + 0x0A42, 0x47FC);
+    }
+
     void enterPM() {
         mem.setA20(true);
 
@@ -449,8 +460,10 @@ TEST_CASE("IRQ: D-bit guard forces HLE for 16-bit thunk IDT target", "[IRQ]") {
     PMIRQTestEnv env;
 
     SECTION("Timer IRQ (0x08) with 16-bit IDT target uses HLE") {
-        // The IDT vector 0x08 points to CODE16_SEL (D=0), so the D-bit
-        // guard should force HLE.  The BIOS HLE handler increments 0x46C.
+        // The IDT vector 0x08 points to CODE16_SEL (D=0), so under DOS/4GW
+        // the D-bit guard should force HLE.  The BIOS HLE handler
+        // increments 0x46C.
+        env.installDos4gwReflectionStack();
         uint16_t counterBefore = env.mem.read16(0x46C);
 
         // Raise IRQ 0 and inject
@@ -468,6 +481,16 @@ TEST_CASE("IRQ: D-bit guard forces HLE for 16-bit thunk IDT target", "[IRQ]") {
         REQUIRE(env.cpu.getEIP() == 0x100000);
         // CS should still be the 32-bit code selector
         REQUIRE(env.cpu.getSegReg(cpu::CS) == PMIRQTestEnv::CODE32_SEL);
+    }
+
+    SECTION("Without DOS/4GW the 16-bit IDT target receives the IRQ") {
+        // Extenders that are their own host (DOS/32A, CauseWay) point the
+        // IDT at 16-bit handlers too; those must run.
+        uint16_t counterBefore = env.mem.read16(0x46C);
+        env.decoder.injectHardwareInterrupt(0x08);
+        REQUIRE(env.mem.read16(0x46C) == counterBefore);
+        REQUIRE(env.cpu.getSegReg(cpu::CS) == PMIRQTestEnv::CODE16_SEL);
+        REQUIRE(env.cpu.getEIP() == 0x0020);
     }
 
     SECTION("Timer IRQ with 32-bit HLE IDT target also uses HLE") {
@@ -710,15 +733,10 @@ TEST_CASE("IRQ: Timer HLE increments app ticcount via Watcom ISR table", "[IRQ]"
         // workaround must not touch memory.
         env.decoder.injectHardwareInterrupt(0x08);
         REQUIRE(env.mem.read32(counterAddr) == 100);
+        env.enterPM(); // the IRQ went to the 16-bit handler; come back
 
         // Provide DOS/4GW's data selector 00AFh with its stack pointer
-        constexpr uint32_t LDT_ADDR = 0x6000;
-        constexpr uint32_t HOST_SEG_BASE = 0x50000;
-        env.cpu.setLDTR({0x00FF, LDT_ADDR});
-        env.cpu.setLDTRSelector(0x0018);
-        env.writeDescriptor(LDT_ADDR + ((0xAFu >> 3) * 8), HOST_SEG_BASE, 0xFFFF,
-                            false, false, false);
-        env.mem.write32(HOST_SEG_BASE + 0x0A42, 0x47FC);
+        env.installDos4gwReflectionStack();
 
         // Inject timer interrupt
         env.decoder.injectHardwareInterrupt(0x08);

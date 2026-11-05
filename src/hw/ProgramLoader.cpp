@@ -10,6 +10,30 @@
 
 namespace fador::hw {
 
+ProgramLoader::EnvList &ProgramLoader::defaultEnvironment() {
+  static EnvList env = {
+      {"BLASTER", "A220 I5 D1 H5 P330 T6"},
+      {"CAUSEWAY", "DPMI"},
+  };
+  return env;
+}
+
+void ProgramLoader::setEnvironmentVariable(const std::string &name,
+                                           const std::string &value) {
+  std::string upper = name;
+  std::transform(upper.begin(), upper.end(), upper.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+  auto &env = defaultEnvironment();
+  for (auto &entry : env) {
+    if (entry.first == upper) {
+      entry.second = value;
+      return;
+    }
+  }
+  env.emplace_back(upper, value);
+}
+
+
 namespace {
 
 constexpr std::array<uint8_t, 4> kFBOVSignature{{'F', 'B', 'O', 'V'}};
@@ -759,8 +783,12 @@ std::pair<bool, bool> ProgramLoader::createPSP(uint16_t segment, const std::stri
     envStr += "INCLUDE=";
     envStr += dosDir;
     envStr += '\0';
-    envStr += "BLASTER=A220 I5 D1 H5 P330 T6";
-    envStr += '\0';
+    for (const auto &[name, value] : defaultEnvironment()) {
+      envStr += name;
+      envStr += '=';
+      envStr += value;
+      envStr += '\0';
+    }
     envStr += '\0';               // End of variables
     envStr.append("\x01\x00", 2); // Signature for program name follows
     envStr += dosFullPath;

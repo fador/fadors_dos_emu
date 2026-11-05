@@ -2431,6 +2431,35 @@ TEST_CASE("DPMI 0205h preserves chain wrapper when restoring HLE stub", "[dpmi][
     REQUIRE(env.cpu.getReg32(cpu::EDX) == 0x00012345);
 }
 
+TEST_CASE("DPMI 0205h full teardown applies deferred HLE stub restores", "[dpmi][int][chain]") {
+    DPMITestEnv env;
+    auto set = [&](uint8_t vec, uint16_t sel, uint32_t off) {
+        env.cpu.setReg16(cpu::AX, 0x0205);
+        env.cpu.setReg8(cpu::BL, vec);
+        env.cpu.setReg16(cpu::CX, sel);
+        env.cpu.setReg32(cpu::EDX, off);
+        env.clearCarry();
+        env.dpmi.handleInt31();
+        REQUIRE(!env.carrySet());
+    };
+    // An extender wraps INT 21h, then (like DOS/4GW before terminating)
+    // restores every vector 00h..FFh to the host's original stubs.
+    set(0x21, 0x00F7, 0x84);
+    set(0x21, 0x0030, 0x0100 + 0x21 * 16);
+    // Mid-sweep the wrapper is still in place...
+    REQUIRE(env.mem.read32(IDT_PM_PHYS + 0x21 * 8) == idtLow(0x00F7, 0x84));
+    for (int v = 0x22; v <= 0xFF; ++v)
+        set(static_cast<uint8_t>(v), 0x0030, 0x0100 + v * 16);
+    // ...and once the sweep reaches FFh INT 21h goes to the host again, so
+    // the extender's final INT 21h/4Ch reaches DOS.
+    REQUIRE(env.mem.read32(IDT_PM_PHYS + 0x21 * 8) ==
+            idtLow(0x0030, 0x0100 + 0x21 * 16));
+    env.cpu.setReg16(cpu::AX, 0x0204);
+    env.cpu.setReg8(cpu::BL, 0x21);
+    env.dpmi.handleInt31();
+    REQUIRE(env.cpu.getReg16(cpu::CX) == 0x0030);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // DPMI 000Ch — Set Descriptor forces Present and DPL bits
 // ═══════════════════════════════════════════════════════════════════════════

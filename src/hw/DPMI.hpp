@@ -106,6 +106,9 @@ private:
     uint32_t offset = 0;
   };
   std::array<PMVector, 256> m_pmVectors{};
+  // Vectors whose "restore our HLE stub" 0205h call was deferred (see 0205h).
+  std::array<bool, 256> m_deferredStubRestore{};
+  void writeIdtVector(uint8_t vec, uint16_t sel, uint32_t off);
 
   // Processor exception handler vectors (INT 31h AX=0202h/0203h)
   std::array<PMVector, 32> m_excVectors{};

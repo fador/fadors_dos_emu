@@ -408,7 +408,13 @@ public:
   void setEFLAGS(uint32_t val) { m_eflags = val; }
 
   uint32_t getCR(uint8_t index) const { return m_cr[index & 7]; }
-  void setCR(uint8_t index, uint32_t val) { m_cr[index & 7] = val; }
+  void setCR(uint8_t index, uint32_t val) {
+    index &= 7;
+    m_cr[index] = val;
+    if (m_memory && (index == 0 || index == 3 || index == 4))
+      m_memory->setPaging((m_cr[0] & 0x80000001u) == 0x80000001u, m_cr[3],
+                          (m_cr[4] & 0x10u) != 0);
+  }
 
   uint32_t getDR(uint8_t index) const { return m_dr[index & 7]; }
   void setDR(uint8_t index, uint32_t val) { m_dr[index & 7] = val; }
@@ -541,12 +547,12 @@ inline void CPU::push16(uint16_t value) {
     uint32_t esp = getReg32(ESP) - 2;
     setReg32(ESP, esp);
     if (m_memory)
-      m_memory->write16(stackBase + esp, value);
+      m_memory->lwrite16(stackBase + esp, value);
   } else {
     uint16_t sp = getReg16(SP) - 2;
     setReg16(SP, sp);
     if (m_memory)
-      m_memory->write16(stackBase + sp, value);
+      m_memory->lwrite16(stackBase + sp, value);
   }
 }
 
@@ -556,12 +562,12 @@ inline void CPU::push32(uint32_t value) {
     uint32_t esp = getReg32(ESP) - 4;
     setReg32(ESP, esp);
     if (m_memory)
-      m_memory->write32(stackBase + esp, value);
+      m_memory->lwrite32(stackBase + esp, value);
   } else {
     uint16_t sp = getReg16(SP) - 4;
     setReg16(SP, sp);
     if (m_memory)
-      m_memory->write32(stackBase + sp, value);
+      m_memory->lwrite32(stackBase + sp, value);
   }
 }
 
@@ -571,12 +577,12 @@ inline uint16_t CPU::pop16() {
   if (m_is32BitStack) {
     uint32_t esp = getReg32(ESP);
     if (m_memory)
-      value = m_memory->read16(stackBase + esp);
+      value = m_memory->lread16(stackBase + esp);
     setReg32(ESP, esp + 2);
   } else {
     uint16_t sp = getReg16(SP);
     if (m_memory)
-      value = m_memory->read16(stackBase + sp);
+      value = m_memory->lread16(stackBase + sp);
     setReg16(SP, sp + 2);
   }
   return value;
@@ -588,12 +594,12 @@ inline uint32_t CPU::pop32() {
   if (m_is32BitStack) {
     uint32_t esp = getReg32(ESP);
     if (m_memory)
-      value = m_memory->read32(stackBase + esp);
+      value = m_memory->lread32(stackBase + esp);
     setReg32(ESP, esp + 4);
   } else {
     uint16_t sp = getReg16(SP);
     if (m_memory)
-      value = m_memory->read32(stackBase + sp);
+      value = m_memory->lread32(stackBase + sp);
     setReg16(SP, sp + 4);
   }
   return value;

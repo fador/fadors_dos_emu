@@ -96,10 +96,14 @@ TEST_CASE("DOS: Memory Management (MCB)", "[DOS][Memory]") {
         REQUIRE(memory.read16(nextMcbAddr + 1) == 0);
     }
 
-    SECTION("Resize PSP block updates PSP end segment") {
+    SECTION("Resize PSP block leaves PSP end segment unchanged") {
+        // MS-DOS sets PSP:0002h at EXEC time only; DOS/32A depends on it
+        // still showing the original top after SETBLOCK.
         const uint16_t psp = dos.getPSPSegment();
 
         shrinkPSPBlock(0x100);
+        const uint32_t topAddr = (static_cast<uint32_t>(psp) << 4) + 0x02;
+        const uint16_t topBefore = memory.read16(topAddr);
 
         cpu.setReg8(AH, 0x4A);
         cpu.setSegReg(ES, psp);
@@ -107,8 +111,7 @@ TEST_CASE("DOS: Memory Management (MCB)", "[DOS][Memory]") {
         dos.handleInterrupt(0x21);
 
         REQUIRE(!(cpu.getEFLAGS() & FLAG_CARRY));
-        REQUIRE(memory.read16((static_cast<uint32_t>(psp) << 4) + 0x02) ==
-                static_cast<uint16_t>(psp + 0x50));
+        REQUIRE(memory.read16(topAddr) == topBefore);
     }
 }
 

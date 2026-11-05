@@ -1879,6 +1879,21 @@ TEST_CASE("DOS: Child Environment Duplication", "[DOS][Exec]") {
     REQUIRE(mem.read8(childEnvAddr) == 'A');
     REQUIRE(mem.read8(childEnvAddr + 1) == '=');
     REQUIRE(mem.read8(childEnvAddr + 2) == 'B');
+    REQUIRE(mem.read8(childEnvAddr + 3) == 0);
+    REQUIRE(mem.read8(childEnvAddr + 4) == 0);
+
+    // ...followed by the CHILD's own fully qualified name (not the parent's):
+    // DOS/16M (DOS/4GW) locates itself through it.
+    REQUIRE(mem.read16(childEnvAddr + 5) == 1);
+    std::string childName;
+    for (uint32_t i = 0; i < 128; ++i) {
+        uint8_t c = mem.read8(childEnvAddr + 7 + i);
+        if (!c) break;
+        childName += static_cast<char>(c);
+    }
+    REQUIRE(childName.size() > 9);
+    REQUIRE(childName.substr(1, 2) == ":\\");
+    REQUIRE(childName.substr(childName.size() - 10) == "\\CHILD.COM");
 
     // Verify that the child's environment block was freed after termination
     // The MCB at childEnvSeg - 1 should have owner == 0 now

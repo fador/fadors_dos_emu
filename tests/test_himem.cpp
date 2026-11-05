@@ -115,3 +115,37 @@ TEST_CASE("HIMEM: Memory Allocation", "[HIMEM][Memory]") {
         REQUIRE(himem.freeEMB(handle) == true);
     }
 }
+
+TEST_CASE("HIMEM: XMS 3.0 sizes beyond 64 MB", "[HIMEM][Memory]") {
+    HIMEM himem;
+    MemoryBus memoryBus;
+    himem.setMemoryBus(&memoryBus);
+
+    REQUIRE(himem.getVersion() == 0x0300);
+
+    uint32_t largest32 = 0;
+    const uint32_t total32 = himem.queryFreeKB32(largest32);
+    uint16_t largest16 = 0;
+    const uint16_t total16 = himem.queryFreeKB(largest16);
+    // The XMS 2.0 query is capped at 64 MB; the 3.0 one is not.
+    REQUIRE(total16 <= 64512);
+    REQUIRE(total32 > 64u * 1024u);
+    REQUIRE(largest32 >= largest16);
+
+    // An 80 MB block (more than a 16-bit KB count can express).
+    const uint32_t kb = 80u * 1024u;
+    const uint16_t handle = himem.allocateEMB(kb);
+    REQUIRE(handle != 0);
+    REQUIRE(himem.getHandleSizeKB(handle) == kb);
+    memoryBus.write32(0x100000 + 0x1234, 0xFEEDFACE); // inside the block
+    REQUIRE(himem.resizeEMB(handle, kb + 1024) == true); // grows in place
+    REQUIRE(himem.getHandleSizeKB(handle) == kb + 1024);
+    REQUIRE(himem.resizeEMB(handle, 1024) == true);      // shrinks in place
+    REQUIRE(himem.getHandleSizeKB(handle) == 1024);
+    REQUIRE(memoryBus.read32(0x100000 + 0x1234) == 0xFEEDFACE);
+    REQUIRE(himem.freeEMB(handle) == true);
+
+    // Absurd sizes fail cleanly instead of overflowing.
+    REQUIRE(himem.allocateEMB(0xFFFFFFFFu) == 0);
+    REQUIRE(himem.lastError() == HIMEM::ERR_OUT_OF_MEMORY);
+}

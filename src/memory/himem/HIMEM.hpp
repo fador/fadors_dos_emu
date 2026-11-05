@@ -12,7 +12,7 @@ public:
 
   // XMS 2.0 API — called by XMS HLE dispatch (INT E0h)
   // Each returns AX in result, sets BL error code on failure.
-  uint16_t getVersion() const { return 0x0200; }       // XMS 2.0
+  uint16_t getVersion() const { return 0x0300; }       // XMS 3.0
   uint16_t getDriverVersion() const { return 0x0100; } // Internal rev 1.0
 
   // A20 gate control
@@ -26,11 +26,11 @@ public:
   bool isHMAAllocated() const { return m_hmaAllocated; }
 
   // Extended Memory Blocks (EMB)
-  uint16_t allocateEMB(uint16_t sizeKB); // returns handle, 0 on failure
+  uint16_t allocateEMB(uint32_t sizeKB); // returns handle, 0 on failure
   bool freeEMB(uint16_t handle);
   bool lockEMB(uint16_t handle, uint32_t &linearAddr);
   bool unlockEMB(uint16_t handle);
-  bool resizeEMB(uint16_t handle, uint16_t newSizeKB);
+  bool resizeEMB(uint16_t handle, uint32_t newSizeKB);
   uint32_t getHandleSizeKB(uint16_t handle) const;
   uint8_t getLockCount(uint16_t handle) const;
   uint8_t getFreeHandles() const;
@@ -42,6 +42,8 @@ public:
 
   // Query free XMS — returns largest free block in KB and total free in KB
   uint16_t queryFreeKB(uint16_t &largestBlockKB) const;
+  // XMS 3.0 (functions 88h): 32-bit sizes, no 64 MB cap.
+  uint32_t queryFreeKB32(uint32_t &largestBlockKB) const;
 
   // Get raw pointer to EMB data (for ProgramLoader compatibility)
   uint8_t *getBlock(uint16_t handle);
@@ -54,7 +56,7 @@ public:
   static constexpr uint8_t ERR_HMA_IN_USE = 0x91;
   static constexpr uint8_t ERR_HMA_NOT_ALLOC = 0x93;
   static constexpr uint8_t ERR_A20_STILL_ENABLED = 0x94;
-  static constexpr uint8_t ERR_NO_FREE_HANDLES = 0xA0;
+  static constexpr uint8_t ERR_NO_FREE_HANDLES = 0xA1;
   static constexpr uint8_t ERR_INVALID_HANDLE = 0xA2;
   static constexpr uint8_t ERR_OUT_OF_MEMORY = 0xA0;
   static constexpr uint8_t ERR_LOCK_OVERFLOW = 0xAA;

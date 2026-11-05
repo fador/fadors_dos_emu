@@ -46,6 +46,8 @@ void CPU::reset() {
   m_eflags = 0x00000002;
 
   m_cr.fill(0);
+  if (m_memory)
+    m_memory->setPaging(false, 0, false);
   m_dr.fill(0);
   resetFPU();
 
@@ -97,8 +99,8 @@ void CPU::loadSegment(SegRegIndex segIndex, uint16_t value) {
       }
     } else {
       uint32_t entryAddr = table.base + entryOffset;
-      uint32_t low = m_memory->read32(entryAddr);
-      uint32_t high = m_memory->read32(entryAddr + 4);
+      uint32_t low = m_memory->lread32(entryAddr);
+      uint32_t high = m_memory->lread32(entryAddr + 4);
       m_segBase[seg] = decodeSegmentBase(low, high);
       if (seg == CS) {
         m_is32BitCode = decodeSegmentIs32Bit(high);

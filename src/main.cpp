@@ -305,6 +305,8 @@ void printHelp(const char *programName) {
     "  --help, -h, -?            Print this help message and exit.\n"
     "  --mount=L:/path           Mount host directory at drive letter L (repeatable).\n"
     "  --himem                   Enable HIMEM/XMS extended memory support.\n"
+    "  --env=NAME=VALUE          Add or replace a DOS environment variable (repeatable).\n"
+    "                            Defaults: BLASTER=A220 I5 D1 H5 P330 T6, CAUSEWAY=DPMI.\n"
     "  --sdl                     Force the SDL graphical frontend (requires SDL2 build).\n"
     "  --no-sdl                  Force headless/text-mode execution even in SDL builds.\n"
     "  --throttle-ips=N          Pace guest execution to roughly N retired instructions/sec.\n"
@@ -728,6 +730,15 @@ int main(int argc, char *argv[]) {
           LOG_ERROR("Invalid --keys specification: ", error);
           return 1;
         }
+      } else if (arg.find("--env=") == 0) {
+        const std::string spec = arg.substr(6);
+        const auto eq = spec.find('=');
+        if (eq == std::string::npos || eq == 0) {
+          LOG_ERROR("Invalid --env= syntax. Use --env=NAME=VALUE");
+          return 1;
+        }
+        fador::hw::ProgramLoader::setEnvironmentVariable(spec.substr(0, eq),
+                                                         spec.substr(eq + 1));
       } else if (arg.find("--mount=") == 0) {
         std::string mountSpec = arg.substr(8);
         if (mountSpec.size() >= 3 && std::isalpha(mountSpec[0]) && mountSpec[1] == ':') {

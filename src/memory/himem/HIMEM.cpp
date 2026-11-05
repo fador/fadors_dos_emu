@@ -95,8 +95,12 @@ bool HIMEM::releaseHMA() {
 
 // ── EMB allocation ──────────────────────────────────────────────────────────
 
-uint16_t HIMEM::allocateEMB(uint16_t sizeKB) {
-  uint32_t sizeBytes = static_cast<uint32_t>(sizeKB) * 1024;
+uint16_t HIMEM::allocateEMB(uint32_t sizeKB) {
+  if (sizeKB > XMS_SIZE / 1024) {
+    m_lastError = ERR_OUT_OF_MEMORY;
+    return 0;
+  }
+  uint32_t sizeBytes = sizeKB * 1024;
   if (sizeBytes == 0)
     sizeBytes = 1024; // minimum 1KB
 
@@ -168,7 +172,7 @@ bool HIMEM::unlockEMB(uint16_t handle) {
   return true;
 }
 
-bool HIMEM::resizeEMB(uint16_t handle, uint16_t newSizeKB) {
+bool HIMEM::resizeEMB(uint16_t handle, uint32_t newSizeKB) {
   if (handle == 0 || handle >= m_handles.size() ||
       !m_handles[handle].allocated) {
     m_lastError = ERR_INVALID_HANDLE;
@@ -178,31 +182,92 @@ bool HIMEM::resizeEMB(uint16_t handle, uint16_t newSizeKB) {
     m_lastError = ERR_HANDLE_LOCKED;
     return false;
   }
-  uint32_t newSize = static_cast<uint32_t>(newSizeKB) * 1024;
-  if (newSize == 0)
-    newSize = 1024;
-
-  // Simple approach: free old, allocate new, copy data
-  uint32_t oldOffset = m_handles[handle].offset;
-  uint32_t oldSize = m_handles[handle].size;
-  uint32_t copySize = std::min(oldSize, newSize);
-
-  uint32_t newOffset = allocatePool(newSize);
-  if (newOffset == UINT32_MAX) {
+  if (newSizeKB > XMS_SIZE / 1024) {
     m_lastError = ERR_OUT_OF_MEMORY;
     return false;
   }
+  uint32_t newSize = newSizeKB * 1024;
+  if (newSize == 0)
+    newSize = 1024;
 
-  if (m_memBus) {
-    uint8_t *newPtr = m_memBus->directAccess(0x100000 + newOffset);
-    uint8_t *oldPtr = m_memBus->directAccess(0x100000 + oldOffset);
-    if (newPtr && oldPtr) {
-      std::memcpy(newPtr, oldPtr, copySize);
-    }
+  const uint32_t oldOffset = m_handles[handle].offset;
+  const uint32_t oldSize = m_handles[handle].size;
+  auto ramAt = [&](uint32_t offset) -> uint8_t * {
+    return m_memBus ? m_memBus->directAccess(0x100000 + offset) : nullptr;
+  };
+
+  // Shrinking: release the tail in place.
+  if (newSize <= oldSize) {
+    if (newSize < oldSize)
+      freePool(oldOffset + newSize, oldSize - newSize);
+    m_handles[handle].size = newSize;
+    return true;
   }
 
-  freePool(oldOffset, oldSize);
-  m_handles[handle].offset = newOffset;
+  // Growing: take the free block that directly follows, if it suffices.
+  const uint32_t extra = newSize - oldSize;
+  auto next = std::find_if(m_freeBlocks.begin(), m_freeBlocks.end(),
+                           [&](const FreeBlock &fb) {
+                             return fb.offset == oldOffset + oldSize;
+                           });
+  if (next != m_freeBlocks.end() && next->size >= extra) {
+    if (next->size == extra) {
+      m_freeBlocks.erase(next);
+    } else {
+      next->offset += extra;
+      next->size -= extra;
+    }
+    m_handles[handle].size = newSize;
+    return true;
+  }
+
+  // Otherwise move the block somewhere it fits.
+  uint32_t newOffset = allocatePool(newSize);
+  if (newOffset != UINT32_MAX) {
+    uint8_t *dst = ramAt(newOffset);
+    uint8_t *src = ramAt(oldOffset);
+    if (dst && src)
+      std::memcpy(dst, src, oldSize);
+    freePool(oldOffset, oldSize);
+    m_handles[handle].offset = newOffset;
+    m_handles[handle].size = newSize;
+    return true;
+  }
+
+  // Last resort: slide into the free space on both sides of the block
+  // (needed when the block is larger than half of the remaining pool).
+  auto prev = std::find_if(m_freeBlocks.begin(), m_freeBlocks.end(),
+                           [&](const FreeBlock &fb) {
+                             return fb.offset + fb.size == oldOffset;
+                           });
+  const uint32_t before = prev != m_freeBlocks.end() ? prev->size : 0;
+  const uint32_t after = next != m_freeBlocks.end() ? next->size : 0;
+  if (static_cast<uint64_t>(before) + oldSize + after < newSize) {
+    m_lastError = ERR_OUT_OF_MEMORY;
+    return false;
+  }
+  const uint32_t start = oldOffset - before;
+  const uint32_t span = before + oldSize + after;
+  if (before) {
+    uint8_t *dst = ramAt(start);
+    uint8_t *src = ramAt(oldOffset);
+    if (dst && src)
+      std::memmove(dst, src, oldSize);
+  }
+  // Both neighbours are now part of the block's span.
+  m_freeBlocks.erase(std::remove_if(m_freeBlocks.begin(), m_freeBlocks.end(),
+                                    [&](const FreeBlock &fb) {
+                                      const bool isBefore =
+                                          before != 0 && fb.offset == start;
+                                      const bool isAfter =
+                                          after != 0 &&
+                                          fb.offset == oldOffset + oldSize;
+                                      return isBefore || isAfter;
+                                    }),
+                     m_freeBlocks.end());
+  if (span > newSize)
+    freePool(start + newSize, span - newSize);
+  m_handles[handle].offset = start;
   m_handles[handle].size = newSize;
   return true;
 }
@@ -260,6 +325,17 @@ uint16_t HIMEM::queryFreeKB(uint16_t &largestBlockKB) const {
   largestBlockKB =
       static_cast<uint16_t>(std::min(largest / 1024, (uint32_t)64512));
   return static_cast<uint16_t>(std::min(total / 1024, (uint32_t)64512));
+}
+
+uint32_t HIMEM::queryFreeKB32(uint32_t &largestBlockKB) const {
+  uint32_t total = 0;
+  uint32_t largest = 0;
+  for (const auto &fb : m_freeBlocks) {
+    total += fb.size;
+    largest = std::max(largest, fb.size);
+  }
+  largestBlockKB = largest / 1024;
+  return total / 1024;
 }
 
 uint32_t HIMEM::getHandleSizeKB(uint16_t handle) const {

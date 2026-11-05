@@ -1,6 +1,8 @@
 #pragma once
 #include <string>
 #include <cstdint>
+#include <utility>
+#include <vector>
 #include "../cpu/CPU.hpp"
 #include "../memory/MemoryBus.hpp"
 
@@ -21,6 +23,16 @@ public:
 
     // Loads an .EXE file, parses MZ header, relocates, and sets initial CS:IP / SS:SP
     bool loadEXE(const std::string& path, uint16_t segment, DOS& dos, const std::string& args = "", bool useHimem = false, uint16_t envSeg = 0);
+
+    // Environment variables given to directly launched programs (and the
+    // shell) in addition to PATH/LIB/INCLUDE, in order.  Defaults:
+    //   BLASTER   the emulated Sound Blaster's settings
+    //   CAUSEWAY  DPMI: CauseWay would otherwise switch to raw mode and
+    //             use ring transitions this emulator does not model
+    // setEnvironmentVariable() replaces or adds one (--env=NAME=VALUE).
+    using EnvList = std::vector<std::pair<std::string, std::string>>;
+    static EnvList& defaultEnvironment();
+    static void setEnvironmentVariable(const std::string& name, const std::string& value);
 
 private:
     cpu::CPU& m_cpu;

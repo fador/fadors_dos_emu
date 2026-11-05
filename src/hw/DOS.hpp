@@ -237,6 +237,14 @@ private:
   // Helpers
   std::string readDOSString(uint32_t address); // Read '$' terminated string
   std::string readFilename(uint32_t address);  // Read null-terminated string
+  // INT 21h/60h semantics: "X:\\DIR\\FILE" in upper case, relative to the
+  // current drive/directory, "." and ".." collapsed.  Empty if the drive is
+  // not mounted.
+  std::string canonicalDosPath(const std::string &path) const;
+  // Fresh environment block for an EXEC'd child: the variables of
+  // `sourceSeg` followed by the child's own program name.  Returns the
+  // segment (0 when out of memory).
+  uint16_t buildChildEnvironment(uint16_t sourceSeg, const std::string &programName);
   std::string resolvePath(
       const std::string &path); // Resolve relative paths against m_currentDir
   std::string
