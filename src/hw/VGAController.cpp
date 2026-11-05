@@ -184,6 +184,11 @@ void VGAController::write8(uint16_t port, uint8_t value) {
 // ── Plane-aware VRAM access ──────────────────────────────────────────
 
 void fador::hw::VGAController::planeWrite8(uint32_t offset, uint8_t value) {
+    if (m_svgaWindowEnabled) {
+        if (uint8_t *p = m_memory.directAccess(m_svgaWindowBase + (offset & 0xFFFF)))
+            *p = value;
+        return;
+    }
     if (m_chain4) {
         // Chain-4: address bits [1:0] select plane, [15:2] select offset
         uint8_t plane = offset & 3;
@@ -254,6 +259,10 @@ void fador::hw::VGAController::planeWrite8(uint32_t offset, uint8_t value) {
 }
 
 uint8_t fador::hw::VGAController::planeRead8(uint32_t offset) const {
+    if (m_svgaWindowEnabled) {
+        const uint8_t *p = m_memory.directAccess(m_svgaWindowBase + (offset & 0xFFFF));
+        return p ? *p : 0xFF;
+    }
     uint32_t planeOff = m_chain4 ? (offset >> 2) : (offset & 0xFFFF);
     loadLatches(planeOff);
 

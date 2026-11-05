@@ -59,6 +59,30 @@ public:
     };
     MouseState& mouseState() { return m_mouse; }
 
+    // VESA BIOS Extensions (VBE 2.0) state.  mode == 0 means a standard
+    // VGA mode (selected via INT 10h AH=00h) is active.
+    struct VbeState {
+        uint16_t mode = 0;          // VBE mode number (without flag bits)
+        uint16_t width = 0;
+        uint16_t height = 0;
+        uint8_t bpp = 0;            // 8, 15, 16 or 32
+        uint32_t pitch = 0;         // bytes per scan line
+        uint32_t startX = 0;        // display start (4F07h)
+        uint32_t startY = 0;
+        uint32_t bank = 0;          // window A position, 64 KiB granularity
+        bool linear = false;        // LFB requested (bit 14 of the mode)
+    };
+    const VbeState& vbeState() const { return m_vbe; }
+
+    // VBE mode table entry (also used by tests and renderers)
+    struct VbeModeInfo {
+        uint16_t mode;
+        uint16_t width;
+        uint16_t height;
+        uint8_t bpp;
+    };
+    static const VbeModeInfo* findVbeMode(uint16_t mode);
+
     // Set up IVT vectors and BDA defaults
     void initialize();
 
@@ -86,6 +110,8 @@ public:
     static constexpr uint16_t EMS_TOTAL_PAGES = 256;
     static constexpr uint16_t EMS_PRIVATE_API_OFFSET = 0x0070;
     static constexpr uint32_t EMS_IMPORT_RECORD_PHYS = 0xF1100;
+    // VBE ROM data (OEM strings, mode list, window function) at F000:C000
+    static constexpr uint16_t VBE_ROM_OFFSET = 0xC000;
 
 private:
     // Original IVT entries written during initialize().
@@ -115,6 +141,10 @@ private:
     uint16_t m_mouseCallbackOff = 0;
 
     void handleVideoService();      // INT 10h
+    void handleVbeService();        // INT 10h AH=4Fh (VESA BIOS Extensions)
+    void initializeVbeRom();        // VBE info strings / mode list in ROM
+    void resetVbeState();           // back to a standard VGA mode
+    VbeState m_vbe;
     void handleKeyboardIRQ();       // INT 09h
     void handleKeyboardService();   // INT 16h
     static uint8_t scancodeToAscii(uint8_t scancode, uint8_t shiftFlags);

@@ -20,6 +20,7 @@
 #include "hw/audio/MidiSynth.hpp"
 #include "hw/audio/SoundBlaster.hpp"
 #include "ui/Debugger.hpp"
+#include "ui/FrameRenderer.hpp"
 #include "ui/InputManager.hpp"
 #include "ui/TerminalRenderer.hpp"
 #include "utils/CrashHandler.hpp"
@@ -39,9 +40,12 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <optional>
+#include <sstream>
 #include <thread>
 
 namespace {
@@ -76,6 +80,125 @@ const char *benchmarkName(BenchmarkKind kind) {
   }
   return "none";
 }
+
+// Scripted keyboard input for unattended runs (--keys=...).
+// Spec: comma separated "<seconds>:<KEY>" entries, e.g. "2:ENTER,5.5:ESC".
+// Each key is pressed at the given wall-clock time after start and
+// released 100 ms later, through the 8042 (port 60h + IRQ1) and the BIOS
+// type-ahead buffer.
+class ScriptedKeys {
+public:
+  bool parse(const std::string &spec, std::string &error) {
+    std::stringstream ss(spec);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+      if (item.empty())
+        continue;
+      auto colon = item.find(':');
+      if (colon == std::string::npos) {
+        error = "missing ':' in '" + item + "'";
+        return false;
+      }
+      Event ev{};
+      try {
+        ev.time = std::stod(item.substr(0, colon));
+      } catch (...) {
+        error = "bad time in '" + item + "'";
+        return false;
+      }
+      if (!lookup(item.substr(colon + 1), ev)) {
+        error = "unknown key '" + item.substr(colon + 1) + "'";
+        return false;
+      }
+      m_events.push_back(ev);
+    }
+    return true;
+  }
+
+  void service(std::chrono::steady_clock::duration sinceStart,
+               fador::hw::KeyboardController &kbd) {
+    double t = std::chrono::duration<double>(sinceStart).count();
+    for (auto &ev : m_events) {
+      if (!ev.pressed && t >= ev.time) {
+        ev.pressed = true;
+        if (ev.extended)
+          kbd.pushMakeKeyExtended(ev.ascii, ev.scancode);
+        else
+          kbd.pushMakeKey(ev.ascii, ev.scancode);
+      }
+      if (ev.pressed && !ev.released && t >= ev.time + 0.1) {
+        ev.released = true;
+        if (ev.extended)
+          kbd.pushBreakKeyExtended(ev.scancode);
+        else
+          kbd.pushBreakKey(ev.scancode);
+      }
+    }
+  }
+
+private:
+  struct Event {
+    double time;
+    uint8_t scancode;
+    uint8_t ascii;
+    bool extended;
+    bool pressed;
+    bool released;
+  };
+
+  static bool lookup(std::string name, Event &ev) {
+    for (auto &c : name)
+      c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    struct Named {
+      const char *name;
+      uint8_t scancode;
+      uint8_t ascii;
+      bool extended;
+    };
+    static const Named kNamed[] = {
+        {"ESC", 0x01, 27, false},   {"ENTER", 0x1C, 13, false},
+        {"SPACE", 0x39, ' ', false}, {"TAB", 0x0F, 9, false},
+        {"BKSP", 0x0E, 8, false},   {"UP", 0x48, 0, true},
+        {"DOWN", 0x50, 0, true},    {"LEFT", 0x4B, 0, true},
+        {"RIGHT", 0x4D, 0, true},   {"F1", 0x3B, 0, false},
+        {"F2", 0x3C, 0, false},     {"F3", 0x3D, 0, false},
+        {"F4", 0x3E, 0, false},     {"F5", 0x3F, 0, false},
+        {"F6", 0x40, 0, false},     {"F7", 0x41, 0, false},
+        {"F8", 0x42, 0, false},     {"F9", 0x43, 0, false},
+        {"F10", 0x44, 0, false},    {"LCTRL", 0x1D, 0, false},
+        {"LALT", 0x38, 0, false},   {"LSHIFT", 0x2A, 0, false},
+        {"MINUS", 0x0C, '-', false}, {"EQUALS", 0x0D, '=', false},
+    };
+    for (const auto &n : kNamed) {
+      if (name == n.name) {
+        ev.scancode = n.scancode;
+        ev.ascii = n.ascii;
+        ev.extended = n.extended;
+        return true;
+      }
+    }
+    if (name.size() == 1) {
+      static const char *kRows[] = {"1234567890", "QWERTYUIOP", "ASDFGHJKL",
+                                    "ZXCVBNM"};
+      static const uint8_t kRowStart[] = {0x02, 0x10, 0x1E, 0x2C};
+      for (int r = 0; r < 4; ++r) {
+        const char *pos = std::strchr(kRows[r], name[0]);
+        if (pos) {
+          ev.scancode = static_cast<uint8_t>(kRowStart[r] + (pos - kRows[r]));
+          ev.ascii = static_cast<uint8_t>(
+              std::isalpha(static_cast<unsigned char>(name[0]))
+                  ? std::tolower(static_cast<unsigned char>(name[0]))
+                  : name[0]);
+          ev.extended = false;
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  std::vector<Event> m_events;
+};
 
 class InstructionThrottle {
 public:
@@ -494,6 +617,10 @@ int main(int argc, char *argv[]) {
 #else
     bool useSDL = false;
 #endif
+    bool headless = false;          // --headless: no rendering, no host input
+    double maxSeconds = 0.0;        // --max-seconds=N wall-clock limit
+    std::string screenshotPath;     // --screenshot=FILE.png at exit
+    ScriptedKeys scriptedKeys;      // --keys=T:KEY,...
     struct MountEntry { char letter; std::string hostPath; std::string label; };
     std::vector<MountEntry> cliMounts;
     std::string path;
@@ -563,6 +690,19 @@ int main(int argc, char *argv[]) {
 #endif
       } else if (arg == "--no-sdl") {
         useSDL = false;
+      } else if (arg == "--headless") {
+        headless = true;
+        useSDL = false;
+      } else if (arg.find("--max-seconds=") == 0) {
+        maxSeconds = std::stod(arg.substr(14));
+      } else if (arg.find("--screenshot=") == 0) {
+        screenshotPath = arg.substr(13);
+      } else if (arg.find("--keys=") == 0) {
+        std::string error;
+        if (!scriptedKeys.parse(arg.substr(7), error)) {
+          LOG_ERROR("Invalid --keys specification: ", error);
+          return 1;
+        }
       } else if (arg.find("--mount=") == 0) {
         std::string mountSpec = arg.substr(8);
         if (mountSpec.size() >= 3 && std::isalpha(mountSpec[0]) && mountSpec[1] == ':') {
@@ -600,6 +740,9 @@ int main(int argc, char *argv[]) {
         path = arg;
       }
     }
+
+    if (headless)
+      audio.close(); // unattended runs never open a host audio device
 
     // Apply CLI mounts
     for (auto& m : cliMounts) {
@@ -938,392 +1081,232 @@ int main(int argc, char *argv[]) {
       return 0;
     }
 
+    // ── Frontend selection ──────────────────────────────────────────
+    // Exactly one frontend is active: SDL window, ANSI terminal, or
+    // headless (no output, no host input; used for automated runs).
+    std::unique_ptr<fador::ui::InputManager> terminalInput;
 #ifdef HAVE_SDL2
-    if (useSDL) {
-      // ── SDL2 graphical window path ──────────────────────────
-  InstructionThrottle throttle(throttleInstructionsPerSecond);
-  throttle.reset();
+    std::unique_ptr<fador::ui::SDLRenderer> sdlRenderer;
+#endif
+    std::function<void()> pollHostInput = []() {};
+    std::function<void(bool)> renderFrame = [](bool) {};
+    std::function<bool()> quitRequested = []() { return false; };
 
-      fador::ui::SDLRenderer sdlRenderer(memory, kbd, vga);
-      sdlRenderer.setBIOS(bios);
+    if (headless) {
+      // nothing to wire up
+    }
+#ifdef HAVE_SDL2
+    else if (useSDL) {
+      sdlRenderer = std::make_unique<fador::ui::SDLRenderer>(memory, kbd, vga);
+      sdlRenderer->setBIOS(bios);
+      pollHostInput = [&]() { sdlRenderer->pollInput(); };
+      renderFrame = [&](bool force) { sdlRenderer->render(force); };
+      quitRequested = [&]() { return sdlRenderer->shouldQuit(); };
+    }
+#endif
+    else {
+      renderer.clearScreen();
+      terminalInput = std::make_unique<fador::ui::InputManager>(kbd);
+      terminalInput->setBIOS(bios);
+      pollHostInput = [&]() { terminalInput->pollInput(); };
+      renderFrame = [&](bool force) { renderer.render(force); };
+    }
 
-      bios.setInputPollCallback([&sdlRenderer]() { sdlRenderer.pollInput(); });
-      bios.setIdleCallback([&sdlRenderer, &pit, &cpu, &decoder, &kbd, &pic,
-                &picSlave, &cmos,
-                &dispatchPendingHardwareInterrupt]() {
-        cpu.addCycles(8);
-        pit.update();
-        while (pit.checkPendingIRQ0()) {
-          pic.raiseIRQ(0);
-        }
-        if (kbd.checkPendingIRQ()) {
-          pic.raiseIRQ(1);
-        }
-        cmos.advanceTime();
-        while (cmos.checkPendingIRQ8()) {
-          picSlave.raiseIRQ(0);
-        }
-        dispatchPendingHardwareInterrupt(false);
-        static auto lr = std::chrono::steady_clock::now();
-        auto now = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lr)
-                .count() > 33) {
-          sdlRenderer.render();
-          lr = now;
-        }
-      });
-      dos.setKeyboard(kbd);
-      dos.setInputPollCallback([&sdlRenderer]() { sdlRenderer.pollInput(); });
-      dos.setIdleCallback([&pit, &cpu, &decoder, &kbd, &pic,
-               &picSlave, &cmos,
-               &dispatchPendingHardwareInterrupt]() {
-        cpu.addCycles(8);
-        pit.update();
-        while (pit.checkPendingIRQ0()) { pic.raiseIRQ(0); }
-        if (kbd.checkPendingIRQ()) { pic.raiseIRQ(1); }
-        cmos.advanceTime();
-        while (cmos.checkPendingIRQ8()) { picSlave.raiseIRQ(0); }
-        dispatchPendingHardwareInterrupt(false);
-      });
+    InstructionThrottle throttle(throttleInstructionsPerSecond);
+    throttle.reset();
+    const auto runStart = std::chrono::steady_clock::now();
+    auto lastRender = runStart;
+    auto lastAudio = runStart;
+    std::vector<float> audioBuf;
 
-      cpu.setEFLAGS(cpu.getEFLAGS() | fador::cpu::FLAG_INTERRUPT);
+    // Timers, keyboard and RTC raise their IRQs here.
+    auto serviceHardware = [&]() {
+      pit.update();
+      while (pit.checkPendingIRQ0())
+        pic.raiseIRQ(0);
+      if (kbd.checkPendingIRQ())
+        pic.raiseIRQ(1);
+      cmos.advanceTime();
+      while (cmos.checkPendingIRQ8())
+        picSlave.raiseIRQ(0);
+    };
+    auto maybeRender = [&](std::chrono::steady_clock::time_point now) {
+      if (now - lastRender > std::chrono::milliseconds(33)) {
+        renderFrame(false);
+        lastRender = now;
+      }
+    };
+    // Generate audio.  With a host audio device the queue depth paces
+    // generation; without one (headless or no SDL) samples are produced at
+    // the real-time rate and discarded, so Sound Blaster DMA and OPL timers
+    // still advance at the correct speed without wasting host CPU.
+    auto serviceAudio = [&](std::chrono::steady_clock::time_point now) {
+      size_t samplesNeeded = 0;
+      if (audio.isActive()) {
+        constexpr uint32_t targetQueueBytes = 32768; // 4096 samples
+        constexpr uint32_t thresholdBytes = 16384;   // 2048 samples
+        uint32_t queued = audio.getQueuedAudioSize();
+        if (queued < thresholdBytes)
+          samplesNeeded = (targetQueueBytes - queued) / 8; // 2ch * float
+      } else {
+        auto elapsed = std::chrono::duration<double>(now - lastAudio).count();
+        if (elapsed < 0.005)
+          return;
+        samplesNeeded = static_cast<size_t>(elapsed * 44100.0);
+        if (samplesNeeded > 4096)
+          samplesNeeded = 4096;
+      }
+      lastAudio = now;
+      if (samplesNeeded == 0)
+        return;
+      audioBuf.assign(samplesNeeded * 2, 0.0f);
+      adlib.generateSamples(audioBuf.data(), samplesNeeded);
+      sb.generateSamples(audioBuf.data(), samplesNeeded);
+      if (audio.isActive())
+        audio.queueSamples(audioBuf.data(), samplesNeeded * 2);
+      adlib.updateTimers(static_cast<double>(samplesNeeded) / 44100.0);
+    };
 
-      bool running = true;
-      uint64_t instrCount = 0;
-      std::vector<float> audioBuf;
+    bios.setInputPollCallback(pollHostInput);
+    bios.setIdleCallback([&]() {
+      cpu.addCycles(8);
+      serviceHardware();
+      dispatchPendingHardwareInterrupt(false);
+      maybeRender(std::chrono::steady_clock::now());
+    });
+    dos.setKeyboard(kbd);
+    dos.setInputPollCallback(pollHostInput);
+    dos.setIdleCallback([&]() {
+      cpu.addCycles(8);
+      serviceHardware();
+      dispatchPendingHardwareInterrupt(false);
+    });
 
-      while (running) {
-        emitInstructionTrace();
+    cpu.setEFLAGS(cpu.getEFLAGS() | fador::cpu::FLAG_INTERRUPT);
 
-        // Save prev state to catch EIP corruption
-        uint16_t prevCS = cpu.getSegReg(fador::cpu::CS);
-        uint32_t prevEIP = cpu.getEIP();
-        uint32_t prevLinear = cpu.getSegBase(fador::cpu::CS) + prevEIP;
+    // Main execution loop.  Instructions run in batches; host services
+    // (IRQ delivery, input, audio, rendering) run between batches.  The
+    // per-instruction slow path is only used while tracing or when a
+    // --stop-after limit falls inside the batch.
+    constexpr uint64_t kBatch = 1024;
+    uint64_t instrCount = 0;
+    int exitStatus = 0;
+    bool running = true;
+    const bool perInstructionSlowPath = instructionTraceCount > 0;
+    while (running) {
+      uint64_t batch = kBatch;
+      if (stopAfterCycles > 0 && stopAfterCycles - instrCount < batch)
+        batch = stopAfterCycles > instrCount ? stopAfterCycles - instrCount : 1;
 
-        decoder.step();
-        cpu.addCycles(1);
-        instrCount++;
-
-        // Periodic EIP sample for progress tracking
-        if ((instrCount & 0xFFFFFF) == 0) {
-          uint16_t cs_s = cpu.getSegReg(fador::cpu::CS);
-          uint32_t eip_s = cpu.getEIP();
-          LOG_INFO("SAMPLE @", instrCount, ": CS=", std::hex, cs_s, " EIP=", eip_s,
-                   " flags=", cpu.getEFLAGS());
-        }
-
-        // TEMP DIAG: catch EIP jumping to low-memory data area
-        // Trigger when: PM + (app CS with data EIP) or (corrupted CS >= 0x1000)
-        {
-          uint16_t cs_s = cpu.getSegReg(fador::cpu::CS);
-          uint32_t eip_s = cpu.getEIP();
-          uint32_t linear = cpu.getSegBase(fador::cpu::CS) + eip_s;
-          bool datatrip = (cpu.getCR(0) & 1) && cs_s >= 0x100 &&
-                          eip_s >= 0x3000 && eip_s < 0x5000;
-          bool cstrip = (cpu.getCR(0) & 1) && cs_s >= 0x1000;
-          if (datatrip || cstrip) {
-            LOG_ERROR("EIP CORRUPTION: CS=", std::hex, cs_s,
-                      " EIP=", eip_s, " linear=", linear,
-                      " instrCount=", std::dec, instrCount);
-            LOG_ERROR("  prevCS=", std::hex, prevCS,
-                      " prevEIP=", prevEIP, " prevLinear=", prevLinear);
-            // Disassemble the instruction at prevCS:prevEIP that caused the jump
-            LOG_ERROR("  Jump from prevCS:prevEIP (last instr before corruption)");
-            uint32_t prevPhys = prevLinear;
-            LOG_ERROR("  Opcode bytes at prev: ",
-                      std::hex, (int)memory.read8(prevPhys), " ",
-                      (int)memory.read8(prevPhys+1), " ",
-                      (int)memory.read8(prevPhys+2), " ",
-                      (int)memory.read8(prevPhys+3), " ",
-                      (int)memory.read8(prevPhys+4), " ",
-                      (int)memory.read8(prevPhys+5));
-            LOG_ERROR("EIP IN DATA AREA: CS=", std::hex, cs_s,
-                      " EIP=", eip_s, " linear=", linear,
-                      " instrCount=", std::dec, instrCount);
-            LOG_ERROR("  EAX=", std::hex, cpu.getReg32(fador::cpu::EAX),
-                      " EBX=", cpu.getReg32(fador::cpu::EBX),
-                      " ECX=", cpu.getReg32(fador::cpu::ECX),
-                      " EDX=", cpu.getReg32(fador::cpu::EDX));
-            LOG_ERROR("  ESP=", cpu.getReg32(fador::cpu::ESP),
-                      " EBP=", cpu.getReg32(fador::cpu::EBP),
-                      " ESI=", cpu.getReg32(fador::cpu::ESI),
-                      " EDI=", cpu.getReg32(fador::cpu::EDI));
-            LOG_ERROR("  SS=", cpu.getSegReg(fador::cpu::SS),
-                      " DS=", cpu.getSegReg(fador::cpu::DS),
-                      " ES=", cpu.getSegReg(fador::cpu::ES),
-                      " FS=", cpu.getSegReg(fador::cpu::FS),
-                      " GS=", cpu.getSegReg(fador::cpu::GS));
-            LOG_ERROR("  EFLAGS=", cpu.getEFLAGS(),
-                      " CR0=", cpu.getCR(0));
-            // Dump top of stack
-            uint32_t ssB = cpu.getSegBase(fador::cpu::SS);
-            uint32_t sp = cpu.is32BitStack()
-                              ? cpu.getReg32(fador::cpu::ESP)
-                              : static_cast<uint32_t>(cpu.getReg16(fador::cpu::SP));
-            LOG_ERROR("  Stack top (SS:SP=", std::hex, cpu.getSegReg(fador::cpu::SS),
-                      ":", sp, "):");
-            for (int si = 0; si < 32; si += 4) {
-              uint32_t v = memory.read32(ssB + sp + si);
-              LOG_ERROR("    +", std::dec, si, ": 0x", std::hex, v);
-            }
-            running = false;
+      uint64_t executed = 0;
+      if (perInstructionSlowPath) {
+        for (; executed < batch; ++executed) {
+          emitInstructionTrace();
+          decoder.step();
+          cpu.addCycles(1);
+          if (dos.isTerminated()) {
+            ++executed;
             break;
           }
         }
-
-        if (stopAfterCycles > 0 && instrCount >= stopAfterCycles) {
-          if (!handleStopAfter(instrCount, true)) {
-            running = false;
+      } else {
+        for (; executed < batch; ++executed) {
+          decoder.step();
+          cpu.addCycles(1);
+          if (dos.isTerminated()) {
+            ++executed;
             break;
           }
-          continue;
         }
+      }
+      instrCount += executed;
 
-        if (dos.isTerminated()) {
-          LOG_INFO("Program terminated normally with exit code ",
-                   (int)dos.getExitCode(), " after ", instrCount,
-                   " instructions");
-          {
-            for (int row = 0; row < 25; ++row) {
-              std::string vramText;
-              for (int col = 0; col < 80; ++col) {
-                uint8_t ch = memory.read8(0xB8000 + (row * 80 + col) * 2);
-                vramText += (ch >= 0x20 && ch < 0x7F) ? static_cast<char>(ch) : ' ';
-              }
-              while (!vramText.empty() && vramText.back() == ' ')
-                vramText.pop_back();
-              if (!vramText.empty())
-                LOG_INFO("VRAM[", row, "]: ", vramText);
-            }
-          }
-          if (dumpOnExit) {
-            debugger.dumpState();
-          }
-          running = false;
+      if (dos.isTerminated()) {
+        LOG_INFO("Program terminated normally with exit code ",
+                 (int)dos.getExitCode(), " after ", instrCount,
+                 " instructions");
+        exitStatus = dos.getExitCode();
+        break;
+      }
+
+      if (stopAfterCycles > 0 && instrCount >= stopAfterCycles) {
+        if (!handleStopAfter(instrCount, true))
           break;
-        }
+        continue;
+      }
 
-        if (sdlRenderer.shouldQuit()) {
+      // ── Between batches: host services ──
+      serviceHardware();
+      dispatchPendingHardwareInterrupt(true);
+      if (bios.shouldReset()) {
+        LOG_INFO("Reset requested — terminating");
+        break;
+      }
+
+      if ((instrCount & 0x3FFF) < kBatch) {
+        auto now = std::chrono::steady_clock::now();
+        pollHostInput();
+        scriptedKeys.service(now - runStart, kbd);
+        serviceAudio(now);
+        maybeRender(now);
+        if (quitRequested()) {
           LOG_INFO("Window closed by user after ", instrCount, " instructions");
           running = false;
-          break;
         }
-
-        if ((instrCount & 0x3FF) == 0) {
-          sdlRenderer.pollInput();
-          pit.update();
-
-          while (pit.checkPendingIRQ0()) {
-            pic.raiseIRQ(0);
-          }
-          if (kbd.checkPendingIRQ()) {
-            pic.raiseIRQ(1);
-          }
-          cmos.advanceTime();
-          while (cmos.checkPendingIRQ8()) {
-            picSlave.raiseIRQ(0);
-          }
-
-          dispatchPendingHardwareInterrupt(true);
-
-          // Handle Ctrl+Alt+Del reset
-          if (bios.shouldReset()) {
-            LOG_INFO("Reset requested — terminating");
-            running = false;
-            break;
-          }
-
-          // Audio generation
-          uint32_t queuedAudio = audio.getQueuedAudioSize();
-          const uint32_t targetQueueBytes = 32768; // 4096 samples
-          const uint32_t thresholdBytes = 16384;   // 2048 samples
-          if (queuedAudio < thresholdBytes) {
-            size_t samplesNeeded =
-                (targetQueueBytes - queuedAudio) / 8; // 2 channels * 4 bytes
-            if (samplesNeeded > 0) {
-              audioBuf.assign(samplesNeeded * 2, 0.0f);
-              adlib.generateSamples(audioBuf.data(), samplesNeeded);
-              sb.generateSamples(audioBuf.data(), samplesNeeded);
-              audio.queueSamples(audioBuf.data(), samplesNeeded * 2);
-            }
-          }
-
-          static auto lastRender = std::chrono::steady_clock::now();
-          auto now = std::chrono::steady_clock::now();
-
-          if (std::chrono::duration_cast<std::chrono::milliseconds>(now -
-                                                                    lastRender)
-                  .count() > 33) {
-            sdlRenderer.render();
-            lastRender = now;
-          }
-
-          throttle.pace(instrCount);
-        }
-      }
-
-      sdlRenderer.render(true);
-    } else
-#endif
-    {
-      // ── Terminal rendering path ─────────────────────────────
-  InstructionThrottle throttle(throttleInstructionsPerSecond);
-  throttle.reset();
-
-      renderer.clearScreen();
-
-      fador::ui::InputManager input(kbd);
-      input.setBIOS(bios);
-      bios.setInputPollCallback([&input]() { input.pollInput(); });
-      bios.setIdleCallback([&renderer, &pit, &cpu, &decoder, &kbd, &pic,
-                &picSlave, &cmos,
-                &dispatchPendingHardwareInterrupt]() {
-        pit.update();
-        while (pit.checkPendingIRQ0()) {
-          pic.raiseIRQ(0);
-        }
-        if (kbd.checkPendingIRQ()) {
-          pic.raiseIRQ(1);
-        }
-        cmos.advanceTime();
-        while (cmos.checkPendingIRQ8()) {
-          picSlave.raiseIRQ(0);
-        }
-        dispatchPendingHardwareInterrupt(false);
-        static auto lr = std::chrono::steady_clock::now();
-        auto now = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lr)
-                .count() > 33) {
-          renderer.render();
-          lr = now;
-        }
-      });
-      dos.setKeyboard(kbd);
-      dos.setInputPollCallback([&input]() { input.pollInput(); });
-      dos.setIdleCallback([&pit, &cpu, &decoder, &kbd, &pic,
-               &picSlave, &cmos,
-               &dispatchPendingHardwareInterrupt]() {
-        pit.update();
-        while (pit.checkPendingIRQ0()) { pic.raiseIRQ(0); }
-        if (kbd.checkPendingIRQ()) { pic.raiseIRQ(1); }
-        cmos.advanceTime();
-        while (cmos.checkPendingIRQ8()) { picSlave.raiseIRQ(0); }
-        dispatchPendingHardwareInterrupt(false);
-      });
-
-      cpu.setEFLAGS(cpu.getEFLAGS() | fador::cpu::FLAG_INTERRUPT);
-
-      bool running = true;
-      uint64_t instrCount = 0;
-      std::vector<float> audioBuf;
-
-      while (running) {
-        emitInstructionTrace();
-        decoder.step();
-        cpu.addCycles(1);
-        instrCount++;
-
-        if ((instrCount & 0x3FF) == 0) {
-          pit.update();
-
-          while (pit.checkPendingIRQ0()) {
-            pic.raiseIRQ(0);
-          }
-          if (kbd.checkPendingIRQ()) {
-            pic.raiseIRQ(1);
-          }
-          cmos.advanceTime();
-          while (cmos.checkPendingIRQ8()) {
-            picSlave.raiseIRQ(0);
-          }
-
-          dispatchPendingHardwareInterrupt(true);
-
-          // Handle Ctrl+Alt+Del reset
-          if (bios.shouldReset()) {
-            LOG_INFO("Reset requested — terminating");
-            running = false;
-            break;
-          }
-        }
-
-        if (stopAfterCycles > 0 && instrCount >= stopAfterCycles) {
-          if (!handleStopAfter(instrCount, true)) {
-            running = false;
-            break;
-          }
-          continue;
-        }
-
-        if (dos.isTerminated()) {
-          LOG_INFO("Program terminated normally with exit code ",
-                   (int)dos.getExitCode(), " after ", instrCount,
-                   " instructions");
-          // Dump text-mode VGA VRAM to see any error messages
-          {
-            for (int row = 0; row < 25; ++row) {
-              std::string vramText;
-              for (int col = 0; col < 80; ++col) {
-                uint8_t ch = memory.read8(0xB8000 + (row * 80 + col) * 2);
-                vramText += (ch >= 0x20 && ch < 0x7F) ? static_cast<char>(ch) : ' ';
-              }
-              while (!vramText.empty() && vramText.back() == ' ')
-                vramText.pop_back();
-              if (!vramText.empty())
-                LOG_INFO("VRAM[", row, "]: ", vramText);
-            }
-          }
-          if (dumpOnExit) {
-            debugger.dumpState();
-          }
+        if (maxSeconds > 0 &&
+            now - runStart > std::chrono::duration<double>(maxSeconds)) {
+          LOG_INFO("Time limit of ", maxSeconds, " s reached after ",
+                   instrCount, " instructions");
+          exitStatus = 124;
           running = false;
-          break;
         }
+        throttle.pace(instrCount);
+      }
+    }
 
-        if ((instrCount & 0x3FF) == 0) {
-          input.pollInput();
-          pit.update();
+    {
+      auto elapsed = std::chrono::duration<double>(
+                         std::chrono::steady_clock::now() - runStart)
+                         .count();
+      LOG_INFO("Executed ", instrCount, " instructions in ", elapsed,
+               " s (", elapsed > 0 ? instrCount / elapsed / 1e6 : 0.0,
+               " MIPS)");
+    }
 
-          while (pit.checkPendingIRQ0()) {
-            pic.raiseIRQ(0);
+    // Final frame: screenshot / text dump for automated runs
+    {
+      fador::ui::FrameRenderer frame(memory, vga);
+      frame.setBIOS(&bios);
+      if (!screenshotPath.empty()) {
+        if (frame.render(false) && frame.savePNG(screenshotPath))
+          LOG_INFO("Screenshot written to ", screenshotPath, " (",
+                   frame.width(), "x", frame.height(), ")");
+        else
+          LOG_WARN("Could not write screenshot to ", screenshotPath);
+      }
+      std::string text = frame.textScreen();
+      if (headless) {
+        if (!text.empty())
+          std::fwrite(text.data(), 1, text.size(), stdout);
+      } else if (!text.empty()) {
+        std::string line;
+        int row = 0;
+        for (char ch : text) {
+          if (ch == '\n') {
+            if (!line.empty())
+              LOG_INFO("VRAM[", row, "]: ", line);
+            line.clear();
+            ++row;
+          } else {
+            line += ch;
           }
-          if (kbd.checkPendingIRQ()) {
-            pic.raiseIRQ(1);
-          }
-          dispatchPendingHardwareInterrupt(true);
-
-          static auto lastRender = std::chrono::steady_clock::now();
-          auto now = std::chrono::steady_clock::now();
-
-          // Audio generation
-          uint32_t queuedAudio = audio.getQueuedAudioSize();
-          const uint32_t targetQueueBytes = 32768; // 4096 samples
-          const uint32_t thresholdBytes = 16384;   // 2048 samples
-          if (queuedAudio < thresholdBytes) {
-            size_t samplesNeeded =
-                (targetQueueBytes - queuedAudio) / 8; // 2 channels * 4 bytes
-            if (samplesNeeded > 0) {
-              audioBuf.assign(samplesNeeded * 2, 0.0f);
-              adlib.generateSamples(audioBuf.data(), samplesNeeded);
-              sb.generateSamples(audioBuf.data(), samplesNeeded);
-              audio.queueSamples(audioBuf.data(), samplesNeeded * 2);
-              adlib.updateTimers((double)samplesNeeded / 44100.0);
-            }
-          }
-
-          if (std::chrono::duration_cast<std::chrono::milliseconds>(now -
-                                                                    lastRender)
-                  .count() > 33) {
-            renderer.render();
-            lastRender = now;
-          }
-
-          throttle.pace(instrCount);
         }
       }
-
-      renderer.render(true);
     }
+    if (dumpOnExit)
+      debugger.dumpState();
+    renderFrame(true);
+    return headless ? exitStatus : 0;
 
   } catch (const std::exception &e) {
     LOG_ERROR("Fatal system error: ", e.what());

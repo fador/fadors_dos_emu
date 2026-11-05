@@ -548,7 +548,11 @@ void BIOS::handleMouseService() {
 void BIOS::handleVideoService() {
   uint8_t ah = m_cpu.getReg8(cpu::AH);
   switch (ah) {
+  case 0x4F: // VESA BIOS Extensions
+    handleVbeService();
+    break;
   case 0x00: {                                  // Set Video Mode
+    resetVbeState();
     uint8_t al = m_cpu.getReg8(cpu::AL) & 0x7F; // bit 7 = don't clear if set
     bool clearScreen = !(m_cpu.getReg8(cpu::AL) & 0x80);
     const auto *mi = findVideoMode(al);
@@ -1492,6 +1496,8 @@ void BIOS::initialize() {
     PAL[i * 3 + 1] = static_cast<uint8_t>(0);
     PAL[i * 3 + 2] = static_cast<uint8_t>(0);
   }
+
+  initializeVbeRom();
 
   // 2. Setup IVT (Interrupt Vector Table) vectors
   // Each vector gets a unique HLE intercept stub at F000:(0x100 + vector * 16).

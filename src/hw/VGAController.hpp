@@ -25,6 +25,15 @@ public:
     void planeWrite8(uint32_t offset, uint8_t value);
     uint8_t planeRead8(uint32_t offset) const;
 
+    // VBE banked framebuffer window.  When enabled, the A0000h-AFFFFh
+    // window is a 64 KiB view into SVGA video memory at physical
+    // `windowBase` (VBE_LFB_BASE + bank * 64 KiB) instead of the VGA planes.
+    void setSvgaWindow(bool enabled, uint32_t windowBase) {
+        m_svgaWindowEnabled = enabled;
+        m_svgaWindowBase = windowBase;
+    }
+    bool svgaWindowEnabled() const { return m_svgaWindowEnabled; }
+
     // Read a specific plane byte (for renderer use)
     uint8_t readPlane(int plane, uint32_t offset) const {
         return m_planes[plane & 3][offset & 0xFFFF];
@@ -84,6 +93,9 @@ private:
     // CRTC registers (port 0x3D4/0x3D5) — mostly stubs
     uint8_t m_crtcIndex = 0;
     std::array<uint8_t, 0x19> m_crtcRegs{};
+
+    bool m_svgaWindowEnabled = false;
+    uint32_t m_svgaWindowBase = 0;
 
     // VGA plane memory (4 planes × 64KB each = 256KB total)
     std::array<std::array<uint8_t, 65536>, 4> m_planes{};
