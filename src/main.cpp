@@ -325,9 +325,9 @@ void printHelp(const char *programName) {
     "  --stop-after-debugger     When --stop-after triggers, enter the interactive debugger.\n"
     "  --dump-on-exit            Dump CPU state when the program terminates.\n"
     "  --instruction-trace=N     Print a trace line per executed instruction for the next N.\n"
-    "  --instruction-trace-from=ADDR\n"
+    "  --instruction-trace-from=ADDR[#N]\n"
     "                            Delay --instruction-trace until CS:EIP reaches this hex\n"
-    "                            linear address.\n"
+    "                            linear address (the N-th time it is reached with #N).\n"
     "  --instruction-trace-step  Pause between each instruction trace line (ENTER to step,\n"
     "                            sN to skip N, q to quit stepping, d for debugger).\n"
     "  --trace=<cats>            Enable trace-level logging for categories: cpu, video, dos\n"
@@ -652,6 +652,7 @@ int main(int argc, char *argv[]) {
     bool instructionTraceStep = false;
     uint64_t instructionTraceSkipSteps = 0;
     std::optional<uint32_t> instructionTraceFrom;
+    uint64_t instructionTraceSkipHits = 0;
     uint64_t throttleInstructionsPerSecond = 0; // 0 = disabled
     std::string throttleLabel;
     std::string execAsm;          // --exec="asm instructions"
@@ -713,7 +714,18 @@ int main(int argc, char *argv[]) {
       } else if (arg.find("--instruction-trace=") == 0) {
         instructionTraceCount = std::stoull(arg.substr(20));
       } else if (arg.find("--instruction-trace-from=") == 0) {
-        auto parsedAddress = parseLinearHexAddress(arg.substr(25));
+        std::string spec = arg.substr(25);
+        if (auto hash = spec.find('#'); hash != std::string::npos) {
+          try {
+            const uint64_t hit = std::stoull(spec.substr(hash + 1));
+            instructionTraceSkipHits = hit > 0 ? hit - 1 : 0;
+          } catch (...) {
+            LOG_ERROR("Invalid hit count in --instruction-trace-from: ", spec);
+            return 1;
+          }
+          spec.resize(hash);
+        }
+        auto parsedAddress = parseLinearHexAddress(spec);
         if (!parsedAddress) {
           LOG_ERROR("Invalid --instruction-trace-from address: ",
                     arg.substr(25), ". Use a hex linear address.");
@@ -831,8 +843,8 @@ int main(int argc, char *argv[]) {
       return 1;
     }
 
-    fador::ui::Debugger::TraceRequest instructionTrace{instructionTraceCount,
-                                                       instructionTraceFrom};
+    fador::ui::Debugger::TraceRequest instructionTrace{
+        instructionTraceCount, instructionTraceFrom, instructionTraceSkipHits};
 
     auto emitInstructionTrace = [&]() {
       if (debugger.emitTraceIfRequested(instructionTrace)) {

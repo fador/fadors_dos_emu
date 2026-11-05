@@ -896,15 +896,52 @@ TEST_CASE("Keyboard: pushMakeKey triggers IRQ and queues to HW buffer", "[KBD][I
     // Should trigger IRQ
     REQUIRE(kbd.checkPendingIRQ());
 
+    // HW buffer should have the scancode (read by the INT 9 handler)
+    uint8_t sc = kbd.read8(0x60);
+    REQUIRE(sc == 0x1E);
+
     // BIOS buffer should have the key
     REQUIRE(kbd.hasKey());
     auto key = kbd.popKey();
     REQUIRE(key.first == 'a');
     REQUIRE(key.second == 0x1E);
+}
 
-    // HW buffer should have the scancode
-    uint8_t sc = kbd.read8(0x60);
-    REQUIRE(sc == 0x1E);
+TEST_CASE("Keyboard: key read by INT 16h before its IRQ is not delivered again", "[KBD]") {
+    hw::KeyboardController kbd;
+
+    // INT 16h sees the key before IRQ 1 has been raised
+    kbd.pushMakeKey('a', 0x1E);
+    kbd.pushBreakKey(0x1E);
+    REQUIRE(kbd.hasKey());
+    REQUIRE(kbd.popKey().first == 'a');
+    // Only the release is still to come
+    REQUIRE(kbd.checkPendingIRQ());
+    REQUIRE(!kbd.checkPendingIRQ());
+    REQUIRE(kbd.read8(0x60) == 0x9E);
+
+    // IRQ already raised but not yet handled: the handler reads a release
+    kbd.pushMakeKey('b', 0x30);
+    REQUIRE(kbd.checkPendingIRQ());
+    REQUIRE(kbd.popKey().first == 'b');
+    REQUIRE((kbd.read8(0x64) & 0x01) == 0);
+    REQUIRE(kbd.read8(0x60) == 0xB0);
+
+    // Extended keys drop their E0 prefix too
+    kbd.pushMakeKeyExtended(0, 0x4D);
+    REQUIRE(kbd.popKey().second == 0x4D);
+    REQUIRE(!kbd.checkPendingIRQ());
+    REQUIRE((kbd.read8(0x64) & 0x01) == 0);
+
+    // A key whose IRQ was handled leaves the controller alone
+    kbd.pushMakeKey('c', 0x2E);
+    kbd.pushMakeKey('c', 0x2E);
+    REQUIRE(kbd.checkPendingIRQ());
+    REQUIRE(kbd.read8(0x60) == 0x2E);
+    REQUIRE(kbd.popKey().first == 'c');
+    REQUIRE(kbd.checkPendingIRQ());   // the second press is still pending
+    REQUIRE(kbd.read8(0x60) == 0x2E);
+    REQUIRE(kbd.popKey().first == 'c');
 }
 
 TEST_CASE("Keyboard: pushKeyWithBreak queues both make and break scancodes", "[KBD]") {
@@ -922,13 +959,6 @@ TEST_CASE("Keyboard: pushKeyWithBreak queues both make and break scancodes", "[K
     // Push a key with auto-break ('A', scancode 0x1E, break = 0x1E | 0x80 = 0x9E)
     kbd.pushKeyWithBreak('a', 0x1E);
 
-    // Should have both make and break in HW buffer, and key in BIOS buffer
-    REQUIRE(kbd.hasKey()); // BIOS buffer has the key
-
-    auto key = kbd.popKey();
-    REQUIRE(key.first == 'a');   // ASCII
-    REQUIRE(key.second == 0x1E); // Scancode
-
     // HW buffer should have make scancode + break scancode
     REQUIRE(kbd.checkPendingIRQ()); // IRQ for make
     uint8_t sc1 = kbd.read8(0x60);
@@ -937,6 +967,12 @@ TEST_CASE("Keyboard: pushKeyWithBreak queues both make and break scancodes", "[K
     REQUIRE(kbd.checkPendingIRQ()); // IRQ for break
     uint8_t sc2 = kbd.read8(0x60);
     REQUIRE(sc2 == 0x9E); // Break (0x80 | 0x1E)
+
+    // ... and the key in the BIOS buffer
+    REQUIRE(kbd.hasKey());
+    auto key = kbd.popKey();
+    REQUIRE(key.first == 'a');   // ASCII
+    REQUIRE(key.second == 0x1E); // Scancode
 }
 
 TEST_CASE("Keyboard: pushMakeKey / pushBreakKey separate events", "[KBD]") {
@@ -954,14 +990,14 @@ TEST_CASE("Keyboard: pushMakeKey / pushBreakKey separate events", "[KBD]") {
     // Push make key ('B', scancode 0x30)
     kbd.pushMakeKey('b', 0x30);
 
+    REQUIRE(kbd.checkPendingIRQ());
+    uint8_t scMake = kbd.read8(0x60);
+    REQUIRE(scMake == 0x30);
+
     REQUIRE(kbd.hasKey());
     auto key = kbd.popKey();
     REQUIRE(key.first == 'b');
     REQUIRE(key.second == 0x30);
-
-    REQUIRE(kbd.checkPendingIRQ());
-    uint8_t scMake = kbd.read8(0x60);
-    REQUIRE(scMake == 0x30);
 
     // Push break for the same scancode
     kbd.pushBreakKey(0x30);

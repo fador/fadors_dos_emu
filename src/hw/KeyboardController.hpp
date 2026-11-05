@@ -2,7 +2,7 @@
 #include "IODevice.hpp"
 #include <cstdint>
 #include <functional>
-#include <queue>
+#include <deque>
 #include <utility>
 
 namespace fador::memory { class MemoryBus; }
@@ -45,7 +45,11 @@ public:
     void setMemoryBus(fador::memory::MemoryBus* memory) { m_memory = memory; }
 
 private:
-    struct KeyEntry { uint8_t ascii; uint8_t scancode; };
+    // hwPending: the key's make code is still waiting in the controller
+    // (its IRQ 1 has not been handled yet).
+    struct KeyEntry { uint8_t ascii; uint8_t scancode; bool hwPending; bool extended; };
+    void pushKeyEntry(uint8_t ascii, uint8_t scancode, bool hwPending, bool extended);
+    void withdrawMakeCode(const KeyEntry &entry);
     int m_pendingIRQCount{0};
 
     // Real hardware limits: 8042 has 1-byte output buffer; BIOS keyboard
@@ -54,8 +58,8 @@ private:
     static constexpr size_t kMaxKeyBuffer = 32;
 
     fador::memory::MemoryBus* m_memory{nullptr};
-    std::queue<KeyEntry> m_keyBuffer;         // BIOS-level buffer (for INT 16h)
-    std::queue<uint8_t> m_hwScanBuffer;       // Hardware scancode buffer (for port 0x60 / INT 9)
+    std::deque<KeyEntry> m_keyBuffer;          // BIOS-level buffer (for INT 16h)
+    std::deque<uint8_t> m_hwScanBuffer;        // Hardware scancode buffer (for port 0x60 / INT 9)
     uint8_t m_lastScancode{0};                // Last scancode read from port 0x60
     uint8_t m_status;
     uint8_t m_commandByte;

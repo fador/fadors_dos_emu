@@ -16,6 +16,7 @@ public:
     struct TraceRequest {
         uint64_t remaining = 0;
         std::optional<uint32_t> startLinearAddress;
+        uint64_t skipHits = 0; // start at hit skipHits+1 of startLinearAddress
     };
 
     Debugger(cpu::CPU& cpu, memory::MemoryBus& memory, cpu::InstructionDecoder& decoder);

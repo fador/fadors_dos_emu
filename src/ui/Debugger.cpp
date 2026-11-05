@@ -195,9 +195,13 @@ bool Debugger::emitTraceIfRequested(TraceRequest& request, std::ostream& out) co
         return false;
     }
 
-    const uint32_t linearIP = currentLinearIP();
-    if (request.startLinearAddress && linearIP != *request.startLinearAddress) {
-        return false;
+    if (request.startLinearAddress) {
+        if (currentLinearIP() != *request.startLinearAddress)
+            return false;
+        if (request.skipHits > 0) {
+            --request.skipHits;
+            return false;
+        }
     }
 
     request.startLinearAddress.reset();
