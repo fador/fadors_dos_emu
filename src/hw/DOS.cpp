@@ -673,6 +673,35 @@ void DOS::handleDOSService() {
     LOG_DOS("DOS: Set Current PSP to 0x", std::hex, pspVal, " (segment 0x", m_pspSegment, ")");
     break;
   }
+  case 0x66: { // Get/Set global code page
+    if (m_cpu.getReg8(cpu::AL) == 0x01) {
+      m_cpu.setReg16(cpu::BX, 437); // active code page
+      m_cpu.setReg16(cpu::DX, 437); // system code page
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    } else if (m_cpu.getReg8(cpu::AL) == 0x02 && m_cpu.getReg16(cpu::BX) == 437) {
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    } else {
+      m_cpu.setReg16(cpu::AX, 0x01); // function not supported
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+    }
+    break;
+  }
+  case 0x63: { // DBCS lead-byte table (AL=00h) / interim console flag
+    if (m_cpu.getReg8(cpu::AL) == 0x00) {
+      // No double-byte character set: DS:SI -> empty table (0000h),
+      // kept in the DOS data segment next to the List of Lists.
+      constexpr uint16_t kDbcsTableOff = 0x01FC;
+      m_memory.write16((static_cast<uint32_t>(kListOfListsSeg) << 4) +
+                           kDbcsTableOff, 0);
+      m_cpu.setSegReg(cpu::DS, kListOfListsSeg);
+      m_cpu.setReg16(cpu::SI, kDbcsTableOff);
+      m_cpu.setReg8(cpu::AL, 0x00);
+    } else {
+      m_cpu.setReg8(cpu::DL, 0x00);
+    }
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    break;
+  }
   case 0x60: { // Truename: canonicalize a path (DS:SI -> ES:DI, 128 bytes)
     const uint32_t src = m_cpu.getSegBase(cpu::DS) + m_cpu.getReg16(cpu::SI);
     const uint32_t dst = m_cpu.getSegBase(cpu::ES) + m_cpu.getReg16(cpu::DI);

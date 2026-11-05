@@ -5251,7 +5251,9 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
       frame.origCS = oldCs;
       frame.origEIP = m_cpu.getEIP();
       frame.savedEAX = m_cpu.getReg32(EAX); // Save for bailout diagnostics
-      if (!(m_cpu.getEFLAGS() & 0x00020000) && oldEsp > 0xFFFF) {
+      uint32_t dos4gwHostSP = 0;
+      if (!(m_cpu.getEFLAGS() & 0x00020000) && oldEsp > 0xFFFF &&
+          dos4gwReflectionStack(dos4gwHostSP)) {
         frame.dpmiStackSwitch = true;
         frame.origESP = oldEsp;
         frame.origSS = oldSs;
@@ -5407,6 +5409,41 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
   m_cpu.setEIP(eip32);
 }
 
+// DOS/4GW keeps the stack pointer of its interrupt-reflection stack at
+// offset 0A42h of its data selector 00AFh.  The reflection-stack emulation
+// in triggerInterrupt/injectHardwareInterrupt must only engage when that
+// structure really exists: other DPMI clients (PMODE/W, DOS/32A, CauseWay,
+// DJGPP, ...) may have an unrelated descriptor at 00AFh, and treating it as
+// DOS/4GW's discards the flags their handlers return (e.g. CF from INT 21h).
+bool InstructionDecoder::dos4gwReflectionStack(uint32_t &hostSP) const {
+  constexpr uint16_t kSel = 0x00AF;
+  constexpr uint32_t kSpOffset = 0x0A42;
+  if (!(m_cpu.getCR(0) & 1))
+    return false;
+  const auto &ldtr = m_cpu.getLDTR();
+  const uint32_t idx = kSel >> 3;
+  if (ldtr.base == 0 || idx * 8 + 7 > ldtr.limit)
+    return false;
+  const uint32_t lo = m_memory.read32(ldtr.base + idx * 8);
+  const uint32_t hi = m_memory.read32(ldtr.base + idx * 8 + 4);
+  const bool present = (hi & 0x8000) != 0;
+  const bool codeOrData = (hi & 0x1000) != 0;
+  const bool isCode = (hi & 0x0800) != 0;
+  if (!present || !codeOrData || isCode)
+    return false;
+  uint32_t limit = (lo & 0xFFFF) | (hi & 0x000F0000);
+  if (hi & 0x00800000)
+    limit = (limit << 12) | 0xFFF;
+  if (limit < kSpOffset + 3)
+    return false;
+  const uint32_t base = (lo >> 16) | ((hi & 0xFF) << 16) | (hi & 0xFF000000);
+  const uint32_t sp = m_memory.read32(base + kSpOffset);
+  if (sp == 0)
+    return false;
+  hostSP = sp;
+  return true;
+}
+
 void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
   syncSegmentCacheIfNeeded();
 
@@ -5484,8 +5521,13 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
       // For INT 9, HLE handled keyboard when inside the thunk (16-bit);
       // in 32-bit app code, we dispatch directly to the IDT handler below.
       if (vector != 0x09) {
-        // INT 8 timer HLE emulation (Watcom ticcount)
-        if ((m_cpu.getCR(0) & 1) && m_cpu.is32BitCode() && vector == 0x08) {
+        // INT 8 timer HLE emulation (Watcom ticcount).
+        // Legacy DOOM-under-DOS/4GW workaround: it pokes a fixed address,
+        // so only apply it when DOS/4GW's reflection stack is present;
+        // for every other program it would read/patch arbitrary memory.
+        uint32_t dos4gwSP = 0;
+        if ((m_cpu.getCR(0) & 1) && m_cpu.is32BitCode() && vector == 0x08 &&
+            dos4gwReflectionStack(dos4gwSP)) {
           uint32_t appHandler = m_memory.read32(0x26D3E0);
           if (appHandler != 0) {
             // Look for: 8B 15 XX XX XX XX = MOV EDX, [imm32]
@@ -5602,7 +5644,9 @@ void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
     // current ESP like a normal same-privilege interrupt.
     bool isOrig = ((cs == 0x08 && eip32 == (0xF0100u + vector * 16)) ||
                    (cs == 0x30 && eip32 == (0x0100u + vector * 16)));
-    if (!directAppPMDispatch && !isOrig && !(m_cpu.getEFLAGS() & 0x00020000)) {
+    uint32_t dos4gwHostSP = 0;
+    if (!directAppPMDispatch && !isOrig && !(m_cpu.getEFLAGS() & 0x00020000) &&
+        dos4gwReflectionStack(dos4gwHostSP)) {
       auto &frame = m_cpu.lastHLEFrameMut();
       frame.dpmiStackSwitch = true;
       frame.origESP = oldEsp;

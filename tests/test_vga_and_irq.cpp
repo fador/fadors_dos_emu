@@ -706,6 +706,20 @@ TEST_CASE("IRQ: Timer HLE increments app ticcount via Watcom ISR table", "[IRQ]"
         // Set the counter to a known value
         env.mem.write32(counterAddr, 100);
 
+        // Without DOS/4GW's reflection-stack selector (00AFh) the legacy
+        // workaround must not touch memory.
+        env.decoder.injectHardwareInterrupt(0x08);
+        REQUIRE(env.mem.read32(counterAddr) == 100);
+
+        // Provide DOS/4GW's data selector 00AFh with its stack pointer
+        constexpr uint32_t LDT_ADDR = 0x6000;
+        constexpr uint32_t HOST_SEG_BASE = 0x50000;
+        env.cpu.setLDTR({0x00FF, LDT_ADDR});
+        env.cpu.setLDTRSelector(0x0018);
+        env.writeDescriptor(LDT_ADDR + ((0xAFu >> 3) * 8), HOST_SEG_BASE, 0xFFFF,
+                            false, false, false);
+        env.mem.write32(HOST_SEG_BASE + 0x0A42, 0x47FC);
+
         // Inject timer interrupt
         env.decoder.injectHardwareInterrupt(0x08);
 
@@ -730,6 +744,12 @@ TEST_CASE("IRQ: Timer HLE increments app ticcount via Watcom ISR table", "[IRQ]"
         env.mem.write32(0x26D3E0, handlerAddr);
         env.mem.write32(counterAddr, 42);
 
+        // DOS/4GW reflection-stack selector enables the legacy workaround
+        env.cpu.setLDTR({0x00FF, 0x6000});
+        env.cpu.setLDTRSelector(0x0018);
+        env.writeDescriptor(0x6000 + ((0xAFu >> 3) * 8), 0x50000, 0xFFFF,
+                            false, false, false);
+        env.mem.write32(0x50000 + 0x0A42, 0x47FC);
         env.decoder.injectHardwareInterrupt(0x08);
         REQUIRE(env.mem.read32(counterAddr) == 43);
     }
