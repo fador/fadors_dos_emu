@@ -46,7 +46,13 @@ See `tests/perf/README.md` and `tests/compat/README.md` for details and referenc
 ## Running
 ```bash
 ./fadors_emu [options] <program.com|exe> [program-args...]
+./fadors_emu [options] <directory>      # DOS prompt with the directory as C:
 ```
+A program given on the command line runs with its directory's parent as
+`C:` and its own directory as the current one (`C:\GAME\GAME.EXE`); with
+`--mount=C:/path` the given directory stays the root and the program's
+directory below it becomes current.  Programs started from the DOS prompt
+run exactly like that too, with interrupts, sound and the headless options.
 
 ### Options
 | Flag | Description |
@@ -68,8 +74,10 @@ See `tests/perf/README.md` and `tests/compat/README.md` for details and referenc
 | `--stop-after-debugger` | When `--stop-after` triggers, enter the interactive debugger at that exact instruction instead of exiting |
 | `--dump-on-exit` | Dump CPU state when the program terminates |
 | `--instruction-trace=N` | Print one trace line per executed instruction for the next `N` instructions |
-| `--instruction-trace-from=ADDR` | Delay `--instruction-trace` until CS:EIP reaches the given hex linear address |
+| `--instruction-trace-from=ADDR[#N]` | Delay `--instruction-trace` until CS:EIP reaches the given hex linear address (the `N`-th time with `#N`) |
 | `--instruction-trace-step` | Pause between each instruction trace line (ENTER to step, `sN` to skip N, `q` to quit, `d` for debugger) |
+| `--io-trace=LO[-HI]` | Log every port read and write in the hex range, with the CS:EIP that made it, to stderr |
+| `--audio-wav=FILE.wav` | Record the sound output (AdLib/OPL3, Sound Blaster, PC speaker, MIDI); the log reports its peak level |
 | `--trace=<cats>` | Enable trace-level logging for category `cpu`, `video`, `dos` (comma-separated) |
 | `--debug=<cats>` | Enable debug logging for categories: `cpu`, `video`, `dos` (comma-separated) |
 | `--bench=decoder-loop\|rep-movsb\|rep-movsd` | Run an in-process benchmark without loading a program |
@@ -110,6 +118,15 @@ See `tests/perf/README.md` and `tests/compat/README.md` for details and referenc
 
 # Wait for a code address, then trace the next 16 instructions
 ./fadors_emu --instruction-trace=16 --instruction-trace-from=12345 program.com
+
+# Same, but start at the 200th time that address is reached
+./fadors_emu --instruction-trace=400 --instruction-trace-from=37BF8#200 game.exe
+
+# See what a game does with the Sound Blaster, and record what it plays
+./fadors_emu --headless --max-seconds=10 --io-trace=220-22F --audio-wav=out.wav game.exe
+
+# Start the DOS prompt in a directory and type a command into it
+./fadors_emu --headless --max-seconds=30 --keys=1:G,1.1:A,1.2:M,1.3:E,1.4:ENTER games/
 
 # Run with CPU debug logging
 ./fadors_emu --debug=cpu program.exe

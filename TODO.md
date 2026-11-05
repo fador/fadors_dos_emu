@@ -100,17 +100,20 @@
 - [x] **Native Audio Backend**
   - [x] Cross-platform audio (SDL2 Audio) with ring-buffered streaming
   - [x] PCM mixing of multiple sources
-- [x] **AdLib (OPL2 / YM3812) Emulation**
-  - [x] I/O port hooks at 0x388–0x389
-  - [x] OPL2 FM synthesis core
-- [x] **Sound Blaster DSP**
-  - [x] I/O ports 0x220–0x22F
-  - [x] 8-bit and 16-bit DMA playback (single-cycle and auto-init)
-  - [x] Mono and stereo sample rendering
-  - [x] IRQ on DMA TC and DSP block completion
-  - [x] SB Pro mixer registers
-  - [x] DSP Identify command 0xE0 (SB Pro v3.01)
-- [x] **Output Mixer** — mixing AdLib + SB PCM into a single audio stream
+- [x] **AdLib / OPL3 (YMF262 via ymfm)**
+  - [x] Ports 0x388–0x38B and the Sound Blaster's FM ports (base+0..3, +8, +9)
+  - [x] OPL timers and status reads with ISA-like latency (detection works)
+- [x] **Sound Blaster 16 (DSP 4.05)**
+  - [x] I/O ports 0x220–0x22F, BLASTER=A220 I5 D1 H5 P330 T6
+  - [x] 8-bit and 16-bit DMA playback (single-cycle, auto-init, high-speed)
+  - [x] Mono and stereo, signed/unsigned, SB Pro stereo via the mixer
+  - [x] IRQ 5 on block completion (8-bit 22Eh / 16-bit 22Fh acknowledge)
+  - [x] SB16 mixer registers, IRQ/DMA select (80h/81h), interrupt status
+  - [x] Direct DAC (command 10h), silence blocks, speaker on/off
+  - [x] Clocked by emulated time, not by the host audio device
+- [x] **PC speaker** (PIT channel 2 square waves, port 61h bit-banging, PWM)
+- [x] **Output Mixer** — AdLib + SB PCM + PC speaker into one stream
+- [x] `--audio-wav=FILE` records the output (headless tests check the level)
 
 ## Phase 8: Built-in Assembler & Disassembler
 - [x] x86 real-mode disassembler (`src/cpu/Disassembler.{hpp,cpp}`)
@@ -142,7 +145,9 @@
   - [x] `--bench-steps=N` and `--bench-warmup=N` for tuning
 - [x] **Instruction Tracing**
   - [x] `--instruction-trace=N` (conditional, with optional start address)
+  - [x] `--instruction-trace-from=ADDR#N` starts at the N-th hit of an address
   - [x] `--instruction-trace-step` interactive stepping through traces
+- [x] **Port I/O tracing** (`--io-trace=LO-HI`, with the CS:EIP of each access)
 - [x] **Crash Handler**
   - [x] SEH/signal crash dump with registers, EIP disassembly, stack, VRAM
 - [x] **Headless runs** (`--headless`, `--max-seconds`, `--screenshot[-at]`, `--keys`)
@@ -180,9 +185,10 @@
   - [x] CauseWay (through DPMI; `CAUSEWAY=DPMI` is set by default)
   - [x] DJGPP / CWSDPMI-style clients
 - [x] 386 paging for raw-mode software (CR0.PG, CR3, INVLPG, PSE)
-- [ ] Page faults delivered to the guest (#PF with instruction restart)
-- [ ] Privilege levels: call gates, inter-ring CALL/RET/IRET, TSS stack switch
-      (needed for CauseWay and other extenders in raw/VCPI mode)
+- [x] Page faults delivered to the guest (#PF with instruction restart)
+- [x] Privilege levels: call gates, inter-ring CALL/RET/IRET, TSS stack switch
+      (for software that owns protected mode itself)
+- [ ] CauseWay in raw mode (CAUSEWAY=DPMI is the default; raw mode still fails)
 - [ ] VCPI (INT 67h DE00h) for extenders that prefer it over DPMI
 
 ## Missing Features / Compatibility Gaps
@@ -214,7 +220,9 @@
   - [x] Internal commands: DIR, CD, MD, RD, COPY, DEL, REN, TYPE, TREE, MOVE
   - [x] Internal commands: ECHO, SET, PATH, PROMPT, CLS, VER, VOL, DATE, TIME
   - [x] Internal commands: MEM, HELP, MOUNT, UNMOUNT, EXIT, BREAK, VERIFY
-  - [x] External program execution with PATH search
+  - [x] External program execution with PATH search, run through the same
+        loop as a program given on the command line (IRQs, audio, --keys,
+        --max-seconds); the shell keeps a small resident block
   - [x] Drive mounting via `MOUNT` command and `--mount=` CLI flag
   - [x] Directory-as-C: mounting when directory path given as argument
 - [x] **INT 21h Updates**
@@ -232,3 +240,15 @@
   - [x] `CHOICE` (DOS 6.22 specific)
   - [x] Unit tests (`test_batch.cpp` — 36 tests)
   - [ ] Unit tests (`test_batch.cpp`)
+
+## Known Use-Case Issues
+- [ ] Cannon Fodder 2: silent.  After opening TITLE.AMF its loader grows its
+      heap with AH=4Ah, which fails because a 2-paragraph block it allocated
+      sits right after the program block; the music is then not loaded.
+      Needs comparison with a real DOS run to find the earlier divergence.
+- [ ] Modplay Pro plays about 7% sharp through the Sound Blaster direct DAC
+      (the DAC rate is exact, so this is probably its own pitch table).
+- Use-case configuration notes (not emulator bugs): DOOM 1.1 reads its
+  settings from C:\DOOMDATA\DEFAULT.CFG and stores the SB port in decimal
+  (`snd_sbport 544`); PUKE_W01.MOD is a 6-channel module that Modplay Pro
+  (4 channels) rejects; XTC-Play needs module files to play.
