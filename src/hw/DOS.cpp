@@ -424,7 +424,11 @@ bool DOS::handleInterrupt(uint8_t vector) {
 void DOS::handleDOSService() {
   uint8_t ah = m_cpu.getReg8(cpu::AH);
   LOG_DEBUG("[DOS] INT 21h AH=0x", std::hex, (int)ah, " AL=0x",
-            (int)m_cpu.getReg8(cpu::AL));
+            (int)m_cpu.getReg8(cpu::AL), " BX=0x", m_cpu.getReg16(cpu::BX),
+            " CX=0x", m_cpu.getReg16(cpu::CX), " DX=0x",
+            m_cpu.getReg16(cpu::DX), " DS=0x", m_cpu.getSegReg(cpu::DS),
+            " from ", m_cpu.getSegReg(cpu::CS), ":",
+            m_cpu.getInstructionStartEIP(), (m_cpu.getCR(0) & 1) ? " PM" : " RM");
   switch (ah) {
   case 0x00: // Terminate Program (same as INT 20h)
     terminateProcess(0);
@@ -3184,9 +3188,16 @@ void DOS::handleFileService() {
     // Fall back to the loaded program's host path if the name looks like
     // just an extension and the file doesn't exist.
     if (!fs::exists(hostPath) && !m_programPath.empty()) {
-      fs::path fn = fs::path(filename).filename();
-      std::string fnStr = upperASCII(fn.string());
-      if (fnStr.size() >= 4 && fnStr.substr(fnStr.size() - 4) == ".EXE") {
+      // Only a bare extension (e.g. "C:\\.EXE") is treated as the program's
+      // own executable; any other missing *.EXE must fail normally, or
+      // existence probes (e.g. the Watcom stub looking for DOS4G.EXE)
+      // would "find" the running program instead.
+      std::string fnStr = filename;
+      size_t sep = fnStr.find_last_of("\\/:");
+      if (sep != std::string::npos)
+        fnStr = fnStr.substr(sep + 1);
+      fnStr = upperASCII(fnStr);
+      if (fnStr == ".EXE") {
         hostPath = m_programPath;
         fh->path = hostPath;
         LOG_INFO("DOS: Filename fallback: '", filename, "' -> '",

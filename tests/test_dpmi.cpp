@@ -1525,8 +1525,10 @@ TEST_CASE("HLE 0F FF chain merges only carry for INT 0x31", "[dpmi][hle][mask]")
 
     // After the chain return, the CPU should have been set to newEIP/newCS
     // and EFLAGS should equal the stored popFlags with only the carry bit
-    // merged from the current flags (mask == FLAG_CARRY for vec=0x31).
-    uint32_t expected = popFlagsVal | cpu::FLAG_CARRY;
+    // merged from the handler's result (mask == FLAG_CARRY for vec=0x31).
+    // The 0205h call succeeds, so CF must be clear even though the caller
+    // entered with CF=1 (PMODE/W relies on this).
+    uint32_t expected = popFlagsVal;
     REQUIRE(env.cpu.getEIP() == newEip);
     REQUIRE(env.cpu.getSegReg(cpu::CS) == static_cast<uint16_t>(newCs & 0xFFFFu));
     REQUIRE((env.cpu.getEFLAGS() & 0xFFFFu) == (expected & 0xFFFFu));

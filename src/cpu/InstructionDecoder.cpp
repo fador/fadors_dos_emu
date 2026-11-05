@@ -4867,14 +4867,13 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
         // vectors, use the flags after handlers ran so handler changes are
         // preserved.
         uint32_t mergeSource32;
-        if (vector == 0x31) {
-          if ((afterFlags & FLAG_CARRY) != 0)
-            mergeSource32 = afterFlags;
-          else
-            mergeSource32 = entryFlags;
-        } else {
-          mergeSource32 = afterFlags;
-        }
+        // A handled service reports its result in the flags it set (DPMI
+
+        // INT 31h clears CF on success even if the caller entered with
+
+        // CF=1); an unhandled vector keeps the caller's flags.
+
+        mergeSource32 = handled ? afterFlags : entryFlags;
         popFlags = (popFlags & ~mask) | (mergeSource32 & mask);
         m_cpu.setEFLAGS(popFlags);
         loadSegment(CS, newCs);
@@ -4890,25 +4889,24 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
         uint16_t popFlags16 = m_memory.read16(ssBase + currentESP + 4);
         uint16_t mask16 = static_cast<uint16_t>(mask);
         uint32_t mergeSource32_for16;
-        if (vector == 0x31) {
-          if ((afterFlags & FLAG_CARRY) != 0)
-            mergeSource32_for16 = afterFlags;
-          else
-            mergeSource32_for16 = entryFlags;
-        } else {
-          mergeSource32_for16 = afterFlags;
-        }
+        // A handled service reports its result in the flags it set (DPMI
+
+        // INT 31h clears CF on success even if the caller entered with
+
+        // CF=1); an unhandled vector keeps the caller's flags.
+
+        mergeSource32_for16 = handled ? afterFlags : entryFlags;
         uint16_t mergeSource16 = static_cast<uint16_t>(mergeSource32_for16);
         popFlags16 = (popFlags16 & ~mask16) | (mergeSource16 & mask16);
         uint32_t merged16 = (mergeSource32_for16 & 0xFFFF0000) | popFlags16;
           if (vector == 0x21) {
-            LOG_INFO("HLE return16: vec=0x21 newIp=0x", std::hex, newIp,
+            LOG_DEBUG("HLE return16: vec=0x21 newIp=0x", std::hex, newIp,
                      " newCs=0x", newCs, " popFlags16=0x", popFlags16,
                      " merged16=0x", merged16, " preSP=0x", currentESP);
           }
         m_cpu.setEFLAGS(merged16);
           if (vector == 0x21) {
-            LOG_INFO("HLE setEFLAGS after: vec=0x21 curEFLAGS=0x", std::hex, m_cpu.getEFLAGS());
+            LOG_DEBUG("HLE setEFLAGS after: vec=0x21 curEFLAGS=0x", std::hex, m_cpu.getEFLAGS());
           }
         loadSegment(CS, newCs);
         m_cpu.setEIP(newIp);
@@ -4956,14 +4954,13 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
           uint16_t newCs = m_memory.read32(frameAddr + 4) & 0xFFFF;
           uint32_t popFlags = m_memory.read32(frameAddr + 8);
           uint32_t mergeSrc;
-          if (vector == 0x31) {
-            if ((afterFlags & FLAG_CARRY) != 0)
-              mergeSrc = afterFlags;
-            else
-              mergeSrc = entryFlags;
-          } else {
-            mergeSrc = afterFlags;
-          }
+          // A handled service reports its result in the flags it set (DPMI
+
+          // INT 31h clears CF on success even if the caller entered with
+
+          // CF=1); an unhandled vector keeps the caller's flags.
+
+          mergeSrc = handled ? afterFlags : entryFlags;
           popFlags = (popFlags & ~mask) | (mergeSrc & mask);
           m_cpu.setEFLAGS(popFlags);
           loadSegment(CS, newCs);
@@ -4978,14 +4975,13 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
           uint16_t newCs = m_memory.read16(frameAddr + 2);
           uint16_t popFlags = m_memory.read16(frameAddr + 4);
           uint32_t mergeSrc32;
-          if (vector == 0x31) {
-            if ((afterFlags & FLAG_CARRY) != 0)
-              mergeSrc32 = afterFlags;
-            else
-              mergeSrc32 = entryFlags;
-          } else {
-            mergeSrc32 = afterFlags;
-          }
+          // A handled service reports its result in the flags it set (DPMI
+
+          // INT 31h clears CF on success even if the caller entered with
+
+          // CF=1); an unhandled vector keeps the caller's flags.
+
+          mergeSrc32 = handled ? afterFlags : entryFlags;
           uint16_t mergeSrc16 = static_cast<uint16_t>(mergeSrc32);
           popFlags = (static_cast<uint16_t>(popFlags) & static_cast<uint16_t>(~mask)) | (mergeSrc16 & static_cast<uint16_t>(mask));
           uint32_t merged = (mergeSrc32 & 0xFFFF0000) | popFlags;
