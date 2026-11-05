@@ -299,6 +299,8 @@ private:
   std::array<uint8_t, DAC_SIZE> m_dac{};
   std::function<void(uint32_t, bool)> m_oobHandler;
   void reportOutOfBounds(uint32_t address, bool write) const {
+    if (m_pageFault) // the access was redirected by a pending page fault
+      return;
     if (m_oobHandler)
       m_oobHandler(address, write);
   }

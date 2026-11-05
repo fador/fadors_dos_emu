@@ -1410,7 +1410,39 @@ bool InstructionDecoder::checkCondition(uint8_t cond) {
   }
 }
 
+// With paging on, a CPU access to a not-present page has no effect and
+// leaves a pending fault in the MemoryBus.  The instruction is then undone
+// (registers, flags, EIP) and #PF is delivered, so the guest's handler can
+// map the page and restart it.
 void InstructionDecoder::step() {
+  if (!m_memory.pagingEnabled()) [[likely]] {
+    stepInstruction();
+    return;
+  }
+  std::array<uint32_t, 8> regs;
+  for (int i = 0; i < 8; ++i)
+    regs[i] = m_cpu.getReg32(static_cast<uint8_t>(i));
+  const uint32_t flags = m_cpu.getEFLAGS();
+  const uint32_t eip = m_cpu.getEIP();
+  stepInstruction();
+  uint32_t linear = 0, error = 0;
+  if (m_memory.takePageFault(linear, error)) {
+    for (int i = 0; i < 8; ++i)
+      m_cpu.setReg32(static_cast<uint8_t>(i), regs[i]);
+    m_cpu.setEFLAGS(flags);
+    m_instrStartEIP = eip;
+    m_cpu.setCR(2, linear);
+    if (currentCPL() == 3)
+      error |= 4;
+    else
+      error &= ~4u;
+    raiseException(14, error);
+    // A fault while delivering the fault is not modelled further.
+    m_memory.takePageFault(linear, error);
+  }
+}
+
+void InstructionDecoder::stepInstruction() {
   m_stepCount++;
   syncSegmentCacheIfNeeded();
   m_hasPrefix66 = m_cpu.is32BitCode();
@@ -1571,21 +1603,35 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     break;
 
   case 0xCC: // INT3
-    triggerInterrupt(3);
+    if (m_cpu.nativeProtection())
+      nativeInterrupt(3, true, false, 0);
+    else
+      triggerInterrupt(3);
     break;
 
   case 0xCD: { // INT imm8
     uint8_t vec = fetch8();
-    triggerInterrupt(vec);
+    if (m_cpu.nativeProtection())
+      nativeInterrupt(vec, true, false, 0);
+    else
+      triggerInterrupt(vec);
     break;
   }
   case 0xCE: { // INTO
-    if (m_cpu.getEFLAGS() & 0x0800)
-      triggerInterrupt(4);
+    if (m_cpu.getEFLAGS() & 0x0800) {
+      if (m_cpu.nativeProtection())
+        nativeInterrupt(4, true, false, 0);
+      else
+        triggerInterrupt(4);
+    }
     break;
   }
 
   case 0xCF: { // IRET/IRETD
+    if (m_cpu.nativeProtection()) {
+      nativeIret(m_hasPrefix66);
+      break;
+    }
     // Compute the physical address of the IRET source frame BEFORE popping,
     // so we can match it against stored HLE frames afterwards.
     bool iretStackIs32 = m_cpu.is32BitStack();
@@ -3474,6 +3520,10 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                                       : getEffectiveAddress16(modrm);
         uint32_t jumpIP = m_memory.lread32(addr);
         uint16_t jumpCS = m_memory.lread16(addr + 4);
+        if (m_cpu.nativeProtection()) {
+          nativeFarTransfer(jumpCS, jumpIP, true, true);
+          break;
+        }
         m_cpu.push32(m_cpu.getSegReg(CS));
         m_cpu.push32(m_cpu.getEIP());
         loadSegment(CS, jumpCS);
@@ -3488,6 +3538,10 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                                       : getEffectiveAddress16(modrm);
         uint32_t jumpIP = m_memory.lread32(addr);
         uint16_t jumpCS = m_memory.lread16(addr + 4);
+        if (m_cpu.nativeProtection()) {
+          nativeFarTransfer(jumpCS, jumpIP, false, true);
+          break;
+        }
         loadSegment(CS, jumpCS);
         m_cpu.setEIP(jumpIP);
         break;
@@ -3520,6 +3574,10 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                                       : getEffectiveAddress16(modrm);
         uint16_t jumpIP = m_memory.lread16(addr);
         uint16_t jumpCS = m_memory.lread16(addr + 2);
+        if (m_cpu.nativeProtection()) {
+          nativeFarTransfer(jumpCS, jumpIP, true, false);
+          break;
+        }
         m_cpu.push16(m_cpu.getSegReg(CS));
         m_cpu.push16(static_cast<uint16_t>(m_cpu.getEIP()));
         loadSegment(CS, jumpCS);
@@ -3534,6 +3592,10 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
                                       : getEffectiveAddress16(modrm);
         uint16_t jumpIP = m_memory.lread16(addr);
         uint16_t jumpCS = m_memory.lread16(addr + 2);
+        if (m_cpu.nativeProtection()) {
+          nativeFarTransfer(jumpCS, jumpIP, false, false);
+          break;
+        }
         loadSegment(CS, jumpCS);
         m_cpu.setEIP(jumpIP);
         break;
@@ -3567,6 +3629,10 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     break;
   }
   case 0xCB: { // RETF Far
+    if (m_cpu.nativeProtection()) {
+      nativeRetf(0, m_hasPrefix66);
+      break;
+    }
     uint32_t eip;
     uint16_t cs;
     if (m_hasPrefix66) {
@@ -3604,6 +3670,10 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
   }
   case 0xCA: { // RETF imm16 Far
     uint16_t imm = fetch16();
+    if (m_cpu.nativeProtection()) {
+      nativeRetf(imm, m_hasPrefix66);
+      break;
+    }
     uint32_t eip;
     uint16_t cs;
     if (m_hasPrefix66) {
@@ -3659,6 +3729,12 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     break;
   }
   case 0x9A: { // CALL far imm16:imm16/32
+    if (m_cpu.nativeProtection()) {
+      const uint32_t off = m_hasPrefix66 ? fetch32() : fetch16();
+      const uint16_t sel = fetch16();
+      nativeFarTransfer(sel, off, true, m_hasPrefix66);
+      break;
+    }
     if (m_hasPrefix66) {
       uint32_t eip = fetch32();
       uint16_t cs = fetch16();
@@ -3688,6 +3764,12 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     break;
   }
   case 0xEA: { // JMP far imm16:imm16/32
+    if (m_cpu.nativeProtection()) {
+      const uint32_t off = m_hasPrefix66 ? fetch32() : fetch16();
+      const uint16_t sel = fetch16();
+      nativeFarTransfer(sel, off, false, m_hasPrefix66);
+      break;
+    }
     if (m_hasPrefix66) {
       uint32_t eip = fetch32();
       uint16_t cs = fetch16();
@@ -3966,7 +4048,10 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
       new_msw = (new_msw & ~1) | (cur_msw & 1) | (new_msw & 1);
       uint32_t newVal = (m_cpu.getCR(0) & 0xFFFF0000) | new_msw;
       LOG_DEBUG("[CPU] LMSW = ", std::hex, new_msw);
+      const bool enteringPM = (newVal & 1) && !(m_cpu.getCR(0) & 1);
       m_cpu.setCR(0, newVal);
+      if (enteringPM)
+        m_cpu.setNativeProtection(true);
       break;
     }
     case 7: { // INVLPG m
@@ -4109,7 +4194,10 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
     ModRM modrm = decodeModRM(fetch8());
     uint32_t val = m_cpu.getReg32(modrm.rm);
     LOG_DEBUG("[CPU] MOV CR", (int)modrm.reg, " = ", std::hex, val);
+    const bool enteringPM = modrm.reg == 0 && (val & 1) && !(m_cpu.getCR(0) & 1);
     m_cpu.setCR(modrm.reg, val);
+    if (enteringPM)
+      m_cpu.setNativeProtection(true); // the guest owns protected mode
     break;
   }
   case 0x23: { // MOV DRn, rd
@@ -5003,6 +5091,10 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
 }
 
 void InstructionDecoder::triggerInterrupt(uint8_t vector) {
+  if (m_cpu.nativeProtection()) {
+    nativeInterrupt(vector, false, false, 0);
+    return;
+  }
   LOG_DEBUG("[CPU] INT 0x", std::hex, (int)vector,
             " CS:EIP=", m_cpu.getSegReg(CS), ":", m_cpu.getEIP(),
             " AX=", m_cpu.getReg16(EAX), " BX=", m_cpu.getReg16(EBX),
@@ -5376,6 +5468,10 @@ bool InstructionDecoder::dos4gwReflectionStack(uint32_t &hostSP) const {
 
 void InstructionDecoder::injectHardwareInterrupt(uint8_t vector) {
   syncSegmentCacheIfNeeded();
+  if (m_cpu.nativeProtection()) {
+    nativeInterrupt(vector, false, false, 0);
+    return;
+  }
 
   // HLE fast-path: if the BIOS can handle this vector entirely in HLE,
   // just call the handler and skip the full interrupt dispatch.

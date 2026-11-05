@@ -46,6 +46,7 @@ void CPU::reset() {
   m_eflags = 0x00000002;
 
   m_cr.fill(0);
+  m_nativeProtection = false;
   if (m_memory)
     m_memory->setPaging(false, 0, false);
   m_dr.fill(0);

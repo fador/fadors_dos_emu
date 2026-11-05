@@ -408,9 +408,19 @@ public:
   void setEFLAGS(uint32_t val) { m_eflags = val; }
 
   uint32_t getCR(uint8_t index) const { return m_cr[index & 7]; }
+  // True while the guest itself owns protected mode (it set CR0.PE with
+  // MOV CR0/LMSW, e.g. a DOS extender in raw or VCPI mode): descriptor
+  // privilege levels, call gates, TSS stack switches and exceptions then
+  // follow the 386 rules.  Under the emulator's own DPMI host this stays
+  // false and the HLE dispatch paths are used.
+  bool nativeProtection() const { return m_nativeProtection; }
+  void setNativeProtection(bool on) { m_nativeProtection = on; }
+
   void setCR(uint8_t index, uint32_t val) {
     index &= 7;
     m_cr[index] = val;
+    if (index == 0 && !(val & 1))
+      m_nativeProtection = false;
     if (m_memory && (index == 0 || index == 3 || index == 4))
       m_memory->setPaging((m_cr[0] & 0x80000001u) == 0x80000001u, m_cr[3],
                           (m_cr[4] & 0x10u) != 0);
@@ -519,6 +529,7 @@ private:
   uint32_t m_eflags{0x00000002}; // bit 1 is always reserved as 1
 
   std::array<uint32_t, 8> m_cr{};
+  bool m_nativeProtection{false};
   std::array<uint32_t, 8> m_dr{};
 
   DescriptorRegister m_gdtr{0xFFFF, 0};

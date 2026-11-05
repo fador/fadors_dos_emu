@@ -64,6 +64,8 @@ uint8_t MemoryBus::read8Slow(uint32_t address, uint32_t effectiveAddress) const 
       return m_vga->planeRead8(effectiveAddress - VGA_PLANAR_START);
     return m_ram[effectiveAddress];
   }
+  if (m_pageFault) // redirected by a pending page fault
+    return 0xFF;
   reportOutOfBounds(address, false);
   LOG_WARN("Memory out of bounds READ 8-bit at: 0x", std::hex, address,
            " (Effective: 0x", effectiveAddress, ")");
@@ -99,7 +101,7 @@ void MemoryBus::write8Slow(uint32_t address, uint32_t effectiveAddress,
                 static_cast<int>(value), " ('",
                 (char)(value >= 32 && value < 127 ? value : '.'), "')");
     }
-  } else {
+  } else if (!m_pageFault) {
     reportOutOfBounds(address, true);
     LOG_WARN("Memory out of bounds WRITE 8-bit at: 0x", std::hex, address,
              " (Effective: 0x", effectiveAddress, ") val: 0x",
@@ -217,14 +219,12 @@ void MemoryBus::lwrite32Slow(uint32_t a, uint32_t v) {
 // unmapped region so the faulting access itself has no effect.
 uint32_t MemoryBus::walkPageTables(uint32_t linear, bool write) const {
   auto fault = [&](bool protection) {
-    // #PF is not delivered to the guest yet (no instruction restart);
-    // report it so a raw-mode extender relying on demand paging is visible.
-    static int reported = 0;
-    if (reported < 8) {
-      ++reported;
-      LOG_WARN("Paging: access to not-present page, linear 0x", std::hex,
-               linear, write ? " (write)" : " (read)");
-    }
+    // The CPU undoes the instruction and delivers #PF (InstructionDecoder::
+    // step); only the first fault of an instruction is recorded.
+    LOG_DEBUG("Paging: not-present page, linear 0x", std::hex, linear,
+              write ? " (write)" : " (read)");
+    if (m_pageFault)
+      return MEMORY_SIZE;
     m_pageFault = true;
     m_faultLinear = linear;
     m_faultError = (protection ? 1u : 0u) | (write ? 2u : 0u) | 4u;

@@ -160,6 +160,24 @@ private:
   // Interrupt and Exception handling
   void triggerInterrupt(uint8_t vector);
 
+  // 386 protection model for guest-owned protected mode (Protection.cpp)
+  uint8_t currentCPL() const;
+  bool readDescriptor(uint16_t selector, uint32_t &low, uint32_t &high) const;
+  bool tssStack(uint8_t dpl, uint16_t &ss, uint32_t &esp) const;
+  void setStackPointer(uint32_t value);
+  void pushSized(bool is32, uint32_t value);
+  uint32_t popSized(bool is32);
+  // Faults: EIP is rewound to the faulting instruction and, in native
+  // protected mode, the error code is pushed where the CPU would.
+  void raiseException(uint8_t vector, uint32_t errorCode = 0);
+  void nativeInterrupt(uint8_t vector, bool software, bool pushError,
+                       uint32_t errorCode);
+  void nativeIret(bool op32);
+  void nativeFarTransfer(uint16_t selector, uint32_t offset, bool isCall,
+                         bool op32);
+  void nativeRetf(uint16_t release, bool op32);
+  void stepInstruction();
+
   struct Descriptor {
     uint32_t base;
     uint32_t limit;
