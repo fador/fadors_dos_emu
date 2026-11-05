@@ -3308,3 +3308,13 @@ TEST_CASE("DPMI 0101h/0102h error reporting for invalid selector", "[dpmi][dosme
     REQUIRE(env.carrySet());
     REQUIRE(env.cpu.getReg16(cpu::AX) == 0x8022);
 }
+
+TEST_CASE("DPMI initial switch: ES is a selector for the PSP", "[dpmi][entry]") {
+    // DPMI 0.9: after the initial real->protected switch ES must address
+    // the program's PSP, whatever ES held in real mode (DJGPP's stub reads
+    // the command tail through it).
+    DPMITestEnv env;
+    uint16_t es = env.cpu.getSegReg(cpu::ES);
+    REQUIRE(env.dpmi.getSelectorBase(es) ==
+            static_cast<uint32_t>(env.dos.getPSPSegment()) << 4);
+}

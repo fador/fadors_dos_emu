@@ -44,13 +44,12 @@ TEST_CASE("Audio: AudioBackend Basic Operations", "[Audio]") {
         // With SDL2 it queues them and returns true (if successful).
         REQUIRE(queueStatus == true);
 
-        // getQueuedAudioSize depends on SDL2. Without SDL2 it returns 0.
-        // With SDL2 it should return > 0.
-#ifdef HAVE_SDL2
-        REQUIRE(backend.getQueuedAudioSize() > 0);
-#else
-        REQUIRE(backend.getQueuedAudioSize() == 0);
-#endif
+        // Samples are only queued when a host audio device is open
+        // (SDL2 build with a working device); otherwise they are dropped.
+        if (backend.isActive())
+            REQUIRE(backend.getQueuedAudioSize() > 0);
+        else
+            REQUIRE(backend.getQueuedAudioSize() == 0);
     }
 
     SECTION("Close and Cleanup") {

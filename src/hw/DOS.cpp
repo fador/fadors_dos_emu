@@ -669,6 +669,62 @@ void DOS::handleDOSService() {
     LOG_DOS("DOS: Set Current PSP to 0x", std::hex, pspVal, " (segment 0x", m_pspSegment, ")");
     break;
   }
+  case 0x60: { // Truename: canonicalize a path (DS:SI -> ES:DI, 128 bytes)
+    const uint32_t src = m_cpu.getSegBase(cpu::DS) + m_cpu.getReg16(cpu::SI);
+    const uint32_t dst = m_cpu.getSegBase(cpu::ES) + m_cpu.getReg16(cpu::DI);
+    std::string in = readFilename(src);
+    char drive = m_driveManager ? m_driveManager->getCurrentDriveLetter() : 'C';
+    std::string rest = in;
+    if (in.size() >= 2 && in[1] == ':' &&
+        std::isalpha(static_cast<unsigned char>(in[0]))) {
+      drive = static_cast<char>(std::toupper(static_cast<unsigned char>(in[0])));
+      rest = in.substr(2);
+    }
+    if (m_driveManager && !m_driveManager->isMounted(drive)) {
+      m_cpu.setReg16(cpu::AX, 0x0F); // invalid drive
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      break;
+    }
+    for (auto &c : rest)
+      c = (c == '/') ? '\\'
+                     : static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    if (rest.empty() || rest[0] != '\\') {
+      std::string cwd = m_driveManager ? m_driveManager->getCurrentDir(drive)
+                                       : m_dosCurrentDir;
+      rest = "\\" + cwd + (cwd.empty() ? "" : "\\") + rest;
+    }
+    // Collapse "." and ".." components
+    std::vector<std::string> parts;
+    std::string comp;
+    auto flush = [&]() {
+      if (comp == "..") {
+        if (!parts.empty())
+          parts.pop_back();
+      } else if (!comp.empty() && comp != ".") {
+        parts.push_back(comp);
+      }
+      comp.clear();
+    };
+    for (char c : rest) {
+      if (c == '\\')
+        flush();
+      else
+        comp += c;
+    }
+    flush();
+    std::string out = std::string(1, drive) + ":\\";
+    for (size_t i = 0; i < parts.size(); ++i)
+      out += (i ? "\\" : "") + parts[i];
+    if (out.size() > 127)
+      out.resize(127);
+    for (size_t i = 0; i < out.size(); ++i)
+      m_memory.write8(dst + static_cast<uint32_t>(i), static_cast<uint8_t>(out[i]));
+    m_memory.write8(dst + static_cast<uint32_t>(out.size()), 0);
+    m_cpu.setReg16(cpu::AX, 0);
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    LOG_DOS("DOS: Truename '", in, "' -> '", out, "'");
+    break;
+  }
   case 0x51:   // Get Current PSP (undocumented)
   case 0x62: { // Get Current PSP
     if (m_dpmi && m_dpmi->isActive() && (m_cpu.getCR(0) & 1)) {

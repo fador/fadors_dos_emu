@@ -148,11 +148,12 @@ bool DPMI::handleEntry() {
   m_ldt[selectorToIndex(m_clientCS)] = makeCodeDesc(callerCS_RM);
   m_ldt[selectorToIndex(m_clientDS)] = makeDataDesc(callerDS);
   m_ldt[selectorToIndex(m_clientSS)] = makeDataDesc(callerSS);
-  uint16_t initialES = callerES;
-  if (initialES >= 0xA000) {
-    initialES = pspSeg;
-  }
-  m_ldt[selectorToIndex(m_clientES)] = makeDataDesc(initialES);
+  // DPMI 0.9 spec: after the initial switch ES is a selector for the
+  // program's PSP (regardless of what ES held in real mode).  The DJGPP
+  // stub stores it as _stubinfo->psp_selector and reads the command tail
+  // through it.
+  (void)callerES;
+  m_ldt[selectorToIndex(m_clientES)] = makeDataDesc(pspSeg);
   m_ldt[selectorToIndex(m_clientPSPSel)] = makeDataDesc(pspSeg);
 
   // SDA selector (maps segment 0x0070, base 0x0700)

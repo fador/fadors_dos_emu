@@ -133,11 +133,15 @@ inline int run_all_tests() {
     if (fador::test::SectionScope _scope{name})
 
 #define REQUIRE(cond) \
-    if (!(cond)) { \
-        throw std::runtime_error("REQUIRE failed: " #cond " at " __FILE__ ":" + std::to_string(__LINE__)); \
-    }
+    do { \
+        if (!(cond)) { \
+            throw std::runtime_error("REQUIRE failed: " #cond " at " __FILE__ ":" + std::to_string(__LINE__)); \
+        } \
+    } while (0)
 
 #define CHECK(cond) \
-    if (!(cond)) { \
-        std::cerr << "    CHECK failed: " << #cond << " at " << __FILE__ << ":" << __LINE__ << std::endl; \
-    }
+    do { \
+        if (!(cond)) { \
+            std::cerr << "    CHECK failed: " << #cond << " at " << __FILE__ << ":" << __LINE__ << std::endl; \
+        } \
+    } while (0)

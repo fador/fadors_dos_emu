@@ -2386,3 +2386,33 @@ TEST_CASE("DOS: Parse Filename (AH=0x29) into FCB", "[DOS][FCB]") {
     }
 }
 
+
+TEST_CASE("DOS: Truename (AH=60h) canonicalizes paths", "[DOS][Truename]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::DOS dos(cpu, mem);
+    dos.initialize();
+
+    auto truename = [&](const std::string& in) {
+        for (size_t i = 0; i < in.size(); ++i)
+            mem.write8(0x20000 + static_cast<uint32_t>(i), static_cast<uint8_t>(in[i]));
+        mem.write8(0x20000 + static_cast<uint32_t>(in.size()), 0);
+        cpu.setSegReg(cpu::DS, 0x2000);
+        cpu.setReg16(cpu::SI, 0);
+        cpu.setSegReg(cpu::ES, 0x3000);
+        cpu.setReg16(cpu::DI, 0);
+        cpu.setReg8(cpu::AH, 0x60);
+        dos.handleInterrupt(0x21);
+        REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+        std::string out;
+        for (uint32_t i = 0; i < 128; ++i) {
+            char c = static_cast<char>(mem.read8(0x30000 + i));
+            if (!c) break;
+            out += c;
+        }
+        return out;
+    };
+
+    REQUIRE(truename("c:/games/../doom/doom.exe") == "C:\\DOOM\\DOOM.EXE");
+    REQUIRE(truename("C:\\A\\.\\B") == "C:\\A\\B");
+}

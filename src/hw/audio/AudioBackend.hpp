@@ -21,6 +21,15 @@ public:
     // Get the amount of queued bytes
     uint32_t getQueuedAudioSize();
 
+    // True when a host audio device is open and consuming samples.
+    bool isActive() const {
+#ifdef HAVE_SDL2
+        return m_deviceId != 0;
+#else
+        return false;
+#endif
+    }
+
 private:
 #ifdef HAVE_SDL2
     uint32_t m_deviceId;

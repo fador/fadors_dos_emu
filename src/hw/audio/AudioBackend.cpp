@@ -29,8 +29,11 @@ bool AudioBackend::init(int sampleRate, int channels, int bufferSize) {
   // frontend. However, to be safe, we can initialize it here if it's not
   // initialized.
   if (SDL_InitSubSystem(SDL_INIT_AUDIO) < 0) {
-    LOG_ERROR("SDL_InitSubSystem(SDL_INIT_AUDIO) failed: ", SDL_GetError());
-    return false;
+    // No audio subsystem (e.g. headless host): run silently.  Emulated
+    // sound devices are still clocked by the main loop.
+    LOG_WARN("SDL audio unavailable (", SDL_GetError(), "); running silent");
+    m_initialized = true;
+    return true;
   }
 
   SDL_AudioSpec desiredSpec;
@@ -47,8 +50,9 @@ bool AudioBackend::init(int sampleRate, int channels, int bufferSize) {
 
   m_deviceId = SDL_OpenAudioDevice(nullptr, 0, &desiredSpec, &obtainedSpec, 0);
   if (m_deviceId == 0) {
-    LOG_ERROR("Failed to open SDL audio device: ", SDL_GetError());
-    return false;
+    LOG_WARN("No SDL audio device (", SDL_GetError(), "); running silent");
+    m_initialized = true;
+    return true;
   }
 
   if (obtainedSpec.format != AUDIO_F32SYS) {
@@ -86,6 +90,8 @@ bool AudioBackend::queueSamples(const float *buffer, size_t count) {
   }
 
 #ifdef HAVE_SDL2
+  if (m_deviceId == 0)
+    return true; // silent fallback: samples are discarded
   // count is the number of floats to queue.
   int ret = SDL_QueueAudio(m_deviceId, buffer, static_cast<Uint32>(count * sizeof(float)));
   return (ret == 0);
