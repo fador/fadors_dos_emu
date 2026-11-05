@@ -512,7 +512,7 @@ int main(int argc, char *argv[]) {
     fador::ui::TerminalRenderer renderer(memory);
     fador::ui::Debugger debugger(cpu, memory, decoder);
 
-    auto dispatchPendingHardwareInterrupt = [&](bool retireShadow) {
+    auto dispatchPendingHardwareInterrupt = [&]() {
       if (cpu.hardwareInterruptsEnabled()) {
         int pending = pic.getPendingInterrupt();
         if (pending == -1) {
@@ -526,9 +526,6 @@ int main(int argc, char *argv[]) {
           }
           decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
         }
-      }
-      if (retireShadow) {
-        cpu.advanceInterruptShadow();
       }
     };
 
@@ -1227,7 +1224,7 @@ int main(int argc, char *argv[]) {
     bios.setIdleCallback([&]() {
       cpu.addCycles(8);
       serviceHardware();
-      dispatchPendingHardwareInterrupt(false);
+      dispatchPendingHardwareInterrupt();
       maybeRender(std::chrono::steady_clock::now());
     });
     dos.setKeyboard(kbd);
@@ -1235,7 +1232,7 @@ int main(int argc, char *argv[]) {
     dos.setIdleCallback([&]() {
       cpu.addCycles(8);
       serviceHardware();
-      dispatchPendingHardwareInterrupt(false);
+      dispatchPendingHardwareInterrupt();
     });
 
     cpu.setEFLAGS(cpu.getEFLAGS() | fador::cpu::FLAG_INTERRUPT);
@@ -1327,7 +1324,7 @@ int main(int argc, char *argv[]) {
 
       // ── Between batches: host services ──
       serviceHardware();
-      dispatchPendingHardwareInterrupt(true);
+      dispatchPendingHardwareInterrupt();
       if (bios.shouldReset()) {
         LOG_INFO("Reset requested — terminating");
         running = false;

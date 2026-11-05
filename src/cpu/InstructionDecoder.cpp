@@ -1444,6 +1444,10 @@ void InstructionDecoder::step() {
 
 void InstructionDecoder::stepInstruction() {
   m_stepCount++;
+  // The instruction after STI / MOV SS runs; interrupts are allowed again
+  // once it has finished (unless it starts a new shadow itself).
+  if (m_cpu.interruptShadowActive()) [[unlikely]]
+    m_cpu.endInterruptShadow();
   syncSegmentCacheIfNeeded();
   m_hasPrefix66 = m_cpu.is32BitCode();
   m_hasPrefix67 = m_cpu.is32BitCode();

@@ -387,12 +387,11 @@ public:
   bool hardwareInterruptsEnabled() const {
     return (m_eflags & FLAG_INTERRUPT) != 0 && m_interruptShadow == 0;
   }
+  // STI, MOV SS and POP SS hold off interrupts until the next instruction
+  // has run: the decoder ends the shadow when it starts that instruction.
   void beginInterruptShadow() { m_interruptShadow = 1; }
-  void advanceInterruptShadow() {
-    if (m_interruptShadow > 0) {
-      --m_interruptShadow;
-    }
-  }
+  void endInterruptShadow() { m_interruptShadow = 0; }
+  bool interruptShadowActive() const { return m_interruptShadow != 0; }
 
   uint32_t getEIP() const { return m_eip; }
   void setEIP(uint32_t val) { m_eip = m_is32BitCode ? val : (val & 0xFFFF); }

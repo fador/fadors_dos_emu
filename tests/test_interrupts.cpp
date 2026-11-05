@@ -807,7 +807,6 @@ TEST_CASE("Hardware IRQ is deferred until after the instruction following STI", 
                 decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
             }
         }
-        cpu.advanceInterruptShadow();
     };
 
     pic.raiseIRQ(0);
@@ -824,6 +823,44 @@ TEST_CASE("Hardware IRQ is deferred until after the instruction following STI", 
 
     REQUIRE(cpu.getSegReg(cpu::CS) == 0x1234);
     REQUIRE(cpu.getEIP() == 0x4321);
+}
+
+TEST_CASE("Interrupt shadow ends after one instruction without a dispatch", "[Interrupts]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::IOBus iobus;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::DOS dos(cpu, mem);
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    bios.initialize();
+    dos.initialize();
+    cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
+
+    cpu.setCR(0, 0);
+    cpu.setSegReg(cpu::CS, 0x1000);
+    cpu.setSegBase(cpu::CS, 0x10000);
+    cpu.setSegReg(cpu::SS, 0x0000);
+    cpu.setSegBase(cpu::SS, 0x0000);
+    cpu.setReg16(cpu::SP, 0x0200);
+    cpu.setReg16(cpu::AX, 0x0000);
+    cpu.setEIP(0x0100);
+    cpu.setEFLAGS(cpu.getEFLAGS() & ~cpu::FLAG_INTERRUPT);
+
+    // MOV SS,AX / STI / NOP / NOP
+    const uint8_t code[] = {0x8E, 0xD0, 0xFB, 0x90, 0x90};
+    for (size_t i = 0; i < sizeof code; ++i)
+        mem.write8(0x10100 + i, code[i]);
+
+    decoder.step();                         // MOV SS,AX
+    REQUIRE(!cpu.hardwareInterruptsEnabled());
+    decoder.step();                         // STI
+    REQUIRE(!cpu.hardwareInterruptsEnabled());
+    decoder.step();                         // NOP: the shadow is over
+    REQUIRE(cpu.hardwareInterruptsEnabled());
+    decoder.step();
+    REQUIRE(cpu.hardwareInterruptsEnabled());
 }
 
 TEST_CASE("Real-mode timer IRQ dispatch respects hooked INT 8 vector", "[Interrupts][Timer]") {
