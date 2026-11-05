@@ -38,13 +38,20 @@ void IOBus::write8(uint16_t port, uint8_t value) {
 
 uint16_t IOBus::read16(uint16_t port) {
     if (auto device = getDevice(port)) {
-        return device->read16(port);
+        const uint16_t value = device->read16(port);
+        if (traced(port))
+            std::fprintf(stderr, "IO: inw %04X -> %04X  %s\n", port, value,
+                         m_traceContext ? m_traceContext().c_str() : "");
+        return value;
     }
     return read8(port) | (static_cast<uint16_t>(read8(port + 1)) << 8);
 }
 
 void IOBus::write16(uint16_t port, uint16_t value) {
     if (auto device = getDevice(port)) {
+        if (traced(port))
+            std::fprintf(stderr, "IO: outw %04X <- %04X  %s\n", port, value,
+                         m_traceContext ? m_traceContext().c_str() : "");
         device->write16(port, value);
         return;
     }
@@ -54,13 +61,20 @@ void IOBus::write16(uint16_t port, uint16_t value) {
 
 uint32_t IOBus::read32(uint16_t port) {
     if (auto device = getDevice(port)) {
-        return device->read32(port);
+        const uint32_t value = device->read32(port);
+        if (traced(port))
+            std::fprintf(stderr, "IO: ind %04X -> %08X  %s\n", port, value,
+                         m_traceContext ? m_traceContext().c_str() : "");
+        return value;
     }
     return read16(port) | (static_cast<uint32_t>(read16(port + 2)) << 16);
 }
 
 void IOBus::write32(uint16_t port, uint32_t value) {
     if (auto device = getDevice(port)) {
+        if (traced(port))
+            std::fprintf(stderr, "IO: outd %04X <- %08X  %s\n", port, value,
+                         m_traceContext ? m_traceContext().c_str() : "");
         device->write32(port, value);
         return;
     }
