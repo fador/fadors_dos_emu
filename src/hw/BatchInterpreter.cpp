@@ -149,7 +149,8 @@ int BatchInterpreter::execute(const std::string& batFilePath, const std::vector<
 int BatchInterpreter::executeFrom(size_t startLine)
 {
     int lastRc = 0;
-    for (size_t pc = startLine; pc < m_lines.size() && !m_exitBatch; ++pc) {
+    for (size_t pc = startLine;
+         pc < m_lines.size() && !m_exitBatch && m_shell.isRunning(); ++pc) {
         if (m_gotoTarget != SIZE_MAX) {
             pc = m_gotoTarget;
             m_gotoTarget = SIZE_MAX;
@@ -162,6 +163,11 @@ int BatchInterpreter::executeFrom(size_t startLine)
 
         // Skip labels
         if (trimmed[0] == ':') continue;
+        // '@' only hides the line when echo is on
+        if (trimmed[0] == '@') {
+            trimmed = trim(trimmed.substr(1));
+            if (trimmed.empty()) continue;
+        }
 
         lastRc = executeLine(trimmed);
     }

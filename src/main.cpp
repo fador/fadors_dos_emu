@@ -31,6 +31,7 @@
 #include <iostream>
 #ifdef _WIN32
 #include <crtdbg.h>
+#include <cstdio>
 #include <cstdlib>
 #include <windows.h>
 #include <io.h>
@@ -328,6 +329,7 @@ void printHelp(const char *programName) {
     "  --instruction-trace-from=ADDR[#N]\n"
     "                            Delay --instruction-trace until CS:EIP reaches this hex\n"
     "                            linear address (the N-th time it is reached with #N).\n"
+    "  --io-trace=LO[-HI]        Log port reads and writes in this hex range to stderr.\n"
     "  --instruction-trace-step  Pause between each instruction trace line (ENTER to step,\n"
     "                            sN to skip N, q to quit stepping, d for debugger).\n"
     "  --trace=<cats>            Enable trace-level logging for categories: cpu, video, dos\n"
@@ -768,6 +770,18 @@ int main(int argc, char *argv[]) {
           LOG_ERROR("Invalid --keys specification: ", error);
           return 1;
         }
+      } else if (arg.find("--io-trace=") == 0) {
+        unsigned first = 0, last = 0;
+        char dash = 0;
+        const std::string spec = arg.substr(11);
+        const int n = std::sscanf(spec.c_str(), "%x%c%x", &first, &dash, &last);
+        if (n == 1)
+          last = first;
+        if ((n != 1 && (n != 3 || dash != '-')) || first > last || last > 0xFFFF) {
+          LOG_ERROR("Invalid --io-trace= range. Use --io-trace=220-22F (hex)");
+          return 1;
+        }
+        iobus.setTraceRange(static_cast<uint16_t>(first), static_cast<uint16_t>(last));
       } else if (arg.find("--env=") == 0) {
         const std::string spec = arg.substr(6);
         const auto eq = spec.find('=');
@@ -913,63 +927,15 @@ int main(int argc, char *argv[]) {
       return false;
     };
 
-    // Helper: set up terminal input/rendering and launch the DOS shell
-    auto launchShell = [&]() {
-      renderer.clearScreen();
-      fador::ui::InputManager input(kbd);
-      input.setBIOS(bios);
-      bios.setInputPollCallback([&input]() { input.pollInput(); });
-      dos.setKeyboard(kbd);
-      dos.setInputPollCallback([&input]() { input.pollInput(); });
-      dos.setIdleCallback([&renderer, &pit, &cpu, &kbd, &pic,
-                           &picSlave, &cmos,
-                           &dispatchPendingHardwareInterrupt]() {
-        pit.update();
-        while (pit.checkPendingIRQ0()) { pic.raiseIRQ(0); }
-        if (kbd.checkPendingIRQ()) { pic.raiseIRQ(1); }
-        cmos.advanceTime();
-        while (cmos.checkPendingIRQ8()) { picSlave.raiseIRQ(0); }
-        dispatchPendingHardwareInterrupt(false);
-        static auto lr = std::chrono::steady_clock::now();
-        auto now = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lr)
-                .count() > 33) {
-          renderer.render();
-          lr = now;
-        }
-      });
-      cpu.setEFLAGS(cpu.getEFLAGS() | fador::cpu::FLAG_INTERRUPT);
-      fador::hw::DosShell shell(dos, driveManager, loader, cpu, decoder, kbd, bios, memory);
-      shell.setInputPollCallback([&input]() { input.pollInput(); });
-      shell.setIdleCallback([&renderer, &pit, &cpu, &kbd, &pic,
-                             &picSlave, &cmos,
-                             &dispatchPendingHardwareInterrupt]() {
-        pit.update();
-        while (pit.checkPendingIRQ0()) { pic.raiseIRQ(0); }
-        if (kbd.checkPendingIRQ()) { pic.raiseIRQ(1); }
-        cmos.advanceTime();
-        while (cmos.checkPendingIRQ8()) { picSlave.raiseIRQ(0); }
-        dispatchPendingHardwareInterrupt(false);
-        static auto lr = std::chrono::steady_clock::now();
-        auto now = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lr)
-                .count() > 33) {
-          renderer.render();
-          lr = now;
-        }
-      });
-      shell.run();
-      renderer.render(true);
-    };
+    // No program, or a directory mounted as C:, starts the DOS shell.
+    const bool shellMode = path.empty() || std::filesystem::is_directory(path);
 
-    if (!path.empty() && driveManager.isMounted('C')) {
-      // Directory was mounted as C: — launch shell instead of loading as program
-      launchShell();
-      return 0;
-    }
-
-    if (!path.empty()) {
+    if (!shellMode) {
       bool loaded = false;
+      // Mounts C: (unless --mount did) and sets the current directory, which
+      // the program's environment refers to.
+      dos.setProgramDir(path);
+      loader.setProgramDosDir(driveManager.getFullDosCwd());
       if (path.find(".com") != std::string::npos ||
           path.find(".COM") != std::string::npos) {
         loaded = loader.loadCOM(path, dos.getPSPSegment(), dos, args);
@@ -980,7 +946,6 @@ int main(int argc, char *argv[]) {
         LOG_ERROR("Failed to load program: ", path);
         return 1;
       }
-      dos.setProgramDir(path);
       decoder.syncSegments();
       if (throttleInstructionsPerSecond > 0) {
         if (!throttleLabel.empty()) {
@@ -993,7 +958,7 @@ int main(int argc, char *argv[]) {
                    " instructions/sec");
         }
       }
-    } else {
+    } else if (path.empty() && (!benchmarkArg.empty() || !execAsm.empty())) {
       auto runExecLoop = [&](uint64_t steps) {
         for (uint64_t i = 0; i < steps; ++i) {
           emitInstructionTrace();
@@ -1151,10 +1116,6 @@ int main(int argc, char *argv[]) {
         debugger.dumpState();
         return 0;
       }
-
-      // Start shell by default if no program (DOS 6.22 COMMAND.COM equivalent)
-      launchShell();
-      return 0;
     }
 
     // ── Frontend selection ──────────────────────────────────────────
@@ -1280,8 +1241,40 @@ int main(int argc, char *argv[]) {
     constexpr uint64_t kBatch = 1024;
     uint64_t instrCount = 0;
     int exitStatus = 0;
-    bool running = true;
+    bool running = true; // false once the emulator should exit
     const bool perInstructionSlowPath = instructionTraceCount > 0;
+    // Host services that also run while the shell waits for input.
+    auto servicePeriodic = [&](std::chrono::steady_clock::time_point now) {
+      pollHostInput();
+      scriptedKeys.service(now - runStart, kbd);
+      if (screenshotAt >= 0 && !screenshotPath.empty() &&
+          now - runStart >= std::chrono::duration<double>(screenshotAt)) {
+        fador::ui::FrameRenderer frame(memory, vga);
+        frame.setBIOS(&bios);
+        if (frame.render(false) && frame.savePNG(screenshotPath))
+          LOG_INFO("Screenshot written to ", screenshotPath, " (",
+                   frame.width(), "x", frame.height(), ") at ",
+                   screenshotAt, " s");
+        screenshotAt = -1.0;
+        screenshotPath.clear(); // do not overwrite it at exit
+      }
+      serviceAudio(now);
+      maybeRender(now);
+      if (quitRequested()) {
+        LOG_INFO("Window closed by user after ", instrCount, " instructions");
+        running = false;
+      }
+      if (maxSeconds > 0 &&
+          now - runStart > std::chrono::duration<double>(maxSeconds)) {
+        LOG_INFO("Time limit of ", maxSeconds, " s reached after ",
+                 instrCount, " instructions");
+        exitStatus = 124;
+        running = false;
+      }
+    };
+    // Runs the loaded program until it terminates (true) or the emulator
+    // has to stop (false).
+    auto runGuest = [&]() -> bool {
     while (running) {
       uint64_t batch = kBatch;
       if (stopAfterCycles > 0 && stopAfterCycles - instrCount < batch)
@@ -1315,12 +1308,14 @@ int main(int argc, char *argv[]) {
                  (int)dos.getExitCode(), " after ", instrCount,
                  " instructions");
         exitStatus = dos.getExitCode();
-        break;
+        return true;
       }
 
       if (stopAfterCycles > 0 && instrCount >= stopAfterCycles) {
-        if (!handleStopAfter(instrCount, true))
+        if (!handleStopAfter(instrCount, true)) {
+          running = false;
           break;
+        }
         continue;
       }
 
@@ -1329,40 +1324,35 @@ int main(int argc, char *argv[]) {
       dispatchPendingHardwareInterrupt(true);
       if (bios.shouldReset()) {
         LOG_INFO("Reset requested — terminating");
+        running = false;
         break;
       }
 
       if ((instrCount & 0x3FFF) < kBatch) {
-        auto now = std::chrono::steady_clock::now();
-        pollHostInput();
-        scriptedKeys.service(now - runStart, kbd);
-        if (screenshotAt >= 0 && !screenshotPath.empty() &&
-            now - runStart >= std::chrono::duration<double>(screenshotAt)) {
-          fador::ui::FrameRenderer frame(memory, vga);
-          frame.setBIOS(&bios);
-          if (frame.render(false) && frame.savePNG(screenshotPath))
-            LOG_INFO("Screenshot written to ", screenshotPath, " (",
-                     frame.width(), "x", frame.height(), ") at ",
-                     screenshotAt, " s");
-          screenshotAt = -1.0;
-          screenshotPath.clear(); // do not overwrite it at exit
-        }
-        serviceAudio(now);
-        maybeRender(now);
-        if (quitRequested()) {
-          LOG_INFO("Window closed by user after ", instrCount, " instructions");
-          running = false;
-        }
-        if (maxSeconds > 0 &&
-            now - runStart > std::chrono::duration<double>(maxSeconds)) {
-          LOG_INFO("Time limit of ", maxSeconds, " s reached after ",
-                   instrCount, " instructions");
-          exitStatus = 124;
-          running = false;
-        }
+        servicePeriodic(std::chrono::steady_clock::now());
         throttle.pace(instrCount);
       }
     }
+    return false;
+    };
+
+    if (shellMode) {
+      // DOS 6.22 COMMAND.COM equivalent.  Programs it starts run through
+      // runGuest(), like a program given on the command line.
+      fador::hw::DosShell shell(dos, driveManager, loader, cpu, decoder, kbd,
+                                bios, memory);
+      shell.setInputPollCallback(pollHostInput);
+      // At the prompt no guest code runs, so no interrupts are delivered
+      // (an IRQ dispatched now would stay in service, unacknowledged).
+      shell.setIdleCallback(
+          [&]() { servicePeriodic(std::chrono::steady_clock::now()); });
+      shell.setStopCheck([&]() { return !running; });
+      shell.setProgramRunner(runGuest);
+      shell.run();
+    } else {
+      runGuest();
+    }
+
 
     {
       auto elapsed = std::chrono::duration<double>(

@@ -1,7 +1,7 @@
 #pragma once
 #include <cstdint>
-#include <map>
 #include <memory>
+#include <vector>
 #include "IODevice.hpp"
 
 namespace fador::hw {
@@ -22,10 +22,22 @@ public:
     uint32_t read32(uint16_t port);
     void write32(uint16_t port, uint32_t value);
 
+    // Log every byte read from or written to ports first..last (--io-trace).
+    void setTraceRange(uint16_t first, uint16_t last) {
+        m_traceFirst = first;
+        m_traceLast = last;
+        m_trace = true;
+    }
+
 private:
-    std::map<uint16_t, IODevice*> m_deviceMap;
-    
-    IODevice* getDevice(uint16_t port);
+    std::vector<IODevice*> m_devices = std::vector<IODevice*>(0x10000, nullptr);
+    bool m_trace = false;
+    uint16_t m_traceFirst = 0, m_traceLast = 0;
+
+    IODevice* getDevice(uint16_t port) { return m_devices[port]; }
+    bool traced(uint16_t port) const {
+        return m_trace && port >= m_traceFirst && port <= m_traceLast;
+    }
 };
 
 } // namespace fador::hw

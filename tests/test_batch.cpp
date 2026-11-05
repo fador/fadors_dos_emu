@@ -610,3 +610,17 @@ TEST_CASE("BatchInterpreter: Nested CALL depth", "[batch]") {
     REQUIRE(rc == 3);
     REQUIRE(env.shell.getEnvVar("DEPTH") == "3");
 }
+
+TEST_CASE("BatchInterpreter: '@' prefix runs the command", "[batch]") {
+    BatchTestEnv env;
+    TempDirGuard guard("batch_at");
+    auto batPath = writeBat(guard.path, "at.bat",
+        "@echo off\r\n"
+        "@SET ATVAR=yes\r\n"
+    );
+
+    int rc = env.batch.execute(batPath.string());
+    REQUIRE(rc == 0);
+    REQUIRE(!env.shell.isEchoOn());
+    REQUIRE(env.shell.getEnvVar("ATVAR") == "yes");
+}

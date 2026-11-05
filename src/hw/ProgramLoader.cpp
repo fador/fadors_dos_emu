@@ -770,7 +770,13 @@ std::pair<bool, bool> ProgramLoader::createPSP(uint16_t segment, const std::stri
         fileName.begin(), fileName.end(), fileName.begin(),
         [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
     std::string dosDir = "C:\\" + dirName;
-    std::string dosFullPath = dosDir + "\\" + fileName;
+    if (!m_programDosDir.empty()) {
+      dosDir = m_programDosDir;
+      if (dosDir.size() > 3 && dosDir.back() == '\\')
+        dosDir.pop_back();
+    }
+    std::string dosFullPath =
+        dosDir + (dosDir.back() == '\\' ? "" : "\\") + fileName;
 
     // Format: VAR=VAL\0\0\0\x01\x00PROGRAM_PATH\0
     std::string envStr;

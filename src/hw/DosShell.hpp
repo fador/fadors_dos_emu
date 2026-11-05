@@ -34,6 +34,13 @@ public:
 
     void setInputPollCallback(std::function<void()> cb) { m_pollInput = std::move(cb); }
     void setIdleCallback(std::function<void()> cb) { m_idleCallback = std::move(cb); }
+    // Returns true when the shell must exit (window closed, time limit).
+    void setStopCheck(std::function<bool()> cb) { m_stopCheck = std::move(cb); }
+    // Runs a loaded program until it terminates; returns false when the
+    // emulator has to stop instead.  Without one the shell steps the CPU
+    // itself (no hardware interrupts).
+    void setProgramRunner(std::function<bool()> cb) { m_programRunner = std::move(cb); }
+    bool isRunning() const { return m_running; }
 
     int getErrorLevel() const { return m_errorLevel; }
     void setErrorLevel(int level) { m_errorLevel = level; }
@@ -64,6 +71,8 @@ private:
     bool m_running = true;
     std::function<void()> m_pollInput;
     std::function<void()> m_idleCallback;
+    std::function<bool()> m_stopCheck;
+    std::function<bool()> m_programRunner;
 
     // Tab completion state
     std::string m_tabLine;

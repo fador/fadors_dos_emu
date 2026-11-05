@@ -1,32 +1,32 @@
 #include "IOBus.hpp"
 #include "../utils/Logger.hpp"
+#include <cstdio>
 
 namespace fador::hw {
 
 void IOBus::registerDevice(uint16_t startPort, uint16_t endPort, IODevice* device) {
     for (uint16_t port = startPort; port <= endPort; ++port) {
-        m_deviceMap[port] = device;
+        m_devices[port] = device;
+        if (port == 0xFFFF)
+            break;
     }
     LOG_DEBUG("IOBus: Registered device for ports 0x", std::hex, startPort, "-0x", endPort);
 }
 
-IODevice* IOBus::getDevice(uint16_t port) {
-    auto it = m_deviceMap.find(port);
-    if (it != m_deviceMap.end()) {
-        return it->second;
-    }
-    return nullptr;
-}
-
 uint8_t IOBus::read8(uint16_t port) {
-    if (auto device = getDevice(port)) {
-        return device->read8(port);
-    }
-    LOG_TRACE("IOBus: Read from unmapped port 0x", std::hex, port);
-    return 0xFF;
+    uint8_t value = 0xFF;
+    if (auto device = getDevice(port))
+        value = device->read8(port);
+    else
+        LOG_TRACE("IOBus: Read from unmapped port 0x", std::hex, port);
+    if (traced(port))
+        std::fprintf(stderr, "IO: in  %04X -> %02X\n", port, value);
+    return value;
 }
 
 void IOBus::write8(uint16_t port, uint8_t value) {
+    if (traced(port))
+        std::fprintf(stderr, "IO: out %04X <- %02X\n", port, value);
     if (auto device = getDevice(port)) {
         device->write8(port, value);
         return;

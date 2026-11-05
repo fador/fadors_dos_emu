@@ -78,9 +78,13 @@ void DosShell::registerCommands()
 void DosShell::run()
 {
     m_running = true;
+    // Like COMMAND.COM, keep a small resident block and leave the rest of
+    // conventional memory free for the programs the shell starts.
+    m_dos.shrinkCurrentPSPBlock(0x100);
     while (m_running) {
         printString(buildPrompt());
         std::string line = readLine();
+        if (!m_running) break;
         if (line.empty()) continue;
         executeCommand(line);
     }
@@ -189,6 +193,10 @@ std::string DosShell::readLine()
         while (!m_kbd.hasKey()) {
             if (m_pollInput) m_pollInput();
             if (m_idleCallback) m_idleCallback();
+            if (m_stopCheck && m_stopCheck()) {
+                m_running = false;
+                return {};
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         auto [ascii, scancode] = m_kbd.popKey();
@@ -1314,8 +1322,35 @@ int DosShell::executeExternal(const ParsedCommand& cmd)
         return batch.execute(found, batArgs);
     }
 
-    uint16_t childSeg = m_dos.allocateMemory(0xFFFF, 0xFFFF);
-    if (childSeg == 0) {
+    // The program's environment: the shell's variables and the program's
+    // full DOS path (DOS extenders open their own file through it).
+    std::string dosProgramPath;
+    for (char letter = 'A'; letter <= 'Z' && dosProgramPath.empty(); ++letter) {
+        if (!m_driveManager.isMounted(letter))
+            continue;
+        const fs::path root = fs::weakly_canonical(m_driveManager.getHostPath(letter));
+        const fs::path rel = fs::weakly_canonical(found).lexically_relative(root);
+        if (rel.empty() || *rel.begin() == "..")
+            continue;
+        std::string r = rel.generic_string();
+        std::replace(r.begin(), r.end(), '/', '\\');
+        std::transform(r.begin(), r.end(), r.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+        dosProgramPath = std::string(1, letter) + ":\\" + r;
+    }
+    std::vector<std::string> envVars;
+    for (const auto& [name, value] : m_envVars)
+        envVars.push_back(name + "=" + value);
+    const uint16_t envSeg = m_dos.buildEnvironment(envVars, dosProgramPath);
+
+    uint16_t childSeg = 0;
+    if (const uint16_t avail = m_dos.largestFreeBlock(); avail >= 0x20)
+        childSeg = m_dos.allocateMemory(avail, 0xFFFF);
+    if (childSeg == 0 || envSeg == 0) {
+        if (childSeg)
+            m_dos.freeMemory(childSeg);
+        if (envSeg)
+            m_dos.freeMemory(envSeg);
         printLine("Insufficient memory");
         return 1;
     }
@@ -1337,30 +1372,43 @@ int DosShell::executeExternal(const ParsedCommand& cmd)
     uint16_t parentPSP = m_dos.getPSPSegment();
     bool loaded = false;
     if (isCom) {
-        loaded = m_loader.loadCOM(found, childSeg, m_dos, args);
+        loaded = m_loader.loadCOM(found, childSeg, m_dos, args, envSeg);
     } else {
-        loaded = m_loader.loadEXE(found, childSeg, m_dos, args);
+        loaded = m_loader.loadEXE(found, childSeg, m_dos, args, false, envSeg);
     }
 
     if (!loaded) {
         m_dos.freeMemory(childSeg);
+        m_dos.freeMemory(envSeg);
         printLine("Program load error");
         return 1;
     }
+
+    // The program's block and environment belong to it, as with DOS EXEC
+    m_memory.write16((static_cast<uint32_t>(childSeg - 1) << 4) + 1, childSeg);
+    m_memory.write16((static_cast<uint32_t>(envSeg - 1) << 4) + 1, childSeg);
+    // The program's PSP becomes the current one; its parent is the shell
+    m_memory.write16((static_cast<uint32_t>(childSeg) << 4) + 0x16, parentPSP);
+    m_dos.setPSPSegment(childSeg);
 
     m_dos.setProgramDir(found);
     m_decoder.syncSegments();
     m_dos.resetTerminated();
 
-    while (!m_dos.isTerminated()) {
-        m_decoder.step();
-        m_cpu.addCycles(1);
+    if (m_programRunner) {
+        if (!m_programRunner())
+            m_running = false; // the emulator is shutting down
+    } else {
+        while (!m_dos.isTerminated()) {
+            m_decoder.step();
+            m_cpu.addCycles(1);
+        }
     }
 
     int exitCode = static_cast<int>(m_dos.getExitCode());
 
     m_dos.setPSPSegment(parentPSP);
-    m_dos.freeMemory(childSeg);
+    m_dos.freeBlocksOwnedBy(childSeg); // program, environment, its allocations
     m_dos.resetTerminated();
     m_dos.clearExecTriggered();
 

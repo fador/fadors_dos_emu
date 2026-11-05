@@ -24,6 +24,11 @@ public:
     // Loads an .EXE file, parses MZ header, relocates, and sets initial CS:IP / SS:SP
     bool loadEXE(const std::string& path, uint16_t segment, DOS& dos, const std::string& args = "", bool useHimem = false, uint16_t envSeg = 0);
 
+    // DOS directory of a directly launched program (e.g. "C:\\GAMES\\DOOM"),
+    // used for its environment's program path and PATH.  When unset, the
+    // program is assumed to be in C:\\<name of its host directory>.
+    void setProgramDosDir(const std::string& dir) { m_programDosDir = dir; }
+
     // Environment variables given to directly launched programs (and the
     // shell) in addition to PATH/LIB/INCLUDE, in order.  Defaults:
     //   BLASTER   the emulated Sound Blaster's settings
@@ -40,6 +45,7 @@ private:
     memory::HIMEM* m_himem;
 
     // Creates a 256-byte Program Segment Prefix at the given segment, returns drive validities for FCB1/2
+    std::string m_programDosDir;
     std::pair<bool, bool> createPSP(uint16_t segment, const std::string& args, const std::string& programPath, uint16_t envSeg = 0);
 };
 
