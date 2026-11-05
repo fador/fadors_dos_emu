@@ -1,6 +1,8 @@
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <memory>
+#include <string>
 #include <vector>
 #include "IODevice.hpp"
 
@@ -23,6 +25,8 @@ public:
     void write32(uint16_t port, uint32_t value);
 
     // Log every byte read from or written to ports first..last (--io-trace).
+    // Optional: describes where the access came from (e.g. CS:EIP).
+    void setTraceContext(std::function<std::string()> ctx) { m_traceContext = std::move(ctx); }
     void setTraceRange(uint16_t first, uint16_t last) {
         m_traceFirst = first;
         m_traceLast = last;
@@ -32,6 +36,7 @@ public:
 private:
     std::vector<IODevice*> m_devices = std::vector<IODevice*>(0x10000, nullptr);
     bool m_trace = false;
+    std::function<std::string()> m_traceContext;
     uint16_t m_traceFirst = 0, m_traceLast = 0;
 
     IODevice* getDevice(uint16_t port) { return m_devices[port]; }

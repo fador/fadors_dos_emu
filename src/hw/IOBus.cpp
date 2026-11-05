@@ -20,13 +20,15 @@ uint8_t IOBus::read8(uint16_t port) {
     else
         LOG_TRACE("IOBus: Read from unmapped port 0x", std::hex, port);
     if (traced(port))
-        std::fprintf(stderr, "IO: in  %04X -> %02X\n", port, value);
+        std::fprintf(stderr, "IO: in  %04X -> %02X  %s\n", port, value,
+                     m_traceContext ? m_traceContext().c_str() : "");
     return value;
 }
 
 void IOBus::write8(uint16_t port, uint8_t value) {
     if (traced(port))
-        std::fprintf(stderr, "IO: out %04X <- %02X\n", port, value);
+        std::fprintf(stderr, "IO: out %04X <- %02X  %s\n", port, value,
+                     m_traceContext ? m_traceContext().c_str() : "");
     if (auto device = getDevice(port)) {
         device->write8(port, value);
         return;

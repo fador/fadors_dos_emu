@@ -782,6 +782,12 @@ int main(int argc, char *argv[]) {
           return 1;
         }
         iobus.setTraceRange(static_cast<uint16_t>(first), static_cast<uint16_t>(last));
+        iobus.setTraceContext([&cpu]() {
+          char buf[32];
+          std::snprintf(buf, sizeof buf, "at %04X:%08X",
+                        cpu.getSegReg(fador::cpu::CS), cpu.getEIP());
+          return std::string(buf);
+        });
       } else if (arg.find("--env=") == 0) {
         const std::string spec = arg.substr(6);
         const auto eq = spec.find('=');

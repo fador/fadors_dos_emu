@@ -2724,7 +2724,14 @@ uint16_t DOS::allocateMemory(uint16_t requested, uint16_t owner) {
     uint16_t scan = FIRST_MCB_SEGMENT;
     for (int i = 0; i < 100; ++i) {
       MCB mcb = readMCB(scan);
-      if (mcb.owner == m_pspSegment) {
+      // Only the program's own block, and only while it still reaches the
+      // top of conventional memory (the last block), is shrunk; a program
+      // that sized its block with AH=4Ah gets the normal failure.
+      const bool pspBlock = scan == static_cast<uint16_t>(m_pspSegment - 1) &&
+                            mcb.owner == m_pspSegment;
+      if (pspBlock && mcb.type != 'Z')
+        break;
+      if (pspBlock) {
         uint16_t pspMcbSeg = scan;
         uint16_t keepParas;
 

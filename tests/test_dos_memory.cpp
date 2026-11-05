@@ -241,3 +241,48 @@ TEST_CASE("DOS: Write to MCB signature byte (corruption attempt)", "[DOS][Memory
     dos.handleInterrupt(0x21);
     REQUIRE(cpu.getEFLAGS() & FLAG_CARRY);
 }
+
+TEST_CASE("DOS: memory runs out after the program sized its block", "[DOS][Memory]") {
+    CPU cpu;
+    MemoryBus memory;
+    DOS dos(cpu, memory);
+    dos.initialize();
+    const uint16_t psp = dos.getPSPSegment();
+    auto call = [&](uint8_t ah, uint16_t bx, uint16_t es = 0) {
+        cpu.setEFLAGS(cpu.getEFLAGS() & ~FLAG_CARRY);
+        cpu.setReg8(AH, ah);
+        cpu.setReg16(BX, bx);
+        cpu.setSegReg(ES, es);
+        dos.handleInterrupt(0x21);
+        return !(cpu.getEFLAGS() & FLAG_CARRY);
+    };
+
+    // The program keeps 0x2000 paragraphs and grabs the rest in pieces
+    REQUIRE(call(0x4A, 0x2000, psp));
+    int blocks = 0;
+    while (call(0x48, 0x0FFD))
+        ++blocks;
+    REQUIRE(blocks > 0);
+    // DOS says no; the program's own block is left alone
+    REQUIRE(cpu.getReg16(AX) == 0x0008);
+    REQUIRE(memory.read16(((psp - 1) << 4) + 3) == 0x2000);
+
+    // Free blocks merge: two adjacent ones serve one larger request
+    REQUIRE(call(0x48, 0x10));
+    const uint16_t a = cpu.getReg16(AX);
+    REQUIRE(call(0x48, 0x10));
+    const uint16_t b = cpu.getReg16(AX);
+    REQUIRE(b == a + 0x11);
+    REQUIRE(call(0x49, 0, a));
+    REQUIRE(call(0x49, 0, b));
+    REQUIRE(call(0x48, 0x21));
+    REQUIRE(cpu.getReg16(AX) == a);
+
+    // AH=4Ah never moves a block: growing into an allocated neighbour fails
+    REQUIRE(call(0x48, 0x10));
+    const uint16_t c = cpu.getReg16(AX);
+    REQUIRE(!call(0x4A, 0x40, a));
+    REQUIRE(cpu.getReg16(AX) == 0x0008);
+    REQUIRE(cpu.getReg16(BX) == 0x21);
+    (void)c;
+}
