@@ -10,6 +10,7 @@ and chained) and keyboard (INT 9) interrupts.
 | `hello32.c`    | argv, x87 math, 4 MB `malloc`, create/read/delete a file    |
 | `irq32.c`      | INT 8/9 handlers, chaining, BIOS tick count, 8 MB `malloc`  |
 | `clocktest.c`  | DJGPP `clock()` and `__dpmi_yield` against the BIOS ticks   |
+| `sbtest.c`     | Sound Blaster 16 DSP, IRQ, 8/16-bit DMA, direct DAC, mixer, OPL2/OPL3 at 388h and the SB ports, PC speaker (real mode and DOS/4GW); the run also checks that `--audio-wav` recorded sound |
 
 Extenders: DOS/4GW (stub + `DOS4GW.EXE`), PMODE/W, DOS/32A, CauseWay
 (Open Watcom), and DJGPP's own DPMI client.

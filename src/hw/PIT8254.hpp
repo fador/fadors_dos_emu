@@ -1,6 +1,7 @@
 #pragma once
 #include "IODevice.hpp"
 #include <chrono>
+#include <functional>
 #include <cstdint>
 
 namespace fador::hw {
@@ -19,6 +20,11 @@ public:
 
     // Compatibility shim for legacy call sites. PIT timing is wall-clock based.
     void addCycles(uint32_t cycles = 4);
+
+    // Called when channel 2 (PC speaker) gets a new count or mode.
+    void setChannel2Callback(std::function<void(uint16_t, uint8_t)> cb) {
+        m_ch2Callback = std::move(cb);
+    }
 
 private:
     struct Channel {
@@ -40,6 +46,7 @@ private:
     void advanceTicks(uint64_t ticks);
     void syncToRealtime();
     double m_subTickTicks = 0.0;
+    std::function<void(uint16_t, uint8_t)> m_ch2Callback;
 };
 
 } // namespace fador::hw

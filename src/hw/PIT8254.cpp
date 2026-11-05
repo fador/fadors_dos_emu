@@ -91,6 +91,8 @@ void PIT8254::write8(uint16_t port, uint8_t value) {
                 ch.hiByteNext = true;
             }
         }
+        if (channelIdx == 2 && m_ch2Callback && !ch.hiByteNext)
+            m_ch2Callback(ch.reload, ch.mode);
     }
 }
 

@@ -38,4 +38,19 @@ for sys in dos4g pmodew dos32a causeway; do
 done
 run clock_djgpp.exe 0 'clock delta=[1-9]'
 
+# Sound: every DSP/DMA/IRQ/OPL check passes and the recorded output is
+# not silent (the emulator logs the peak level of --audio-wav).
+for exe in sbtest_rm.exe sbtest_dos4g.exe; do
+  [ -f "$exe" ] || { printf '%-22s SKIP (not built)\n' "$exe"; continue; }
+  log=$(timeout 120 "$emu" --headless --max-seconds=30 --audio-wav=sbtest.wav "$exe" 2>&1 | tr -d '\r')
+  if grep -q 'sbtest passed' <<<"$log" && grep -Eq 'peak (0\.[1-9]|1)' <<<"$log"; then
+    printf '%-22s ok\n' "$exe"
+  else
+    printf '%-22s FAIL\n' "$exe"
+    grep -E 'FAIL|peak' <<<"$log" | sed 's/^/    /'
+    fail=1
+  fi
+  rm -f sbtest.wav
+done
+
 exit $fail

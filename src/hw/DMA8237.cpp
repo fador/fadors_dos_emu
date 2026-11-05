@@ -120,7 +120,8 @@ uint32_t DMA8237::getChannelAddress(int channel) {
     // Linear address = (page << 16) | (currentAddress << 1).
     // Note: bit 0 of page is ignored/undefined usually, but for some PCs it's part of the address.
     // In AT, page register bit 0 is effectively address bit 16.
-    return ((uint32_t)m_channels[channel].page << 16) | (static_cast<uint32_t>(m_channels[channel].currentAddress) << 1);
+    // Bit 0 of the page register is not used for the 16-bit channels.
+    return ((uint32_t)(m_channels[channel].page & 0xFE) << 16) | (static_cast<uint32_t>(m_channels[channel].currentAddress) << 1);
   }
   return ((uint32_t)m_channels[channel].page << 16) | m_channels[channel].currentAddress;
 }

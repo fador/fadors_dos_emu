@@ -5,6 +5,9 @@
 #include "hw/DMA8237.hpp"
 #include "hw/PIT8254.hpp"
 #include "memory/MemoryBus.hpp"
+#include <algorithm>
+#include <cmath>
+#include <vector>
 
 using namespace fador::hw::audio;
 using namespace fador::hw;
@@ -112,14 +115,20 @@ TEST_CASE("SoundBlaster: Missing DSP commands now implemented", "[SB]") {
         REQUIRE(spk == 0xFF); // Speaker on
     }
 
-    SECTION("0xE2 DSP identification returns two bytes") {
+    SECTION("0xE2 takes one argument and answers through DMA, not the read buffer") {
         sb.write8(0x22C, 0xE2);
-        REQUIRE(sb.read8(0x22E) == 0x80);
-        sb.read8(0x22A); // First byte
-        REQUIRE(sb.read8(0x22E) == 0x80);
-        sb.read8(0x22A); // Second byte
-        // After consuming, no more data
+        sb.write8(0x22C, 0xAA);
         REQUIRE(sb.read8(0x22E) == 0x00);
+        // The DSP is ready for the next command (the argument was consumed).
+        sb.write8(0x22C, 0xE1);
+        REQUIRE(sb.read8(0x22A) == 0x04);
+    }
+
+    SECTION("0xE0 identification inverts its argument") {
+        sb.write8(0x22C, 0xE0);
+        sb.write8(0x22C, 0x55);
+        REQUIRE(sb.read8(0x22E) == 0x80);
+        REQUIRE(sb.read8(0x22A) == 0xAA);
     }
 }
 
@@ -158,7 +167,7 @@ TEST_CASE("SoundBlaster: DMA TC-driven IRQ (single-cycle 8-bit)", "[SB][DMA]") {
 
     // Start single-cycle 8-bit DMA via DSP
     sb.write8(0x22C, 0x14);           // DSP command: single-cycle 8-bit DMA
-    sb.write8(0x22C, sampleCount & 0xFF); // Length LSB
+    sb.write8(0x22C, (sampleCount - 1) & 0xFF); // Length LSB (samples - 1)
     sb.write8(0x22C, 0x00);           // Length MSB
 
     // Verify DMA is active and address is correct
@@ -207,7 +216,10 @@ TEST_CASE("SoundBlaster: DMA TC-driven IRQ (auto-init 8-bit)", "[SB][DMA]") {
     dma.write8(0x03, 0x00);
     dma.write8(0x0A, 0x01);
 
-    // Start auto-init 8-bit DMA via DSP
+    // Block size (samples - 1), then auto-init 8-bit DMA via DSP
+    sb.write8(0x22C, 0x48);
+    sb.write8(0x22C, static_cast<uint8_t>(sampleCount - 1));
+    sb.write8(0x22C, 0x00);
     sb.write8(0x22C, 0x1C); // Auto-init 8-bit DMA (no args)
 
     // Generate samples — after 2 samples, IRQ fires and DMA resets
@@ -325,75 +337,65 @@ TEST_CASE("SoundBlaster: High-Speed DMA and Force 16-bit IRQ", "[SB][DMA]") {
         REQUIRE(dma.getChannelAddress(1) == dmaPhysBase + sampleCount);
     }
 
-    SECTION("0x98 Auto-Init High-Speed 16-bit DMA") {
+    SECTION("0x99 High-speed single-cycle 8-bit input records silence") {
         const uint32_t dmaPhysBase = 0x20000;
-        const uint16_t sampleCount = 4; // 4 samples, 16-bit, mono (8 bytes total)
-        for (uint16_t i = 0; i < sampleCount; ++i) {
-            memory.write16(dmaPhysBase + i * 2, static_cast<int16_t>(i * 1000));
-        }
+        const uint16_t sampleCount = 4;
+        for (uint16_t i = 0; i < sampleCount; ++i)
+            memory.write8(dmaPhysBase + i, 0x11);
+        dma.write8(0x0A, 0x05);
+        dma.write8(0x0B, 0x45);     // Mode: single, write (device->memory), channel 1
+        dma.write8(0x0C, 0x00);
+        dma.write8(0x02, 0x00);
+        dma.write8(0x02, 0x00);
+        dma.write8(0x83, 0x02);     // phys 0x20000
+        dma.write8(0x0C, 0x00);
+        dma.write8(0x03, static_cast<uint8_t>(sampleCount - 1));
+        dma.write8(0x03, 0x00);
+        dma.write8(0x0A, 0x01);
 
-        // Program DMA for channel 5 auto-init:
-        dma.write8(0xD4, 0x05);     // Mask channel 5
-        dma.write8(0xD6, 0x59);     // Mode: auto-init, read, channel 5
-        dma.write8(0xD8, 0x00);     // Clear master flip-flop
-        dma.write8(0xC4, 0x00);     // Address LSB (0x0000 words)
-        dma.write8(0xC4, 0x00);     // Address MSB
-        dma.write8(0x8B, 0x02);     // Page = 0x02 (phys 0x20000 since 2 << 16 | 0 << 1 = 0x20000)
-        dma.write8(0xD8, 0x00);     // Clear flip-flop
-        // Word count = 4 - 1 = 3 words
-        dma.write8(0xC6, 0x03);     // Count LSB
-        dma.write8(0xC6, 0x00);     // Count MSB
-        dma.write8(0xD4, 0x01);     // Unmask channel 5
-
-        // Program DSP block size via command 0x48:
         sb.write8(0x22C, 0x48);
-        sb.write8(0x22C, static_cast<uint8_t>((sampleCount - 1) & 0xFF));
-        sb.write8(0x22C, static_cast<uint8_t>(((sampleCount - 1) >> 8) & 0xFF));
-
-        // Start 16-bit Auto-Init High-Speed DMA (0x98, no args)
-        sb.write8(0x22C, 0x98);
-
-        float buffer[16] = {};
-        sb.generateSamples(buffer, 8);
-
-        REQUIRE(irqCount >= 1);
-        REQUIRE(dma.getChannelAddress(5) == dmaPhysBase);
-    }
-
-    SECTION("0x99 Single-Cycle High-Speed 16-bit DMA") {
-        const uint32_t dmaPhysBase = 0x20000;
-        const uint16_t sampleCount = 4; // 4 samples, 16-bit, mono (8 bytes total)
-        for (uint16_t i = 0; i < sampleCount; ++i) {
-            memory.write16(dmaPhysBase + i * 2, static_cast<int16_t>(i * 1000));
-        }
-
-        // Program DMA for channel 5 single-cycle:
-        dma.write8(0xD4, 0x05);     // Mask channel 5
-        dma.write8(0xD6, 0x49);     // Mode: single, read, channel 5
-        dma.write8(0xD8, 0x00);     // Clear master flip-flop
-        dma.write8(0xC4, 0x00);     // Address LSB (0x0000 words)
-        dma.write8(0xC4, 0x00);     // Address MSB
-        dma.write8(0x8B, 0x02);     // Page = 0x02
-        dma.write8(0xD8, 0x00);     // Clear flip-flop
-        // Word count = 4 - 1 = 3 words
-        dma.write8(0xC6, 0x03);     // Count LSB
-        dma.write8(0xC6, 0x00);     // Count MSB
-        dma.write8(0xD4, 0x01);     // Unmask channel 5
-
-        // Program DSP block size via command 0x48:
-        sb.write8(0x22C, 0x48);
-        sb.write8(0x22C, static_cast<uint8_t>((sampleCount - 1) & 0xFF));
-        sb.write8(0x22C, static_cast<uint8_t>(((sampleCount - 1) >> 8) & 0xFF));
-
-        // Start 16-bit Single-Cycle High-Speed DMA (0x99, no args)
+        sb.write8(0x22C, static_cast<uint8_t>(sampleCount - 1));
+        sb.write8(0x22C, 0x00);
         sb.write8(0x22C, 0x99);
 
         float buffer[16] = {};
         sb.generateSamples(buffer, 8);
 
         REQUIRE(irqCount == 1);
-        // Address should have advanced by 4 words = 8 bytes
-        REQUIRE(dma.getChannelAddress(5) == dmaPhysBase + sampleCount * 2);
+        for (uint16_t i = 0; i < sampleCount; ++i)
+            REQUIRE(memory.read8(dmaPhysBase + i) == 0x80);
+    }
+
+    SECTION("SB16 0xB6 16-bit auto-init output on DMA 5") {
+        const uint32_t dmaPhysBase = 0x20000;
+        const uint16_t sampleCount = 4;
+        for (uint16_t i = 0; i < sampleCount; ++i)
+            memory.write16(dmaPhysBase + i * 2, static_cast<uint16_t>(i * 1000));
+        dma.write8(0xD4, 0x05);
+        dma.write8(0xD6, 0x59);     // auto-init, read, channel 5
+        dma.write8(0xD8, 0x00);
+        dma.write8(0xC4, 0x00);
+        dma.write8(0xC4, 0x00);
+        dma.write8(0x8B, 0x02);
+        dma.write8(0xD8, 0x00);
+        dma.write8(0xC6, sampleCount - 1);
+        dma.write8(0xC6, 0x00);
+        dma.write8(0xD4, 0x01);
+
+        sb.write8(0x22C, 0xB6);     // 16-bit, auto-init, output
+        sb.write8(0x22C, 0x10);     // mono, signed
+        sb.write8(0x22C, sampleCount - 1);
+        sb.write8(0x22C, 0x00);
+
+        float buffer[16] = {};
+        sb.generateSamples(buffer, 8);
+
+        REQUIRE(irqCount == 1);
+        REQUIRE(dma.getChannelAddress(5) == dmaPhysBase); // wrapped
+        sb.write8(0x224, 0x82);
+        REQUIRE((sb.read8(0x225) & 0x02) == 0x02); // 16-bit IRQ pending
+        sb.read8(0x22F);
+        REQUIRE((sb.read8(0x225) & 0x02) == 0x00);
     }
 
     SECTION("0xF3 Force 16-bit IRQ") {
@@ -482,9 +484,15 @@ TEST_CASE("SB detection: SB16 mixer config read", "[SB]") {
         // Allegro reads mixer register 0x80 to get IRQ configuration
         sb.write8(0x224, 0x80); // Mixer address = IRQ status
         uint8_t irqStatus = sb.read8(0x225);
-        // Our emulator: returns pending IRQ flags
-        // Before any DMA, no IRQs pending
-        REQUIRE(irqStatus == 0x00);
+        // SB16 IRQ select: bit 1 = IRQ 5
+        REQUIRE(irqStatus == 0x02);
+        // IRQ status lives in 0x82
+        sb.write8(0x224, 0x82);
+        REQUIRE(sb.read8(0x225) == 0x00);
+        sb.write8(0x22C, 0xF2);
+        REQUIRE((sb.read8(0x225) & 0x01) == 0x01);
+        sb.read8(0x22E); // acknowledge
+        REQUIRE((sb.read8(0x225) & 0x01) == 0x00);
     }
 
     SECTION("DMA channel register (0x81)") {
@@ -495,7 +503,7 @@ TEST_CASE("SB detection: SB16 mixer config read", "[SB]") {
         // In a real SB16, this would return channel bit masks
         // Allegro checks: bit 0=ch0, bit 1=ch1, bit 3=ch3 for 8-bit
         //                 bit 5=ch5, bit 6=ch6, bit 7=ch7 for 16-bit
-        (void)dmaConfig; // Just verify read doesn't crash
+        REQUIRE(dmaConfig == 0x22); // DMA 1 and DMA 5
     }
 
     SECTION("Mixer volume registers") {
@@ -523,7 +531,7 @@ TEST_CASE("SB detection: SB16 mixer config read", "[SB]") {
         // After reset, volumes should be at defaults
         sb.write8(0x224, 0x22);
         uint8_t master = sb.read8(0x225);
-        REQUIRE((master & 0x0F) == 0x0C); // Default 75%
+        REQUIRE(master == 0xFF); // full volume (left and right)
     }
 }
 
@@ -909,3 +917,97 @@ TEST_CASE("AdLib: fm_reset register initialization", "[AdLib]") {
         (void)status;
     }
 }
+
+// ── OPL3 (ymfm) behaviour that games depend on ───────────────────
+TEST_CASE("AdLib: OPL3 detection by status polling alone", "[AdLib]") {
+    // No CPU cycle counter: the timer has to expire from the ~1 us that
+    // each status read represents, like an 80 us delay loop on real ISA.
+    AdLib opl(44100.0f);
+    auto w = [&](uint8_t reg, uint8_t val) { opl.write8(0x388, reg); opl.write8(0x389, val); };
+    w(0x04, 0x60);
+    w(0x04, 0x80);
+    REQUIRE((opl.read8(0x388) & 0xE0) == 0x00);
+    w(0x02, 0xFF);
+    w(0x04, 0x21);
+    for (int i = 0; i < 100; ++i)
+        opl.read8(0x388);
+    const uint8_t status = opl.read8(0x388);
+    REQUIRE((status & 0xE0) == 0xC0);
+    REQUIRE((status & 0x06) == 0x00); // OPL3, not OPL2
+    w(0x04, 0x60);
+    w(0x04, 0x80);
+    REQUIRE((opl.read8(0x388) & 0xE0) == 0x00);
+}
+
+TEST_CASE("AdLib: a keyed-on channel produces a tone at its frequency", "[AdLib]") {
+    AdLib opl(44100.0f);
+    auto w = [&](uint8_t reg, uint8_t val) { opl.write8(0x388, reg); opl.write8(0x389, val); };
+    // Channel 0: pure sine carrier (modulator silent), A4-ish
+    w(0x20, 0x21); w(0x40, 0x3F); w(0x60, 0xF0); w(0x80, 0x0F);
+    w(0x23, 0x21); w(0x43, 0x00); w(0x63, 0xF0); w(0x83, 0x0F); // fast release
+    w(0xC0, 0x01);                  // additive: carrier only audible
+    w(0xA0, 0x41); w(0xB0, 0x32);   // fnum 0x241, block 4, key on (~437 Hz)
+    std::vector<float> buf(44100 * 2, 0.0f);
+    opl.generateSamples(buf.data(), 44100);
+    float peak = 0.0f;
+    int crossings = 0;
+    for (size_t i = 1; i < 44100; ++i) {
+        peak = std::max(peak, std::fabs(buf[i * 2]));
+        if ((buf[(i - 1) * 2] < 0.0f) != (buf[i * 2] < 0.0f))
+            ++crossings;
+    }
+    REQUIRE(peak > 0.05f);
+    REQUIRE(crossings / 2 > 400);   // ~437 Hz over one second
+    REQUIRE(crossings / 2 < 475);
+    // Key off: the note decays to silence
+    w(0xB0, 0x12);
+    std::fill(buf.begin(), buf.end(), 0.0f);
+    opl.generateSamples(buf.data(), 44100);
+    float tail = 0.0f;
+    for (size_t i = 40000; i < 44100; ++i)
+        tail = std::max(tail, std::fabs(buf[i * 2]));
+    REQUIRE(tail < 0.01f);
+}
+
+TEST_CASE("SoundBlaster: FM ports at base+0..3 and base+8/9 reach the OPL", "[SB][AdLib]") {
+    MemoryBus memory;
+    DMA8237 dma;
+    SoundBlaster sb(memory, dma, 44100.0f);
+    AdLib opl(44100.0f);
+    sb.setFM(&opl);
+    sb.write8(0x228, 0xB0);
+    sb.write8(0x229, 0x2A);
+    REQUIRE(opl.readRegister(0xB0) == 0x2A);
+    sb.write8(0x222, 0x05);         // bank 1 (OPL3)
+    sb.write8(0x223, 0x01);
+    REQUIRE(opl.readRegister(0x105) == 0x01);
+    REQUIRE((sb.read8(0x220) & 0x06) == 0x00);
+}
+
+TEST_CASE("SoundBlaster: emulated-time DMA raises block IRQs at the sample rate", "[SB][DMA]") {
+    MemoryBus memory;
+    DMA8237 dma;
+    SoundBlaster sb(memory, dma, 44100.0f);
+    sb.write8(0x226, 1); sb.write8(0x226, 0); sb.read8(0x22A);
+    int irqs = 0;
+    sb.setIRQCallback([&]() { ++irqs; sb.read8(0x22E); });
+    // 8-bit auto-init, DMA buffer 2 x 1000 bytes, block 1000, 10 kHz
+    dma.write8(0x0A, 0x05); dma.write8(0x0B, 0x59); dma.write8(0x0C, 0);
+    dma.write8(0x02, 0x00); dma.write8(0x02, 0x00); dma.write8(0x83, 0x01);
+    dma.write8(0x03, (2000 - 1) & 0xFF); dma.write8(0x03, (2000 - 1) >> 8);
+    dma.write8(0x0A, 0x01);
+    sb.write8(0x22C, 0x40); sb.write8(0x22C, 256 - 100); // 10 kHz
+    sb.write8(0x22C, 0x48); sb.write8(0x22C, (1000 - 1) & 0xFF); sb.write8(0x22C, (1000 - 1) >> 8);
+    sb.write8(0x22C, 0x1C);
+    for (int i = 0; i < 1000; ++i)
+        sb.advance(0.001);          // one second in 1 ms steps
+    REQUIRE(irqs >= 9);
+    REQUIRE(irqs <= 11);
+    // 0xDA: finish the current block, then stop
+    sb.write8(0x22C, 0xDA);
+    sb.advance(0.5);
+    const int after = irqs;
+    sb.advance(0.5);
+    REQUIRE(irqs == after);
+}
+

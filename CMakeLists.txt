@@ -56,10 +56,20 @@ endif()
 # Ensure HIMEM.cpp is included (in case GLOB_RECURSE misses nested folders or symlinks)
 list(APPEND SRC_FILES "${SRC_DIR}/memory/himem/HIMEM.cpp")
 
+# Third-party: ymfm (BSD-3-Clause) for the OPL2/OPL3 FM synthesizer
+set(YMFM_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ymfm)
+add_library(ymfm STATIC
+    ${YMFM_DIR}/ymfm_opl.cpp
+    ${YMFM_DIR}/ymfm_adpcm.cpp
+    ${YMFM_DIR}/ymfm_pcm.cpp)
+target_include_directories(ymfm PUBLIC ${YMFM_DIR})
+set_target_properties(ymfm PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 # Define an internal static library for the emulator core
 add_library(fadors_core STATIC ${SRC_FILES}
     src/hw/CMOSRTC.hpp)
 target_include_directories(fadors_core PUBLIC ${SRC_DIR})
+target_link_libraries(fadors_core PUBLIC ymfm)
 target_compile_definitions(fadors_core PUBLIC
     FADOR_ENABLE_DEBUG_DIAGNOSTICS=$<BOOL:${FADOR_ENABLE_DEBUG_DIAGNOSTICS}>)
 

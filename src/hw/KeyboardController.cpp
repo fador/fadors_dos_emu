@@ -72,6 +72,8 @@ void KeyboardController::write8(uint16_t port, uint8_t value) {
   } else if (port == 0x61) { // PPI Port B
     // Bits 0-3 and 7 are R/W. Bits 4-6 are read-only.
     m_port61 = (m_port61 & 0x70) | (value & 0x8F);
+    if (m_port61Callback)
+      m_port61Callback(value);
   }
 }
 

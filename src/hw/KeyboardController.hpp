@@ -1,6 +1,7 @@
 #pragma once
 #include "IODevice.hpp"
 #include <cstdint>
+#include <functional>
 #include <queue>
 #include <utility>
 
@@ -10,6 +11,8 @@ namespace fador::hw {
 
 class KeyboardController : public IODevice {
 public:
+  // Called with the new value when port 61h (PC speaker control) is written.
+  void setPort61Callback(std::function<void(uint8_t)> cb) { m_port61Callback = std::move(cb); }
     KeyboardController();
     ~KeyboardController() = default;
 
@@ -59,6 +62,7 @@ private:
     uint8_t m_lastCommand{0};
     uint8_t m_port61{0};
     uint64_t m_refreshCounter{0};
+    std::function<void(uint8_t)> m_port61Callback;
 };
 
 } // namespace fador::hw

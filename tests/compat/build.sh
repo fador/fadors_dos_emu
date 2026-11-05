@@ -22,6 +22,9 @@ for prog in hello32 irq32; do
     wcl386 -q -bt=dos -l=$sys -fe="${prog}_${sys}.exe" "$src/$prog.c" >/dev/null
   done
 done
+# Sound Blaster / AdLib / PC speaker test: real mode and DOS/4GW
+wcl -q -bt=dos -ml -ox -fe=sbtest_rm.exe "$src/sbtest.c" >/dev/null
+wcl386 -q -bt=dos -l=dos4g -ox -fe=sbtest_dos4g.exe "$src/sbtest.c" >/dev/null
 cp "$WATCOM/binw/dos4gw.exe" DOS4GW.EXE
 rm -f ./*.o ./*.obj
 

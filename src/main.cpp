@@ -19,6 +19,8 @@
 #include "hw/audio/MidiDevice.hpp"
 #include "hw/audio/MidiSynth.hpp"
 #include "hw/audio/SoundBlaster.hpp"
+#include "hw/audio/WavWriter.hpp"
+#include "hw/audio/PcSpeaker.hpp"
 #include "ui/Debugger.hpp"
 #include "ui/FrameRenderer.hpp"
 #include "ui/InputManager.hpp"
@@ -312,6 +314,7 @@ void printHelp(const char *programName) {
     "  --max-seconds=S           Stop after S seconds of wall-clock time.\n"
     "  --screenshot=FILE.png     Save the screen (text or graphics) as PNG at exit, or at\n"
     "  --screenshot-at=S         S seconds after start.\n"
+    "  --audio-wav=FILE.wav      Record the sound output (AdLib, Sound Blaster, MIDI).\n"
     "  --keys=T:KEY,...          Type KEY at T seconds (letters, digits, ESC, ENTER, SPACE,\n"
     "                            TAB, BKSP, arrows, F1-F10, LCTRL, LALT, LSHIFT, ...).\n"
     "  --sdl                     Force the SDL graphical frontend (requires SDL2 build).\n"
@@ -407,7 +410,7 @@ int main(int argc, char *argv[]) {
     // The host audio device is opened after the command line is parsed
     // (headless runs never open one).
 
-    fador::hw::audio::AdLib adlib(44100.0f, &cpu.getCyclesRef());
+    fador::hw::audio::AdLib adlib(44100.0f);
     fador::hw::audio::SoundBlaster sb(memory, dma, 44100.0f);
     fador::hw::audio::MidiDevice midi(0x330);
     fador::hw::audio::MidiSynth midiSynth(adlib, 44100.0f);
@@ -423,6 +426,7 @@ int main(int argc, char *argv[]) {
     iobus.registerDevice(0xA0, 0xA1, &picSlave);
     iobus.registerDevice(0x40, 0x43, &pit);
     iobus.registerDevice(0x60, 0x60, &kbd);
+    iobus.registerDevice(0x61, 0x61, &kbd); // PPI port B: speaker, refresh
     iobus.registerDevice(0x64, 0x64, &kbd);
     iobus.registerDevice(0x201, 0x201, &joystick);
     iobus.registerDevice(0x3C0, 0x3CF, &vga);
@@ -433,7 +437,7 @@ int main(int argc, char *argv[]) {
     iobus.registerDevice(0x81, 0x8F, &dma);
     iobus.registerDevice(0x220, 0x22F, &sb);
     iobus.registerDevice(0x330, 0x331, &midi);
-    iobus.registerDevice(0x388, 0x389, &adlib);
+    iobus.registerDevice(0x388, 0x38B, &adlib);
 
     kbd.setMemoryBus(&memory);
     fador::hw::DOS dos(cpu, memory);
@@ -488,7 +492,19 @@ int main(int argc, char *argv[]) {
           decoder.loadSegment(static_cast<fador::cpu::SegRegIndex>(seg), sel);
         });
 
-    sb.setIRQCallback([&pic]() { pic.raiseIRQ(5); });
+    sb.setFM(&adlib);
+    fador::hw::audio::PcSpeaker pcSpeaker(44100.0f);
+    kbd.setPort61Callback([&pcSpeaker](uint8_t v) { pcSpeaker.port61Written(v); });
+    pit.setChannel2Callback([&pcSpeaker](uint16_t reload, uint8_t mode) {
+      pcSpeaker.channel2Programmed(reload, mode);
+    });
+    sb.setIRQCallback([&pic, &picSlave, &sb]() {
+      const int line = sb.getIRQ();
+      if (line < 8)
+        pic.raiseIRQ(static_cast<uint8_t>(line));
+      else
+        picSlave.raiseIRQ(static_cast<uint8_t>(line - 8));
+    });
 
     fador::hw::ProgramLoader loader(cpu, memory, dos.getHIMEM());
     fador::ui::TerminalRenderer renderer(memory);
@@ -651,6 +667,7 @@ int main(int argc, char *argv[]) {
     bool headless = false;          // --headless: no rendering, no host input
     double maxSeconds = 0.0;        // --max-seconds=N wall-clock limit
     std::string screenshotPath;     // --screenshot=FILE.png at exit
+    std::string audioWavPath;       // --audio-wav=FILE.wav: record output
     double screenshotAt = -1.0;     // --screenshot-at=T: capture at T s instead
     ScriptedKeys scriptedKeys;      // --keys=T:KEY,...
     struct MountEntry { char letter; std::string hostPath; std::string label; };
@@ -727,6 +744,8 @@ int main(int argc, char *argv[]) {
         useSDL = false;
       } else if (arg.find("--max-seconds=") == 0) {
         maxSeconds = std::stod(arg.substr(14));
+      } else if (arg.find("--audio-wav=") == 0) {
+        audioWavPath = arg.substr(12);
       } else if (arg.find("--screenshot=") == 0) {
         screenshotPath = arg.substr(13);
       } else if (arg.find("--screenshot-at=") == 0) {
@@ -1163,9 +1182,19 @@ int main(int argc, char *argv[]) {
     auto lastRender = runStart;
     auto lastAudio = runStart;
     std::vector<float> audioBuf;
+    fador::hw::audio::WavWriter wav;
+    if (!audioWavPath.empty() && !wav.open(audioWavPath, 44100, 2))
+      LOG_WARN("Could not open ", audioWavPath, " for --audio-wav");
 
-    // Timers, keyboard and RTC raise their IRQs here.
+    // Timers, keyboard, RTC and the Sound Blaster's DMA run on emulated
+    // (wall-clock) time and raise their IRQs here.
+    auto lastHardware = std::chrono::steady_clock::now();
     auto serviceHardware = [&]() {
+      const auto hwNow = std::chrono::steady_clock::now();
+      const double hwDt =
+          std::chrono::duration<double>(hwNow - lastHardware).count();
+      lastHardware = hwNow;
+      sb.advance(std::min(hwDt, 0.1));
       pit.update();
       while (pit.checkPendingIRQ0())
         pic.raiseIRQ(0);
@@ -1207,8 +1236,11 @@ int main(int argc, char *argv[]) {
       audioBuf.assign(samplesNeeded * 2, 0.0f);
       adlib.generateSamples(audioBuf.data(), samplesNeeded);
       sb.generateSamples(audioBuf.data(), samplesNeeded);
+      pcSpeaker.generateSamples(audioBuf.data(), samplesNeeded);
       if (audio.isActive())
         audio.queueSamples(audioBuf.data(), samplesNeeded * 2);
+      if (wav.isOpen())
+        wav.write(audioBuf.data(), samplesNeeded * 2);
       adlib.updateTimers(static_cast<double>(samplesNeeded) / 44100.0);
     };
 
@@ -1327,6 +1359,12 @@ int main(int argc, char *argv[]) {
       LOG_INFO("Executed ", instrCount, " instructions in ", elapsed,
                " s (", elapsed > 0 ? instrCount / elapsed / 1e6 : 0.0,
                " MIPS)");
+    }
+
+    if (wav.isOpen()) {
+      LOG_INFO("Audio written to ", audioWavPath, ": ",
+               wav.framesWritten() / 44100.0, " s, peak ", wav.peak());
+      wav.close();
     }
 
     // Final frame: screenshot / text dump for automated runs

@@ -1,745 +1,499 @@
 #include "SoundBlaster.hpp"
+#include "AdLib.hpp"
 #include "../../utils/Logger.hpp"
 #include <algorithm>
+#include <cmath>
 
 namespace fador::hw::audio {
+
+namespace {
+// SB16 mixer registers (volumes are 5 bits in bits 7-3)
+constexpr uint8_t kMasterL = 0x30, kMasterR = 0x31;
+constexpr uint8_t kVoiceL = 0x32, kVoiceR = 0x33;
+constexpr uint8_t kFmL = 0x34, kFmR = 0x35;
+constexpr uint8_t kCdL = 0x36, kCdR = 0x37;
+constexpr uint8_t kLineL = 0x38, kLineR = 0x39;
+constexpr uint8_t kMic = 0x3A, kSpeaker = 0x3B;
+constexpr uint8_t kOutSwitch = 0x3C;
+constexpr size_t kMaxQueuedFrames = 8192; // ~186 ms at 44.1 kHz
+} // namespace
 
 SoundBlaster::SoundBlaster(fador::memory::MemoryBus &memory, DMA8237 &dma,
                            float systemSampleRate, uint16_t basePort, int irq,
                            int dmaChannel8, int dmaChannel16)
-    : m_memory(memory), m_dma(dma), m_systemSampleRate(systemSampleRate),
-      m_basePort(basePort), m_irq(irq), m_dmaChannel8(dmaChannel8),
-      m_dmaChannel16(dmaChannel16) {
-  LOG_INFO("SoundBlaster DSP initialized at base port ", std::hex, m_basePort,
-           " IRQ=", std::dec, m_irq, " DMA8=", m_dmaChannel8,
-           " DMA16=", m_dmaChannel16);
+    : m_memory(memory), m_dma(dma), m_basePort(basePort), m_irq(irq),
+      m_dmaChannel8(dmaChannel8), m_dmaChannel16(dmaChannel16),
+      m_outputRate(systemSampleRate) {
+  resetMixer();
+  LOG_INFO("SoundBlaster 16 (DSP 4.05) at ", std::hex, m_basePort, std::dec,
+           " IRQ=", m_irq, " DMA8=", m_dmaChannel8, " DMA16=", m_dmaChannel16);
 }
 
-// ─── Mixer register constants ───────────────────────────────────────────
-namespace MixerReg {
-  constexpr uint8_t RESET           = 0x00;
-  constexpr uint8_t DAC_LEVEL       = 0x04;
-  constexpr uint8_t VOICE_LEFT      = 0x04; // alias
-  constexpr uint8_t MIC_LEVEL       = 0x0A;
-  constexpr uint8_t OUTPUT_SWITCH   = 0x0E;
-  constexpr uint8_t INPUT_SWITCH    = 0x0F;
-  constexpr uint8_t MASTER_LEFT     = 0x22;
-  constexpr uint8_t MASTER_RIGHT    = 0x23;
-  constexpr uint8_t VOICE_VOL_LEFT  = 0x24; // also 0x04
-  constexpr uint8_t VOICE_VOL_RIGHT = 0x25;
-  constexpr uint8_t MIDI_LEFT       = 0x26;
-  constexpr uint8_t MIDI_RIGHT      = 0x27;
-  constexpr uint8_t CD_LEFT         = 0x28;
-  constexpr uint8_t CD_RIGHT        = 0x29;
-  constexpr uint8_t LINEIN_LEFT     = 0x2E;
-  constexpr uint8_t LINEIN_RIGHT    = 0x2F;
-  constexpr uint8_t PC_SPEAKER      = 0x30;
-  constexpr uint8_t TREBLE_LEFT     = 0x31;
-  constexpr uint8_t TREBLE_RIGHT    = 0x32;
-  constexpr uint8_t BASS_LEFT       = 0x33;
-  constexpr uint8_t BASS_RIGHT      = 0x34;
-  constexpr uint8_t RECORD_SOURCE   = 0x36;
-  constexpr uint8_t RECORD_GAIN_L   = 0x38;
-  constexpr uint8_t RECORD_GAIN_R   = 0x39;
-  constexpr uint8_t MIC_GAIN        = 0x3B;
-  constexpr uint8_t AGC             = 0x3C;
-  constexpr uint8_t IRQ_STATUS      = 0x80;
-  constexpr uint8_t DMA_STATUS      = 0x81;
-  constexpr uint8_t IRQ_CONFIG      = 0x80;
-  constexpr uint8_t DMA_CONFIG      = 0x81;
+// ─── Mixer ──────────────────────────────────────────────────────────────
+
+void SoundBlaster::resetMixer() {
+  m_mixer.fill(0);
+  // Full volume: games that never touch the mixer must still be audible
+  // (the analog output stage of a real card makes up for its -14 dB reset
+  // default).
+  for (uint8_t r : {kMasterL, kMasterR, kVoiceL, kVoiceR, kFmL, kFmR, kCdL,
+                    kCdR, kLineL, kLineR})
+    m_mixer[r] = 0xF8;
+  m_mixer[kOutSwitch] = 0x1F;
+  m_mixer[0x3D] = 0x15;
+  m_mixer[0x3E] = 0x0B;
+  m_mixer[0x44] = m_mixer[0x45] = m_mixer[0x46] = m_mixer[0x47] = 0x80;
+  m_mixer[0x0E] = 0x00; // SB Pro: mono, filter on
 }
 
-// ─── Mixer volume conversion ────────────────────────────────────────────
-// SB16 mixer volumes: 4-bit nibble (0x0–0xF) → 0.0–1.0
-float SoundBlaster::mixerVolumeToFloat(uint8_t nibble) {
-  return static_cast<float>(nibble & 0x0F) / 15.0f;
+float SoundBlaster::volumeGain(uint8_t sb16Value) {
+  const int v = sb16Value >> 3;
+  if (v == 0)
+    return 0.0f;
+  return std::pow(10.0f, -(31 - v) * 2.0f / 20.0f); // 2 dB steps
 }
 
-// ─── Mixer register read/write ──────────────────────────────────────────
-uint8_t SoundBlaster::readMixerRegister(uint8_t reg) const {
+uint8_t SoundBlaster::readMixer(uint8_t reg) const {
+  auto pro = [&](uint8_t l, uint8_t r) {
+    return static_cast<uint8_t>((m_mixer[l] & 0xF0) | (m_mixer[r] >> 4));
+  };
   switch (reg) {
-  case MixerReg::RESET:
-    return 0x00;
-  case MixerReg::DAC_LEVEL:
-    return (m_mixer.voiceLeft << 4) | m_mixer.voiceRight;
-  case MixerReg::MIC_LEVEL:
-    return m_mixer.micLevel & 0x0F;
-  case MixerReg::OUTPUT_SWITCH:
-    return m_mixer.outputMixerSwitch;
-  case MixerReg::INPUT_SWITCH:
-    return m_mixer.inputMixerSwitch;
-  case MixerReg::MASTER_LEFT:
-    return m_mixer.masterLeft & 0x0F;
-  case MixerReg::MASTER_RIGHT:
-    return m_mixer.masterRight & 0x0F;
-  case MixerReg::VOICE_VOL_LEFT:
-    return m_mixer.voiceLeft & 0x0F;
-  case MixerReg::VOICE_VOL_RIGHT:
-    return m_mixer.voiceRight & 0x0F;
-  case MixerReg::MIDI_LEFT:
-    return m_mixer.midiLeft & 0x0F;
-  case MixerReg::MIDI_RIGHT:
-    return m_mixer.midiRight & 0x0F;
-  case MixerReg::CD_LEFT:
-    return m_mixer.cdLeft & 0x0F;
-  case MixerReg::CD_RIGHT:
-    return m_mixer.cdRight & 0x0F;
-  case MixerReg::LINEIN_LEFT:
-    return m_mixer.lineInLeft & 0x0F;
-  case MixerReg::LINEIN_RIGHT:
-    return m_mixer.lineInRight & 0x0F;
-  case MixerReg::PC_SPEAKER:
-    return m_mixer.pcSpeaker & 0x0F;
-  case MixerReg::TREBLE_LEFT:
-    return m_mixer.trebleLeft & 0x0F;
-  case MixerReg::TREBLE_RIGHT:
-    return m_mixer.trebleRight & 0x0F;
-  case MixerReg::BASS_LEFT:
-    return m_mixer.bassLeft & 0x0F;
-  case MixerReg::BASS_RIGHT:
-    return m_mixer.bassRight & 0x0F;
-  case MixerReg::RECORD_SOURCE:
-    return m_mixer.recordSource;
-  case MixerReg::RECORD_GAIN_L:
-    return (m_mixer.recordGainLeft & 0x0F) << 4;
-  case MixerReg::RECORD_GAIN_R:
-    return (m_mixer.recordGainRight & 0x0F) << 4;
-  case MixerReg::MIC_GAIN:
-    return m_mixer.micGain & 0x0F;
-  case MixerReg::AGC:
-    return m_mixer.agc & 0x01;
-  case MixerReg::IRQ_STATUS: {
-    uint8_t status = 0x00;
-    if (m_irq8Pending)  status |= 0x01; // bit 0: 8-bit IRQ
-    if (m_irq16Pending) status |= 0x02; // bit 1: 16-bit IRQ
-    return status;
-  }
-  default:
-    return 0x00;
-  }
-}
-
-void SoundBlaster::writeMixerRegister(uint8_t reg, uint8_t value) {
-  switch (reg) {
-  case MixerReg::RESET:
-    if (value & 0x01) {
-      m_mixer = MixerState{};
-      LOG_DEBUG("[SB] Mixer reset to defaults");
+  case 0x04: return pro(kVoiceL, kVoiceR);
+  case 0x0A: return static_cast<uint8_t>(m_mixer[kMic] >> 5);
+  case 0x0E: return m_mixer[0x0E];
+  case 0x22: return pro(kMasterL, kMasterR);
+  case 0x26: return pro(kFmL, kFmR);
+  case 0x28: return pro(kCdL, kCdR);
+  case 0x2E: return pro(kLineL, kLineR);
+  case 0x80: // IRQ select
+    switch (m_irq) {
+    case 2: case 9: return 0x01;
+    case 5: return 0x02;
+    case 7: return 0x04;
+    case 10: return 0x08;
+    default: return 0x00;
     }
-    break;
-  case MixerReg::DAC_LEVEL:
-    m_mixer.voiceLeft  = (value >> 4) & 0x0F;
-    m_mixer.voiceRight = value & 0x0F;
-    break;
-  case MixerReg::MIC_LEVEL:
-    m_mixer.micLevel = value & 0x0F;
-    break;
-  case MixerReg::OUTPUT_SWITCH:
-    m_mixer.outputMixerSwitch = value;
-    break;
-  case MixerReg::INPUT_SWITCH:
-    m_mixer.inputMixerSwitch = value;
-    break;
-  case MixerReg::MASTER_LEFT:
-    m_mixer.masterLeft = value & 0x0F;
-    break;
-  case MixerReg::MASTER_RIGHT:
-    m_mixer.masterRight = value & 0x0F;
-    break;
-  case MixerReg::VOICE_VOL_LEFT:
-    m_mixer.voiceLeft = value & 0x0F;
-    break;
-  case MixerReg::VOICE_VOL_RIGHT:
-    m_mixer.voiceRight = value & 0x0F;
-    break;
-  case MixerReg::MIDI_LEFT:
-    m_mixer.midiLeft = value & 0x0F;
-    break;
-  case MixerReg::MIDI_RIGHT:
-    m_mixer.midiRight = value & 0x0F;
-    break;
-  case MixerReg::CD_LEFT:
-    m_mixer.cdLeft = value & 0x0F;
-    break;
-  case MixerReg::CD_RIGHT:
-    m_mixer.cdRight = value & 0x0F;
-    break;
-  case MixerReg::LINEIN_LEFT:
-    m_mixer.lineInLeft = value & 0x0F;
-    break;
-  case MixerReg::LINEIN_RIGHT:
-    m_mixer.lineInRight = value & 0x0F;
-    break;
-  case MixerReg::PC_SPEAKER:
-    m_mixer.pcSpeaker = value & 0x0F;
-    break;
-  case MixerReg::TREBLE_LEFT:
-    m_mixer.trebleLeft = value & 0x0F;
-    break;
-  case MixerReg::TREBLE_RIGHT:
-    m_mixer.trebleRight = value & 0x0F;
-    break;
-  case MixerReg::BASS_LEFT:
-    m_mixer.bassLeft = value & 0x0F;
-    break;
-  case MixerReg::BASS_RIGHT:
-    m_mixer.bassRight = value & 0x0F;
-    break;
-  case MixerReg::RECORD_SOURCE:
-    m_mixer.recordSource = value & 0x07;
-    break;
-  case MixerReg::RECORD_GAIN_L:
-    m_mixer.recordGainLeft = (value >> 4) & 0x0F;
-    break;
-  case MixerReg::RECORD_GAIN_R:
-    m_mixer.recordGainRight = (value >> 4) & 0x0F;
-    break;
-  case MixerReg::MIC_GAIN:
-    m_mixer.micGain = value & 0x0F;
-    break;
-  case MixerReg::AGC:
-    m_mixer.agc = value & 0x01;
-    break;
-  case MixerReg::IRQ_CONFIG:
-  case MixerReg::DMA_CONFIG:
-    // SB16 IRQ/DMA config — read-only in practice
-    break;
+  case 0x81: // DMA select
+    return static_cast<uint8_t>((1u << m_dmaChannel8) |
+                                (m_dmaChannel16 >= 4 ? 1u << m_dmaChannel16 : 0u));
+  case 0x82: // IRQ status: 8-bit DMA, 16-bit DMA, MPU-401
+    return static_cast<uint8_t>((m_irq8Pending ? 1 : 0) |
+                                (m_irq16Pending ? 2 : 0));
   default:
-    LOG_DEBUG("[SB] Write to unknown mixer register 0x", std::hex,
-              (int)reg, " = 0x", (int)value);
-    break;
+    return m_mixer[reg];
+  }
+}
+
+void SoundBlaster::writeMixer(uint8_t reg, uint8_t value) {
+  // SB Pro registers: high nibble left, low nibble right (4-bit volumes)
+  auto pro = [&](uint8_t l, uint8_t r) {
+    m_mixer[l] = static_cast<uint8_t>((value & 0xF0) | 0x08);
+    m_mixer[r] = static_cast<uint8_t>(((value & 0x0F) << 4) | 0x08);
+  };
+  switch (reg) {
+  case 0x00: resetMixer(); break;
+  case 0x04: pro(kVoiceL, kVoiceR); break;
+  case 0x0A: m_mixer[kMic] = static_cast<uint8_t>((value & 7) << 5); break;
+  case 0x0E: m_mixer[0x0E] = value; break; // bit 1: stereo, bit 5: filter off
+  case 0x22: pro(kMasterL, kMasterR); break;
+  case 0x26: pro(kFmL, kFmR); break;
+  case 0x28: pro(kCdL, kCdR); break;
+  case 0x2E: pro(kLineL, kLineR); break;
+  case 0x80: case 0x81: case 0x82: break; // jumper settings / status
+  default: m_mixer[reg] = value; break;
   }
 }
 
 // ─── Port I/O ───────────────────────────────────────────────────────────
-uint8_t SoundBlaster::read8(uint16_t port) {
-  uint16_t off = port - m_basePort;
 
-  if (off == 0x04) { // Mixer Address
-    return m_mixerIndex;
-  } else if (off == 0x05) { // Mixer Data
-    return readMixerRegister(m_mixerIndex);
-  } else if (off == 0x0A) { // DSP Read Data (read) / DSP Data Write (write)
+uint8_t SoundBlaster::read8(uint16_t port) {
+  const uint16_t off = static_cast<uint16_t>(port - m_basePort);
+  switch (off) {
+  case 0x0: case 0x1: case 0x2: case 0x3:
+    return m_fm ? m_fm->read8(static_cast<uint16_t>(0x388 + off)) : 0xFF;
+  case 0x8: case 0x9:
+    return m_fm ? m_fm->read8(static_cast<uint16_t>(0x388 + off - 8)) : 0xFF;
+  case 0x4: return m_mixerIndex;
+  case 0x5: return readMixer(m_mixerIndex);
+  case 0x6: return 0xFF;
+  case 0xA:
     if (!m_readQueue.empty()) {
-      uint8_t val = m_readQueue.front();
+      m_lastRead = m_readQueue.front();
       m_readQueue.pop();
-      return val;
     }
-    return 0xFF;
-  } else if (off == 0x0C) { // DSP Write Status / Read-Buffer mirror
-    // Bit 7 = 1 if read data available (for programs that poll 0x22C
-    // instead of 0x22E, like WINGS.EXE); also always clear = ready for
-    // writing (bit 7 = 0 for write-buffer-empty).
-    return m_readQueue.empty() ? 0x00 : 0x80;
-  } else if (off == 0x0E) { // Read-Buffer Status / 8-bit IRQ Ack
-    m_irq8Pending = false;
-    if (m_irqCallback) {
-      // Lower the IRQ line
-    }
-    return m_readQueue.empty() ? 0x00 : 0x80;
-  } else if (off == 0x0F) { // 16-bit IRQ Ack
-    m_irq16Pending = false;
+    return m_lastRead;
+  case 0xC: // write buffer status: bit 7 clear = ready for a command
     return 0x00;
+  case 0xE: // read buffer status; reading acknowledges the 8-bit IRQ
+    m_irq8Pending = false;
+    return static_cast<uint8_t>(m_readQueue.empty() ? 0x00 : 0x80);
+  case 0xF: // acknowledge the 16-bit IRQ
+    m_irq16Pending = false;
+    return 0xFF;
+  default:
+    return 0xFF;
   }
-  return 0xFF;
 }
 
 void SoundBlaster::write8(uint16_t port, uint8_t value) {
-  uint16_t off = port - m_basePort;
-
-  if (off == 0x04) { // Mixer Address
-    m_mixerIndex = value;
-  } else if (off == 0x05) { // Mixer Data
-    writeMixerRegister(m_mixerIndex, value);
-  } else if (off == 0x06) { // DSP Reset
-    if (value == 1) {
-      m_resetState = true;
-      LOG_INFO("[SB] Reset Initiated");
-    } else if (value == 0 && m_resetState) {
-      m_resetState = false;
-      while (!m_readQueue.empty())
-        m_readQueue.pop();
-      while (!m_writeQueue.empty())
-        m_writeQueue.pop();
-      m_readQueue.push(0xAA); // DSP Ready flag
-      LOG_INFO("[SB] Reset Completed - Sent 0xAA");
-      m_expectedArgs = 0;
-      m_dmaActive = false;
-      m_highSpeed = false;
-      m_16bit = false;
-      m_irq8Pending = false;
-      m_irq16Pending = false;
+  const uint16_t off = static_cast<uint16_t>(port - m_basePort);
+  switch (off) {
+  case 0x0: case 0x1: case 0x2: case 0x3:
+    if (m_fm)
+      m_fm->write8(static_cast<uint16_t>(0x388 + off), value);
+    break;
+  case 0x8: case 0x9:
+    if (m_fm)
+      m_fm->write8(static_cast<uint16_t>(0x388 + off - 8), value);
+    break;
+  case 0x4: m_mixerIndex = value; break;
+  case 0x5: writeMixer(m_mixerIndex, value); break;
+  case 0x6:
+    if (value & 1) {
+      m_resetLatch = true;
+    } else if (m_resetLatch) {
+      m_resetLatch = false;
+      dspReset();
     }
-  } else if (off == 0x0A || off == 0x0C) { // DSP Write Command/Data (both ports)
-    // Port 0x22A is the alternate command port used by some programs
-    // (e.g. WINGS.EXE) instead of the standard 0x22C.
-    if (m_expectedArgs > 0) {
-      m_writeQueue.push(value);
-      m_expectedArgs--;
-      if (m_expectedArgs == 0) {
-        processCommand(m_currentCommand);
-      }
-    } else {
-      m_currentCommand = value;
-      switch (m_currentCommand) {
-      case 0x10:
-        m_expectedArgs = 1;
-        break;
-      case 0x14:
-        m_expectedArgs = 2;
-        break;
-      case 0x1C:
-        m_expectedArgs = 0;
-        processCommand(m_currentCommand);
-        break;
-      case 0x40:
-        m_expectedArgs = 1;
-        break;
-      case 0x41:
-      case 0x42:
-        m_expectedArgs = 2;
-        break;
-      case 0x48:
-        m_expectedArgs = 2;
-        break;
-      case 0xB0: case 0xB1: case 0xB2: case 0xB3:
-      case 0xB4: case 0xB5: case 0xB6: case 0xB7:
-      case 0xB8: case 0xB9: case 0xBA: case 0xBB:
-      case 0xBC: case 0xBD: case 0xBE: case 0xBF:
-        m_expectedArgs = 3;
-        break;
-      case 0xC0: case 0xC1: case 0xC2: case 0xC3:
-      case 0xC4: case 0xC5: case 0xC6: case 0xC7:
-      case 0xC8: case 0xC9: case 0xCA: case 0xCB:
-      case 0xCC: case 0xCD: case 0xCE: case 0xCF:
-        m_expectedArgs = 3;
-        break;
-      case 0x90: case 0x91: case 0x98: case 0x99:
-        m_expectedArgs = 0;
-        processCommand(m_currentCommand);
-        break;
-      case 0xE0:
-        m_expectedArgs = 0;
-        processCommand(m_currentCommand);
-        break;
-      case 0xE1:
-        m_expectedArgs = 0;
-        processCommand(m_currentCommand);
-        break;
-      case 0xE2:
-        m_expectedArgs = 0;
-        processCommand(m_currentCommand);
-        break;
-      case 0xE3:
-        m_expectedArgs = 0;
-        processCommand(m_currentCommand);
-        break;
-      case 0xE4:
-        m_expectedArgs = 1;
-        break;
-      case 0xE8:
-        m_expectedArgs = 0;
-        processCommand(m_currentCommand);
-        break;
-      case 0xF0:
-      case 0xF1:
-      case 0xF2:
-      case 0xF3:
-        m_expectedArgs = 0;
-        processCommand(m_currentCommand);
-        break;
-      case 0xF8:
-        m_expectedArgs = 0;
-        processCommand(m_currentCommand);
-        break;
-      default:
-        processCommand(m_currentCommand);
-        break;
-      }
-    }
+    break;
+  case 0xC:
+    dspWrite(value);
+    break;
+  default:
+    break;
   }
 }
 
-// ─── Command processing ─────────────────────────────────────────────────
-void SoundBlaster::processCommand(uint8_t cmd) {
+// ─── DSP ────────────────────────────────────────────────────────────────
+
+void SoundBlaster::dspReset() {
+  std::queue<uint8_t>().swap(m_readQueue);
+  m_readQueue.push(0xAA);
+  m_argsNeeded = 0;
+  m_args.clear();
+  m_dmaRunning = false;
+  m_dmaPaused = false;
+  m_highSpeed = false;
+  m_exitAutoInit = false;
+  m_silenceLeft = 0;
+  m_irq8Pending = false;
+  m_irq16Pending = false;
+  m_speakerOn = true; // SB16: DMA output does not depend on it anyway
+  LOG_DEBUG("[SB] DSP reset");
+}
+
+int SoundBlaster::argumentCount(uint8_t cmd) const {
+  if ((cmd & 0xF0) == 0xB0 || (cmd & 0xF0) == 0xC0)
+    return 3;
   switch (cmd) {
-  case 0x10: { // Direct DAC output
-    uint8_t sample = m_writeQueue.front();
-    m_writeQueue.pop();
-    if (m_speakerOn) {
-      float val = ((float)sample - 128.0f) / 128.0f;
-      m_lastSampleL = val;
-      m_lastSampleR = val;
-    }
-    break;
+  case 0x10: case 0x38: case 0x40: case 0xE0: case 0xE2: case 0xE4:
+  case 0xF9:
+    return 1;
+  case 0x14: case 0x16: case 0x17: case 0x24: case 0x41: case 0x42:
+  case 0x48: case 0x74: case 0x75: case 0x76: case 0x77: case 0x80:
+    return 2;
+  default:
+    return 0;
   }
-  case 0x14: { // 8-bit single-cycle DMA
-    uint8_t lenLo = m_writeQueue.front();
-    m_writeQueue.pop();
-    uint8_t lenHi = m_writeQueue.front();
-    m_writeQueue.pop();
-    m_dmaLength = (lenHi << 8) | lenLo;
-    m_dmaBaseLength = m_dmaLength;
-    m_autoInitDma = false;
-    m_dmaActive = true;
-    m_16bit = false;
-    m_highSpeed = false;
-    LOG_INFO("[SB] 8-bit Single-cycle DMA Length=", m_dmaLength);
-    break;
-  }
-  case 0x1C: { // 8-bit auto-init DMA
-    m_dmaLength = m_dmaBaseLength;
-    m_autoInitDma = true;
-    m_dmaActive = true;
-    m_16bit = false;
-    m_highSpeed = false;
-    LOG_INFO("[SB] 8-bit Auto-init DMA Length=", m_dmaBaseLength);
-    break;
-  }
-  case 0x40: { // Set Time Constant
-    uint8_t tc = m_writeQueue.front();
-    m_writeQueue.pop();
-    if (tc == 0) {
-      LOG_WARN("[SB] Time constant 0, clamping to 1");
-      tc = 1;
-    }
-    m_dspSampleRate = 1000000.0f / (256.0f - static_cast<float>(tc));
-    LOG_DEBUG("[SB] Time Constant ", (int)tc, " -> ", m_dspSampleRate, " Hz");
-    break;
-  }
-  case 0x41: // Set Output Sample Rate (SB16)
-  case 0x42: { // Set Input Sample Rate (SB16)
-    uint8_t hi = m_writeQueue.front();
-    m_writeQueue.pop();
-    uint8_t lo = m_writeQueue.front();
-    m_writeQueue.pop();
-    uint16_t rate = (hi << 8) | lo;
-    if (rate < 5000) rate = 5000;
-    if (rate > 44100) rate = 44100;
-    m_dspSampleRate = static_cast<float>(rate);
-    LOG_INFO("[SB] Sample Rate set to ", m_dspSampleRate);
-    break;
-  }
-  case 0x48: { // Set Block size
-    uint8_t lo = m_writeQueue.front();
-    m_writeQueue.pop();
-    uint8_t hi = m_writeQueue.front();
-    m_writeQueue.pop();
-    m_dmaBaseLength = (hi << 8) | lo;
-    m_dmaLength = m_dmaBaseLength;
-    LOG_INFO("[SB] Block size set to ", m_dmaBaseLength);
-    break;
-  }
-  case 0xD0: // Halt 8-bit DMA
-    m_dmaActive = false;
-    break;
-  case 0xD1: // Speaker On
-    m_speakerOn = true;
-    break;
-  case 0xD3: // Speaker Off
-    m_speakerOn = false;
-    break;
-  case 0xD4: // Continue 8-bit DMA
-    m_dmaActive = true;
-    break;
-  case 0xD5: // Halt 16-bit DMA
-    m_dmaActive = false;
-    break;
-  case 0xD6: // Continue 16-bit DMA
-    m_dmaActive = true;
-    break;
-  case 0xD8: { // Speaker status
-    m_readQueue.push(m_speakerOn ? 0xFF : 0x00);
-    break;
-  }
-  case 0xD9: // Exit auto-init 16-bit DMA
-    m_autoInitDma = false;
-    break;
-  case 0xDA: // Exit auto-init 8-bit DMA
-    m_autoInitDma = false;
-    break;
+}
 
-  // ── 16-bit DMA commands (SB16) ────────────────────────────────────
-  case 0xB0: case 0xB1: case 0xB2: case 0xB3:
-  case 0xB4: case 0xB5: case 0xB6: case 0xB7:
-  case 0xB8: case 0xB9: case 0xBA: case 0xBB:
-  case 0xBC: case 0xBD: case 0xBE: case 0xBF: {
-    uint8_t mode = m_writeQueue.front();
-    m_writeQueue.pop();
-    uint8_t lo = m_writeQueue.front();
-    m_writeQueue.pop();
-    uint8_t hi = m_writeQueue.front();
-    m_writeQueue.pop();
+void SoundBlaster::dspWrite(uint8_t value) {
+  if (m_argsNeeded > 0) {
+    m_args.push_back(value);
+    if (--m_argsNeeded == 0)
+      processCommand();
+    return;
+  }
+  m_command = value;
+  m_args.clear();
+  m_argsNeeded = argumentCount(value);
+  if (m_argsNeeded == 0)
+    processCommand();
+}
 
-    m_autoInitDma = (cmd & 0x04) != 0;
-    m_dmaActive = true;
-    m_16bit = true;
-    m_highSpeed = false;
-    m_stereo = (mode & 0x20) != 0;
-    m_dmaBaseLength = (hi << 8) | lo;
-    m_dmaLength = m_dmaBaseLength;
-    m_sampleAccumulator = 0.0f;
-    m_prevSampleL = 0.0f;
-    m_prevSampleR = 0.0f;
-    LOG_INFO("[SB] 16-bit DMA Mode=0x", std::hex, (int)mode,
-             " Length=", std::dec, m_dmaLength);
-    break;
+void SoundBlaster::startDma(bool is16, bool autoInit, bool stereo,
+                            bool isSigned, uint32_t length, bool input,
+                            bool highSpeed) {
+  m_dma16 = is16;
+  m_autoInit = autoInit;
+  m_stereo = stereo;
+  m_signed = isSigned;
+  m_input = input;
+  m_highSpeed = highSpeed;
+  m_blockSize = std::max<uint32_t>(length, 1);
+  m_blockLeft = m_blockSize;
+  m_dmaRunning = true;
+  m_dmaPaused = false;
+  m_exitAutoInit = false;
+  m_halfRate = false;
+  m_frameAcc = 0.0;
+  LOG_DEBUG("[SB] DMA ", is16 ? "16" : "8", "-bit ", input ? "input" : "output",
+            autoInit ? " auto-init" : " single-cycle", stereo ? " stereo" : "",
+            " block=", m_blockSize, " rate=", m_rate);
+}
+
+void SoundBlaster::processCommand() {
+  const uint8_t cmd = m_command;
+  auto arg = [&](size_t i) -> uint32_t { return i < m_args.size() ? m_args[i] : 0; };
+  const bool proStereo = (m_mixer[0x0E] & 0x02) != 0;
+
+  if ((cmd & 0xF0) == 0xB0 || (cmd & 0xF0) == 0xC0) {
+    // SB16: Bx = 16-bit, Cx = 8-bit; bit 3 = input, bit 2 = auto-init;
+    // mode bit 5 = stereo, bit 4 = signed; length = samples - 1.
+    const uint8_t mode = static_cast<uint8_t>(arg(0));
+    const uint32_t len = (arg(1) | (arg(2) << 8)) + 1;
+    startDma((cmd & 0xF0) == 0xB0, (cmd & 0x04) != 0, (mode & 0x20) != 0,
+             (mode & 0x10) != 0, len, (cmd & 0x08) != 0, false);
+    return;
   }
 
-  // ── 8-bit DMA commands (SB16) ─────────────────────────────────────
-  case 0xC0: case 0xC1: case 0xC2: case 0xC3:
-  case 0xC4: case 0xC5: case 0xC6: case 0xC7:
-  case 0xC8: case 0xC9: case 0xCA: case 0xCB:
-  case 0xCC: case 0xCD: case 0xCE: case 0xCF: {
-    uint8_t mode = m_writeQueue.front();
-    m_writeQueue.pop();
-    uint8_t lo = m_writeQueue.front();
-    m_writeQueue.pop();
-    uint8_t hi = m_writeQueue.front();
-    m_writeQueue.pop();
-
-    m_autoInitDma = (cmd & 0x04) != 0;
-    m_dmaActive = true;
-    m_16bit = false;
-    m_highSpeed = false;
-    m_stereo = (mode & 0x20) != 0;
-    m_dmaBaseLength = (hi << 8) | lo;
-    m_dmaLength = m_dmaBaseLength;
-    m_sampleAccumulator = 0.0f;
-    m_prevSampleL = 0.0f;
-    m_prevSampleR = 0.0f;
-    LOG_INFO("[SB] 8-bit DMA Mode=0x", std::hex, (int)mode,
-             " Length=", std::dec, m_dmaLength);
+  switch (cmd) {
+  case 0x10: { // direct DAC, 8-bit
+    const float v = (static_cast<float>(arg(0)) - 128.0f) / 128.0f;
+    m_dacPending.push_back(v);
+    if (m_dacPending.size() > 65536)
+      m_dacPending.erase(m_dacPending.begin(), m_dacPending.begin() + 32768);
     break;
   }
-
-  // ── High-speed DMA ────────────────────────────────────────────────
-  case 0x90: { // 8-bit auto-init high-speed
-    m_dmaLength = m_dmaBaseLength;
-    m_autoInitDma = true;
-    m_dmaActive = true;
-    m_16bit = false;
-    m_highSpeed = true;
-    LOG_INFO("[SB] 8-bit Auto-init High-Speed DMA Length=", m_dmaBaseLength);
+  case 0x14: // 8-bit single-cycle output
+  case 0x16: case 0x17: // ADPCM (played as 8-bit; rarely used)
+  case 0x74: case 0x75: case 0x76: case 0x77:
+    startDma(false, false, false, false, (arg(0) | (arg(1) << 8)) + 1, false,
+             false);
+    break;
+  case 0x1C: // 8-bit auto-init output
+  case 0x1F: case 0x7D: case 0x7F:
+    startDma(false, true, proStereo, false, m_legacyBlock, false, false);
+    m_halfRate = proStereo;
+    break;
+  case 0x20: // direct ADC: silence
+    m_readQueue.push(0x80);
+    break;
+  case 0x24: // 8-bit single-cycle input
+    startDma(false, false, false, false, (arg(0) | (arg(1) << 8)) + 1, true,
+             false);
+    break;
+  case 0x2C: // 8-bit auto-init input
+    startDma(false, true, false, false, m_legacyBlock, true, false);
+    break;
+  case 0x30: case 0x31: case 0x34: case 0x35: case 0x36: case 0x37:
+  case 0x38: // MIDI: not connected
+    break;
+  case 0x40: { // time constant
+    const uint32_t tc = arg(0);
+    m_rate = 1000000.0f / static_cast<float>(256 - std::min<uint32_t>(tc, 255));
     break;
   }
-  case 0x91: { // 8-bit single-cycle high-speed
-    m_dmaLength = m_dmaBaseLength;
-    m_autoInitDma = false;
-    m_dmaActive = true;
-    m_16bit = false;
-    m_highSpeed = true;
-    LOG_INFO("[SB] 8-bit Single-cycle High-Speed DMA Length=", m_dmaLength);
+  case 0x41: case 0x42: { // SB16 sample rate (high byte first)
+    const uint32_t rate = (arg(0) << 8) | arg(1);
+    m_rate = static_cast<float>(std::clamp<uint32_t>(rate, 4000, 48000));
     break;
   }
-  case 0x98: { // 16-bit auto-init high-speed
-    m_dmaLength = m_dmaBaseLength;
-    m_autoInitDma = true;
-    m_dmaActive = true;
-    m_16bit = true;
-    m_highSpeed = true;
-    LOG_INFO("[SB] 16-bit Auto-init High-Speed DMA Length=", m_dmaBaseLength);
+  case 0x45: // continue 8-bit auto-init
+  case 0x47: // continue 16-bit auto-init
+    m_dmaPaused = false;
+    m_exitAutoInit = false;
     break;
-  }
-  case 0x99: { // 16-bit single-cycle high-speed
-    m_dmaLength = m_dmaBaseLength;
-    m_autoInitDma = false;
-    m_dmaActive = true;
-    m_16bit = true;
-    m_highSpeed = true;
-    LOG_INFO("[SB] 16-bit Single-cycle High-Speed DMA Length=", m_dmaLength);
+  case 0x48: // block size for 0x1C / 0x90 / 0x91
+    m_legacyBlock = (arg(0) | (arg(1) << 8)) + 1;
     break;
-  }
-
-  // ── Identity ──────────────────────────────────────────────────────
-  case 0xE0: { // Identify DSP (inverted byte)
-    uint8_t inv = m_writeQueue.empty() ? 0 : m_writeQueue.front();
-    if (!m_writeQueue.empty()) m_writeQueue.pop();
-    m_readQueue.push(~inv);
+  case 0x80: // silence for N samples, then IRQ
+    m_silenceLeft = (arg(0) | (arg(1) << 8)) + 1;
+    m_silenceAcc = 0.0;
     break;
-  }
-  case 0xE1: { // Get DSP Version
-    m_readQueue.push(0x04); // v4.05 = SB16
+  case 0x90: // 8-bit high-speed auto-init output
+    startDma(false, true, proStereo, false, m_legacyBlock, false, true);
+    m_halfRate = proStereo;
+    break;
+  case 0x91: // 8-bit high-speed single-cycle output
+    startDma(false, false, proStereo, false, m_legacyBlock, false, true);
+    m_halfRate = proStereo;
+    break;
+  case 0x98: // 8-bit high-speed auto-init input
+    startDma(false, true, false, false, m_legacyBlock, true, true);
+    break;
+  case 0x99: // 8-bit high-speed single-cycle input
+    startDma(false, false, false, false, m_legacyBlock, true, true);
+    break;
+  case 0xA0: case 0xA8: // SB Pro input mode: mono / stereo
+    break;
+  case 0xD0: case 0xD5: // pause DMA
+    m_dmaPaused = true;
+    break;
+  case 0xD4: case 0xD6: // continue DMA
+    m_dmaPaused = false;
+    break;
+  case 0xD1: m_speakerOn = true; break;
+  case 0xD3: m_speakerOn = false; break;
+  case 0xD8: m_readQueue.push(m_speakerOn ? 0xFF : 0x00); break;
+  case 0xD9: case 0xDA: // exit auto-init after the current block
+    m_exitAutoInit = true;
+    break;
+  case 0xE0: // DSP identification: inverted data byte
+    m_readQueue.push(static_cast<uint8_t>(~arg(0)));
+    break;
+  case 0xE1: // DSP version 4.05 (Sound Blaster 16)
+    m_readQueue.push(0x04);
     m_readQueue.push(0x05);
     break;
-  }
-  case 0xE2: { // DSP identification (SB16)
-    // Return 2-byte copyright string fragment
+  case 0xE2: // DMA identification (result goes to memory by DMA; rarely used)
+    m_identifyByte = static_cast<uint8_t>(arg(0));
+    break;
+  case 0xE3: {
     static const char copyright[] = "COPYRIGHT (C) CREATIVE TECHNOLOGY LTD, 1992.";
-    uint16_t idx = 0;
-    m_readQueue.push(static_cast<uint8_t>(copyright[idx]));
-    m_readQueue.push(static_cast<uint8_t>(copyright[idx + 1]));
+    for (char c : copyright)
+      m_readQueue.push(static_cast<uint8_t>(c)); // includes the NUL
     break;
   }
-  case 0xE3: { // DSP Copyright string (40 bytes)
-    static const char copyright[] = "COPYRIGHT (C) CREATIVE TECHNOLOGY LTD, 1992.";
-    for (int i = 0; i < 40; ++i) {
-      m_readQueue.push(static_cast<uint8_t>(copyright[i]));
-    }
-    break;
-  }
-  case 0xE4: { // Write test register
-    uint8_t val = m_writeQueue.front();
-    m_writeQueue.pop();
-    m_dspTestReg = val;
-    break;
-  }
-  case 0xE8: { // Read test register
-    m_readQueue.push(m_dspTestReg);
-    break;
-  }
-
-  // ── IRQ control ───────────────────────────────────────────────────
-  case 0xF0: // Sine generator (undocumented, many SB16 don't support)
-    break;
-  case 0xF1: // IRQ reset (clear both IRQs)
-    m_irq8Pending = false;
-    m_irq16Pending = false;
-    break;
-  case 0xF2: { // Force 8-bit IRQ
-    triggerIRQ(false);
-    break;
-  }
-  case 0xF3: { // Force 16-bit IRQ
-    triggerIRQ(true);
-    break;
-  }
-  case 0xF8: { // Undocumented — returns 0x00 on SB16
-    m_readQueue.push(0x00);
-    break;
-  }
-
+  case 0xE4: m_testRegister = static_cast<uint8_t>(arg(0)); break;
+  case 0xE8: m_readQueue.push(m_testRegister); break;
+  case 0xF2: triggerIRQ(false); break;
+  case 0xF3: triggerIRQ(true); break;
+  case 0xF8: m_readQueue.push(0x00); break;
+  case 0xF9: m_readQueue.push(0x00); break;
+  case 0xFB: case 0xFC: case 0xFD: m_readQueue.push(0x00); break;
   default:
-    LOG_DEBUG("[SB] Unimplemented command: 0x", std::hex, (int)cmd);
-    while (!m_writeQueue.empty())
-      m_writeQueue.pop();
+    LOG_DEBUG("[SB] unhandled DSP command 0x", std::hex, static_cast<int>(cmd));
     break;
   }
 }
 
-// ─── IRQ triggering ─────────────────────────────────────────────────────
 void SoundBlaster::triggerIRQ(bool is16bit) {
-  if (is16bit) {
+  if (is16bit)
     m_irq16Pending = true;
-  } else {
+  else
     m_irq8Pending = true;
-  }
-  if (m_irqCallback) {
+  if (m_irqCallback)
     m_irqCallback();
-  }
 }
 
-// ─── Audio generation ───────────────────────────────────────────────────
+// ─── DMA engine and output ──────────────────────────────────────────────
+
+void SoundBlaster::fetchFrame() {
+  const int channel = m_dma16 ? m_dmaChannel16 : m_dmaChannel8;
+  const int channels = m_stereo ? 2 : 1;
+  m_prev = m_cur;
+  for (int c = 0; c < channels && m_dmaRunning; ++c) {
+    const uint32_t addr = m_dma.getChannelAddress(channel);
+    float v = 0.0f;
+    if (m_input) {
+      if (m_dma16)
+        m_memory.write16(addr, 0);
+      else
+        m_memory.write8(addr, 0x80);
+    } else if (m_dma16) {
+      uint16_t raw = m_memory.read16(addr);
+      if (!m_signed)
+        raw ^= 0x8000;
+      v = static_cast<float>(static_cast<int16_t>(raw)) / 32768.0f;
+    } else {
+      uint8_t raw = m_memory.read8(addr);
+      if (m_signed)
+        raw ^= 0x80;
+      v = (static_cast<float>(raw) - 128.0f) / 128.0f;
+    }
+    m_dma.acknowledgeTransfer(channel, m_dma16 ? 2 : 1);
+    if (m_stereo)
+      m_cur[c] = v;
+    else
+      m_cur[0] = m_cur[1] = v;
+
+    if (m_blockLeft > 0)
+      --m_blockLeft;
+    if (m_blockLeft == 0) {
+      triggerIRQ(m_dma16);
+      if (m_autoInit && !m_exitAutoInit) {
+        m_blockLeft = m_blockSize;
+      } else {
+        m_dmaRunning = false;
+        m_exitAutoInit = false;
+      }
+    }
+  }
+  if (m_input)
+    m_cur = {0.0f, 0.0f};
+}
+
+void SoundBlaster::produce(size_t frames) {
+  if (frames == 0)
+    return;
+  if (m_gainKey != (m_mixer[kMasterL] | m_mixer[kMasterR] << 8 |
+                    m_mixer[kVoiceL] << 16 | uint32_t(m_mixer[kVoiceR]) << 24)) {
+    m_gainKey = m_mixer[kMasterL] | m_mixer[kMasterR] << 8 |
+                m_mixer[kVoiceL] << 16 | uint32_t(m_mixer[kVoiceR]) << 24;
+    m_gain[0] = volumeGain(m_mixer[kMasterL]) * volumeGain(m_mixer[kVoiceL]);
+    m_gain[1] = volumeGain(m_mixer[kMasterR]) * volumeGain(m_mixer[kVoiceR]);
+  }
+  const float master[2] = {m_gain[0], m_gain[1]};
+  const float voice[2] = {1.0f, 1.0f};
+  // Direct DAC writes since the last call are spread over these frames.
+  const size_t dacCount = m_dacPending.size();
+  for (size_t i = 0; i < frames; ++i) {
+    std::array<float, 2> s{0.0f, 0.0f};
+    if (m_dmaRunning && !m_dmaPaused) {
+      // SB Pro stereo via the legacy commands: the rate is the byte rate.
+      const double frameRate = m_halfRate ? m_rate / 2.0 : m_rate;
+      m_frameAcc += frameRate / m_outputRate;
+      while (m_frameAcc >= 1.0 && m_dmaRunning) {
+        m_frameAcc -= 1.0;
+        fetchFrame();
+      }
+      const float f = static_cast<float>(std::min(m_frameAcc, 1.0));
+      s[0] = m_prev[0] + (m_cur[0] - m_prev[0]) * f;
+      s[1] = m_prev[1] + (m_cur[1] - m_prev[1]) * f;
+    }
+    if (m_silenceLeft > 0) {
+      m_silenceAcc += m_rate / m_outputRate;
+      while (m_silenceAcc >= 1.0 && m_silenceLeft > 0) {
+        m_silenceAcc -= 1.0;
+        if (--m_silenceLeft == 0)
+          triggerIRQ(false);
+      }
+    }
+    if (dacCount > 0) {
+      m_dacLevel = m_dacPending[std::min(dacCount - 1, i * dacCount / frames)];
+      m_dacIdleFrames = 0;
+    } else if (m_dacLevel != 0.0f && ++m_dacIdleFrames > 4410) {
+      m_dacLevel *= 0.999f; // let a stale DC level from the DAC fade out
+      if (std::fabs(m_dacLevel) < 1e-4f)
+        m_dacLevel = 0.0f;
+    }
+    s[0] += m_dacLevel;
+    s[1] += m_dacLevel;
+    m_out.push_back({s[0] * voice[0] * master[0], s[1] * voice[1] * master[1]});
+  }
+  m_dacPending.clear();
+  while (m_out.size() > kMaxQueuedFrames)
+    m_out.pop_front();
+}
+
+void SoundBlaster::advance(double seconds) {
+  m_timeDriven = true;
+  if (seconds <= 0)
+    return;
+  m_outAcc += seconds * m_outputRate;
+  const auto frames = static_cast<size_t>(m_outAcc);
+  m_outAcc -= static_cast<double>(frames);
+  produce(std::min<size_t>(frames, kMaxQueuedFrames));
+}
+
 void SoundBlaster::generateSamples(float *buffer, size_t numSamples) {
-  float samplesPerSystemSample = m_dspSampleRate / m_systemSampleRate;
-
-  // Pre-compute mixer volume levels
-  float masterL = mixerVolumeToFloat(m_mixer.masterLeft);
-  float masterR = mixerVolumeToFloat(m_mixer.masterRight);
-  float voiceL  = mixerVolumeToFloat(m_mixer.voiceLeft);
-  float voiceR  = mixerVolumeToFloat(m_mixer.voiceRight);
-
-  for (size_t i = 0; i < numSamples; i++) {
-    m_sampleAccumulator += samplesPerSystemSample;
-
-    // Fetch new samples from DMA
-    while (m_sampleAccumulator >= 1.0f) {
-      if (!m_dmaActive)
-        break;
-
-      int dmaChannel = m_16bit ? m_dmaChannel16 : m_dmaChannel8;
-      uint32_t addr = m_dma.getChannelAddress(dmaChannel);
-      uint16_t transferBytes = 0;
-      float newL = m_lastSampleL;
-      float newR = m_lastSampleR;
-
-      if (m_16bit) {
-        if (m_stereo) {
-          // SB16 16-bit stereo: word-interleaved (L, R)
-          int16_t sL = static_cast<int16_t>(m_memory.read16(addr));
-          int16_t sR = static_cast<int16_t>(m_memory.read16(addr + 2));
-          newL = static_cast<float>(sL) / 32768.0f;
-          newR = static_cast<float>(sR) / 32768.0f;
-          transferBytes = 4;
-        } else {
-          int16_t sL = static_cast<int16_t>(m_memory.read16(addr));
-          newL = static_cast<float>(sL) / 32768.0f;
-          newR = newL;
-          transferBytes = 2;
-        }
-      } else {
-        if (m_stereo) {
-          // SB Pro / SB16 8-bit stereo: byte-interleaved (L, R)
-          uint8_t sL = m_memory.read8(addr);
-          uint8_t sR = m_memory.read8(addr + 1);
-          newL = (static_cast<float>(sL) - 128.0f) / 128.0f;
-          newR = (static_cast<float>(sR) - 128.0f) / 128.0f;
-          transferBytes = 2;
-        } else {
-          uint8_t sL = m_memory.read8(addr);
-          newL = (static_cast<float>(sL) - 128.0f) / 128.0f;
-          newR = newL;
-          transferBytes = 1;
-        }
-      }
-
-      // Store previous sample for interpolation
-      m_prevSampleL = m_lastSampleL;
-      m_prevSampleR = m_lastSampleR;
-      m_lastSampleL = newL;
-      m_lastSampleR = newR;
-
-      bool tc = m_dma.acknowledgeTransfer(dmaChannel, transferBytes);
-
-      // Decrement DSP block counter by number of sample-words consumed
-      // For 16-bit: each channel sample = 1 word; for 8-bit: each = 1 byte
-      // The counter counts samples per channel, not bytes
-      uint16_t samplesConsumed = 1;
-      if (m_16bit && m_stereo) samplesConsumed = 1; // counter counts per channel
-      else if (m_stereo) samplesConsumed = 1;        // same for 8-bit stereo
-
-      bool dspTc = false;
-      if (m_dmaLength == 0) {
-        dspTc = true;
-        if (m_autoInitDma) {
-          m_dmaLength = m_dmaBaseLength;
-        }
-      } else {
-        m_dmaLength--;
-      }
-
-      // Fire IRQ on DMA TC — the DMA channel reached terminal count
-      if (tc) {
-        triggerIRQ(m_16bit);
-        if (!m_autoInitDma) {
-          m_dmaActive = false;
-        }
-      }
-
-      // Fire IRQ on DSP block boundary — independently of DMA TC
-      if (dspTc && !tc) {
-        triggerIRQ(m_16bit);
-      }
-
-      m_sampleAccumulator -= 1.0f;
-    }
-
-    if (m_dmaActive && m_speakerOn) {
-      // Linear interpolation between previous and current sample
-      float frac = m_sampleAccumulator;
-      if (frac < 0.0f) frac = 0.0f;
-      if (frac > 1.0f) frac = 1.0f;
-
-      float interpL = m_prevSampleL + (m_lastSampleL - m_prevSampleL) * (1.0f - frac);
-      float interpR = m_prevSampleR + (m_lastSampleR - m_prevSampleR) * (1.0f - frac);
-
-      // Apply voice volume then master volume
-      float outL = interpL * voiceL * masterL;
-      float outR = interpR * voiceR * masterR;
-
-      buffer[i * 2 + 0] += outL;
-      buffer[i * 2 + 1] += outR;
-    }
+  // Without advance() (unit tests) the DSP is clocked by the output.  With
+  // it, emulated time alone moves the DSP: an underrun is padded with
+  // silence instead of running the DMA ahead of the program's timeline,
+  // and a backlog beyond ~100 ms is dropped to keep the latency bounded.
+  if (!m_timeDriven && m_out.size() < numSamples)
+    produce(numSamples - m_out.size());
+  constexpr size_t kMaxLatencyFrames = 4410;
+  while (m_out.size() > numSamples + kMaxLatencyFrames)
+    m_out.pop_front();
+  const size_t available = std::min(numSamples, m_out.size());
+  const size_t start = numSamples - available; // pad at the front
+  for (size_t i = 0; i < available; ++i) {
+    const auto &f = m_out.front();
+    buffer[(start + i) * 2 + 0] += f[0];
+    buffer[(start + i) * 2 + 1] += f[1];
+    m_out.pop_front();
   }
 }
 
