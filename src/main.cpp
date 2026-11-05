@@ -745,6 +745,7 @@ int main(int argc, char *argv[]) {
           fador::utils::enabledCategories |= fador::utils::CAT_CPU;
         if (cats.find("video") != std::string::npos)
           fador::utils::enabledCategories |= fador::utils::CAT_VIDEO;
+          memory.setWriteTracing(true); // log VRAM / IVT writes
         if (cats.find("dos") != std::string::npos)
           fador::utils::enabledCategories |= fador::utils::CAT_DOS;
       } else if (arg.find("--debug=") == 0) {
@@ -755,6 +756,7 @@ int main(int argc, char *argv[]) {
           fador::utils::enabledCategories |= fador::utils::CAT_CPU;
         if (cats.find("video") != std::string::npos)
           fador::utils::enabledCategories |= fador::utils::CAT_VIDEO;
+          memory.setWriteTracing(true); // log VRAM / IVT writes
         if (cats.find("dos") != std::string::npos)
           fador::utils::enabledCategories |= fador::utils::CAT_DOS;
       } else if (arg == "--") {

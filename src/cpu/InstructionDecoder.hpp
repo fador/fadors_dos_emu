@@ -85,10 +85,25 @@ private:
   uint8_t m_currentEASegment;
   bool m_eaResolved;
 
-  // Fetches next byte from memory through CS:EIP
-  uint8_t fetch8();
-  uint16_t fetch16();
-  uint32_t fetch32();
+  // Fetches next byte(s) from memory through CS:EIP (inline: hot path)
+  uint8_t fetch8() {
+    const uint32_t eip = m_cpu.getEIP();
+    const uint8_t val = m_memory.read8(m_segBase[CS] + eip);
+    m_cpu.setEIP(eip + 1);
+    return val;
+  }
+  uint16_t fetch16() {
+    const uint32_t eip = m_cpu.getEIP();
+    const uint16_t val = m_memory.read16(m_segBase[CS] + eip);
+    m_cpu.setEIP(eip + 2);
+    return val;
+  }
+  uint32_t fetch32() {
+    const uint32_t eip = m_cpu.getEIP();
+    const uint32_t val = m_memory.read32(m_segBase[CS] + eip);
+    m_cpu.setEIP(eip + 4);
+    return val;
+  }
   void syncSegmentCacheIfNeeded();
   bool tryFastRepMovs(uint32_t elementSize);
   bool currentOperandSize32() const;

@@ -56,11 +56,12 @@ MemoryBus::MemoryBus() {
   LOG_INFO("MemoryBus initialized with ", MEMORY_SIZE, " bytes");
 }
 
+// Slow paths: handled byte by byte so accesses that straddle the VGA
+// window or the A20 wrap point are routed correctly for every byte.
 uint8_t MemoryBus::read8Slow(uint32_t address, uint32_t effectiveAddress) const {
   if (effectiveAddress < MEMORY_SIZE) {
-    if (needsPlaneRead8(effectiveAddress)) {
+    if (needsPlaneRead8(effectiveAddress))
       return m_vga->planeRead8(effectiveAddress - VGA_PLANAR_START);
-    }
     return m_ram[effectiveAddress];
   }
   reportOutOfBounds(address, false);
@@ -71,50 +72,21 @@ uint8_t MemoryBus::read8Slow(uint32_t address, uint32_t effectiveAddress) const 
 
 uint16_t MemoryBus::read16Slow(uint32_t address,
                                uint32_t effectiveAddress) const {
-  if (effectiveAddress + 1 < MEMORY_SIZE) {
-    uint8_t lo, hi;
-    if (needsPlaneRead8(effectiveAddress)) {
-      lo = m_vga->planeRead8(effectiveAddress - VGA_PLANAR_START);
-      hi = m_vga->planeRead8(effectiveAddress + 1 - VGA_PLANAR_START);
-    } else {
-      lo = m_ram[effectiveAddress];
-      hi = m_ram[effectiveAddress + 1];
-    }
-    return static_cast<uint16_t>(lo) | (static_cast<uint16_t>(hi) << 8);
-  }
-  reportOutOfBounds(address, false);
-  LOG_WARN("Memory out of bounds READ 16-bit at: 0x", std::hex, address,
-           " (Effective: 0x", effectiveAddress, ")");
-  return 0xFFFF;
+  (void)effectiveAddress;
+  return static_cast<uint16_t>(read8(address) | (read8(address + 1) << 8));
 }
 
 uint32_t MemoryBus::read32Slow(uint32_t address,
                                uint32_t effectiveAddress) const {
-  if (effectiveAddress + 3 < MEMORY_SIZE) {
-    uint32_t b0, b1, b2, b3;
-    if (needsPlaneRead8(effectiveAddress)) {
-      b0 = m_vga->planeRead8(effectiveAddress - VGA_PLANAR_START);
-      b1 = m_vga->planeRead8(effectiveAddress + 1 - VGA_PLANAR_START);
-      b2 = m_vga->planeRead8(effectiveAddress + 2 - VGA_PLANAR_START);
-      b3 = m_vga->planeRead8(effectiveAddress + 3 - VGA_PLANAR_START);
-    } else {
-      b0 = m_ram[effectiveAddress];
-      b1 = m_ram[effectiveAddress + 1];
-      b2 = m_ram[effectiveAddress + 2];
-      b3 = m_ram[effectiveAddress + 3];
-    }
-    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
-  }
-  reportOutOfBounds(address, false);
-  LOG_WARN("Memory out of bounds READ 32-bit at: 0x", std::hex, address,
-           " (Effective: 0x", effectiveAddress, ")");
-  return 0xFFFFFFFF;
+  (void)effectiveAddress;
+  return static_cast<uint32_t>(read16(address)) |
+         (static_cast<uint32_t>(read16(address + 2)) << 16);
 }
 
 void MemoryBus::write8Slow(uint32_t address, uint32_t effectiveAddress,
                            uint8_t value) {
   if (effectiveAddress < MEMORY_SIZE) {
-    if (effectiveAddress < 0x400) {
+    if (effectiveAddress < IVT_BDA_LIMIT) {
       LOG_DEBUG("IVT WRITE8 at 0x", std::hex, effectiveAddress, " val: 0x",
                 static_cast<int>(value));
     }
@@ -137,58 +109,21 @@ void MemoryBus::write8Slow(uint32_t address, uint32_t effectiveAddress,
 
 void MemoryBus::write16Slow(uint32_t address, uint32_t effectiveAddress,
                             uint16_t value) {
-  if (effectiveAddress + 1 < MEMORY_SIZE) {
-    if (effectiveAddress < 0x400) {
-      LOG_DEBUG("IVT WRITE16 at 0x", std::hex, effectiveAddress, " val: 0x",
-                static_cast<int>(value));
-    }
-    m_ram[effectiveAddress] = value & 0xFF;
-    m_ram[effectiveAddress + 1] = (value >> 8) & 0xFF;
-    if (needsPlaneWrite16(effectiveAddress)) {
-      m_vga->planeWrite8(effectiveAddress - VGA_PLANAR_START, value & 0xFF);
-      m_vga->planeWrite8(effectiveAddress - VGA_PLANAR_START + 1,
-                         (value >> 8) & 0xFF);
-    }
-    if (needsTextVramLog(effectiveAddress)) {
-      uint8_t c1 = value & 0xFF;
-      LOG_VIDEO("VRAM WRITE16 at 0x", std::hex, effectiveAddress, " val: 0x",
-                value, " ('", (char)(c1 >= 32 && c1 < 127 ? c1 : '.'), "')");
-    }
-  } else {
-    reportOutOfBounds(address, true);
-    LOG_WARN("Memory out of bounds WRITE 16-bit at: 0x", std::hex, address,
-             " (Effective: 0x", effectiveAddress, ") val: 0x", value);
-  }
+  (void)effectiveAddress;
+  const bool tracing = m_traceWrites;
+  m_traceWrites = false; // log once per access, not per byte
+  write8Slow(address, (address) & m_a20Mask, static_cast<uint8_t>(value));
+  write8Slow(address + 1, (address + 1) & m_a20Mask,
+             static_cast<uint8_t>(value >> 8));
+  m_traceWrites = tracing;
 }
 
 void MemoryBus::write32Slow(uint32_t address, uint32_t effectiveAddress,
                             uint32_t value) {
-  if (effectiveAddress + 3 < MEMORY_SIZE) {
-    m_ram[effectiveAddress] = value & 0xFF;
-    m_ram[effectiveAddress + 1] = (value >> 8) & 0xFF;
-    m_ram[effectiveAddress + 2] = (value >> 16) & 0xFF;
-    m_ram[effectiveAddress + 3] = (value >> 24) & 0xFF;
-    if (needsPlaneWrite32(effectiveAddress)) {
-      m_vga->planeWrite8(effectiveAddress - VGA_PLANAR_START, value & 0xFF);
-      m_vga->planeWrite8(effectiveAddress - VGA_PLANAR_START + 1,
-                         (value >> 8) & 0xFF);
-      m_vga->planeWrite8(effectiveAddress - VGA_PLANAR_START + 2,
-                         (value >> 16) & 0xFF);
-      m_vga->planeWrite8(effectiveAddress - VGA_PLANAR_START + 3,
-                         (value >> 24) & 0xFF);
-    }
-    if (needsTextVramLog(effectiveAddress)) {
-      uint8_t c1 = value & 0xFF;
-      uint8_t c2 = (value >> 16) & 0xFF;
-      LOG_VIDEO("VRAM WRITE32 at 0x", std::hex, effectiveAddress, " val: 0x",
-                value, " ('", (char)(c1 >= 32 && c1 < 127 ? c1 : '.'), "' '",
-                (char)(c2 >= 32 && c2 < 127 ? c2 : '.'), "')");
-    }
-  } else {
-    reportOutOfBounds(address, true);
-    LOG_WARN("Memory out of bounds WRITE 32-bit at: 0x", std::hex, address,
-             " (Effective: 0x", effectiveAddress, ") val: 0x", value);
-  }
+  (void)effectiveAddress;
+  for (uint32_t i = 0; i < 4; ++i)
+    write8Slow(address + i, (address + i) & m_a20Mask,
+               static_cast<uint8_t>(value >> (8 * i)));
 }
 
 uint8_t *MemoryBus::directAccess(uint32_t address) {

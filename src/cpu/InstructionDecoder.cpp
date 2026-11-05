@@ -75,27 +75,6 @@ InstructionDecoder::InstructionDecoder(CPU &cpu, memory::MemoryBus &memory,
   syncSegments();
 }
 
-uint8_t InstructionDecoder::fetch8() {
-  uint32_t eip = m_cpu.getEIP();
-  uint8_t val = m_memory.read8(m_segBase[CS] + eip);
-  m_cpu.setEIP(eip + 1);
-  return val;
-}
-
-uint16_t InstructionDecoder::fetch16() {
-  uint32_t eip = m_cpu.getEIP();
-  uint16_t val = m_memory.read16(m_segBase[CS] + eip);
-  m_cpu.setEIP(eip + 2);
-  return val;
-}
-
-uint32_t InstructionDecoder::fetch32() {
-  uint32_t eip = m_cpu.getEIP();
-  uint32_t val = m_memory.read32(m_segBase[CS] + eip);
-  m_cpu.setEIP(eip + 4);
-  return val;
-}
-
 ModRM InstructionDecoder::decodeModRM(uint8_t byte) {
   return {static_cast<uint8_t>((byte >> 6) & 0x03),
           static_cast<uint8_t>((byte >> 3) & 0x07),
@@ -1430,8 +1409,6 @@ bool InstructionDecoder::checkCondition(uint8_t cond) {
 void InstructionDecoder::step() {
   m_stepCount++;
   syncSegmentCacheIfNeeded();
-  bool default32 = m_cpu.is32BitCode();
-
   m_hasPrefix66 = m_cpu.is32BitCode();
   m_hasPrefix67 = m_cpu.is32BitCode();
   m_hasRepnz = false;
@@ -1439,10 +1416,15 @@ void InstructionDecoder::step() {
   m_segmentOverride = 0xFF;
   m_eaResolved = false;
 
-  m_instrStartEIP = m_cpu.getEIP();
-  m_cpu.setInstructionStartEIP(m_instrStartEIP);
-  m_cpu.setPrevInstructionCS(m_cpu.getInstructionStartCS());
-  m_cpu.setInstructionStartCS(m_cpu.getSegReg(CS));
+  // Read everything first, then write: interleaving the 16-bit field
+  // updates caused a store-forwarding stall that cost ~30% of step().
+  const uint32_t startEIP = m_cpu.getEIP();
+  const uint16_t prevCS = m_cpu.getInstructionStartCS();
+  const uint16_t curCS = m_cpu.getSegReg(CS);
+  m_instrStartEIP = startEIP;
+  m_cpu.setInstructionStartEIP(startEIP);
+  m_cpu.setPrevInstructionCS(prevCS);
+  m_cpu.setInstructionStartCS(curCS);
   uint8_t opcode = fetch8();
   // Temporary diagnostic: log the next few bytes at the instruction start
   {
@@ -1513,14 +1495,11 @@ void InstructionDecoder::step() {
   } else {
     // String operations repeat handling
     if (m_hasRepz || m_hasRepnz) {
-      uint8_t stringOps[] = {0xA4, 0xA5, 0xA6, 0xA7, 0xAA, 0xAB, 0xAC,
-                             0xAD, 0xAE, 0xAF, 0x6C, 0x6D, 0x6E, 0x6F};
-      bool isStringOp = false;
-      for (uint8_t op : stringOps)
-        if (op == opcode) {
-          isStringOp = true;
-          break;
-        }
+      // String instructions: A4-A7, AA-AF, 6C-6F (no local table: a stack
+      // array here pulled the stack protector into every step())
+      const bool isStringOp = (opcode >= 0xA4 && opcode <= 0xA7) ||
+                              (opcode >= 0xAA && opcode <= 0xAF) ||
+                              (opcode >= 0x6C && opcode <= 0x6F);
 
       if (isStringOp) {
         // Execute up to a batch of iterations per step() call.

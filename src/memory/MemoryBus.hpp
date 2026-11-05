@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -33,67 +34,66 @@ public:
   MemoryBus(const MemoryBus &) = delete;
   MemoryBus &operator=(const MemoryBus &) = delete;
 
+  // Fast paths: a single range check decides whether an access touches
+  // plain RAM.  Everything else (VGA plane window A0000h-AFFFFh, accesses
+  // past the end of RAM, write tracing) goes through the *Slow functions.
   uint8_t read8(uint32_t address) const {
-    uint32_t effective = effectiveAddress(address);
-    if (effective < MEMORY_SIZE && !needsPlaneRead8(effective)) {
-      return m_ram[effective];
-    }
-    return read8Slow(address, effective);
+    const uint32_t e = address & m_a20Mask;
+    if (isPlain(e, 1))
+      return m_ram[e];
+    return read8Slow(address, e);
   }
 
   uint16_t read16(uint32_t address) const {
-    uint32_t effective = effectiveAddress(address);
-    if (effective < MEMORY_SIZE - 1 && !needsPlaneRead8(effective)) {
-      return static_cast<uint16_t>(m_ram[effective]) |
-             (static_cast<uint16_t>(m_ram[effective + 1]) << 8);
+    const uint32_t e = address & m_a20Mask;
+    if (isPlain(e, 2)) {
+      uint16_t v;
+      std::memcpy(&v, &m_ram[e], sizeof(v));
+      return v;
     }
-    return read16Slow(address, effective);
+    return read16Slow(address, e);
   }
 
   uint32_t read32(uint32_t address) const {
-    uint32_t effective = effectiveAddress(address);
-    if (effective < MEMORY_SIZE - 3 && !needsPlaneRead8(effective)) {
-      return static_cast<uint32_t>(m_ram[effective]) |
-             (static_cast<uint32_t>(m_ram[effective + 1]) << 8) |
-             (static_cast<uint32_t>(m_ram[effective + 2]) << 16) |
-             (static_cast<uint32_t>(m_ram[effective + 3]) << 24);
+    const uint32_t e = address & m_a20Mask;
+    if (isPlain(e, 4)) {
+      uint32_t v;
+      std::memcpy(&v, &m_ram[e], sizeof(v));
+      return v;
     }
-    return read32Slow(address, effective);
+    return read32Slow(address, e);
   }
 
   void write8(uint32_t address, uint8_t value) {
-    uint32_t effective = effectiveAddress(address);
-    if (effective < MEMORY_SIZE && effective >= IVT_BDA_LIMIT &&
-        !needsPlaneWrite8(effective) && !needsTextVramLog(effective)) {
-      m_ram[effective] = value;
+    const uint32_t e = address & m_a20Mask;
+    if (isPlainWrite(e, 1)) {
+      m_ram[e] = value;
       return;
     }
-    write8Slow(address, effective, value);
+    write8Slow(address, e, value);
   }
 
   void write16(uint32_t address, uint16_t value) {
-    uint32_t effective = effectiveAddress(address);
-    if (effective < MEMORY_SIZE - 1 && effective >= IVT_BDA_LIMIT &&
-        !needsPlaneWrite16(effective) && !needsTextVramLog(effective)) {
-      m_ram[effective] = static_cast<uint8_t>(value & 0xFF);
-      m_ram[effective + 1] = static_cast<uint8_t>((value >> 8) & 0xFF);
+    const uint32_t e = address & m_a20Mask;
+    if (isPlainWrite(e, 2)) {
+      std::memcpy(&m_ram[e], &value, sizeof(value));
       return;
     }
-    write16Slow(address, effective, value);
+    write16Slow(address, e, value);
   }
 
   void write32(uint32_t address, uint32_t value) {
-    uint32_t effective = effectiveAddress(address);
-    if (effective < MEMORY_SIZE - 3 && effective >= IVT_BDA_LIMIT &&
-        !needsPlaneWrite32(effective) && !needsTextVramLog(effective)) {
-      m_ram[effective] = static_cast<uint8_t>(value & 0xFF);
-      m_ram[effective + 1] = static_cast<uint8_t>((value >> 8) & 0xFF);
-      m_ram[effective + 2] = static_cast<uint8_t>((value >> 16) & 0xFF);
-      m_ram[effective + 3] = static_cast<uint8_t>((value >> 24) & 0xFF);
+    const uint32_t e = address & m_a20Mask;
+    if (isPlainWrite(e, 4)) {
+      std::memcpy(&m_ram[e], &value, sizeof(value));
       return;
     }
-    write32Slow(address, effective, value);
+    write32Slow(address, e, value);
   }
+
+  // Route every write through the slow path so IVT/BDA and text-VRAM
+  // writes are logged (enabled for --trace/--debug=video sessions).
+  void setWriteTracing(bool enabled) { m_traceWrites = enabled; }
 
   // Direct access to a memory chunk, e.g., for loading ROM/RAM to a specific
   // address or video
@@ -106,6 +106,7 @@ public:
 
   void setA20(bool enabled) {
     m_a20Enabled = enabled;
+    m_a20Mask = enabled ? 0xFFFFFFFFu : A20_MASK;
     LOG_DEBUG("Memory: A20 Gate ", enabled ? "Enabled" : "Disabled");
   }
   bool isA20Enabled() const { return m_a20Enabled; }
@@ -140,7 +141,17 @@ private:
   static constexpr uint32_t TEXT_VRAM_END = 0xBFFFF;
 
   uint32_t effectiveAddress(uint32_t address) const {
-    return m_a20Enabled ? address : (address & A20_MASK);
+    return address & m_a20Mask;
+  }
+
+  // [e, e+n) lies inside RAM and does not touch the VGA plane window
+  bool isPlain(uint32_t e, uint32_t n) const {
+    if (e > MEMORY_SIZE - n)
+      return false;
+    return m_vga == nullptr || e >= VGA_PLANAR_END || e + n <= VGA_PLANAR_START;
+  }
+  bool isPlainWrite(uint32_t e, uint32_t n) const {
+    return !m_traceWrites && isPlain(e, n);
   }
 
   bool needsPlaneRead8(uint32_t effective) const {
@@ -189,6 +200,8 @@ private:
       m_oobHandler(address, write);
   }
   bool m_a20Enabled{false};
+  uint32_t m_a20Mask{A20_MASK};
+  bool m_traceWrites{false};
   hw::VGAController *m_vga = nullptr;
 };
 

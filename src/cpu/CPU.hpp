@@ -1,4 +1,5 @@
 #pragma once
+#include "../memory/MemoryBus.hpp"
 #include <array>
 #include <cstdint>
 #include <vector>
@@ -84,12 +85,28 @@ public:
   CPU();
   void reset();
 
-  uint32_t getReg32(uint8_t index) const;
-  void setReg32(uint8_t index, uint32_t value);
-  uint16_t getReg16(uint8_t index) const;
-  void setReg16(uint8_t index, uint16_t value);
-  uint8_t getReg8(uint8_t index) const;
-  void setReg8(uint8_t index, uint8_t value);
+  // Register accessors are defined inline: they are on every instruction's
+  // hot path.
+  uint32_t getReg32(uint8_t index) const { return m_regs[index & 7]; }
+  void setReg32(uint8_t index, uint32_t value) { m_regs[index & 7] = value; }
+  uint16_t getReg16(uint8_t index) const {
+    return static_cast<uint16_t>(m_regs[index & 7]);
+  }
+  void setReg16(uint8_t index, uint16_t value) {
+    uint32_t &reg = m_regs[index & 7];
+    reg = (reg & 0xFFFF0000u) | value;
+  }
+  uint8_t getReg8(uint8_t index) const {
+    // 0-3 = AL,CL,DL,BL; 4-7 = AH,CH,DH,BH
+    return static_cast<uint8_t>(m_regs[index & 3] >> ((index & 4) ? 8 : 0));
+  }
+  void setReg8(uint8_t index, uint8_t value) {
+    uint32_t &reg = m_regs[index & 3];
+    if (index & 4)
+      reg = (reg & 0xFFFF00FFu) | (static_cast<uint32_t>(value) << 8);
+    else
+      reg = (reg & 0xFFFFFF00u) | value;
+  }
 
   uint16_t getSegReg(uint8_t index) const { return m_segRegs[index % 6]; }
   void setSegReg(uint8_t index, uint16_t value) {
@@ -378,7 +395,7 @@ public:
   }
 
   uint32_t getEIP() const { return m_eip; }
-  void setEIP(uint32_t val);
+  void setEIP(uint32_t val) { m_eip = m_is32BitCode ? val : (val & 0xFFFF); }
 
   uint32_t getInstructionStartEIP() const { return m_instructionStartEIP; }
   void setInstructionStartEIP(uint32_t val) { m_instructionStartEIP = val; }
@@ -516,5 +533,70 @@ private:
 
   std::vector<HLEFrame> m_hleStack;
 };
+
+// Stack helpers (inline: used by PUSH/POP/CALL/RET on every call)
+inline void CPU::push16(uint16_t value) {
+  uint32_t stackBase = m_segBase[SS];
+  if (m_is32BitStack) {
+    uint32_t esp = getReg32(ESP) - 2;
+    setReg32(ESP, esp);
+    if (m_memory)
+      m_memory->write16(stackBase + esp, value);
+  } else {
+    uint16_t sp = getReg16(SP) - 2;
+    setReg16(SP, sp);
+    if (m_memory)
+      m_memory->write16(stackBase + sp, value);
+  }
+}
+
+inline void CPU::push32(uint32_t value) {
+  uint32_t stackBase = m_segBase[SS];
+  if (m_is32BitStack) {
+    uint32_t esp = getReg32(ESP) - 4;
+    setReg32(ESP, esp);
+    if (m_memory)
+      m_memory->write32(stackBase + esp, value);
+  } else {
+    uint16_t sp = getReg16(SP) - 4;
+    setReg16(SP, sp);
+    if (m_memory)
+      m_memory->write32(stackBase + sp, value);
+  }
+}
+
+inline uint16_t CPU::pop16() {
+  uint16_t value = 0;
+  uint32_t stackBase = m_segBase[SS];
+  if (m_is32BitStack) {
+    uint32_t esp = getReg32(ESP);
+    if (m_memory)
+      value = m_memory->read16(stackBase + esp);
+    setReg32(ESP, esp + 2);
+  } else {
+    uint16_t sp = getReg16(SP);
+    if (m_memory)
+      value = m_memory->read16(stackBase + sp);
+    setReg16(SP, sp + 2);
+  }
+  return value;
+}
+
+inline uint32_t CPU::pop32() {
+  uint32_t value = 0;
+  uint32_t stackBase = m_segBase[SS];
+  if (m_is32BitStack) {
+    uint32_t esp = getReg32(ESP);
+    if (m_memory)
+      value = m_memory->read32(stackBase + esp);
+    setReg32(ESP, esp + 4);
+  } else {
+    uint16_t sp = getReg16(SP);
+    if (m_memory)
+      value = m_memory->read32(stackBase + sp);
+    setReg16(SP, sp + 4);
+  }
+  return value;
+}
 
 } // namespace fador::cpu
