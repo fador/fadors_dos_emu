@@ -2879,7 +2879,7 @@ uint16_t DOS::allocateMemory(uint16_t requested, uint16_t owner) {
     }
     return chosenBlock + 1;
   }
-  LOG_ERROR("DOS: allocateMemory(", requested, " paras) FAILED. No free block large enough.");
+  LOG_DOS("DOS: allocateMemory(", requested, " paras) failed: no free block large enough");
   return 0;
 }
 
