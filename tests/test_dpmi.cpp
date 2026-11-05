@@ -830,6 +830,53 @@ TEST_CASE("DPMI 0501h/0502h allocate and free memory block", "[dpmi][memory]") {
     REQUIRE(!env.carrySet());
 }
 
+TEST_CASE("DPMI 0100h-0102h DOS memory blocks preserve ES", "[dpmi][memory]") {
+    DPMITestEnv env;
+    const uint16_t es = env.cpu.getSegReg(cpu::ES);
+    env.cpu.setSegBase(cpu::ES, 0x12340);
+
+    env.cpu.setReg16(cpu::AX, 0x0100);
+    env.cpu.setReg16(cpu::BX, 0x40);          // 1 KB
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+    const uint16_t seg = env.cpu.getReg16(cpu::AX);
+    const uint16_t sel = env.cpu.getReg16(cpu::DX);
+    REQUIRE(seg != 0);
+    REQUIRE(env.cpu.getSegReg(cpu::ES) == es);
+    REQUIRE(env.cpu.getSegBase(cpu::ES) == 0x12340);
+
+    env.cpu.setReg16(cpu::AX, 0x0102);        // shrink to 512 bytes
+    env.cpu.setReg16(cpu::BX, 0x20);
+    env.cpu.setReg16(cpu::DX, sel);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+    REQUIRE(env.cpu.getSegReg(cpu::ES) == es);
+    REQUIRE(env.cpu.getSegBase(cpu::ES) == 0x12340);
+
+    env.cpu.setReg16(cpu::AX, 0x0101);
+    env.cpu.setReg16(cpu::DX, sel);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(!env.carrySet());
+    REQUIRE(env.cpu.getSegReg(cpu::ES) == es);
+    REQUIRE(env.cpu.getSegBase(cpu::ES) == 0x12340);
+
+    // Freeing it again, or freeing a selector that is not a DOS block, fails
+    env.cpu.setReg16(cpu::AX, 0x0101);
+    env.cpu.setReg16(cpu::DX, sel);
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(env.carrySet());
+    REQUIRE(env.cpu.getReg16(cpu::AX) == 0x8022);
+    env.cpu.setReg16(cpu::AX, 0x0101);
+    env.cpu.setReg16(cpu::DX, env.cpu.getSegReg(cpu::CS));
+    env.clearCarry();
+    env.dpmi.handleInt31();
+    REQUIRE(env.carrySet());
+}
+
 TEST_CASE("DPMI 0502h free invalid handle fails", "[dpmi][memory]") {
     DPMITestEnv env;
 

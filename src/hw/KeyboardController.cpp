@@ -151,6 +151,17 @@ std::pair<uint8_t, uint8_t> KeyboardController::popKey() {
     return {0, 0};
   auto entry = m_keyBuffer.front();
   m_keyBuffer.pop();
+  // The BIOS INT 9 handler also queued this key in the BDA ring buffer
+  // (0040:001E); consume it there too, or programs that test for a key by
+  // comparing the BDA head and tail pointers see it forever.
+  if (m_memory) {
+    const uint16_t head = m_memory->read16(0x41A);
+    const uint16_t tail = m_memory->read16(0x41C);
+    if (head != tail && head >= 0x1E && head < 0x3E) {
+      const uint16_t next = static_cast<uint16_t>(head + 2 >= 0x3E ? 0x1E : head + 2);
+      m_memory->write16(0x41A, next);
+    }
+  }
   // Do NOT clear m_status bit 0 here — that bit reflects the hardware
   // output buffer (port 0x60), not the BIOS key buffer consumed by INT 16h.
   // Clearing it would falsely signal "no data" to programs that poll port 0x64.

@@ -42,6 +42,7 @@ void DPMI::reset() {
   }
   m_pmVectors = {};
   m_deferredStubRestore = {};
+  m_dosBlockSelectors.clear();
   m_excVectors = {};
   m_virtualIF = true;
   m_clientCS = 0;
@@ -630,8 +631,12 @@ void DPMI::handleDescriptorMgmt() {
 void DPMI::handleDOSMemory() {
   uint16_t func = m_cpu.getReg16(cpu::AX);
   switch (func) {
+  // The DOS calls below take a segment in ES; the client's ES selector
+  // (and its cached base) must survive them.
   case 0x0100: { // Allocate DOS Memory Block
-    uint16_t paras = m_cpu.getReg16(cpu::BX);
+    const uint16_t paras = m_cpu.getReg16(cpu::BX);
+    const uint16_t savedES = m_cpu.getSegReg(cpu::ES);
+    const uint32_t savedESBase = m_cpu.getSegBase(cpu::ES);
     m_cpu.setReg8(cpu::AH, 0x48);
     m_cpu.setReg16(cpu::BX, paras);
     if (m_dos)
@@ -644,10 +649,12 @@ void DPMI::handleDOSMemory() {
             static_cast<uint32_t>(seg) << 4,
             static_cast<uint32_t>(paras) * 16 - 1, 0xF2, 0x00);
         flushLDTEntry(selectorToIndex(sel));
+        m_dosBlockSelectors.insert(sel & 0xFFF8);
         m_cpu.setReg16(cpu::DX, sel);
         m_cpu.setReg16(cpu::AX, seg);
       } else {
         m_cpu.setSegReg(cpu::ES, seg);
+        m_cpu.setSegBase(cpu::ES, static_cast<uint32_t>(seg) << 4);
         m_cpu.setReg8(cpu::AH, 0x49);
         if (m_dos)
           m_dos->handleInterrupt(0x21);
@@ -655,46 +662,46 @@ void DPMI::handleDOSMemory() {
         m_cpu.setReg16(cpu::AX, 0x8011);
       }
     }
+    m_cpu.setSegReg(cpu::ES, savedES);
+    m_cpu.setSegBase(cpu::ES, savedESBase);
     break;
   }
-  case 0x0101: { // Free DOS Memory Block
-    uint16_t sel = m_cpu.getReg16(cpu::DX);
-    int idx = selectorToIndex(sel);
-    if (idx > 0 && idx < MAX_LDT && m_ldtUsed[idx]) {
-      uint32_t base = extractBase(m_ldt[idx]);
-      uint16_t seg = static_cast<uint16_t>(base >> 4);
-      m_cpu.setSegReg(cpu::ES, seg);
+  case 0x0101:   // Free DOS Memory Block
+  case 0x0102: { // Resize DOS Memory Block
+    const uint16_t sel = m_cpu.getReg16(cpu::DX);
+    const int idx = selectorToIndex(sel);
+    if (idx <= 0 || idx >= MAX_LDT || !m_ldtUsed[idx] ||
+        !m_dosBlockSelectors.count(sel & 0xFFF8)) {
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      m_cpu.setReg16(cpu::AX, 0x8022); // invalid selector
+      break;
+    }
+    const uint16_t savedES = m_cpu.getSegReg(cpu::ES);
+    const uint32_t savedESBase = m_cpu.getSegBase(cpu::ES);
+    const uint16_t seg = static_cast<uint16_t>(extractBase(m_ldt[idx]) >> 4);
+    m_cpu.setSegReg(cpu::ES, seg);
+    m_cpu.setSegBase(cpu::ES, static_cast<uint32_t>(seg) << 4);
+    if (func == 0x0101) {
       m_cpu.setReg8(cpu::AH, 0x49);
       if (m_dos)
         m_dos->handleInterrupt(0x21);
-      freeDescriptor(sel);
+      if (!(m_cpu.getEFLAGS() & cpu::FLAG_CARRY)) {
+        m_dosBlockSelectors.erase(sel & 0xFFF8);
+        freeDescriptor(sel);
+      }
     } else {
-      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
-      m_cpu.setReg16(cpu::AX, 0x8022);
-    }
-    break;
-  }
-  case 0x0102: { // Resize DOS Memory Block
-    uint16_t sel = m_cpu.getReg16(cpu::DX);
-    uint16_t newParas = m_cpu.getReg16(cpu::BX);
-    int idx = selectorToIndex(sel);
-    if (idx > 0 && idx < MAX_LDT && m_ldtUsed[idx]) {
-      uint32_t base = extractBase(m_ldt[idx]);
-      uint16_t seg = static_cast<uint16_t>(base >> 4);
-      m_cpu.setSegReg(cpu::ES, seg);
+      const uint16_t newParas = m_cpu.getReg16(cpu::BX);
       m_cpu.setReg8(cpu::AH, 0x4A);
       m_cpu.setReg16(cpu::BX, newParas);
       if (m_dos)
         m_dos->handleInterrupt(0x21);
       if (!(m_cpu.getEFLAGS() & cpu::FLAG_CARRY)) {
-        setDescLimit(m_ldt[idx],
-                     static_cast<uint32_t>(newParas) * 16 - 1);
+        setDescLimit(m_ldt[idx], static_cast<uint32_t>(newParas) * 16 - 1);
         flushLDTEntry(idx);
       }
-    } else {
-      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
-      m_cpu.setReg16(cpu::AX, 0x8022);
     }
+    m_cpu.setSegReg(cpu::ES, savedES);
+    m_cpu.setSegBase(cpu::ES, savedESBase);
     break;
   }
   default:

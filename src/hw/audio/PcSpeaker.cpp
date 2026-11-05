@@ -51,7 +51,10 @@ float PcSpeaker::levelAt(const Event &s, double t) const {
     const double phase = std::fmod((t - s.time) * freq, 1.0);
     return phase < 0.5 ? 1.0f : -1.0f;
   }
-  return 1.0f; // one-shot modes: output high once the count ran out
+  // Modes 0/1 (one-shot): output low until the count runs out, then high.
+  // Rewriting the count every sample is 1-bit PWM ("RealSound", MOD
+  // players): the duty cycle is the sample value.
+  return (t - s.time) * kPitHz >= reload ? 1.0f : -1.0f;
 }
 
 void PcSpeaker::generateSamples(float *buffer, size_t numSamples) {
@@ -67,11 +70,19 @@ void PcSpeaker::generateSamples(float *buffer, size_t numSamples) {
   }
   for (size_t i = 0; i < numSamples; ++i) {
     const double ts = end - (numSamples - i) * dt;
-    while (!m_events.empty() && m_events.front().time <= ts) {
-      m_state = m_events.front();
-      m_events.pop_front();
+    // Average over the sample period: PWM and bit-banged output switch far
+    // faster than the output rate.
+    constexpr int kSub = 8;
+    float level = 0.0f;
+    for (int k = 0; k < kSub; ++k) {
+      const double tk = ts - dt + (k + 0.5) * dt / kSub;
+      while (!m_events.empty() && m_events.front().time <= tk) {
+        m_state = m_events.front();
+        m_events.pop_front();
+      }
+      level += levelAt(m_state, tk);
     }
-    float level = levelAt(m_state, ts);
+    level /= kSub;
     // Remove the DC component of a speaker that is left switched on.
     m_filtered += (level - m_filtered) * 0.0005f;
     const float out = (level - m_filtered) * kVolume;
