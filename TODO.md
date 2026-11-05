@@ -145,12 +145,18 @@
   - [x] `--instruction-trace-step` interactive stepping through traces
 - [x] **Crash Handler**
   - [x] SEH/signal crash dump with registers, EIP disassembly, stack, VRAM
+- [x] **Headless runs** (`--headless`, `--max-seconds`, `--screenshot[-at]`, `--keys`)
+- [x] **Performance profiles** (`tests/perf`: fixed-workload DOS programs, MIPS table)
+- [x] **Differential CPU fuzzer** (`cpu_fuzz`, integer instructions vs. the host CPU)
+- [ ] Cycle-weighted `--throttle-machine` presets (currently instructions/second)
+- [ ] Further interpreter speed-ups (decoded-instruction cache or a JIT)
 
 ## Phase 10: Memory & Extended Memory
 - [x] **HIMEM/XMS (INT 2Fh + far-call dispatcher)**
   - [x] XMS driver detection via INT 2Fh/4300h
   - [x] XMS function dispatch: version, request/ unlock HMA, global/ local enable A20
   - [x] XMS memory management: allocate, lock, unlock, free, resize, query
+  - [x] XMS 3.0 32-bit functions (88h, 89h, 8Eh, 8Fh)
 - [x] **EMS (INT 67h)**
   - [x] EMMXXXX0 device detection
   - [x] Page frame mapping and EMS memory management
@@ -167,13 +173,24 @@
   - [x] Embedded 32-bit payload launching from MZ stub
   - [x] DOS/4GW header parsing and linear execution
   - [x] VROOMM/FBOV overlay loading for segmented Borland applications
+  - [x] Stub-loaded DOS/4GW (`DOS4GW.EXE` next to the program)
+- [x] **Other extenders** (see `tests/compat`)
+  - [x] PMODE/W
+  - [x] DOS/32A
+  - [x] CauseWay (through DPMI; `CAUSEWAY=DPMI` is set by default)
+  - [x] DJGPP / CWSDPMI-style clients
+- [x] 386 paging for raw-mode software (CR0.PG, CR3, INVLPG, PSE)
+- [ ] Page faults delivered to the guest (#PF with instruction restart)
+- [ ] Privilege levels: call gates, inter-ring CALL/RET/IRET, TSS stack switch
+      (needed for CauseWay and other extenders in raw/VCPI mode)
+- [ ] VCPI (INT 67h DE00h) for extenders that prefer it over DPMI
 
 ## Missing Features / Compatibility Gaps
 - [ ] More complete INT 10h (Video) support:
   - [x] Implement all major AH functions (mode set, cursor, page, palette, block transfer, etc.)
   - [x] Support for graphics modes (VGA, EGA, CGA)
   - [x] BIOS video state save/restore (AH=1Ch)
-  - [ ] VESA extensions (optional)
+  - [x] VESA BIOS Extensions 2.0 (banked, linear frame buffer, PM interface)
 - [ ] More complete INT 13h, 16h, 1Ah, 21h subfunctions
 - [ ] Fallback/logging for unhandled INTs (warn with vector/reg state)
 - [ ] Stubs for common but unimplemented INTs to avoid program crashes
