@@ -1,8 +1,14 @@
 #include "test_framework.hpp"
 #include "hw/DriveManager.hpp"
+#include "crc32.hpp"
+#include "zip_reader.hpp"
 
+#include <cstdint>
 #include <filesystem>
+#include <fstream>
+#include <span>
 #include <string>
+#include <vector>
 
 using namespace fador::hw;
 
@@ -328,5 +334,178 @@ TEST_CASE("DriveManager: setCurrentDir Validation", "[drive_manager]") {
 
     SECTION("Non-existent directory fails") {
         REQUIRE(!dm.setCurrentDir('C', "NOSUCHDIR"));
+    }
+}
+
+namespace {
+
+void appendLe16(std::vector<uint8_t>& buf, uint16_t v) {
+    buf.push_back(static_cast<uint8_t>(v & 0xFFu));
+    buf.push_back(static_cast<uint8_t>((v >> 8) & 0xFFu));
+}
+
+void appendLe32(std::vector<uint8_t>& buf, uint32_t v) {
+    buf.push_back(static_cast<uint8_t>(v & 0xFFu));
+    buf.push_back(static_cast<uint8_t>((v >> 8) & 0xFFu));
+    buf.push_back(static_cast<uint8_t>((v >> 16) & 0xFFu));
+    buf.push_back(static_cast<uint8_t>((v >> 24) & 0xFFu));
+}
+
+void writeSingleStoreZip(const std::filesystem::path& zipPath,
+                         const std::string& entryName,
+                         const std::string& payload,
+                         uint32_t crc) {
+    std::vector<uint8_t> out;
+    const uint32_t localOffset = 0;
+    const uint16_t nameLen = static_cast<uint16_t>(entryName.size());
+    const uint32_t dataSize = static_cast<uint32_t>(payload.size());
+
+    // Local file header (30 bytes + name + data)
+    appendLe32(out, 0x04034b50u);
+    appendLe16(out, 20);
+    appendLe16(out, 0);
+    appendLe16(out, 0);
+    appendLe16(out, 0);
+    appendLe16(out, 0);
+    appendLe32(out, crc);
+    appendLe32(out, dataSize);
+    appendLe32(out, dataSize);
+    appendLe16(out, nameLen);
+    appendLe16(out, 0);
+    out.insert(out.end(), entryName.begin(), entryName.end());
+    out.insert(out.end(), payload.begin(), payload.end());
+
+    const uint32_t cdOffset = static_cast<uint32_t>(out.size());
+    // Central directory header (46 bytes + name)
+    appendLe32(out, 0x02014b50u);
+    appendLe16(out, 20);
+    appendLe16(out, 20);
+    appendLe16(out, 0);
+    appendLe16(out, 0);
+    appendLe16(out, 0);
+    appendLe16(out, 0);
+    appendLe32(out, crc);
+    appendLe32(out, dataSize);
+    appendLe32(out, dataSize);
+    appendLe16(out, nameLen);
+    appendLe16(out, 0);
+    appendLe16(out, 0);
+    appendLe16(out, 0);
+    appendLe16(out, 0);
+    appendLe32(out, 0);
+    appendLe32(out, localOffset);
+    out.insert(out.end(), entryName.begin(), entryName.end());
+
+    const uint32_t cdSize = static_cast<uint32_t>(out.size()) - cdOffset;
+    // EOCD (22 bytes)
+    appendLe32(out, 0x06054b50u);
+    appendLe16(out, 0);
+    appendLe16(out, 0);
+    appendLe16(out, 1);
+    appendLe16(out, 1);
+    appendLe32(out, cdSize);
+    appendLe32(out, cdOffset);
+    appendLe16(out, 0);
+
+    std::ofstream ofs(zipPath, std::ios::binary | std::ios::trunc);
+    ofs.write(reinterpret_cast<const char*>(out.data()),
+              static_cast<std::streamsize>(out.size()));
+}
+
+std::filesystem::path locateUseCaseZip(const std::string& filename) {
+    namespace fs = std::filesystem;
+    const std::vector<fs::path> prefixes = {
+        fs::path("use-cases"),
+        fs::path("..") / "use-cases",
+        fs::path("..") / ".." / "use-cases",
+    };
+    std::error_code ec;
+    for (const auto& dir : prefixes) {
+        fs::path candidate = dir / filename;
+        if (fs::is_regular_file(candidate, ec) && !ec) {
+            return candidate;
+        }
+    }
+    return {};
+}
+
+} // namespace
+
+TEST_CASE("fzip: extract_to_directory validation and security", "[drive_manager]") {
+    TempDirGuard guard("fzip_sec");
+    const std::filesystem::path base(guard.path);
+    const std::string payload = "HELLO";
+    const uint32_t validCrc = fzip::crc32(std::span<const std::byte>(
+        reinterpret_cast<const std::byte*>(payload.data()), payload.size()));
+
+    SECTION("Valid Store entry extracts and passes CRC") {
+        const std::filesystem::path zipPath = base / "good.zip";
+        const std::filesystem::path outDir = base / "out_good";
+        writeSingleStoreZip(zipPath, "sub/hello.txt", payload, validCrc);
+        REQUIRE(fzip::extract_to_directory(zipPath.string(), outDir));
+        REQUIRE(std::filesystem::is_regular_file(outDir / "sub" / "hello.txt"));
+    }
+
+    SECTION("Corrupted CRC fails extraction") {
+        const std::filesystem::path zipPath = base / "bad_crc.zip";
+        const std::filesystem::path outDir = base / "out_bad_crc";
+        writeSingleStoreZip(zipPath, "hello.txt", payload, validCrc ^ 1u);
+        REQUIRE(!fzip::extract_to_directory(zipPath.string(), outDir));
+    }
+
+    SECTION("Path traversal entry fails extraction") {
+        const std::filesystem::path zipPath = base / "traversal.zip";
+        const std::filesystem::path outDir = base / "out_traversal";
+        writeSingleStoreZip(zipPath, "../escape.txt", payload, validCrc);
+        REQUIRE(!fzip::extract_to_directory(zipPath.string(), outDir));
+        REQUIRE(!std::filesystem::exists(base / "escape.txt"));
+    }
+}
+
+TEST_CASE("DriveManager: Mount and unmount ZIP archives", "[drive_manager]") {
+    const auto wingsZip = locateUseCaseZip("wings140.zip");
+    const auto scorchZip = locateUseCaseZip("scorch15.zip");
+    const auto cannonZip = locateUseCaseZip("Cannon Fodder (1993).zip");
+
+    if (!wingsZip.empty()) {
+        std::string extractedHostPath;
+        {
+            DriveManager dm;
+            REQUIRE(dm.mount('C', wingsZip.string()));
+            REQUIRE(dm.isMounted('C'));
+            extractedHostPath = dm.getHostPath('C');
+            REQUIRE(std::filesystem::is_directory(extractedHostPath));
+            REQUIRE(std::filesystem::is_regular_file(dm.resolvePath("C:\\WINGS.EXE")));
+            REQUIRE(dm.unmount('C'));
+            REQUIRE(!dm.isMounted('C'));
+            REQUIRE(!std::filesystem::exists(extractedHostPath));
+        }
+    }
+
+    if (!wingsZip.empty()) {
+        std::string extractedOnDrop;
+        {
+            DriveManager dm;
+            REQUIRE(dm.mount('C', wingsZip.string()));
+            extractedOnDrop = dm.getHostPath('C');
+            REQUIRE(std::filesystem::exists(extractedOnDrop));
+        }
+        REQUIRE(!std::filesystem::exists(extractedOnDrop));
+    }
+
+    if (!scorchZip.empty()) {
+        DriveManager dm;
+        REQUIRE(dm.mount('D', scorchZip.string()));
+        REQUIRE(std::filesystem::is_regular_file(dm.resolvePath("D:\\SCORCH.EXE")));
+        REQUIRE(dm.unmount('D'));
+    }
+
+    if (!cannonZip.empty()) {
+        DriveManager dm;
+        REQUIRE(dm.mount('E', cannonZip.string()));
+        const std::string hostPath = dm.getHostPath('E');
+        REQUIRE(std::filesystem::is_regular_file(dm.resolvePath("E:\\run.bat")));
+        REQUIRE(dm.unmount('E'));
+        REQUIRE(!std::filesystem::exists(hostPath));
     }
 }

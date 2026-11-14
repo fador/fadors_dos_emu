@@ -440,12 +440,15 @@ void DOS::handleDOSService() {
       break;
     }
     if (!m_kbd || !m_kbd->hasKey()) {
-      if (m_pollInput)
+      if (m_pollInput) {
         m_pollInput();
+      }
       if (!m_kbd || !m_kbd->hasKey()) {
-        if (m_idleCallback)
-          m_idleCallback();
+        // Rewind EIP before m_idleCallback() so an injected IRQ saves/enters cleanly.
         m_cpu.setEIP(m_cpu.getInstructionStartEIP());
+        if (m_idleCallback) {
+          m_idleCallback();
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         return;
       }
@@ -492,10 +495,20 @@ void DOS::handleDOSService() {
         m_cpu.setReg8(cpu::AL, m_pendingExtScancode);
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_ZERO);
       } else {
-        if (m_kbd && !m_kbd->hasKey() && m_pollInput)
+        if (m_kbd && !m_kbd->hasKey() && m_pollInput) {
           m_pollInput();
-        if (m_idleCallback)
+        }
+        bool hadKeyBeforeIdle = (m_kbd && m_kbd->hasKey());
+        if (!hadKeyBeforeIdle) {
+          // Set return state before m_idleCallback() in case it injects an IRQ.
+          m_cpu.setReg8(cpu::AL, 0);
+          m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_ZERO);
+          if (m_idleCallback) {
+            m_idleCallback();
+          }
+        } else if (m_idleCallback) {
           m_idleCallback();
+        }
         if (m_kbd && m_kbd->hasKey()) {
           auto [ascii, scancode] = m_kbd->popKey();
           if (ascii == 0 && scancode != 0) {
@@ -504,9 +517,6 @@ void DOS::handleDOSService() {
           }
           m_cpu.setReg8(cpu::AL, ascii);
           m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_ZERO);
-        } else {
-          m_cpu.setReg8(cpu::AL, 0);
-          m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_ZERO);
         }
       }
     }
@@ -522,12 +532,15 @@ void DOS::handleDOSService() {
       break;
     }
     if (!m_kbd || !m_kbd->hasKey()) {
-      if (m_pollInput)
+      if (m_pollInput) {
         m_pollInput();
+      }
       if (!m_kbd || !m_kbd->hasKey()) {
-        if (m_idleCallback)
-          m_idleCallback();
+        // Rewind EIP before m_idleCallback() so an injected IRQ saves/enters cleanly.
         m_cpu.setEIP(m_cpu.getInstructionStartEIP());
+        if (m_idleCallback) {
+          m_idleCallback();
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         return;
       }
@@ -607,11 +620,17 @@ void DOS::handleDOSService() {
     break;
   }
   case 0x0B: { // Get Stdin Status
-    if (m_kbd && !m_kbd->hasKey() && m_pollInput)
+    if (m_kbd && !m_kbd->hasKey() && m_pollInput) {
       m_pollInput();
-    if (m_idleCallback)
+    }
+    const bool hasKey = (m_kbd && m_kbd->hasKey());
+    m_cpu.setReg8(cpu::AL, hasKey ? 0xFF : 0x00);
+    if (m_idleCallback) {
       m_idleCallback();
-    m_cpu.setReg8(cpu::AL, (m_kbd && m_kbd->hasKey()) ? 0xFF : 0x00);
+    }
+    if (!hasKey && m_kbd && m_kbd->hasKey()) {
+      m_cpu.setReg8(cpu::AL, 0xFF);
+    }
     break;
   }
   case 0x0C: { // Flush Buffer and Read
@@ -1956,6 +1975,50 @@ std::string DOS::hostToDosPath(const std::string &hostPath) {
   return result;
 }
 
+namespace {
+// Collapse '.' and '..' components against baseRel while clamping at root.
+std::string clampRelPath(const std::string &baseRel, const std::string &relPath) {
+  std::vector<std::string> parts;
+  auto pushFrom = [&parts](const std::string &src) {
+    std::string cur;
+    auto flush = [&]() {
+      if (cur.empty() || cur == ".") {
+        cur.clear();
+        return;
+      }
+      if (cur == "..") {
+        if (!parts.empty()) {
+          parts.pop_back();
+        }
+      } else {
+        parts.push_back(cur);
+      }
+      cur.clear();
+    };
+    for (char ch : src) {
+      if (ch == '/' || ch == '\\') {
+        flush();
+      } else {
+        cur += ch;
+      }
+    }
+    flush();
+  };
+
+  pushFrom(baseRel);
+  pushFrom(relPath);
+
+  std::string joined;
+  for (size_t i = 0; i < parts.size(); ++i) {
+    if (i > 0) {
+      joined += '/';
+    }
+    joined += parts[i];
+  }
+  return joined;
+}
+} // namespace
+
 std::string DOS::dosToHostPath(const std::string &dosPath) {
   // Convert a DOS-style path to a host filesystem path
   std::string path = dosPath;
@@ -1970,17 +2033,23 @@ std::string DOS::dosToHostPath(const std::string &dosPath) {
                  [](char c) { return c == '\\' ? '/' : c; });
   // If path starts with /, it's absolute from drive root
   if (!path.empty() && path[0] == '/') {
-    return DriveManager::matchHostCase(m_hostRootDir, path.substr(1));
+    std::string clamped = clampRelPath("", path.substr(1));
+    return DriveManager::matchHostCase(m_hostRootDir, clamped);
   }
-  // Relative path — resolve from current directory
-  return DriveManager::matchHostCase(m_currentDir, path);
+  // Relative path — collapse relative to current dir, clamped at m_hostRootDir
+  std::error_code ec;
+  fs::path relBase = fs::relative(m_currentDir, m_hostRootDir, ec);
+  std::string baseRel = (ec || relBase == ".") ? std::string() : relBase.generic_string();
+  std::string clamped = clampRelPath(baseRel, path);
+  return DriveManager::matchHostCase(m_hostRootDir, clamped);
 }
 
 std::string DOS::resolvePath(const std::string &path) {
   if (m_driveManager) {
     std::string resolved = m_driveManager->resolvePath(path);
-    if (!resolved.empty())
+    if (!resolved.empty()) {
       return resolved;
+    }
   }
 
   std::string resolvedStr;
@@ -1996,11 +2065,12 @@ std::string DOS::resolvePath(const std::string &path) {
   else {
     // If path is already an absolute host path, use as-is
     fs::path p(path);
-    if (p.is_absolute())
+    if (p.is_absolute()) {
       resolvedStr = path;
-    else
-      // Resolve relative to m_currentDir (case-insensitively, like DOS)
-      resolvedStr = DriveManager::matchHostCase(m_currentDir, path);
+    } else {
+      // Resolve relative to current dir (case-insensitively, clamped at root)
+      resolvedStr = dosToHostPath(path);
+    }
   }
 
   // Security check: ensure the resolved path stays within m_hostRootDir
@@ -2177,7 +2247,41 @@ void DOS::handleMemoryManagement() {
       }
     };
 
+    constexpr uint16_t SBRK_MIN_BLOCK_PARAS = 0x4000;
+    constexpr uint16_t SBRK_HEADROOM_PARAS = 0x1000;
+    constexpr uint16_t SBRK_GRAIN_MASK = 0x003F;
+    const bool isPspHeapGrowth =
+        (segment == m_pspSegment) && (mcb.size >= SBRK_MIN_BLOCK_PARAS) &&
+        ((requested & SBRK_GRAIN_MASK) == 0);
+
     if (mcb.size >= requested) { // Shrink
+      // Keep headroom on large PSP heap blocks so subsequent small AH=48h
+      // allocations cannot immediately pin 1KB sbrk increments.
+      const uint32_t targetSize =
+          static_cast<uint32_t>(requested) + SBRK_HEADROOM_PARAS;
+      if (isPspHeapGrowth && mcb.size <= targetSize) {
+        if (mcb.type == 'M') {
+          const uint32_t nextSeg32 =
+              static_cast<uint32_t>(mcbSeg) + mcb.size + 1u;
+          if (nextSeg32 <= LAST_PARA &&
+              readMCB(static_cast<uint16_t>(nextSeg32)).owner == 0) {
+            MCB topped = mcb;
+            coalesceFollowingFreeBlocks(topped);
+            if (topped.size > targetSize + 1u) {
+              MCB newNext;
+              newNext.type = topped.type;
+              newNext.owner = 0;
+              newNext.size = static_cast<uint16_t>(topped.size - targetSize - 1u);
+              topped.type = 'M';
+              topped.size = static_cast<uint16_t>(targetSize);
+              writeMCB(mcbSeg, topped);
+              writeMCB(static_cast<uint16_t>(mcbSeg + targetSize + 1u), newNext);
+            }
+          }
+        }
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+        return;
+      }
       if (mcb.size > requested + 1) {
         // Compute the size of the new free block
         uint16_t freeSize = mcb.size - requested - 1;
@@ -2216,22 +2320,27 @@ void DOS::handleMemoryManagement() {
       coalesceFollowingFreeBlocks(expanded);
 
       if (expanded.size >= requested) {
-        if (expanded.size > requested + 1) {
+        uint16_t allocSize = requested;
+        if (isPspHeapGrowth &&
+            expanded.size > static_cast<uint32_t>(requested) + SBRK_HEADROOM_PARAS + 1u) {
+          allocSize = static_cast<uint16_t>(requested + SBRK_HEADROOM_PARAS);
+        }
+        if (expanded.size > allocSize + 1) {
           MCB newNext;
           newNext.type = expanded.type;
           newNext.owner = 0;
-          newNext.size = static_cast<uint16_t>(expanded.size - requested - 1);
+          newNext.size = static_cast<uint16_t>(expanded.size - allocSize - 1);
 
           expanded.type = 'M';
-          expanded.size = requested;
+          expanded.size = allocSize;
           writeMCB(mcbSeg, expanded);
-          writeMCB(static_cast<uint16_t>(mcbSeg + requested + 1), newNext);
+          writeMCB(static_cast<uint16_t>(mcbSeg + allocSize + 1), newNext);
         } else {
           writeMCB(mcbSeg, expanded);
         }
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
         LOG_DEBUG("DOS: Expanded segment ", std::hex, segment, " to ",
-                  requested, " paras");
+                  allocSize, " paras");
         return;
       }
 

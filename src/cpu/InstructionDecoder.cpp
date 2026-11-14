@@ -5180,8 +5180,6 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
     // Privilege change check
     bool privChange = (newCpl < oldCpl) || (m_cpu.getEFLAGS() & 0x00020000);
 
-    m_cpu.pushHLEFrame(use32, vector);
-
     // HLE check: try handling the interrupt directly via HLE before
     // dispatching to a hooked IDT entry (thunk). This avoids the thunk
     // pushing onto its internal transfer stack, which would never get
@@ -5203,26 +5201,24 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
             loadSegment(ES, m_cpu.getSegReg(ES));
             loadSegment(FS, m_cpu.getSegReg(FS));
             loadSegment(GS, m_cpu.getSegReg(GS));
-          } else {
-            m_cpu.popHLEFrame();
-            if (vector == 0x21 && m_dos.isExecTriggered()) {
-              m_dos.clearExecTriggered();
-              loadSegment(CS, m_cpu.getSegReg(CS));
-              loadSegment(SS, m_cpu.getSegReg(SS));
-              loadSegment(DS, m_cpu.getSegReg(DS));
-              loadSegment(ES, m_cpu.getSegReg(ES));
-              loadSegment(FS, m_cpu.getSegReg(FS));
-              loadSegment(GS, m_cpu.getSegReg(GS));
-            }
+          } else if (vector == 0x21 && m_dos.isExecTriggered()) {
+            m_dos.clearExecTriggered();
+            loadSegment(CS, m_cpu.getSegReg(CS));
+            loadSegment(SS, m_cpu.getSegReg(SS));
+            loadSegment(DS, m_cpu.getSegReg(DS));
+            loadSegment(ES, m_cpu.getSegReg(ES));
+            loadSegment(FS, m_cpu.getSegReg(FS));
+            loadSegment(GS, m_cpu.getSegReg(GS));
           }
           return;
         }
         if (m_bios.handleInterrupt(vector)) {
-          m_cpu.popHLEFrame();
           return;
         }
       }
     }
+
+    m_cpu.pushHLEFrame(use32, vector);
 
     // Capture app-level PM vectors: when INT 31h is dispatched through a
     // hooked vector (DOS extender thunk) and AX=0205h, the app is setting
@@ -5375,7 +5371,6 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
     cs = m_memory.lread16(vector * 4 + 2);
     eip32 = ip;
     use32 = false;
-    m_cpu.pushHLEFrame(use32, vector);
 
     // HLE shortcut: if the IVT still points to our original HLE stubs,
     // handle the interrupt directly without pushing an IRET frame.
@@ -5390,25 +5385,23 @@ void InstructionDecoder::triggerInterrupt(uint8_t vector) {
           loadSegment(ES, m_cpu.getSegReg(ES));
           loadSegment(FS, m_cpu.getSegReg(FS));
           loadSegment(GS, m_cpu.getSegReg(GS));
-        } else {
-          m_cpu.popHLEFrame();
-          if (vector == 0x21 && m_dos.isExecTriggered()) {
-            m_dos.clearExecTriggered();
-            loadSegment(CS, m_cpu.getSegReg(CS));
-            loadSegment(SS, m_cpu.getSegReg(SS));
-            loadSegment(DS, m_cpu.getSegReg(DS));
-            loadSegment(ES, m_cpu.getSegReg(ES));
-            loadSegment(FS, m_cpu.getSegReg(FS));
-            loadSegment(GS, m_cpu.getSegReg(GS));
-          }
+        } else if (vector == 0x21 && m_dos.isExecTriggered()) {
+          m_dos.clearExecTriggered();
+          loadSegment(CS, m_cpu.getSegReg(CS));
+          loadSegment(SS, m_cpu.getSegReg(SS));
+          loadSegment(DS, m_cpu.getSegReg(DS));
+          loadSegment(ES, m_cpu.getSegReg(ES));
+          loadSegment(FS, m_cpu.getSegReg(FS));
+          loadSegment(GS, m_cpu.getSegReg(GS));
         }
         return;
       }
       if (m_bios.handleInterrupt(vector)) {
-        m_cpu.popHLEFrame();
         return;
       }
     }
+
+    m_cpu.pushHLEFrame(use32, vector);
 
     m_cpu.push16(static_cast<uint16_t>(m_cpu.getEFLAGS() & 0xFFFF));
     m_cpu.push16(oldCs);

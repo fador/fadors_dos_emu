@@ -1308,9 +1308,11 @@ void BIOS::handleKeyboardService() {
       if (m_pollInput)
         m_pollInput();
       if (!m_kbd.hasKey()) {
-        if (m_idleCallback)
-          m_idleCallback();
+        // Set IP for retry before m_idleCallback() in case it injects an IRQ.
         m_cpu.setEIP(m_cpu.getInstructionStartEIP());
+        if (m_idleCallback) {
+          m_idleCallback();
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         return;
       }
@@ -1529,7 +1531,7 @@ void BIOS::initialize() {
   // chains work naturally when programs hook the user-timer vector.
   //   PUSH DS; PUSH AX; MOV AX,0040; MOV DS,AX;
   //   INC WORD [006C]; JNZ +4; INC WORD [006E];
-  //   INT 1C; POP AX; POP DS; MOV AL,20; OUT 20,AL; IRET
+  //   INT 1C; MOV AL,20; OUT 20,AL; POP AX; POP DS; IRET
   {
     constexpr uint16_t INT8_HANDLER = 0x0200;
     const uint32_t base =
@@ -1543,10 +1545,10 @@ void BIOS::initialize() {
         0x75, 0x04,             // JNZ +4
         0xFF, 0x06, 0x6E, 0x00, // INC WORD [006Eh]
         0xCD, 0x1C,             // INT 1Ch
+        0xB0, 0x20,             // MOV AL, 20h (EOI before restoring AX)
+        0xE6, 0x20,             // OUT 20h, AL
         0x58,                   // POP AX
         0x1F,                   // POP DS
-        0xB0, 0x20,             // MOV AL, 20h
-        0xE6, 0x20,             // OUT 20h, AL
         0xCF                    // IRET
     };
     for (size_t i = 0; i < sizeof(code); ++i)

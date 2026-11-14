@@ -44,6 +44,8 @@
 #include "ui/SDLRenderer.hpp"
 #endif
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -55,6 +57,153 @@
 #include <thread>
 
 namespace {
+
+std::string toUpperAscii(const std::string &in) {
+  std::string out = in;
+  for (auto &ch : out) {
+    ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+  }
+  return out;
+}
+
+std::string pathToUtf8String(const std::filesystem::path &p) {
+  auto u8 = p.u8string();
+  return std::string(reinterpret_cast<const char *>(u8.data()), u8.size());
+}
+
+bool isZipArchiveFile(const std::string &pathStr) {
+  if (pathStr.empty()) {
+    return false;
+  }
+  std::error_code ec;
+  const std::filesystem::path p(pathStr);
+  if (!std::filesystem::is_regular_file(p, ec) || ec) {
+    return false;
+  }
+  return toUpperAscii(pathToUtf8String(p.extension())) == ".ZIP";
+}
+
+bool isDosLaunchExtension(const std::string &extUpper) {
+  return extUpper == ".EXE" || extUpper == ".COM" || extUpper == ".BAT";
+}
+
+std::string normalizeAlnumUpper(const std::string &in) {
+  std::string out;
+  for (unsigned char ch : in) {
+    if (std::isalnum(ch)) {
+      out.push_back(static_cast<char>(std::toupper(ch)));
+    }
+  }
+  return out;
+}
+
+int scoreZipExecutable(const std::string &stemUpper,
+                       const std::string &extUpper,
+                       const std::string &zipStemUpper) {
+  constexpr int SCORE_EXE = 20;
+  constexpr int SCORE_COM = 15;
+  constexpr int SCORE_BAT = 5;
+  constexpr int SCORE_EXACT_STEM = 100;
+  constexpr int SCORE_PREFIX_STEM = 50;
+  constexpr int PENALTY_DOS_EXTENDER = -100;
+  constexpr int PENALTY_UTILITY = -80;
+
+  int score = 0;
+  if (extUpper == ".EXE") {
+    score = SCORE_EXE;
+  } else if (extUpper == ".COM") {
+    score = SCORE_COM;
+  } else if (extUpper == ".BAT") {
+    score = SCORE_BAT;
+  }
+
+  const std::string stemNorm = normalizeAlnumUpper(stemUpper);
+  const std::string zipNorm = normalizeAlnumUpper(zipStemUpper);
+  if (!stemUpper.empty() && stemUpper == zipStemUpper) {
+    score += SCORE_EXACT_STEM;
+  } else if (stemNorm.size() >= 3 && zipNorm.size() >= 3 &&
+             (zipNorm.find(stemNorm) == 0 || stemNorm.find(zipNorm) == 0)) {
+    score += SCORE_PREFIX_STEM;
+  }
+
+  if (stemUpper == "DOS4GW" || stemUpper == "CWSDPMI" || stemUpper == "DOS32A") {
+    score += PENALTY_DOS_EXTENDER;
+  } else {
+    static constexpr const char *UTILITY_KEYWORDS[] = {
+        "SETUP", "INSTALL", "CONFIG", "SETSOUND", "SNDSETUP",
+        "UNINST", "EDIT", "README", "PKUNZIP", "UNIVBE"};
+    for (const char *kw : UTILITY_KEYWORDS) {
+      if (stemUpper.find(kw) != std::string::npos) {
+        score += PENALTY_UTILITY;
+        break;
+      }
+    }
+  }
+  return score;
+}
+
+std::string selectZipLaunchTarget(fador::hw::DriveManager &driveManager,
+                                  const std::string &mountRootStr,
+                                  const std::string &zipStem,
+                                  std::string &args) {
+  namespace fs = std::filesystem;
+  std::error_code ec;
+
+  const size_t tokStart = args.find_first_not_of(" \t");
+  if (tokStart != std::string::npos) {
+    size_t tokEnd = args.find_first_of(" \t", tokStart);
+    if (tokEnd == std::string::npos) {
+      tokEnd = args.size();
+    }
+    const std::string token = args.substr(tokStart, tokEnd - tokStart);
+    const std::string extUpper = toUpperAscii(pathToUtf8String(fs::path(token).extension()));
+    if (isDosLaunchExtension(extUpper)) {
+      const std::string resolved = driveManager.matchHostCase(mountRootStr, token);
+      if (fs::is_regular_file(resolved, ec) && !ec) {
+        const size_t restStart = args.find_first_not_of(" \t", tokEnd);
+        args = (restStart == std::string::npos) ? std::string() : args.substr(restStart);
+        return resolved;
+      }
+    }
+  }
+
+  struct Candidate {
+    int score;
+    std::string nameUpper;
+    std::string hostPath;
+  };
+  std::vector<Candidate> candidates;
+  const std::string zipStemUpper = toUpperAscii(zipStem);
+  for (fs::directory_iterator it(mountRootStr, ec), end; !ec && it != end; it.increment(ec)) {
+    if (!it->is_regular_file(ec) || ec) {
+      continue;
+    }
+    const fs::path p = it->path();
+    const std::string extUpper = toUpperAscii(pathToUtf8String(p.extension()));
+    if (!isDosLaunchExtension(extUpper)) {
+      continue;
+    }
+    const std::string stemUpper = toUpperAscii(pathToUtf8String(p.stem()));
+    const std::string nameUpper = toUpperAscii(pathToUtf8String(p.filename()));
+    candidates.push_back({scoreZipExecutable(stemUpper, extUpper, zipStemUpper),
+                          nameUpper, pathToUtf8String(p)});
+  }
+
+  if (candidates.empty()) {
+    return {};
+  }
+  std::sort(candidates.begin(), candidates.end(),
+            [](const Candidate &a, const Candidate &b) {
+              if (a.score != b.score) {
+                return a.score > b.score;
+              }
+              if (a.nameUpper.size() != b.nameUpper.size()) {
+                return a.nameUpper.size() < b.nameUpper.size();
+              }
+              return a.nameUpper < b.nameUpper;
+            });
+  return candidates.front().hostPath;
+}
 
 enum class BenchmarkKind {
   None,
@@ -298,18 +447,19 @@ std::optional<uint32_t> parseLinearHexAddress(const std::string &value) {
 void printHelp(const char *programName) {
   // clang-format off
   std::printf(
-    "Usage: %s [OPTIONS] [program.com|exe|directory] [program-args...]\n"
+    "Usage: %s [OPTIONS] [program.com|exe|directory|archive.zip] [program-args...]\n"
     "\n"
     "Fador's DOS Emulator — a multiplatform MS-DOS 6.22 emulator written in modern C++20.\n"
     "\n"
     "Launch modes:\n"
     "  No arguments           Start the DOS 6.22 command prompt (Z:\\>).\n"
     "  <directory>            Mount directory as C: and start the command prompt at C:\\>.\n"
+    "  <archive.zip>          Extract ZIP archive to temporary C: and launch its program.\n"
     "  <program.com|exe>      Load and run the program directly.\n"
     "\n"
     "Options:\n"
     "  --help, -h, -?            Print this help message and exit.\n"
-    "  --mount=L:/path           Mount host directory at drive letter L (repeatable).\n"
+    "  --mount=L:/path           Mount host directory or .zip archive at drive letter L (repeatable).\n"
     "  --himem                   Enable HIMEM/XMS extended memory support.\n"
     "  --env=NAME=VALUE          Add or replace a DOS environment variable (repeatable).\n"
     "                            Defaults: BLASTER=A220 I5 D1 H5 P330 T6, CAUSEWAY=DPMI.\n"
@@ -445,6 +595,7 @@ int main(int argc, char *argv[]) {
     iobus.registerDevice(0x388, 0x38B, &adlib);
 
     kbd.setMemoryBus(&memory);
+    fador::hw::DriveManager driveManager;
     fador::hw::DOS dos(cpu, memory);
     fador::hw::BIOS bios(cpu, memory, kbd, pit, pic);
     bios.setVGA(&vga);
@@ -455,7 +606,6 @@ int main(int argc, char *argv[]) {
     bios.initialize();
     dos.initialize();
 
-    fador::hw::DriveManager driveManager;
     {
       auto toolsPath = std::filesystem::path(argv[0]).parent_path() / "tools";
       std::error_code ec;
@@ -852,7 +1002,35 @@ int main(int argc, char *argv[]) {
       }
     }
 
-    if (!path.empty() && std::filesystem::is_directory(path)) {
+    bool mountedArchiveShell = false;
+    std::string startupBatCommand;
+    if (isZipArchiveFile(path)) {
+      std::string absZip = std::filesystem::absolute(path).string();
+      if (!driveManager.mount('C', absZip)) {
+        LOG_ERROR("Failed to mount ZIP archive as C: ", path);
+        return 1;
+      }
+      driveManager.setCurrentDrive('C');
+      const std::string mountRootStr = driveManager.getHostPath('C');
+      const std::string zipStem = pathToUtf8String(std::filesystem::path(absZip).stem());
+      const std::string selected =
+          selectZipLaunchTarget(driveManager, mountRootStr, zipStem, args);
+      if (selected.empty()) {
+        mountedArchiveShell = true;
+      } else {
+        const std::filesystem::path selPath(selected);
+        const std::string selExt = toUpperAscii(pathToUtf8String(selPath.extension()));
+        if (selExt == ".BAT") {
+          startupBatCommand = pathToUtf8String(selPath.filename());
+          if (!args.empty()) {
+            startupBatCommand += " " + args;
+          }
+          mountedArchiveShell = true;
+        } else {
+          path = selected;
+        }
+      }
+    } else if (!path.empty() && std::filesystem::is_directory(path)) {
       // Path is a directory — mount as C: and start the shell
       std::string absDir = std::filesystem::absolute(path).string();
       if (!driveManager.mount('C', absDir, "MS-DOS_622")) {
@@ -937,8 +1115,9 @@ int main(int argc, char *argv[]) {
       return false;
     };
 
-    // No program, or a directory mounted as C:, starts the DOS shell.
-    const bool shellMode = path.empty() || std::filesystem::is_directory(path);
+    // No program, directory mounted as C:, or ZIP archive without a primary executable, starts the DOS shell.
+    const bool shellMode =
+        path.empty() || std::filesystem::is_directory(path) || mountedArchiveShell;
 
     if (!shellMode) {
       bool loaded = false;
@@ -1358,7 +1537,12 @@ int main(int argc, char *argv[]) {
           [&]() { servicePeriodic(std::chrono::steady_clock::now()); });
       shell.setStopCheck([&]() { return !running; });
       shell.setProgramRunner(runGuest);
-      shell.run();
+      if (!startupBatCommand.empty()) {
+        shell.executeCommand(startupBatCommand);
+      }
+      if (shell.isRunning()) {
+        shell.run();
+      }
     } else {
       runGuest();
     }

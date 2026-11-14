@@ -10,7 +10,7 @@ namespace fador::hw {
 class DriveManager {
 public:
   DriveManager() = default;
-  ~DriveManager() = default;
+  ~DriveManager();
 
   bool mount(char letter, const std::string& hostPath, const std::string& label = "");
   bool unmount(char letter);
@@ -61,6 +61,7 @@ private:
   }
 
   std::array<std::string, 26> m_mounts{};
+  std::array<std::string, 26> m_tempZipDirs{};
   std::array<std::string, 26> m_currentDir{};
   std::array<std::string, 26> m_volumeLabels{};
   uint8_t m_currentDrive = 25;

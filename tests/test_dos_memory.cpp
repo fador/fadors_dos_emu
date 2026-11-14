@@ -286,3 +286,29 @@ TEST_CASE("DOS: memory runs out after the program sized its block", "[DOS][Memor
     REQUIRE(cpu.getReg16(BX) == 0x21);
     (void)c;
 }
+
+TEST_CASE("DOS: incremental PSP heap growth resists small AH=48h pinning", "[DOS][Memory]") {
+    CPU cpu;
+    MemoryBus memory;
+    DOS dos(cpu, memory);
+    dos.initialize();
+    const uint16_t psp = dos.getPSPSegment();
+
+    auto call = [&](uint8_t ah, uint16_t bx, uint16_t es = 0) {
+        cpu.setEFLAGS(cpu.getEFLAGS() & ~FLAG_CARRY);
+        cpu.setReg8(AH, ah);
+        cpu.setReg16(BX, bx);
+        cpu.setSegReg(ES, es);
+        dos.handleInterrupt(0x21);
+        return !(cpu.getEFLAGS() & FLAG_CARRY);
+    };
+
+    // Simulate Borland startup shrink followed by incremental 1KB (0x40-para) sbrk growth.
+    REQUIRE(call(0x4A, 0x4000, psp));
+    REQUIRE(call(0x4A, 0x4800, psp));
+
+    // A small standalone INT 21h AH=48h allocation shouldn't immediately pin
+    // the next 1KB heap expansion on the PSP block.
+    REQUIRE(call(0x48, 0x0002));
+    REQUIRE(call(0x4A, 0x4840, psp));
+}

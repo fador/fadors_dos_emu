@@ -374,3 +374,142 @@ TEST_CASE("BIOS EMS services allocate, map, remap, and release", "[BIOS][EMS]") 
     REQUIRE(cpu.getReg16(cpu::BX) == hw::BIOS::EMS_TOTAL_PAGES);
     REQUIRE(cpu.getReg16(cpu::DX) == hw::BIOS::EMS_TOTAL_PAGES);
 }
+
+TEST_CASE("BIOS INT 08h stub preserves caller AX", "[BIOS][IRQ0]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::IOBus iobus;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::DOS dos(cpu, mem);
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    bios.initialize();
+    dos.initialize();
+    cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
+
+    // Chaining directly to F000:0200 (like Borland _chain_intr on INT 08h)
+    // must restore the caller's AX/DS before returning via IRET.
+    cpu.setSegReg(cpu::SS, 0x1000);
+    cpu.setSegBase(cpu::SS, 0x10000);
+    cpu.setReg16(cpu::SP, 0x0100);
+    cpu.setSegReg(cpu::CS, 0x2000);
+    cpu.setSegBase(cpu::CS, 0x20000);
+    cpu.setEIP(0x0010);
+    mem.write8(0x20010, 0xF4); // HLT
+
+    // Push IRET frame: FLAGS, CS=0x2000, IP=0x0010
+    cpu.push16(0x0202);
+    cpu.push16(0x2000);
+    cpu.push16(0x0010);
+
+    cpu.setReg16(cpu::AX, 0x1234);
+    cpu.setSegReg(cpu::DS, 0x3333);
+    cpu.setSegBase(cpu::DS, 0x33330);
+
+    uint16_t int8Off = mem.read16(0x08 * 4);
+    uint16_t int8Seg = mem.read16(0x08 * 4 + 2);
+    cpu.setSegReg(cpu::CS, int8Seg);
+    cpu.setSegBase(cpu::CS, static_cast<uint32_t>(int8Seg) << 4);
+    cpu.setEIP(int8Off);
+
+    for (int i = 0; i < 32; ++i) {
+        if (cpu.getSegReg(cpu::CS) == 0x2000 && cpu.getEIP() == 0x0010) {
+            break;
+        }
+        decoder.step();
+    }
+
+    REQUIRE(cpu.getSegReg(cpu::CS) == 0x2000);
+    REQUIRE(cpu.getEIP() == 0x0010);
+    REQUIRE(cpu.getReg16(cpu::AX) == 0x1234);
+    REQUIRE(cpu.getSegReg(cpu::DS) == 0x3333);
+    REQUIRE(mem.read16(0x46C) == 1);
+}
+
+TEST_CASE("Idle callback IRQ injection preserves ISR CS:EIP, AL, and HLE stack", "[BIOS][DOS][IRQ]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::IOBus iobus;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::DOS dos(cpu, mem);
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    bios.initialize();
+    dos.initialize();
+    cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
+
+    // Install custom real-mode INT 08h handler at 0x2000:0x0100.
+    mem.write16(0x08 * 4, 0x0100);
+    mem.write16(0x08 * 4 + 2, 0x2000);
+    mem.write8(0x20100, 0xCF); // IRET
+
+    auto triggerTimer = [&]() {
+        decoder.injectHardwareInterrupt(0x08);
+    };
+    bios.setIdleCallback(triggerTimer);
+    dos.setIdleCallback(triggerTimer);
+
+    cpu.setSegReg(cpu::SS, 0x1000);
+    cpu.setSegBase(cpu::SS, 0x10000);
+
+    SECTION("Blocking INT 16h AH=00h does not overwrite injected ISR EIP") {
+        cpu.setReg16(cpu::SP, 0x0200);
+        cpu.setSegReg(cpu::CS, 0x3000);
+        cpu.setSegBase(cpu::CS, 0x30000);
+        cpu.setReg8(cpu::AH, 0x00);
+        mem.write8(0x30050, 0xCD);
+        mem.write8(0x30051, 0x16);
+        cpu.setEIP(0x0050);
+
+        decoder.step();
+
+        REQUIRE(cpu.getSegReg(cpu::CS) == 0x2000);
+        REQUIRE(cpu.getEIP() == 0x0100);
+        REQUIRE(cpu.hleStackSize() == 1);
+        REQUIRE(cpu.lastHLEFrame().vector == 0x08);
+    }
+
+    SECTION("Blocking INT 21h AH=08h does not overwrite injected ISR EIP") {
+        cpu.setReg16(cpu::SP, 0x0200);
+        cpu.setSegReg(cpu::CS, 0x3000);
+        cpu.setSegBase(cpu::CS, 0x30000);
+        cpu.setReg8(cpu::AH, 0x08);
+        mem.write8(0x30060, 0xCD);
+        mem.write8(0x30061, 0x21);
+        cpu.setEIP(0x0060);
+
+        decoder.step();
+
+        REQUIRE(cpu.getSegReg(cpu::CS) == 0x2000);
+        REQUIRE(cpu.getEIP() == 0x0100);
+        REQUIRE(cpu.hleStackSize() == 1);
+        REQUIRE(cpu.lastHLEFrame().vector == 0x08);
+    }
+
+    SECTION("Polling INT 21h AH=0Bh preserves AL and injected IRQ HLE frame") {
+        cpu.setReg16(cpu::SP, 0x0200);
+        cpu.setSegReg(cpu::CS, 0x3000);
+        cpu.setSegBase(cpu::CS, 0x30000);
+        cpu.setReg8(cpu::AH, 0x0B);
+        cpu.setReg8(cpu::AL, 0x77);
+        mem.write8(0x30070, 0xCD);
+        mem.write8(0x30071, 0x21);
+        cpu.setEIP(0x0070);
+
+        // When ISR runs, AL on entry holds status and HLE stack keeps IRQ 08h.
+        decoder.step();
+
+        REQUIRE(cpu.getSegReg(cpu::CS) == 0x2000);
+        REQUIRE(cpu.getEIP() == 0x0100);
+        REQUIRE(cpu.hleStackSize() == 1);
+        REQUIRE(cpu.lastHLEFrame().vector == 0x08);
+
+        // Execute the ISR's IRET and verify AL=0x00 (no key) upon return.
+        decoder.step();
+        REQUIRE(cpu.getSegReg(cpu::CS) == 0x3000);
+        REQUIRE(cpu.getEIP() == 0x0072);
+        REQUIRE(cpu.getReg8(cpu::AL) == 0x00);
+    }
+}

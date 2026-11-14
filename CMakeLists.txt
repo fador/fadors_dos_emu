@@ -65,11 +65,29 @@ add_library(ymfm STATIC
 target_include_directories(ymfm PUBLIC ${YMFM_DIR})
 set_target_properties(ymfm PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+# Third-party: fzip (https://github.com/fador/fzip) for reading ZIP archives
+set(FZIP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/fzip)
+add_library(fzip STATIC
+    ${FZIP_DIR}/codec.cpp
+    ${FZIP_DIR}/crc32.cpp
+    ${FZIP_DIR}/deflate.cpp
+    ${FZIP_DIR}/file_type.cpp
+    ${FZIP_DIR}/xxhash.cpp
+    ${FZIP_DIR}/zip_reader.cpp
+    ${FZIP_DIR}/zstd_codec.cpp
+    ${FZIP_DIR}/zstd_compress.cpp
+    ${FZIP_DIR}/zstd_decompress.cpp
+    ${FZIP_DIR}/zstd_fse.cpp
+    ${FZIP_DIR}/zstd_huffman.cpp
+    ${FZIP_DIR}/zstd_sequence.cpp)
+target_include_directories(fzip PUBLIC ${FZIP_DIR})
+set_target_properties(fzip PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 # Define an internal static library for the emulator core
 add_library(fadors_core STATIC ${SRC_FILES}
     src/hw/CMOSRTC.hpp)
 target_include_directories(fadors_core PUBLIC ${SRC_DIR})
-target_link_libraries(fadors_core PUBLIC ymfm)
+target_link_libraries(fadors_core PUBLIC ymfm fzip)
 target_compile_definitions(fadors_core PUBLIC
     FADOR_ENABLE_DEBUG_DIAGNOSTICS=$<BOOL:${FADOR_ENABLE_DEBUG_DIAGNOSTICS}>)
 
