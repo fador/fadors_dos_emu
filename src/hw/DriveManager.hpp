@@ -1,9 +1,13 @@
 #pragma once
 
+#include "cdrom/IsoImage.hpp"
 #include <array>
+#include <cctype>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace fador::hw {
 
@@ -13,9 +17,22 @@ public:
   ~DriveManager();
 
   bool mount(char letter, const std::string& hostPath, const std::string& label = "");
+  bool mountCdrom(char letter, const std::string& imagePath, const std::string& label = "");
   bool unmount(char letter);
   bool isMounted(char letter) const;
+  bool isCdrom(char letter) const;
+  bool isCdrom(uint8_t driveIndex) const;
+  std::shared_ptr<cdrom::IsoImage> getCdromImage(char letter) const;
+  std::shared_ptr<cdrom::IsoImage> getCdromImage(uint8_t driveIndex) const;
+  std::vector<uint8_t> getCdromDriveIndices() const;
   std::string getHostPath(char letter) const;
+
+  // Resolves `dosPath` when its target drive is a mounted CD-ROM image.
+  // Returns the normalized ISO-relative path ("" for root, "DIR\\FILE") and
+  // optionally writes the 0-based drive index to `outDriveIdx`.  Returns
+  // nullopt if the target drive is not a CD-ROM.
+  std::optional<std::string> resolveCdromPath(const std::string& dosPath,
+                                              uint8_t* outDriveIdx = nullptr) const;
 
   void setCurrentDrive(uint8_t driveIndex);
   void setCurrentDrive(char letter);
@@ -62,6 +79,7 @@ private:
 
   std::array<std::string, 26> m_mounts{};
   std::array<std::string, 26> m_tempZipDirs{};
+  std::array<std::shared_ptr<cdrom::IsoImage>, 26> m_cdromImages{};
   std::array<std::string, 26> m_currentDir{};
   std::array<std::string, 26> m_volumeLabels{};
   uint8_t m_currentDrive = 25;

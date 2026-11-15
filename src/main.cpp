@@ -460,6 +460,7 @@ void printHelp(const char *programName) {
     "Options:\n"
     "  --help, -h, -?            Print this help message and exit.\n"
     "  --mount=L:/path           Mount host directory or .zip archive at drive letter L (repeatable).\n"
+    "  --cdrom=L:/image.iso      Mount CD-ROM image (.iso/.cue/.bin/.img) at drive letter L (repeatable).\n"
     "  --himem                   Enable HIMEM/XMS extended memory support.\n"
     "  --env=NAME=VALUE          Add or replace a DOS environment variable (repeatable).\n"
     "                            Defaults: BLASTER=A220 I5 D1 H5 P330 T6, CAUSEWAY=DPMI.\n"
@@ -823,7 +824,7 @@ int main(int argc, char *argv[]) {
     std::string audioWavPath;       // --audio-wav=FILE.wav: record output
     double screenshotAt = -1.0;     // --screenshot-at=T: capture at T s instead
     ScriptedKeys scriptedKeys;      // --keys=T:KEY,...
-    struct MountEntry { char letter; std::string hostPath; std::string label; };
+    struct MountEntry { char letter; std::string hostPath; std::string label; bool cdrom = false; };
     std::vector<MountEntry> cliMounts;
     std::string path;
     std::string args;
@@ -953,12 +954,24 @@ int main(int argc, char *argv[]) {
                                                          spec.substr(eq + 1));
       } else if (arg.find("--mount=") == 0) {
         std::string mountSpec = arg.substr(8);
-        if (mountSpec.size() >= 3 && std::isalpha(mountSpec[0]) && mountSpec[1] == ':') {
-          char letter = static_cast<char>(std::toupper(mountSpec[0]));
+        if (mountSpec.size() >= 3 && std::isalpha(static_cast<unsigned char>(mountSpec[0])) && mountSpec[1] == ':') {
+          char letter = static_cast<char>(std::toupper(static_cast<unsigned char>(mountSpec[0])));
           std::string hostPath = mountSpec.substr(2);
-          cliMounts.push_back({letter, hostPath, ""});
+          cliMounts.push_back({letter, hostPath, "", false});
         } else {
           LOG_ERROR("Invalid --mount= syntax. Use --mount=C:/path");
+          return 1;
+        }
+      } else if (arg.find("--cdrom=") == 0) {
+        std::string spec = arg.substr(8);
+        if (spec.size() >= 3 && std::isalpha(static_cast<unsigned char>(spec[0])) && spec[1] == ':') {
+          char letter = static_cast<char>(std::toupper(static_cast<unsigned char>(spec[0])));
+          std::string imagePath = spec.substr(2);
+          if (!imagePath.empty() && imagePath[0] == '=')
+            imagePath = imagePath.substr(1);
+          cliMounts.push_back({letter, imagePath, "", true});
+        } else {
+          LOG_ERROR("Invalid --cdrom= syntax. Use --cdrom=D:/path/to/image.iso");
           return 1;
         }
       } else if (arg.find("--trace=") == 0) {
@@ -996,7 +1009,9 @@ int main(int argc, char *argv[]) {
 
     // Apply CLI mounts
     for (auto& m : cliMounts) {
-      if (!driveManager.mount(m.letter, m.hostPath, m.label)) {
+      const bool ok = m.cdrom ? driveManager.mountCdrom(m.letter, m.hostPath, m.label)
+                              : driveManager.mount(m.letter, m.hostPath, m.label);
+      if (!ok) {
         LOG_ERROR("Failed to mount ", m.letter, ": to ", m.hostPath);
         return 1;
       }

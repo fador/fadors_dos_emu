@@ -3,6 +3,7 @@
 #include "../memory/MemoryBus.hpp"
 #include "../memory/himem/HIMEM.hpp"
 #include "DriveManager.hpp"
+#include "cdrom/Mscdex.hpp"
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -37,7 +38,7 @@ public:
   void setDPMI(DPMI *dpmi) { m_dpmi = dpmi; }
 
   // Drive manager wiring
-  void setDriveManager(DriveManager *dm) { m_driveManager = dm; }
+  void setDriveManager(DriveManager *dm);
   DriveManager *getDriveManager() { return m_driveManager; }
 
   // Access to HIMEM (XMS) for BIOS dispatch wiring
@@ -165,6 +166,7 @@ public:
 private:
   // HIMEM (XMS) support
   std::unique_ptr<memory::HIMEM> m_himem;
+  std::unique_ptr<cdrom::Mscdex> m_mscdex;
   DPMI *m_dpmi = nullptr;
   DriveManager *m_driveManager = nullptr;
   cpu::CPU &m_cpu;
@@ -215,15 +217,21 @@ private:
     enum class Kind {
       File,
       EMSDevice,
+      IsoFile,
     };
 
     std::string path;
     Kind kind = Kind::File;
     std::fstream stream;
+    std::shared_ptr<cdrom::IsoImage> isoImage;
+    cdrom::IsoDirEntry isoEntry{};
+    uint64_t isoPos = 0;
+    uint8_t isoDriveIdx = 0;
     uint16_t fileTime = 0;
     uint16_t fileDate = 0;
 
     bool isEMSDevice() const { return kind == Kind::EMSDevice; }
+    bool isIsoFile() const { return kind == Kind::IsoFile; }
   };
   std::vector<std::shared_ptr<FileHandle>> m_fileHandles;
   uint16_t storeHandle(std::shared_ptr<FileHandle> fh);
@@ -241,7 +249,14 @@ private:
   void resizeTSRBlock(uint16_t segment, uint16_t requested);
 
   // FindFirst/FindNext search state
-  std::vector<std::filesystem::path> m_searchResults;
+  struct SearchResult {
+    std::string name;
+    uint8_t dosAttr = 0x20;
+    uint16_t dosTime = 0;
+    uint16_t dosDate = 0;
+    uint32_t fileSize = 0;
+  };
+  std::vector<SearchResult> m_searchResults;
   size_t m_searchIndex = 0;
   std::string m_searchPattern;
   std::string m_searchDir;

@@ -1163,8 +1163,9 @@ int DosShell::cmdMount(const ParsedCommand& cmd)
     char drive = static_cast<char>(std::toupper(static_cast<unsigned char>(cmd.args[0][0])));
     std::string hostPath = cmd.args[1];
 
-    if (!fs::is_directory(hostPath)) {
-        printLine("Host path does not exist or is not a directory");
+    if (!fs::is_directory(hostPath) &&
+        !(fs::is_regular_file(hostPath) && cdrom::IsoImage::hasImageExtension(hostPath))) {
+        printLine("Host path does not exist or is not a directory/ISO image");
         return 1;
     }
     if (m_driveManager.mount(drive, hostPath)) {

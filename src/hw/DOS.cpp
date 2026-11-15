@@ -113,6 +113,16 @@ DOS::DOS(cpu::CPU &cpu, memory::MemoryBus &memory)
   m_himem = std::make_unique<memory::HIMEM>();
 }
 
+void DOS::setDriveManager(DriveManager *dm) {
+  m_driveManager = dm;
+  if (dm) {
+    m_mscdex = std::make_unique<cdrom::Mscdex>(m_cpu, m_memory, *dm);
+    m_mscdex->initializeDeviceHeader();
+  } else {
+    m_mscdex.reset();
+  }
+}
+
 void DOS::initialize() {
   LOG_INFO("DOS: Kernel initialized (v2.2).");
 
@@ -135,6 +145,9 @@ void DOS::initialize() {
   writeMCB(freeSeg, free);
 
   initializeDOSListOfLists(m_memory, FIRST_MCB_SEGMENT);
+  if (m_mscdex) {
+    m_mscdex->initializeDeviceHeader();
+  }
 
   // Initialize Fake Shell PSP at segment 0x0070
   // Write parent PSP segment to 0x0070 (itself) at offset 0x16 (physical 0x0716)
@@ -370,6 +383,9 @@ bool DOS::handleInterrupt(uint8_t vector) {
       m_cpu.setReg8(cpu::AL, 0x00);
 
     } else if ((ax >> 8) == 0x15) {
+      if (m_mscdex) {
+        return m_mscdex->handleInt2F();
+      }
       LOG_DEBUG("DOS: INT 2Fh CD-ROM/MSCDEX Multiplex, AX=0x", std::hex, ax, " -> Not installed");
       m_cpu.setReg8(cpu::AL, 0x00);
       if (ax == 0x1500) {
@@ -1073,6 +1089,8 @@ void DOS::handleDOSService() {
                m_fileHandles[bx - 5]) {
         if (m_fileHandles[bx - 5]->isEMSDevice())
           info = 0x0080; // Character device
+        else if (m_fileHandles[bx - 5]->isIsoFile())
+          info = static_cast<uint16_t>(0x0040 | (m_fileHandles[bx - 5]->isoDriveIdx & 0x3F));
         else
           // Disk file: bit7=0 (file), bit11=1 (media not removable),
           // bits 5-0 = drive number (0=A:,2=C:).
@@ -1154,6 +1172,9 @@ void DOS::handleDOSService() {
         auto &fh = m_fileHandles[bx - 5];
         if (fh->isEMSDevice()) {
           m_cpu.setReg8(cpu::AL, 0xFF);
+        } else if (fh->isIsoFile()) {
+          bool atEof = (fh->isoPos >= fh->isoEntry.size);
+          m_cpu.setReg8(cpu::AL, atEof ? 0x00 : 0xFF);
         } else {
           bool atEof = fh->stream.eof();
           m_cpu.setReg8(cpu::AL, atEof ? 0x00 : 0xFF);
@@ -1181,7 +1202,8 @@ void DOS::handleDOSService() {
         m_cpu.setReg16(cpu::AX, 0x000F); // Invalid drive
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
       } else {
-        uint16_t fixed = (drive <= 2) ? 0x0000 : 0x0001; // A/B removable, C+ fixed
+        const bool isCd = m_driveManager && m_driveManager->isCdrom(static_cast<uint8_t>(drive - 1));
+        uint16_t fixed = (drive <= 2 || isCd) ? 0x0000 : 0x0001; // A/B/CD-ROM removable, C+ fixed
         m_cpu.setReg16(cpu::AX, fixed);
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
       }
@@ -1192,7 +1214,8 @@ void DOS::handleDOSService() {
         m_cpu.setReg16(cpu::AX, 0x000F);
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
       } else {
-        m_cpu.setReg16(cpu::DX, 0x0802); // Local block device
+        const bool isCd = m_driveManager && m_driveManager->isCdrom(static_cast<uint8_t>(drive - 1));
+        m_cpu.setReg16(cpu::DX, isCd ? 0x1000 : 0x0802); // Remote/redirector for CD-ROM
         m_cpu.setReg16(cpu::AX, 0x0000);
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
       }
@@ -1212,6 +1235,38 @@ void DOS::handleDOSService() {
     const uint8_t mode = m_cpu.getReg8(cpu::BL);
     const uint8_t action = m_cpu.getReg8(cpu::DL);
     const std::string name = readFilename(m_cpu.getSegBase(cpu::DS) + si);
+    uint8_t cdDriveIdx = 0;
+    if (m_driveManager) {
+      if (auto cdRel = m_driveManager->resolveCdromPath(name, &cdDriveIdx)) {
+        auto iso = m_driveManager->getCdromImage(cdDriveIdx);
+        auto entry = iso ? iso->lookup(*cdRel) : std::nullopt;
+        if (entry) {
+          if ((action & 0x0F) == 0x01 && (mode & 0x03) == 0) {
+            m_cpu.setReg8(cpu::AH, 0x3D);
+            m_cpu.setReg8(cpu::AL, mode & 0x7F);
+            const uint16_t savedDX = m_cpu.getReg16(cpu::DX);
+            m_cpu.setReg16(cpu::DX, si);
+            handleFileService();
+            m_cpu.setReg16(cpu::DX, savedDX);
+            if (!(m_cpu.getEFLAGS() & cpu::FLAG_CARRY))
+              m_cpu.setReg16(cpu::CX, 1);
+          } else {
+            m_cpu.setReg16(cpu::AX, (action & 0x0F) == 0 ? 0x50 : 0x05);
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+            setExtendedError((action & 0x0F) == 0 ? 0x50 : 0x05, 0x07, 0x04, 0x02);
+          }
+        } else if ((action & 0xF0) == 0x10) {
+          m_cpu.setReg16(cpu::AX, 0x05); // Access denied (read-only)
+          m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+          setExtendedError(0x05, 0x07, 0x04, 0x02);
+        } else {
+          m_cpu.setReg16(cpu::AX, 0x02);
+          m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+          setExtendedError(0x02, 0x08, 0x03, 0x02);
+        }
+        break;
+      }
+    }
     const std::string host = resolvePath(name);
     std::error_code ec;
     const bool exists = !host.empty() && fs::exists(host, ec);
@@ -1558,6 +1613,9 @@ void DOS::handleDOSService() {
   }
   case 0x52: { // "Get List of Lists" (SYSVARS)
       initializeDOSListOfLists(m_memory, FIRST_MCB_SEGMENT);
+  if (m_mscdex) {
+    m_mscdex->initializeDeviceHeader();
+  }
       m_cpu.setSegReg(cpu::ES, kListOfListsSeg);
       m_cpu.setReg16(cpu::BX, kListOfListsOff);
       LOG_DOS("DOS: Get List of Lists at ", std::hex, kListOfListsSeg, ":",
@@ -2394,7 +2452,14 @@ void DOS::handleDirectoryService() {
 
   try {
     if (ah == 0x39) { // MKDIR
-      std::string path = resolvePath(readFilename(addr));
+      std::string rawPath = readFilename(addr);
+      if (m_driveManager && m_driveManager->resolveCdromPath(rawPath)) {
+        m_cpu.setReg16(cpu::AX, 0x05); // Access denied
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+        setExtendedError(0x05, 0x07, 0x04, 0x02);
+        return;
+      }
+      std::string path = resolvePath(rawPath);
       LOG_DEBUG("DOS: MKDIR '", path, "'");
       if (fs::create_directory(path)) {
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
@@ -2405,7 +2470,14 @@ void DOS::handleDirectoryService() {
         setExtendedError(0x03, 0x08, 0x03, 0x02);
       }
     } else if (ah == 0x3A) { // RMDIR
-      std::string path = resolvePath(readFilename(addr));
+      std::string rawPath = readFilename(addr);
+      if (m_driveManager && m_driveManager->resolveCdromPath(rawPath)) {
+        m_cpu.setReg16(cpu::AX, 0x05); // Access denied
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+        setExtendedError(0x05, 0x07, 0x04, 0x02);
+        return;
+      }
+      std::string path = resolvePath(rawPath);
       LOG_DEBUG("DOS: RMDIR '", path, "'");
       if (fs::remove(path)) {
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
@@ -2418,6 +2490,22 @@ void DOS::handleDirectoryService() {
       }
     } else if (ah == 0x3B) { // CHDIR
       std::string rawPath = readFilename(addr);
+      uint8_t cdDriveIdx = 0;
+      if (m_driveManager) {
+        if (auto cdRel = m_driveManager->resolveCdromPath(rawPath, &cdDriveIdx)) {
+          char driveLetter = static_cast<char>('A' + cdDriveIdx);
+          if (m_driveManager->setCurrentDir(driveLetter, *cdRel)) {
+            m_dosCurrentDir = m_driveManager->getCurrentDir(cdDriveIdx);
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+            m_cpu.setReg16(cpu::AX, 0);
+          } else {
+            m_cpu.setReg16(cpu::AX, 0x03); // Path not found
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+            setExtendedError(0x03, 0x08, 0x03, 0x02);
+          }
+          return;
+        }
+      }
       std::string path = resolvePath(rawPath);
       LOG_DEBUG("DOS: CHDIR raw='", rawPath, "' resolved='", path, "'");
       if (fs::exists(path) && fs::is_directory(path)) {
@@ -2562,6 +2650,15 @@ void DOS::handleDriveService() {
     LOG_DEBUG("DOS: Get Free Disk Space for drive ", (int)drive);
 
     if (m_driveManager) {
+      if (auto iso = m_driveManager->getCdromImage(static_cast<uint8_t>(drive - 1))) {
+        const uint32_t total = std::min<uint32_t>(iso->volumeSectors(), 65535);
+        m_cpu.setReg16(cpu::AX, 1);                             // Sectors per cluster
+        m_cpu.setReg16(cpu::BX, 0);                             // Free clusters
+        m_cpu.setReg16(cpu::CX, cdrom::IsoImage::kSectorSize);  // Bytes per sector (2048)
+        m_cpu.setReg16(cpu::DX, static_cast<uint16_t>(total));  // Total clusters
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+        return;
+      }
       char letter = static_cast<char>('A' + drive - 1);
       std::string hostPath = m_driveManager->getHostPath(letter);
       if (!hostPath.empty()) {
@@ -2652,34 +2749,14 @@ void DOS::handleDirectorySearch() {
   // compatible in early DOS/4GW.
   uint32_t dtaAddr = (static_cast<uint32_t>(dtaSeg) << 4) + dtaOff;
 
-  auto fillDTA = [&](const fs::path &fullPath, const std::string &dosName) {
-    // Byte 0x15: file attributes
-    std::error_code ec;
-    uint8_t dosAttr = 0x20; // Archive
-    if (fs::is_directory(fullPath, ec))
-      dosAttr = 0x10;
-    auto perms = fs::status(fullPath, ec).permissions();
-    if ((perms & fs::perms::owner_write) == fs::perms::none)
-      dosAttr |= 0x01;
-    m_memory.write8(dtaAddr + 0x15, dosAttr);
-
-    // Bytes 0x16-0x17: file time, 0x18-0x19: file date
-    auto ftime = fs::last_write_time(fullPath, ec);
-    (void)ftime; // Mark ftime as unused to fix compiler warning
-    // Use a plausible default timestamp
-    uint16_t dosTime = (12 << 11) | (0 << 5) | 0;           // 12:00:00
-    uint16_t dosDate = ((2026 - 1980) << 9) | (3 << 5) | 2; // 2026-03-02
-    m_memory.write16(dtaAddr + 0x16, dosTime);
-    m_memory.write16(dtaAddr + 0x18, dosDate);
-
-    // Bytes 0x1A-0x1D: file size (32-bit)
-    uint32_t fileSize = 0;
-    if (fs::is_regular_file(fullPath, ec))
-      fileSize = static_cast<uint32_t>(fs::file_size(fullPath, ec));
-    m_memory.write32(dtaAddr + 0x1A, fileSize);
+  auto fillDTA = [&](const SearchResult &sr) {
+    m_memory.write8(dtaAddr + 0x15, sr.dosAttr);
+    m_memory.write16(dtaAddr + 0x16, sr.dosTime);
+    m_memory.write16(dtaAddr + 0x18, sr.dosDate);
+    m_memory.write32(dtaAddr + 0x1A, sr.fileSize);
 
     // Bytes 0x1E-0x2A: filename (null-terminated, uppercase 8.3)
-    std::string upper = dosName;
+    std::string upper = sr.name;
     for (auto &ch : upper)
       ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
     for (int i = 0; i < 13; ++i) {
@@ -2690,11 +2767,88 @@ void DOS::handleDirectorySearch() {
     }
   };
 
+  auto makeHostSearchResult = [](const fs::path &fullPath, const std::string &dosName) {
+    SearchResult sr;
+    sr.name = dosName;
+    std::error_code ec;
+    sr.dosAttr = 0x20; // Archive
+    if (fs::is_directory(fullPath, ec))
+      sr.dosAttr = 0x10;
+    auto perms = fs::status(fullPath, ec).permissions();
+    if ((perms & fs::perms::owner_write) == fs::perms::none)
+      sr.dosAttr |= 0x01;
+    sr.dosTime = (12 << 11) | (0 << 5) | 0;           // 12:00:00
+    sr.dosDate = ((2026 - 1980) << 9) | (3 << 5) | 2; // 2026-03-02
+    if (fs::is_regular_file(fullPath, ec))
+      sr.fileSize = static_cast<uint32_t>(fs::file_size(fullPath, ec));
+    return sr;
+  };
+
   if (ah == 0x4E) { // Find First
     uint16_t dx = m_cpu.getReg16(cpu::DX);
     uint32_t nameAddr = m_cpu.getSegBase(cpu::DS) + dx;
     std::string rawPattern = readFilename(nameAddr);
     uint8_t attr = m_cpu.getReg8(cpu::CL);
+
+    uint8_t cdDriveIdx = 0;
+    if (m_driveManager) {
+      if (auto cdRel = m_driveManager->resolveCdromPath(rawPattern, &cdDriveIdx)) {
+        auto iso = m_driveManager->getCdromImage(cdDriveIdx);
+        m_searchResults.clear();
+        m_searchIndex = 0;
+
+        std::string searchDir;
+        std::string filePattern;
+        auto directEntry = iso ? iso->lookup(*cdRel) : std::nullopt;
+        if (directEntry && directEntry->isDirectory()) {
+          searchDir = *cdRel;
+          filePattern = "*.*";
+        } else {
+          auto sep = cdRel->find_last_of('\\');
+          if (sep == std::string::npos) {
+            searchDir.clear();
+            filePattern = *cdRel;
+          } else {
+            searchDir = cdRel->substr(0, sep);
+            filePattern = cdRel->substr(sep + 1);
+          }
+        }
+        m_searchPattern = filePattern;
+        m_searchDir = searchDir;
+
+        auto entries = iso ? iso->listDirectory(searchDir) : std::nullopt;
+        if (!entries) {
+          m_cpu.setReg16(cpu::AX, 0x03); // Path not found
+          m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+          return;
+        }
+        for (const auto &entry : *entries) {
+          if (entry.isDirectory() && !(attr & 0x10))
+            continue;
+          if (entry.isHidden() && !(attr & 0x02))
+            continue;
+          if (dosWildcardMatch(filePattern, entry.name)) {
+            SearchResult sr;
+            sr.name = entry.name;
+            sr.dosAttr = entry.dosAttributes();
+            sr.dosTime = entry.dosTime();
+            sr.dosDate = entry.dosDate();
+            sr.fileSize = entry.isDirectory() ? 0 : entry.size;
+            m_searchResults.push_back(std::move(sr));
+          }
+        }
+        if (m_searchResults.empty()) {
+          m_cpu.setReg16(cpu::AX, 0x12); // No more files
+          m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+          return;
+        }
+        m_memory.write16(dtaAddr + 0x00, 0);
+        fillDTA(m_searchResults[0]);
+        m_cpu.setReg16(cpu::AX, 0);
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+        return;
+      }
+    }
 
     // Separate directory and filename pattern
     std::string resolvedStr = resolvePath(rawPattern);
@@ -2736,7 +2890,7 @@ void DOS::handleDirectorySearch() {
           continue;
 
         if (dosWildcardMatch(filePattern, fname)) {
-          m_searchResults.push_back(entry.path());
+          m_searchResults.push_back(makeHostSearchResult(entry.path(), fname));
         }
       }
     } catch (...) {
@@ -2756,8 +2910,8 @@ void DOS::handleDirectorySearch() {
     // Store search state in DTA reserved area
     m_memory.write16(dtaAddr + 0x00, 0); // match index = 0
 
-    fillDTA(m_searchResults[0], m_searchResults[0].filename().string());
-    LOG_DOS("DOS: FindFirst matched '", m_searchResults[0].filename().string(),
+    fillDTA(m_searchResults[0]);
+    LOG_DOS("DOS: FindFirst matched '", m_searchResults[0].name,
             "' (", m_searchResults.size(), " total)");
 
     m_cpu.setReg16(cpu::AX, 0);
@@ -2776,9 +2930,8 @@ void DOS::handleDirectorySearch() {
 
     m_memory.write16(dtaAddr + 0x00, index);
 
-    fillDTA(m_searchResults[index], m_searchResults[index].filename().string());
-    LOG_DOS("DOS: FindNext matched '",
-            m_searchResults[index].filename().string(), "'");
+    fillDTA(m_searchResults[index]);
+    LOG_DOS("DOS: FindNext matched '", m_searchResults[index].name, "'");
 
     m_cpu.setReg16(cpu::AX, 0);
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
@@ -3356,6 +3509,12 @@ void DOS::handleFileService() {
     uint16_t dx = m_cpu.getReg16(cpu::DX);
     uint32_t nameAddr = m_cpu.getSegBase(cpu::DS) + dx;
     std::string filename = readFilename(nameAddr);
+    if (m_driveManager && m_driveManager->resolveCdromPath(filename)) {
+      m_cpu.setReg16(cpu::AX, 0x05); // Access denied (read-only CD-ROM)
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      setExtendedError(0x05, 0x07, 0x04, 0x02);
+      return;
+    }
     std::string hostPath = resolvePath(filename);
 
     auto fh = std::make_shared<FileHandle>();
@@ -3400,6 +3559,41 @@ void DOS::handleFileService() {
       LOG_DOS("DOS: Opened EMS device '",
               m_fileHandles.back()->path, "' handle=", handle);
       return;
+    }
+
+    uint8_t cdDriveIdx = 0;
+    if (m_driveManager) {
+      if (auto cdRel = m_driveManager->resolveCdromPath(filename, &cdDriveIdx)) {
+        auto iso = m_driveManager->getCdromImage(cdDriveIdx);
+        auto entry = iso ? iso->lookup(*cdRel) : std::nullopt;
+        if (!entry) {
+          m_cpu.setReg16(cpu::AX, 0x02); // File not found
+          m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+          setExtendedError(0x02, 0x08, 0x03, 0x02);
+          return;
+        }
+        if (entry->isDirectory() || accessMode != 0) {
+          m_cpu.setReg16(cpu::AX, 0x05); // Access denied
+          m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+          setExtendedError(0x05, 0x07, 0x04, 0x02);
+          return;
+        }
+        auto fh = std::make_shared<FileHandle>();
+        fh->path = filename;
+        fh->kind = FileHandle::Kind::IsoFile;
+        fh->isoImage = std::move(iso);
+        fh->isoEntry = *entry;
+        fh->isoPos = 0;
+        fh->isoDriveIdx = cdDriveIdx;
+        fh->fileTime = entry->dosTime();
+        fh->fileDate = entry->dosDate();
+        uint16_t handle = storeHandle(std::move(fh));
+        m_cpu.setReg16(cpu::AX, handle);
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+        syncJFT(handle, static_cast<uint8_t>(handle));
+        LOG_DOS("DOS: Opened ISO file '", filename, "' handle=", handle);
+        return;
+      }
     }
 
     std::string hostPath = resolvePath(filename);
@@ -3476,7 +3670,7 @@ void DOS::handleFileService() {
     if (handle >= 5 && handle - 5 < m_fileHandles.size() &&
         m_fileHandles[handle - 5]) {
       if (m_fileHandles[handle - 5].use_count() == 1 &&
-          !m_fileHandles[handle - 5]->isEMSDevice())
+          m_fileHandles[handle - 5]->kind == FileHandle::Kind::File)
         m_fileHandles[handle - 5]->stream.close();
       m_fileHandles[handle - 5].reset(); // Free slot
       syncJFT(handle, 0xFF);
@@ -3522,7 +3716,7 @@ void DOS::handleFileService() {
       if (dstHandle >= 5 && dstHandle - 5 < m_fileHandles.size() &&
           m_fileHandles[dstHandle - 5]) {
         if (m_fileHandles[dstHandle - 5].use_count() == 1 &&
-            !m_fileHandles[dstHandle - 5]->isEMSDevice())
+            m_fileHandles[dstHandle - 5]->kind == FileHandle::Kind::File)
           m_fileHandles[dstHandle - 5]->stream.close();
         m_fileHandles[dstHandle - 5].reset();
       } else if (dstHandle < 5) {
@@ -3557,6 +3751,19 @@ void DOS::handleFileService() {
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
         LOG_DOS("DOS: Read from EMS device handle=", handle,
                 " returned 0 bytes");
+        return;
+      }
+
+      if (fh->isIsoFile()) {
+        std::vector<uint8_t> buf(bytesToRead);
+        size_t bytesRead = fh->isoImage->readFile(fh->isoEntry, fh->isoPos, buf);
+        fh->isoPos += bytesRead;
+        for (size_t i = 0; i < bytesRead; ++i) {
+          m_memory.write8(bufAddr + static_cast<uint32_t>(i), buf[i]);
+        }
+        m_cpu.setReg16(cpu::AX, static_cast<uint16_t>(bytesRead));
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+        LOG_DOS("DOS: Read ", bytesRead, " bytes from ISO handle=", handle);
         return;
       }
 
@@ -3599,6 +3806,12 @@ void DOS::handleFileService() {
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
         LOG_DOS("DOS: Ignored write of ", bytesToWrite,
                 " bytes to EMS device handle=", handle);
+        return;
+      }
+      if (fh->isIsoFile()) {
+        m_cpu.setReg16(cpu::AX, 0x05); // Access denied
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+        setExtendedError(0x05, 0x07, 0x04, 0x02);
         return;
       }
 
@@ -3650,6 +3863,12 @@ void DOS::handleFileService() {
     uint16_t dx = m_cpu.getReg16(cpu::DX);
     uint32_t nameAddr = m_cpu.getSegBase(cpu::DS) + dx;
     std::string filename = readFilename(nameAddr);
+    if (m_driveManager && m_driveManager->resolveCdromPath(filename)) {
+      m_cpu.setReg16(cpu::AX, 0x05); // Access denied
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      setExtendedError(0x05, 0x03, 0x04, 0x02);
+      return;
+    }
     std::string hostPath = resolvePath(filename);
     fs::path targetPath(hostPath);
     fs::path parentPath = targetPath.parent_path();
@@ -3698,6 +3917,36 @@ void DOS::handleFileService() {
         return;
       }
 
+      if (fh->isIsoFile()) {
+        int64_t base = 0;
+        if (method == 0)
+          base = 0;
+        else if (method == 1)
+          base = static_cast<int64_t>(fh->isoPos);
+        else if (method == 2)
+          base = static_cast<int64_t>(fh->isoEntry.size);
+        else {
+          m_cpu.setReg16(cpu::AX, 0x01);
+          m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+          setExtendedError(0x01, 0x07, 0x04, 0x01);
+          return;
+        }
+        int64_t target = base + static_cast<int64_t>(offset);
+        if (target < 0) {
+          m_cpu.setReg16(cpu::AX, 0x19); // Seek error
+          m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+          setExtendedError(0x19, 0x07, 0x04, 0x02);
+          return;
+        }
+        fh->isoPos = static_cast<uint64_t>(target);
+        uint32_t newPos = static_cast<uint32_t>(fh->isoPos);
+        m_cpu.setReg16(cpu::DX, newPos >> 16);
+        m_cpu.setReg16(cpu::AX, newPos & 0xFFFF);
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+        LOG_DOS("DOS: Seeked ISO handle=", handle, " to pos=", newPos);
+        return;
+      }
+
       std::ios_base::seekdir dir;
       if (method == 0)
         dir = std::ios::beg;
@@ -3731,6 +3980,32 @@ void DOS::handleFileService() {
     uint8_t al = m_cpu.getReg8(cpu::AL);
     uint32_t nameAddr = m_cpu.getSegBase(cpu::DS) + dx;
     std::string filename = readFilename(nameAddr);
+    uint8_t cdDriveIdx = 0;
+    if (m_driveManager) {
+      if (auto cdRel = m_driveManager->resolveCdromPath(filename, &cdDriveIdx)) {
+        if (al == 0x00) {
+          auto iso = m_driveManager->getCdromImage(cdDriveIdx);
+          auto entry = iso ? iso->lookup(*cdRel) : std::nullopt;
+          if (entry) {
+            m_cpu.setReg16(cpu::CX, entry->dosAttributes());
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+          } else {
+            m_cpu.setReg16(cpu::AX, 0x02); // File not found
+            m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+            setExtendedError(0x02, 0x08, 0x03, 0x02);
+          }
+        } else if (al == 0x01) {
+          m_cpu.setReg16(cpu::AX, 0x05); // Access denied
+          m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+          setExtendedError(0x05, 0x07, 0x04, 0x02);
+        } else {
+          m_cpu.setReg16(cpu::AX, 0x01);
+          m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+          setExtendedError(0x01, 0x07, 0x04, 0x01);
+        }
+        return;
+      }
+    }
     std::string hostPath = resolvePath(filename);
 
     std::error_code ec;
@@ -3759,11 +4034,17 @@ void DOS::handleFileService() {
     uint16_t dx = m_cpu.getReg16(cpu::DX);
     uint32_t oldAddr = m_cpu.getSegBase(cpu::DS) + dx;
     std::string oldFilename = readFilename(oldAddr);
-    std::string oldHostPath = resolvePath(oldFilename);
-
     uint16_t di = m_cpu.getReg16(cpu::DI);
     uint32_t newAddr = m_cpu.getSegBase(cpu::ES) + di;
     std::string newFilename = readFilename(newAddr);
+    if (m_driveManager && (m_driveManager->resolveCdromPath(oldFilename) ||
+                          m_driveManager->resolveCdromPath(newFilename))) {
+      m_cpu.setReg16(cpu::AX, 0x05); // Access denied
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      setExtendedError(0x05);
+      return;
+    }
+    std::string oldHostPath = resolvePath(oldFilename);
     std::string newHostPath = resolvePath(newFilename);
 
     std::error_code ec;
@@ -3825,6 +4106,12 @@ void DOS::handleFileService() {
     uint16_t dx = m_cpu.getReg16(cpu::DX);
     uint32_t pathAddr = m_cpu.getSegBase(cpu::DS) + dx;
     std::string dirPath = readFilename(pathAddr);
+    if (m_driveManager && m_driveManager->resolveCdromPath(dirPath)) {
+      m_cpu.setReg16(cpu::AX, 0x05); // Access denied
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      setExtendedError(0x05);
+      return;
+    }
     if (!dirPath.empty() && dirPath.back() != '\\' && dirPath.back() != '/') {
       dirPath += '\\';
     }
@@ -3887,6 +4174,12 @@ void DOS::handleFileService() {
     uint16_t dx = m_cpu.getReg16(cpu::DX);
     uint32_t nameAddr = m_cpu.getSegBase(cpu::DS) + dx;
     std::string filename = readFilename(nameAddr);
+    if (m_driveManager && m_driveManager->resolveCdromPath(filename)) {
+      m_cpu.setReg16(cpu::AX, 0x05); // Access denied
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+      setExtendedError(0x05);
+      return;
+    }
     std::string hostPath = resolvePath(filename);
 
     std::error_code ec;
@@ -3923,7 +4216,8 @@ void DOS::handleFileService() {
       m_cpu.setReg16(cpu::AX, 0x0000);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
     } else if (bx >= 5 && bx - 5 < m_fileHandles.size() && m_fileHandles[bx - 5]) {
-      m_fileHandles[bx - 5]->stream.flush();
+      if (m_fileHandles[bx - 5]->kind == FileHandle::Kind::File)
+        m_fileHandles[bx - 5]->stream.flush();
       m_cpu.setReg16(cpu::AX, 0x0000);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
       LOG_DOS("DOS: Committed file handle ", bx);

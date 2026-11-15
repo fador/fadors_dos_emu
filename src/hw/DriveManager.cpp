@@ -180,7 +180,7 @@ DriveManager::~DriveManager() {
 
 bool DriveManager::mount(char letter, const std::string& hostPath, const std::string& label) {
   auto idx = letterToIndex(letter);
-  if (!m_mounts[idx].empty()) {
+  if (!m_mounts[idx].empty() || m_cdromImages[idx]) {
     return false;
   }
 
@@ -188,6 +188,11 @@ bool DriveManager::mount(char letter, const std::string& hostPath, const std::st
   auto canonical = std::filesystem::canonical(hostPath, ec);
   if (ec) {
     return false;
+  }
+
+  if (std::filesystem::is_regular_file(canonical, ec) &&
+      cdrom::IsoImage::hasImageExtension(canonical.string())) {
+    return mountCdrom(letter, canonical.string(), label);
   }
 
   if (std::filesystem::is_regular_file(canonical, ec) && hasZipExtension(canonical)) {
@@ -222,9 +227,38 @@ bool DriveManager::mount(char letter, const std::string& hostPath, const std::st
   return true;
 }
 
+bool DriveManager::mountCdrom(char letter, const std::string& imagePath, const std::string& label) {
+  auto idx = letterToIndex(letter);
+  if (idx >= 26 || !m_mounts[idx].empty() || m_cdromImages[idx]) {
+    return false;
+  }
+
+  std::error_code ec;
+  auto canonical = std::filesystem::canonical(imagePath, ec);
+  const std::string resolvedPath = ec ? imagePath : canonical.string();
+
+  std::string err;
+  auto iso = cdrom::IsoImage::open(resolvedPath, &err);
+  if (!iso) {
+    return false;
+  }
+
+  m_cdromImages[idx] = std::shared_ptr<cdrom::IsoImage>(std::move(iso));
+  m_mounts[idx] = resolvedPath;
+  m_currentDir[idx].clear();
+  if (!label.empty()) {
+    m_volumeLabels[idx] = label;
+  } else if (!m_cdromImages[idx]->volumeLabel().empty()) {
+    m_volumeLabels[idx] = m_cdromImages[idx]->volumeLabel();
+  } else {
+    m_volumeLabels[idx] = "CDROM";
+  }
+  return true;
+}
+
 bool DriveManager::unmount(char letter) {
   auto idx = letterToIndex(letter);
-  if (idx == 25 || m_mounts[idx].empty()) {
+  if (idx == 25 || (m_mounts[idx].empty() && !m_cdromImages[idx])) {
     return false;
   }
 
@@ -233,6 +267,7 @@ bool DriveManager::unmount(char letter) {
     std::filesystem::remove_all(m_tempZipDirs[idx], ec);
     m_tempZipDirs[idx].clear();
   }
+  m_cdromImages[idx].reset();
   m_mounts[idx].clear();
   m_currentDir[idx].clear();
   m_volumeLabels[idx].clear();
@@ -240,7 +275,35 @@ bool DriveManager::unmount(char letter) {
 }
 
 bool DriveManager::isMounted(char letter) const {
-  return !m_mounts[letterToIndex(letter)].empty();
+  auto idx = letterToIndex(letter);
+  return !m_mounts[idx].empty() || m_cdromImages[idx] != nullptr;
+}
+
+bool DriveManager::isCdrom(char letter) const {
+  return m_cdromImages[letterToIndex(letter)] != nullptr;
+}
+
+bool DriveManager::isCdrom(uint8_t driveIndex) const {
+  return driveIndex < 26 && m_cdromImages[driveIndex] != nullptr;
+}
+
+std::shared_ptr<cdrom::IsoImage> DriveManager::getCdromImage(char letter) const {
+  return m_cdromImages[letterToIndex(letter)];
+}
+
+std::shared_ptr<cdrom::IsoImage> DriveManager::getCdromImage(uint8_t driveIndex) const {
+  if (driveIndex >= 26)
+    return nullptr;
+  return m_cdromImages[driveIndex];
+}
+
+std::vector<uint8_t> DriveManager::getCdromDriveIndices() const {
+  std::vector<uint8_t> result;
+  for (uint8_t i = 0; i < 26; ++i) {
+    if (m_cdromImages[i])
+      result.push_back(i);
+  }
+  return result;
 }
 
 std::string DriveManager::getHostPath(char letter) const {
@@ -272,8 +335,29 @@ std::string DriveManager::getCurrentDir(char letter) const {
 }
 
 bool DriveManager::setCurrentDir(uint8_t driveIndex, const std::string& dosDir) {
-  if (m_mounts[driveIndex].empty())
+  if (driveIndex >= 26 || (m_mounts[driveIndex].empty() && !m_cdromImages[driveIndex]))
     return false;
+
+  if (m_cdromImages[driveIndex]) {
+    auto normalized = normalizeDosPath(dosDir);
+    if (normalized.empty() || normalized == "\\") {
+      m_currentDir[driveIndex].clear();
+      return true;
+    }
+    if (normalized.front() != '\\') {
+      auto& cwd = m_currentDir[driveIndex];
+      normalized = cwd.empty() ? ("\\" + normalized) : ("\\" + cwd + "\\" + normalized);
+    }
+    normalized = collapsePath(normalized);
+    std::string rel = normalized.size() > 1 ? normalized.substr(1) : std::string();
+    if (!rel.empty()) {
+      auto entry = m_cdromImages[driveIndex]->lookup(rel);
+      if (!entry || !entry->isDirectory())
+        return false;
+    }
+    m_currentDir[driveIndex] = rel;
+    return true;
+  }
 
   auto normalized = normalizeDosPath(dosDir);
   if (normalized.empty() || normalized == "\\") {
@@ -316,15 +400,46 @@ std::string DriveManager::getFullDosCwd() const {
 }
 
 int DriveManager::getMountedCount() const {
-  return static_cast<int>(std::count_if(m_mounts.begin(), m_mounts.end(),
-    [](const std::string& s) { return !s.empty(); }));
+  int count = 0;
+  for (size_t i = 0; i < 26; ++i) {
+    if (!m_mounts[i].empty() || m_cdromImages[i])
+      ++count;
+  }
+  return count;
+}
+
+std::optional<std::string> DriveManager::resolveCdromPath(const std::string& dosPath,
+                                                          uint8_t* outDriveIdx) const {
+  auto [driveLetter, remainder] = parseDrive(dosPath);
+  auto idx = letterToIndex(driveLetter);
+  if (!m_cdromImages[idx])
+    return std::nullopt;
+  if (outDriveIdx)
+    *outDriveIdx = idx;
+
+  auto normalized = normalizeDosPath(remainder);
+  if (normalized.empty())
+    normalized = "\\";
+
+  if (normalized.front() != '\\') {
+    auto& cwd = m_currentDir[idx];
+    if (!cwd.empty())
+      normalized = "\\" + cwd + "\\" + normalized;
+    else
+      normalized = "\\" + normalized;
+  }
+
+  normalized = collapsePath(normalized);
+  if (normalized.size() <= 1)
+    return std::string();
+  return normalized.substr(1);
 }
 
 std::string DriveManager::resolvePath(const std::string& dosPath) const {
   auto [driveLetter, remainder] = parseDrive(dosPath);
   auto idx = letterToIndex(driveLetter);
 
-  if (m_mounts[idx].empty())
+  if (m_cdromImages[idx] || m_mounts[idx].empty())
     return {};
 
   auto normalized = normalizeDosPath(remainder);
