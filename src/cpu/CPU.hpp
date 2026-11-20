@@ -1,5 +1,6 @@
 #pragma once
 #include "../memory/MemoryBus.hpp"
+#include "CpuModel.hpp"
 #include <array>
 #include <cstdint>
 #include <vector>
@@ -82,8 +83,34 @@ struct DescriptorRegister {
 
 class CPU {
 public:
-  CPU();
+  explicit CPU(CpuModelId model = kDefaultCpuModel);
   void reset();
+
+  // CPU model: identification, model-gated instructions, EFLAGS/CR0/CR4
+  // bits and the cycle-cost table.  setModel() keeps the register state
+  // (except CR0 bits the new model lacks); reset() applies the model's
+  // power-on signature in EDX.
+  void setModel(CpuModelId id);
+  const CpuModel &model() const { return *m_model; }
+  bool hasFeature(uint32_t featureBits) const {
+    return (m_features & featureBits) == featureBits;
+  }
+  // EFLAGS bits that exist on this model (bit 1 excluded).
+  uint32_t eflagsMask() const { return m_model->eflagsMask; }
+
+  // Guest clock: approximate core clock cycles executed so far, weighted by
+  // the model's per-instruction costs.  Monotonic; never reset.
+  uint64_t cycles() const { return m_guestCycles; }
+  void addGuestCycles(uint32_t c) { m_guestCycles += c; }
+  // Per-opcode cost table (see CpuModel.hpp); decoders keep a copy and
+  // refresh it when the segment-state version changes.
+  const uint8_t *cycleTable() const { return m_cycleTable.data(); }
+  uint32_t memOperandCycles() const { return m_memOperandCycles; }
+  uint32_t mulExtraCycles() const { return m_mulExtraCycles; }
+  uint32_t divExtraCycles() const { return m_divExtraCycles; }
+  // Time-stamp counter (RDTSC, MSR 0x10): cycles() plus a WRMSR offset.
+  uint64_t readTSC() const { return m_guestCycles + m_tscOffset; }
+  void writeTSC(uint64_t value) { m_tscOffset = value - m_guestCycles; }
 
   // Register accessors are defined inline: they are on every instruction's
   // hot path.
@@ -378,6 +405,8 @@ public:
   uint16_t pop16();
   uint32_t pop32();
 
+  // Host-side tick counter advanced by the main loop (one per instruction
+  // plus idle ticks); see cycles() for the model-weighted guest clock.
   uint64_t getCycles() const { return m_cycles; }
   const uint64_t &getCyclesRef() const { return m_cycles; }
   void addCycles(uint32_t c) { m_cycles += c; }
@@ -512,6 +541,8 @@ private:
   }
 
   uint64_t m_cycles{0};
+  uint64_t m_guestCycles{0};
+  uint32_t m_memOperandCycles{0};
   fador::memory::MemoryBus *m_memory{nullptr};
   std::array<uint32_t, 8> m_regs{};    // EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI
   std::array<uint16_t, 6> m_segRegs{}; // ES, CS, SS, DS, FS, GS
@@ -548,6 +579,14 @@ private:
   uint16_t m_fpuDataSelector{0};
 
   std::vector<HLEFrame> m_hleStack;
+
+  // CPU model (kept after the hot register state).
+  const CpuModel *m_model{nullptr};
+  uint32_t m_features{0};
+  uint32_t m_mulExtraCycles{0};
+  uint32_t m_divExtraCycles{0};
+  uint64_t m_tscOffset{0};
+  CycleTable m_cycleTable{};
 };
 
 // Stack helpers (inline: used by PUSH/POP/CALL/RET on every call)

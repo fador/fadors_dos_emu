@@ -462,6 +462,9 @@ void printHelp(const char *programName) {
     "  --mount=L:/path           Mount host directory or .zip archive at drive letter L (repeatable).\n"
     "  --cdrom=L:/image.iso      Mount CD-ROM image (.iso/.cue/.bin/.img) at drive letter L (repeatable).\n"
     "  --himem                   Enable HIMEM/XMS extended memory support.\n"
+    "  --cpu=MODEL               Emulated CPU: %s\n"
+    "                            (default 486dx2).  Sets CPUID, EFLAGS/CR0 bits, the\n"
+    "                            available instructions and the guest cycle costs.\n"
     "  --env=NAME=VALUE          Add or replace a DOS environment variable (repeatable).\n"
     "                            Defaults: BLASTER=A220 I5 D1 H5 P330 T6, CAUSEWAY=DPMI.\n"
     "  --headless                No window, terminal output or host input; for scripted\n"
@@ -512,6 +515,7 @@ void printHelp(const char *programName) {
     "  %s --exec=\"MOV AX, 4C00h; INT 21h\"\n"
     "  %s --no-sdl --bench=decoder-loop --bench-steps=5000000\n",
     programName,
+    std::string(fador::cpu::cpuModelNames()).c_str(),
     throttleMachinePresetList(),
     programName, programName, programName, programName, programName, programName);
   // clang-format on
@@ -557,7 +561,25 @@ int main(int argc, char *argv[]) {
     fador::hw::VGAController vga(memory);
     fador::hw::DMA8237 dma;
     fador::hw::CMOSRTC cmos;
-    fador::cpu::CPU cpu;
+    // --cpu is needed before the CPU is constructed (its reset state is
+    // model-specific); the main option loop below skips it.
+    fador::cpu::CpuModelId cpuModelId = fador::cpu::kDefaultCpuModel;
+    for (int i = 1; i < argc; ++i) {
+      const std::string arg = argv[i];
+      if (arg.rfind("--", 0) != 0 || arg == "--")
+        break; // program path reached
+      if (arg.rfind("--cpu=", 0) == 0) {
+        const auto id = fador::cpu::parseCpuModel(arg.substr(6));
+        if (!id) {
+          LOG_ERROR("Unknown CPU model: ", arg.substr(6), ". Use one of ",
+                    fador::cpu::cpuModelNames());
+          return 1;
+        }
+        cpuModelId = *id;
+      }
+    }
+    fador::cpu::CPU cpu(cpuModelId);
+    LOG_INFO("CPU model: ", cpu.model().description);
 
     // Connect VGA plane memory to the memory bus
     memory.setVGA(&vga);
@@ -845,6 +867,8 @@ int main(int argc, char *argv[]) {
       // Emulator-specific flags (must appear before the program path).
       if (arg == "--himem") {
         useHimem = true;
+      } else if (arg.find("--cpu=") == 0) {
+        // Applied before the CPU was constructed.
       } else if (arg == "--dump-on-exit") {
         dumpOnExit = true;
       } else if (arg.find("--throttle-ips=") == 0) {
