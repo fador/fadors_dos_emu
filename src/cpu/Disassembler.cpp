@@ -486,7 +486,7 @@ std::string Disassembler::disasmOpcode(Cursor& c, uint8_t op, bool p66, bool p67
     // ── XLAT ──
     if (op == 0xD7) return "XLAT";
 
-    // ── FPU partial decoding ──
+    // ── x87 FPU (D8-DF) ──
     if (op >= 0xD8 && op <= 0xDF) {
         ModRM m = decodeModRM(c.read8());
 
@@ -502,20 +502,95 @@ std::string Disassembler::disasmOpcode(Cursor& c, uint8_t op, bool p66, bool p67
             return rm;
         };
 
+        const int fop = op - 0xD8;
         if (m.mod != 3) {
-            if (op == 0xD9) {
-                if (m.reg == 4) return "FLDENV " + formatMemNoSize(m);
-                if (m.reg == 6) return "FNSTENV " + formatMemNoSize(m);
-            }
-            if (op == 0xDD) {
-                if (m.reg == 4) return "FRSTOR " + formatMemNoSize(m);
-                if (m.reg == 6) return "FNSAVE " + formatMemNoSize(m);
-            }
+            // Memory forms: mnemonic and operand size per opcode and /reg
+            static const char* memNames[8][8] = {
+                {"FADD", "FMUL", "FCOM", "FCOMP", "FSUB", "FSUBR", "FDIV", "FDIVR"},
+                {"FLD", nullptr, "FST", "FSTP", "FLDENV", "FLDCW", "FNSTENV", "FNSTCW"},
+                {"FIADD", "FIMUL", "FICOM", "FICOMP", "FISUB", "FISUBR", "FIDIV", "FIDIVR"},
+                {"FILD", "FISTTP", "FIST", "FISTP", nullptr, "FLD", nullptr, "FSTP"},
+                {"FADD", "FMUL", "FCOM", "FCOMP", "FSUB", "FSUBR", "FDIV", "FDIVR"},
+                {"FLD", "FISTTP", "FST", "FSTP", "FRSTOR", nullptr, "FNSAVE", "FNSTSW"},
+                {"FIADD", "FIMUL", "FICOM", "FICOMP", "FISUB", "FISUBR", "FIDIV", "FIDIVR"},
+                {"FILD", "FISTTP", "FIST", "FISTP", "FBLD", "FILD", "FBSTP", "FISTP"}};
+            // 0 = no size tag (environment images), else bytes
+            static const uint8_t memSizes[8][8] = {
+                {4, 4, 4, 4, 4, 4, 4, 4}, {4, 0, 4, 4, 0, 2, 0, 2},
+                {4, 4, 4, 4, 4, 4, 4, 4}, {4, 4, 4, 4, 0, 10, 0, 10},
+                {8, 8, 8, 8, 8, 8, 8, 8}, {8, 8, 8, 8, 0, 0, 0, 2},
+                {2, 2, 2, 2, 2, 2, 2, 2}, {2, 2, 2, 2, 10, 8, 10, 8}};
+            const char* name = memNames[fop][m.reg];
+            const std::string mem = formatMemNoSize(m);
+            if (!name)
+                return "DB " + hexStr8(op);
+            static const char* sizeTag[11] = {"", "", "WORD PTR ", "", "DWORD PTR ", "", "",
+                                              "", "QWORD PTR ", "", "TBYTE PTR "};
+            return std::string(name) + " " + sizeTag[memSizes[fop][m.reg]] + mem;
         }
 
-        (void)formatRM(c, m, 32, p67, segOvr); // consume any displacement
-        std::ostringstream s; s << "FPU_" << std::hex << (int)op;
-        return s.str();
+        const uint8_t modrmByte = static_cast<uint8_t>(0xC0 | (m.reg << 3) | m.rm);
+        const std::string sti = "ST(" + std::to_string(m.rm) + ")";
+        static const char* arith[8] = {"FADD", "FMUL", "FCOM", "FCOMP", "FSUB", "FSUBR", "FDIV", "FDIVR"};
+        switch (op) {
+        case 0xD8:
+            if (m.reg == 2 || m.reg == 3) return std::string(arith[m.reg]) + " " + sti;
+            return std::string(arith[m.reg]) + " ST, " + sti;
+        case 0xD9: {
+            if (m.reg == 0) return "FLD " + sti;
+            if (m.reg == 1) return "FXCH " + sti;
+            if (m.reg == 3) return "FSTP1 " + sti;
+            static const char* d9[32] = {
+                "FCHS", "FABS", nullptr, nullptr, "FTST", "FXAM", nullptr, nullptr,
+                "FLD1", "FLDL2T", "FLDL2E", "FLDPI", "FLDLG2", "FLDLN2", "FLDZ", nullptr,
+                "F2XM1", "FYL2X", "FPTAN", "FPATAN", "FXTRACT", "FPREM1", "FDECSTP", "FINCSTP",
+                "FPREM", "FYL2XP1", "FSQRT", "FSINCOS", "FRNDINT", "FSCALE", "FSIN", "FCOS"};
+            if (modrmByte == 0xD0) return "FNOP";
+            if (modrmByte >= 0xE0 && d9[modrmByte - 0xE0]) return d9[modrmByte - 0xE0];
+            break;
+        }
+        case 0xDA: {
+            static const char* cmov[4] = {"FCMOVB", "FCMOVE", "FCMOVBE", "FCMOVU"};
+            if (m.reg < 4) return std::string(cmov[m.reg]) + " ST, " + sti;
+            if (modrmByte == 0xE9) return "FUCOMPP";
+            break;
+        }
+        case 0xDB: {
+            static const char* cmov[4] = {"FCMOVNB", "FCMOVNE", "FCMOVNBE", "FCMOVNU"};
+            if (m.reg < 4) return std::string(cmov[m.reg]) + " ST, " + sti;
+            if (m.reg == 5) return "FUCOMI ST, " + sti;
+            if (m.reg == 6) return "FCOMI ST, " + sti;
+            static const char* db[5] = {"FNENI", "FNDISI", "FNCLEX", "FNINIT", "FNSETPM"};
+            if (modrmByte >= 0xE0 && modrmByte <= 0xE4) return db[modrmByte - 0xE0];
+            break;
+        }
+        case 0xDC: {
+            static const char* dc[8] = {"FADD", "FMUL", "FCOM2", "FCOMP3", "FSUBR", "FSUB", "FDIVR", "FDIV"};
+            if (m.reg == 2 || m.reg == 3) return std::string(dc[m.reg]) + " " + sti;
+            return std::string(dc[m.reg]) + " " + sti + ", ST";
+        }
+        case 0xDD: {
+            static const char* dd[6] = {"FFREE", "FXCH4", "FST", "FSTP", "FUCOM", "FUCOMP"};
+            if (m.reg < 6) return std::string(dd[m.reg]) + " " + sti;
+            break;
+        }
+        case 0xDE: {
+            static const char* de[8] = {"FADDP", "FMULP", "FCOMP5", nullptr, "FSUBRP", "FSUBP", "FDIVRP", "FDIVP"};
+            if (m.reg == 2) return "FCOMP5 " + sti;
+            if (modrmByte == 0xD9) return "FCOMPP";
+            if (de[m.reg]) return std::string(de[m.reg]) + " " + sti + ", ST";
+            break;
+        }
+        default: { // 0xDF
+            static const char* df[4] = {"FFREEP", "FXCH7", "FSTP8", "FSTP9"};
+            if (m.reg < 4) return std::string(df[m.reg]) + " " + sti;
+            if (modrmByte == 0xE0) return "FNSTSW AX";
+            if (m.reg == 5) return "FUCOMIP ST, " + sti;
+            if (m.reg == 6) return "FCOMIP ST, " + sti;
+            break;
+        }
+        }
+        return "DB " + hexStr8(op) + ", " + hexStr8(modrmByte);
     }
 
     // ── LOOP/JCXZ ──

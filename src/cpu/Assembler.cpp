@@ -502,6 +502,18 @@ AsmResult Assembler::assembleLine(const std::string& line, uint32_t origin) cons
         return result;
     }
 
+    // x87 FPU instructions (operands like ST(i), QWORD/TBYTE memory)
+    {
+        AsmResult x87;
+        if (assembleX87(mnem, toks, pos, x87)) {
+            if (!x87.error.empty())
+                return x87;
+            result.bytes = prefixes;
+            result.bytes.insert(result.bytes.end(), x87.bytes.begin(), x87.bytes.end());
+            return result;
+        }
+    }
+
     // Special-case data directives: parse successive immediate tokens
     if (mnem == "DB" || mnem == "DW" || mnem == "DD") {
         while (pos < toks.size() && toks[pos].kind != TokKind::Eol) {
@@ -1171,6 +1183,233 @@ AsmResult Assembler::assembleBlock(const std::string& text, uint32_t origin) con
         addr += static_cast<uint32_t>(lr.bytes.size());
     }
     return result;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  x87 FPU
+// ═══════════════════════════════════════════════════════════════════
+
+bool Assembler::assembleX87(const std::string& mnemIn, const std::vector<Token>& toks,
+                            size_t pos, AsmResult& out) const {
+    if (mnemIn.empty() || mnemIn[0] != 'F')
+        return false;
+    // FLDENV/FNSTENV/FRSTOR/FNSAVE keep their dedicated (operand-size aware)
+    // encoder further down.
+    if (mnemIn == "FLDENV" || mnemIn == "FNSTENV" || mnemIn == "FRSTOR" ||
+        mnemIn == "FNSAVE" || mnemIn == "FWAIT")
+        return false;
+
+    std::string mnem = mnemIn;
+    // WAIT-prefixed spellings: FINIT = WAIT FNINIT, ...
+    static const std::unordered_map<std::string, std::string> waitForms = {
+        {"FINIT", "FNINIT"}, {"FCLEX", "FNCLEX"}, {"FSTSW", "FNSTSW"},
+        {"FSTCW", "FNSTCW"}, {"FSTENV", "FNSTENV"}, {"FSAVE", "FNSAVE"}};
+    if (auto w = waitForms.find(mnem); w != waitForms.end()) {
+        out.bytes.push_back(0x9B);
+        mnem = w->second;
+    }
+
+    static const std::unordered_map<std::string, std::vector<uint8_t>> noOperand = {
+        {"FNINIT", {0xDB, 0xE3}}, {"FNCLEX", {0xDB, 0xE2}}, {"FNENI", {0xDB, 0xE0}},
+        {"FNDISI", {0xDB, 0xE1}}, {"FNSETPM", {0xDB, 0xE4}}, {"FNOP", {0xD9, 0xD0}},
+        {"FCHS", {0xD9, 0xE0}}, {"FABS", {0xD9, 0xE1}}, {"FTST", {0xD9, 0xE4}},
+        {"FXAM", {0xD9, 0xE5}}, {"FLD1", {0xD9, 0xE8}}, {"FLDL2T", {0xD9, 0xE9}},
+        {"FLDL2E", {0xD9, 0xEA}}, {"FLDPI", {0xD9, 0xEB}}, {"FLDLG2", {0xD9, 0xEC}},
+        {"FLDLN2", {0xD9, 0xED}}, {"FLDZ", {0xD9, 0xEE}}, {"F2XM1", {0xD9, 0xF0}},
+        {"FYL2X", {0xD9, 0xF1}}, {"FPTAN", {0xD9, 0xF2}}, {"FPATAN", {0xD9, 0xF3}},
+        {"FXTRACT", {0xD9, 0xF4}}, {"FPREM1", {0xD9, 0xF5}}, {"FDECSTP", {0xD9, 0xF6}},
+        {"FINCSTP", {0xD9, 0xF7}}, {"FPREM", {0xD9, 0xF8}}, {"FYL2XP1", {0xD9, 0xF9}},
+        {"FSQRT", {0xD9, 0xFA}}, {"FSINCOS", {0xD9, 0xFB}}, {"FRNDINT", {0xD9, 0xFC}},
+        {"FSCALE", {0xD9, 0xFD}}, {"FSIN", {0xD9, 0xFE}}, {"FCOS", {0xD9, 0xFF}},
+        {"FCOMPP", {0xDE, 0xD9}}, {"FUCOMPP", {0xDA, 0xE9}}};
+
+    // ── Operands: ST / ST(i) / ST1, AX, or memory with an optional size ──
+    struct X87Op {
+        enum Kind { None, St, Ax, Mem } kind = None;
+        uint8_t st = 0;
+        uint8_t size = 0; // memory operand size in bytes (0 = unspecified)
+        Operand mem;
+    };
+    std::vector<X87Op> ops;
+    while (pos < toks.size() && toks[pos].kind != TokKind::Eol) {
+        X87Op op;
+        const Token &t = toks[pos];
+        if (t.kind == TokKind::Ident && (t.text == "ST" || (t.text.size() == 3 && t.text.rfind("ST", 0) == 0 &&
+                                                           t.text[2] >= '0' && t.text[2] <= '7'))) {
+            op.kind = X87Op::St;
+            ++pos;
+            if (t.text.size() == 3) {
+                op.st = static_cast<uint8_t>(t.text[2] - '0');
+            } else if (pos < toks.size() && toks[pos].kind == TokKind::Imm) { // ST(i)
+                op.st = static_cast<uint8_t>(toks[pos].value & 7);
+                ++pos;
+            }
+        } else if (t.kind == TokKind::Reg16 && t.value == 0) {
+            op.kind = X87Op::Ax;
+            ++pos;
+        } else {
+            if (t.kind == TokKind::Ident && (t.text == "QWORD" || t.text == "TBYTE" || t.text == "TWORD")) {
+                op.size = t.text == "QWORD" ? 8 : 10;
+                ++pos;
+            }
+            if (!parseOperand(toks, pos, op.mem) || op.mem.kind != OpKind::Mem) {
+                out.error = mnemIn + ": invalid operand";
+                return true;
+            }
+            if (!op.size)
+                op.size = op.mem.sizeHint;
+            op.kind = X87Op::Mem;
+        }
+        ops.push_back(op);
+        if (pos < toks.size() && toks[pos].kind == TokKind::Comma)
+            ++pos;
+    }
+
+    auto reg = [&](uint8_t opcode, uint8_t base, uint8_t st) {
+        out.bytes.push_back(opcode);
+        out.bytes.push_back(static_cast<uint8_t>(base + (st & 7)));
+        return true;
+    };
+    auto mem = [&](uint8_t opcode, uint8_t regField, const Operand &m) {
+        out.bytes.push_back(opcode);
+        encodeModRM(m, regField, out.bytes);
+        return true;
+    };
+    auto fail = [&](const std::string &why) {
+        out.error = mnemIn + ": " + why;
+        return true;
+    };
+
+    if (auto it = noOperand.find(mnem); it != noOperand.end()) {
+        if (!ops.empty())
+            return fail("takes no operands");
+        out.bytes.insert(out.bytes.end(), it->second.begin(), it->second.end());
+        return true;
+    }
+
+    const size_t n = ops.size();
+    const bool m1 = n == 1 && ops[0].kind == X87Op::Mem;
+    const bool st1 = n == 1 && ops[0].kind == X87Op::St;
+    const bool stSti = n == 2 && ops[0].kind == X87Op::St && ops[0].st == 0 && ops[1].kind == X87Op::St;
+    const bool stiSt = n == 2 && ops[0].kind == X87Op::St && ops[1].kind == X87Op::St && ops[1].st == 0;
+
+    // Two-operand arithmetic: FADD FMUL FSUB FSUBR FDIV FDIVR (+P / I forms)
+    static const std::unordered_map<std::string, uint8_t> arith = {
+        {"FADD", 0}, {"FMUL", 1}, {"FSUB", 4}, {"FSUBR", 5}, {"FDIV", 6}, {"FDIVR", 7}};
+    // DC/DE register forms encode "ST(i) = ST(i) op ST" with SUB/SUBR, DIV/DIVR swapped.
+    static const uint8_t rev[8] = {0, 1, 2, 3, 5, 4, 7, 6};
+    if (auto a = arith.find(mnem); a != arith.end()) {
+        const uint8_t r = a->second;
+        if (m1) {
+            if (ops[0].size == 8) return mem(0xDC, r, ops[0].mem);
+            if (ops[0].size == 4 || ops[0].size == 0) return mem(0xD8, r, ops[0].mem);
+            return fail("needs a DWORD or QWORD operand");
+        }
+        if (stSti) return reg(0xD8, static_cast<uint8_t>(0xC0 + r * 8), ops[1].st);
+        if (stiSt) return reg(0xDC, static_cast<uint8_t>(0xC0 + rev[r] * 8), ops[0].st);
+        if (n == 0) return reg(0xDE, static_cast<uint8_t>(0xC0 + rev[r] * 8), 1);
+        return fail("invalid operands");
+    }
+    if (mnem.size() > 1 && mnem.back() == 'P' && arith.count(mnem.substr(0, mnem.size() - 1))) {
+        const uint8_t r = arith.at(mnem.substr(0, mnem.size() - 1));
+        if (n == 0) return reg(0xDE, static_cast<uint8_t>(0xC0 + rev[r] * 8), 1);
+        if (stiSt) return reg(0xDE, static_cast<uint8_t>(0xC0 + rev[r] * 8), ops[0].st);
+        return fail("expects ST(i), ST");
+    }
+    static const std::unordered_map<std::string, uint8_t> iarith = {
+        {"FIADD", 0}, {"FIMUL", 1}, {"FICOM", 2}, {"FICOMP", 3},
+        {"FISUB", 4}, {"FISUBR", 5}, {"FIDIV", 6}, {"FIDIVR", 7}};
+    if (auto a = iarith.find(mnem); a != iarith.end()) {
+        if (!m1) return fail("needs a memory operand");
+        return mem(ops[0].size == 2 ? 0xDE : 0xDA, a->second, ops[0].mem);
+    }
+
+    // Compares
+    if (mnem == "FCOM" || mnem == "FCOMP") {
+        const uint8_t r = mnem == "FCOM" ? 2 : 3;
+        if (m1) return mem(ops[0].size == 8 ? 0xDC : 0xD8, r, ops[0].mem);
+        return reg(0xD8, static_cast<uint8_t>(0xC0 + r * 8), st1 ? ops[0].st : 1);
+    }
+    if (mnem == "FUCOM") return reg(0xDD, 0xE0, st1 ? ops[0].st : 1);
+    if (mnem == "FUCOMP") return reg(0xDD, 0xE8, st1 ? ops[0].st : 1);
+    static const std::unordered_map<std::string, std::pair<uint8_t, uint8_t>> comi = {
+        {"FCOMI", {0xDB, 0xF0}}, {"FUCOMI", {0xDB, 0xE8}},
+        {"FCOMIP", {0xDF, 0xF0}}, {"FUCOMIP", {0xDF, 0xE8}}};
+    if (auto c = comi.find(mnem); c != comi.end()) {
+        const uint8_t st = stSti ? ops[1].st : (st1 ? ops[0].st : 1);
+        return reg(c->second.first, c->second.second, st);
+    }
+    static const std::unordered_map<std::string, std::pair<uint8_t, uint8_t>> cmov = {
+        {"FCMOVB", {0xDA, 0xC0}}, {"FCMOVE", {0xDA, 0xC8}}, {"FCMOVBE", {0xDA, 0xD0}},
+        {"FCMOVU", {0xDA, 0xD8}}, {"FCMOVNB", {0xDB, 0xC0}}, {"FCMOVNE", {0xDB, 0xC8}},
+        {"FCMOVNBE", {0xDB, 0xD0}}, {"FCMOVNU", {0xDB, 0xD8}}};
+    if (auto c = cmov.find(mnem); c != cmov.end()) {
+        if (!stSti) return fail("expects ST, ST(i)");
+        return reg(c->second.first, c->second.second, ops[1].st);
+    }
+
+    // Loads and stores
+    if (mnem == "FLD") {
+        if (st1) return reg(0xD9, 0xC0, ops[0].st);
+        if (!m1) return fail("invalid operand");
+        if (ops[0].size == 8) return mem(0xDD, 0, ops[0].mem);
+        if (ops[0].size == 10) return mem(0xDB, 5, ops[0].mem);
+        return mem(0xD9, 0, ops[0].mem);
+    }
+    if (mnem == "FST" || mnem == "FSTP") {
+        const bool pop = mnem == "FSTP";
+        if (st1) return reg(0xDD, pop ? 0xD8 : 0xD0, ops[0].st);
+        if (!m1) return fail("invalid operand");
+        if (ops[0].size == 8) return mem(0xDD, pop ? 3 : 2, ops[0].mem);
+        if (ops[0].size == 10) {
+            if (!pop) return fail("TBYTE stores only with FSTP");
+            return mem(0xDB, 7, ops[0].mem);
+        }
+        return mem(0xD9, pop ? 3 : 2, ops[0].mem);
+    }
+    if (mnem == "FILD") {
+        if (!m1) return fail("needs a memory operand");
+        if (ops[0].size == 2) return mem(0xDF, 0, ops[0].mem);
+        if (ops[0].size == 8) return mem(0xDF, 5, ops[0].mem);
+        return mem(0xDB, 0, ops[0].mem);
+    }
+    if (mnem == "FIST" || mnem == "FISTP") {
+        const bool pop = mnem == "FISTP";
+        if (!m1) return fail("needs a memory operand");
+        if (ops[0].size == 2) return mem(0xDF, pop ? 3 : 2, ops[0].mem);
+        if (ops[0].size == 8) {
+            if (!pop) return fail("QWORD only with FISTP");
+            return mem(0xDF, 7, ops[0].mem);
+        }
+        return mem(0xDB, pop ? 3 : 2, ops[0].mem);
+    }
+    if (mnem == "FBLD" || mnem == "FBSTP") {
+        if (!m1) return fail("needs a memory operand");
+        return mem(0xDF, mnem == "FBLD" ? 4 : 6, ops[0].mem);
+    }
+    if (mnem == "FLDCW" || mnem == "FNSTCW") {
+        if (!m1) return fail("needs a memory operand");
+        return mem(0xD9, mnem == "FLDCW" ? 5 : 7, ops[0].mem);
+    }
+    if (mnem == "FNSTSW") {
+        if (n == 1 && ops[0].kind == X87Op::Ax) {
+            out.bytes.push_back(0xDF);
+            out.bytes.push_back(0xE0);
+            return true;
+        }
+        if (!m1) return fail("needs AX or a memory operand");
+        return mem(0xDD, 7, ops[0].mem);
+    }
+    if (mnem == "FNSTENV" || mnem == "FNSAVE") { // reached via FSTENV / FSAVE
+        if (!m1) return fail("needs a memory operand");
+        if (ops[0].size == 4)
+            out.bytes.push_back(0x66); // 32-bit image
+        return mem(mnem == "FNSTENV" ? 0xD9 : 0xDD, 6, ops[0].mem);
+    }
+    if (mnem == "FXCH") return reg(0xD9, 0xC8, st1 ? ops[0].st : 1);
+    if (mnem == "FFREE") return reg(0xDD, 0xC0, st1 ? ops[0].st : 0);
+    if (mnem == "FFREEP") return reg(0xDF, 0xC0, st1 ? ops[0].st : 0);
+    return false;
 }
 
 } // namespace fador::cpu

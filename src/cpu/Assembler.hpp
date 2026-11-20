@@ -77,6 +77,11 @@ private:
                           const Operand& dst, const Operand& src) const;
     AsmResult encodeJcc(uint8_t cc, const Operand& target, uint32_t origin) const;
 
+    // x87 instructions (D8-DF, plus the WAIT-prefixed forms).  Returns false
+    // if `mnem` is not an x87 mnemonic handled here.
+    bool assembleX87(const std::string& mnem, const std::vector<Token>& toks,
+                     size_t pos, AsmResult& out) const;
+
     static std::string toUpper(const std::string& s);
 };
 

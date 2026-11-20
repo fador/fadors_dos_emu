@@ -209,6 +209,37 @@ TEST_CASE("Assembler - x87 env/state save-restore", "[assembler]") {
     expectBytes("FRSTOR DWORD [3100h]",  {0x66, 0xDD, 0x26, 0x00, 0x31});
 }
 
+TEST_CASE("Assembler - x87 arithmetic, loads/stores and control", "[assembler]") {
+    expectBytes("FLD1", {0xD9, 0xE8});
+    expectBytes("FLDPI", {0xD9, 0xEB});
+    expectBytes("FSQRT", {0xD9, 0xFA});
+    expectBytes("FCOMPP", {0xDE, 0xD9});
+    expectBytes("FINIT", {0x9B, 0xDB, 0xE3});
+    expectBytes("FNSTSW AX", {0xDF, 0xE0});
+    expectBytes("FSTSW AX", {0x9B, 0xDF, 0xE0});
+    expectBytes("FLD ST(3)", {0xD9, 0xC3});
+    expectBytes("FXCH", {0xD9, 0xC9});
+    expectBytes("FADD ST, ST(2)", {0xD8, 0xC2});
+    expectBytes("FSUB ST(2), ST", {0xDC, 0xEA});
+    expectBytes("FSUBR ST(2), ST", {0xDC, 0xE2});
+    expectBytes("FDIVP ST(1), ST", {0xDE, 0xF9});
+    expectBytes("FADDP", {0xDE, 0xC1});
+    expectBytes("FCOMI ST, ST(1)", {0xDB, 0xF1});
+    expectBytes("FCMOVNE ST, ST(4)", {0xDB, 0xCC});
+    expectBytes("FLD DWORD [2000h]", {0xD9, 0x06, 0x00, 0x20});
+    expectBytes("FLD QWORD PTR [2000h]", {0xDD, 0x06, 0x00, 0x20});
+    expectBytes("FLD TBYTE PTR [BX+4]", {0xDB, 0x6F, 0x04});
+    expectBytes("FSTP QWORD [2008h]", {0xDD, 0x1E, 0x08, 0x20});
+    expectBytes("FSTP TBYTE [2010h]", {0xDB, 0x3E, 0x10, 0x20});
+    expectBytes("FILD WORD [2000h]", {0xDF, 0x06, 0x00, 0x20});
+    expectBytes("FISTP QWORD [2000h]", {0xDF, 0x3E, 0x00, 0x20});
+    expectBytes("FMUL QWORD [SI]", {0xDC, 0x0C});
+    expectBytes("FIADD WORD [2000h]", {0xDE, 0x06, 0x00, 0x20});
+    expectBytes("FLDCW [2000h]", {0xD9, 0x2E, 0x00, 0x20});
+    expectBytes("FBSTP [2000h]", {0xDF, 0x36, 0x00, 0x20});
+    expectBytes("FSAVE DWORD [3100h]", {0x9B, 0x66, 0xDD, 0x36, 0x00, 0x31});
+}
+
 // ============================================================================
 //  Jumps
 // ============================================================================

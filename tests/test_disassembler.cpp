@@ -1,4 +1,5 @@
 #include "test_framework.hpp"
+#include "cpu/Assembler.hpp"
 #include "cpu/Disassembler.hpp"
 #include "memory/MemoryBus.hpp"
 
@@ -231,5 +232,40 @@ TEST_CASE("Disassembler - Context (Around)", "[Disassembler]") {
 
         REQUIRE(instrs[3].address == 0x155);
         REQUIRE(instrs[3].mnemonic == "SUB AX, DX");
+    }
+}
+
+TEST_CASE("Disassembler - x87 instructions round-trip through the assembler", "[Disassembler]") {
+    memory::MemoryBus mem;
+    cpu::Disassembler disasm(mem);
+    cpu::Assembler as;
+    struct Case { const char* source; const char* expected; };
+    const Case cases[] = {
+        {"FLD QWORD PTR [2000h]", "FLD QWORD PTR [2000h]"},
+        {"FSTP TBYTE PTR [2010h]", "FSTP TBYTE PTR [2010h]"},
+        {"FIADD WORD [2000h]", "FIADD WORD PTR [2000h]"},
+        {"FADD DWORD [2000h]", "FADD DWORD PTR [2000h]"},
+        {"FLDCW [2000h]", "FLDCW WORD PTR [2000h]"},
+        {"FLD ST(3)", "FLD ST(3)"},
+        {"FSUB ST(2), ST", "FSUB ST(2), ST"},
+        {"FDIVR ST, ST(5)", "FDIVR ST, ST(5)"},
+        {"FMULP ST(1), ST", "FMULP ST(1), ST"},
+        {"FCOMPP", "FCOMPP"},
+        {"FNSTSW AX", "FNSTSW AX"},
+        {"FUCOMIP ST, ST(1)", "FUCOMIP ST, ST(1)"},
+        {"FCMOVBE ST, ST(2)", "FCMOVBE ST, ST(2)"},
+        {"FSINCOS", "FSINCOS"},
+        {"FLDL2E", "FLDL2E"},
+    };
+    for (const auto& c : cases) {
+        auto r = as.assembleLine(c.source, 0x100);
+        REQUIRE(r.error.empty());
+        for (size_t i = 0; i < r.bytes.size(); ++i)
+            mem.write8(0x100 + static_cast<uint32_t>(i), r.bytes[i]);
+        auto instr = disasm.disassembleAt(0x100);
+        if (instr.mnemonic != c.expected)
+            throw std::runtime_error(std::string("disassembled '") + c.source + "' as '" +
+                                     instr.mnemonic + "'");
+        REQUIRE(instr.length == r.bytes.size());
     }
 }
