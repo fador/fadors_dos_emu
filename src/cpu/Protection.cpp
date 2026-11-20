@@ -281,14 +281,14 @@ void InstructionDecoder::nativeInterrupt(uint8_t vector, bool software,
              " not present");
     return;
   }
-  if (gateType == 0x5) {
-    LOG_WARN("PM: task gates are not supported (vector 0x", std::hex,
-             static_cast<int>(vector), ")");
-    return;
-  }
-  if (software && gateDpl < cpl && !fromV86) {
+  if (software && gateDpl < cpl) {
     // INT n may only use gates the caller is allowed to see.
     nativeInterrupt(13, false, true, vector * 8u + 2);
+    return;
+  }
+  if (gateType == 0x5) { // task gate: the handler is another task
+    taskSwitch(static_cast<uint16_t>(low >> 16), TaskSwitch::Int, pushError,
+               errorCode);
     return;
   }
   const bool gate32 = (gateType & 0x08) != 0;
@@ -370,8 +370,11 @@ void InstructionDecoder::nativeIret(bool op32) {
     m_cpu.setEIP(eip & 0xFFFF);
     return;
   }
-  if (flags & kFlagNT)
-    LOG_WARN("PM: IRET with NT set (task return) is not supported");
+  if (flags & kFlagNT) {
+    // Nested task: return to the task in the back link of the current TSS.
+    taskSwitch(m_memory.lread16(m_cpu.getTR().base), TaskSwitch::Iret);
+    return;
+  }
 
   const uint8_t cpl = currentCPL();
   const uint32_t eip = popSized(op32);
@@ -459,11 +462,20 @@ void InstructionDecoder::nativeFarTransfer(uint16_t selector, uint32_t offset,
   }
 
   const uint8_t type = (high >> 8) & 0x0F;
+  const uint8_t dpl = (high >> 13) & 3;
+  if (type == 0x1 || type == 0x9 || type == 0x5) {
+    // Available TSS or task gate: DPL >= max(CPL, RPL).
+    if (dpl < cpl || dpl < (selector & 3)) {
+      raiseException(13, selector & 0xFFFC);
+      return;
+    }
+    const uint16_t tss =
+        type == 0x5 ? static_cast<uint16_t>(low >> 16) : selector;
+    taskSwitch(tss, isCall ? TaskSwitch::Call : TaskSwitch::Jmp);
+    return;
+  }
   if (type != 0x4 && type != 0xC) {
-    LOG_WARN("PM: far ", isCall ? "CALL" : "JMP", " to system descriptor type 0x",
-             std::hex, static_cast<int>(type),
-             " (task switches are not supported), selector 0x", selector);
-    raiseException(13, selector & 0xFFFC);
+    raiseException(13, selector & 0xFFFC); // busy TSS, LDT, ...
     return;
   }
 
@@ -549,6 +561,141 @@ void InstructionDecoder::nativeRetf(uint16_t release, bool op32) {
   }
   loadSegment(CS, cs);
   m_cpu.setEIP(op32 ? eip : (eip & 0xFFFF));
+}
+
+// ── Hardware task switches ───────────────────────────────────────────────
+//
+// 32-bit TSS: 00 link, 04 ESP0/SS0 ... 1C CR3, 20 EIP, 24 EFLAGS,
+// 28-44 EAX ECX EDX EBX ESP EBP ESI EDI, 48-5C ES CS SS DS FS GS, 60 LDT,
+// 64 T bit, 66 I/O map base.  16-bit (286) TSS: 00 link, 02-0C SP0/SS0..,
+// 0E IP, 10 FLAGS, 12-20 AX CX DX BX SP BP SI DI, 22-28 ES CS SS DS, 2A LDT.
+
+void InstructionDecoder::taskSwitch(uint16_t selector, TaskSwitch kind,
+                                    bool pushError, uint32_t errorCode) {
+  const uint16_t sel = selector & 0xFFFC;
+  uint32_t low = 0, high = 0;
+  if ((selector & 4) || !readDescriptor(selector, low, high) ||
+      (high & 0x1000)) {
+    raiseException(kind == TaskSwitch::Iret ? 10 : 13, sel);
+    return;
+  }
+  const uint32_t type = (high >> 8) & 0x0F;
+  const bool isTss = type == 0x1 || type == 0x3 || type == 0x9 || type == 0xB;
+  const bool isBusy = (type & 0x2) != 0;
+  if (!isTss || isBusy != (kind == TaskSwitch::Iret)) {
+    // JMP/CALL/INT need an available TSS, IRET a busy one.
+    raiseException(kind == TaskSwitch::Iret ? 10 : 13, sel);
+    return;
+  }
+  if (!(high & 0x8000)) {
+    raiseException(11, sel);
+    return;
+  }
+  const Descriptor desc = decodeDescriptor(low, high);
+  const bool new32 = (type & 0x8) != 0;
+  if (desc.limit < (new32 ? 0x67u : 0x2Bu)) {
+    raiseException(10, sel);
+    return;
+  }
+
+  // Save the outgoing task.
+  const uint16_t oldSel = m_cpu.getTRSelector();
+  const uint32_t oldBase = m_cpu.getTR().base;
+  uint32_t oldLow = 0, oldHigh = 0;
+  const bool haveOld = readDescriptor(oldSel, oldLow, oldHigh);
+  const bool old32 = !haveOld || ((oldHigh >> 8) & 0x8) != 0;
+  uint32_t flags = m_cpu.getEFLAGS();
+  if (kind == TaskSwitch::Iret)
+    flags &= ~kFlagNT;
+  if (old32) {
+    m_memory.lwrite32(oldBase + 0x20, m_cpu.getEIP());
+    m_memory.lwrite32(oldBase + 0x24, flags);
+    for (uint8_t r = 0; r < 8; ++r)
+      m_memory.lwrite32(oldBase + 0x28 + r * 4u, m_cpu.getReg32(r));
+    for (uint8_t s = 0; s < 6; ++s)
+      m_memory.lwrite32(oldBase + 0x48 + s * 4u, m_cpu.getSegReg(s));
+  } else {
+    m_memory.lwrite16(oldBase + 0x0E, static_cast<uint16_t>(m_cpu.getEIP()));
+    m_memory.lwrite16(oldBase + 0x10, static_cast<uint16_t>(flags));
+    for (uint8_t r = 0; r < 8; ++r)
+      m_memory.lwrite16(oldBase + 0x12 + r * 2u, m_cpu.getReg16(r));
+    for (uint8_t s = 0; s < 4; ++s)
+      m_memory.lwrite16(oldBase + 0x22 + s * 2u, m_cpu.getSegReg(s));
+  }
+
+  // Read the incoming task.
+  const uint32_t base = desc.base;
+  uint32_t eip, newFlags, cr3 = 0;
+  std::array<uint32_t, 8> regs{};
+  std::array<uint16_t, 6> segs{};
+  uint16_t ldt;
+  bool debugTrap = false;
+  if (new32) {
+    cr3 = m_memory.lread32(base + 0x1C);
+    eip = m_memory.lread32(base + 0x20);
+    newFlags = m_memory.lread32(base + 0x24);
+    for (uint8_t r = 0; r < 8; ++r)
+      regs[r] = m_memory.lread32(base + 0x28 + r * 4u);
+    for (uint8_t s = 0; s < 6; ++s)
+      segs[s] = m_memory.lread16(base + 0x48 + s * 4u);
+    ldt = m_memory.lread16(base + 0x60);
+    debugTrap = (m_memory.lread16(base + 0x64) & 1) != 0;
+  } else {
+    eip = m_memory.lread16(base + 0x0E);
+    newFlags = m_memory.lread16(base + 0x10);
+    for (uint8_t r = 0; r < 8; ++r)
+      regs[r] = (m_cpu.getReg32(r) & 0xFFFF0000u) |
+                m_memory.lread16(base + 0x12 + r * 2u);
+    for (uint8_t s = 0; s < 4; ++s)
+      segs[s] = m_memory.lread16(base + 0x22 + s * 2u);
+    ldt = m_memory.lread16(base + 0x2A);
+  }
+
+  // Busy bits and the back link.
+  const uint32_t gdt = m_cpu.getGDTR().base;
+  if (haveOld && (kind == TaskSwitch::Jmp || kind == TaskSwitch::Iret))
+    m_memory.lwrite32(gdt + (oldSel & 0xFFF8u) + 4, oldHigh & ~0x0200u);
+  if (kind == TaskSwitch::Call || kind == TaskSwitch::Int) {
+    m_memory.lwrite16(base, oldSel);
+    newFlags |= kFlagNT;
+  }
+  if (kind != TaskSwitch::Iret)
+    m_memory.lwrite32(gdt + sel + 4, high | 0x0200u);
+
+  m_cpu.setTRSelector(selector);
+  m_cpu.setTR({static_cast<uint16_t>(desc.limit), base});
+  uint32_t cr0 = m_cpu.getCR(0) | 0x8u; // TS: the x87 state is stale
+  m_cpu.setCR(0, cr0);
+  if (new32 && (cr0 & 0x80000000u))
+    m_cpu.setCR(3, cr3);
+
+  // LDT first: the segment selectors may refer to it.
+  m_cpu.setLDTRSelector(ldt);
+  uint32_t ldtLow = 0, ldtHigh = 0;
+  if ((ldt & 0xFFFC) != 0 && !(ldt & 4) && readDescriptor(ldt, ldtLow, ldtHigh) &&
+      (ldtHigh & 0x1F00) == 0x0200) {
+    const Descriptor d = decodeDescriptor(ldtLow, ldtHigh);
+    m_cpu.setLDTR({static_cast<uint16_t>(d.limit), d.base});
+  } else {
+    m_cpu.setLDTR({0, 0});
+  }
+
+  m_cpu.setEFLAGS((newFlags & m_cpu.eflagsMask()) | 0x2u);
+  m_rfLoaded = (newFlags & kFlagRF) != 0;
+  for (uint8_t r = 0; r < 8; ++r)
+    m_cpu.setReg32(r, regs[r]);
+  // CPU::loadSegment decodes V86 selectors as paragraphs (EFLAGS.VM).
+  loadSegment(CS, segs[CS]);
+  loadSegment(SS, segs[SS]);
+  loadSegment(DS, segs[DS]);
+  loadSegment(ES, segs[ES]);
+  loadSegment(FS, segs[FS]);
+  loadSegment(GS, segs[GS]);
+  m_cpu.setEIP(eip);
+  if (pushError)
+    pushSized(new32, errorCode);
+  if (debugTrap)
+    deliverDebugException(0x8000); // DR6.BT: the new task's T bit
 }
 
 // ── Debug registers and single-stepping ─────────────────────────────────

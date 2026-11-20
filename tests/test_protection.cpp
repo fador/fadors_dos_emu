@@ -663,3 +663,220 @@ TEST_CASE("Protection: debug breakpoints and single-step", "[CPU][Protection][De
     REQUIRE(env.mem.read16(env.cpu.getReg16(cpu::SP)) == 1);
   }
 }
+
+// ── hardware task switches ──────────────────────────────────────────────
+
+namespace {
+
+constexpr uint32_t kTaskBCode = 0x5800;
+
+// Task B: a 32-bit TSS (available) whose code starts at kTaskBCode.
+void setupTaskB(Env &env, uint32_t flags = 0x2) {
+  const uint32_t b = Env::kTss2;
+  for (uint32_t i = 0; i < 0x68; ++i)
+    env.mem.write8(b + i, 0);
+  env.mem.write32(b + 0x04, Env::kRing0Stack - 0x400); // ESP0
+  env.mem.write32(b + 0x08, 0x10);                     // SS0
+  env.mem.write32(b + 0x20, kTaskBCode);               // EIP
+  env.mem.write32(b + 0x24, flags);                    // EFLAGS
+  env.mem.write32(b + 0x28, 0xB0B0B0B0);               // EAX
+  env.mem.write32(b + 0x38, 0x7800);                   // ESP
+  env.mem.write32(b + 0x48, 0x10);                     // ES
+  env.mem.write32(b + 0x4C, 0x08);                     // CS
+  env.mem.write32(b + 0x50, 0x10);                     // SS
+  env.mem.write32(b + 0x54, 0x10);                     // DS
+  env.mem.write32(b + 0x58, 0x10);                     // FS
+  env.mem.write32(b + 0x5C, 0x10);                     // GS
+  env.mem.write16(b + 0x66, 0x68);
+  env.descriptor(Env::kTss2Sel, b, 0x67, 0x89);
+  env.descriptor(Env::kTaskGateSel, 0, 0, 0xE5); // task gate, DPL 3
+  env.mem.write16(Env::kGdt + Env::kTaskGateSel + 2, Env::kTss2Sel);
+}
+
+void writeCode(Env &env, uint32_t at, std::initializer_list<uint8_t> code) {
+  for (uint8_t b : code)
+    env.mem.write8(at++, b);
+}
+
+} // namespace
+
+TEST_CASE("Protection: hardware task switches", "[CPU][Protection][Task]") {
+  SECTION("CALL to a TSS: state saved, back link, NT, busy bits; IRET returns") {
+    Env env;
+    env.enterProtected();
+    env.enterRing(0, 0x202);
+    setupTaskB(env);
+    env.cpu.setReg32(cpu::EAX, 0xA0A0A0A0);
+    writeCode(env, kTaskBCode, {0x40, 0xCF}); // INC EAX; IRETD
+    env.run({0x9A, 0, 0, 0, 0, Env::kTss2Sel, 0}); // CALL FAR 30h:0
+    REQUIRE(env.cpu.getTRSelector() == Env::kTss2Sel);
+    REQUIRE(env.cpu.getEIP() == kTaskBCode);
+    REQUIRE(env.cpu.getReg32(cpu::EAX) == 0xB0B0B0B0);
+    REQUIRE(env.cpu.getReg32(cpu::ESP) == 0x7800);
+    REQUIRE((env.cpu.getEFLAGS() & 0x4000) != 0); // NT
+    REQUIRE((env.cpu.getCR(0) & 0x8) != 0);       // TS
+    REQUIRE(env.busy(Env::kTssSel));
+    REQUIRE(env.busy(Env::kTss2Sel));
+    REQUIRE(env.mem.read16(Env::kTss2) == Env::kTssSel); // back link
+    REQUIRE(env.mem.read32(Env::kTss + 0x20) == Env::kCode + 7);
+    REQUIRE(env.mem.read32(Env::kTss + 0x28) == 0xA0A0A0A0);
+    REQUIRE(env.mem.read32(Env::kTss + 0x24) == 0x202);
+    env.decoder.step(); // INC EAX
+    env.decoder.step(); // IRETD with NT: back to task A
+    REQUIRE(env.cpu.getTRSelector() == Env::kTssSel);
+    REQUIRE(env.cpu.getEIP() == Env::kCode + 7);
+    REQUIRE(env.cpu.getReg32(cpu::EAX) == 0xA0A0A0A0);
+    REQUIRE(env.cpu.getEFLAGS() == 0x202);
+    REQUIRE(env.busy(Env::kTssSel));
+    REQUIRE(!env.busy(Env::kTss2Sel));
+    // Task B's state was saved with NT clear.
+    REQUIRE(env.mem.read32(Env::kTss2 + 0x20) == kTaskBCode + 2);
+    REQUIRE(env.mem.read32(Env::kTss2 + 0x28) == 0xB0B0B0B1);
+    REQUIRE((env.mem.read32(Env::kTss2 + 0x24) & 0x4000) == 0);
+  }
+
+  SECTION("JMP to a TSS clears the old busy bit and sets no back link") {
+    Env env;
+    env.enterProtected();
+    env.enterRing(0);
+    setupTaskB(env);
+    env.mem.write16(Env::kTss2, 0x1234);
+    env.run({0xEA, 0, 0, 0, 0, Env::kTss2Sel, 0}); // JMP FAR 30h:0
+    REQUIRE(env.cpu.getTRSelector() == Env::kTss2Sel);
+    REQUIRE(!env.busy(Env::kTssSel));
+    REQUIRE(env.busy(Env::kTss2Sel));
+    REQUIRE(env.mem.read16(Env::kTss2) == 0x1234);
+    REQUIRE((env.cpu.getEFLAGS() & 0x4000) == 0);
+  }
+
+  SECTION("CALL to a busy TSS is #GP(selector); a task gate in the GDT works") {
+    Env env;
+    env.enterProtected();
+    env.enterRing(0);
+    setupTaskB(env);
+    env.run({0x9A, 0, 0, 0, 0, Env::kTssSel, 0}); // CALL FAR 28h:0 (busy)
+    REQUIRE(env.pmVector() == 13);
+    REQUIRE(env.stack(0) == Env::kTssSel);
+
+    Env gate;
+    gate.enterProtected();
+    gate.enterRing(3);
+    setupTaskB(gate);
+    gate.run({0xEA, 0, 0, 0, 0, Env::kTaskGateSel | 3, 0}); // JMP FAR 43h:0
+    REQUIRE(gate.cpu.getTRSelector() == Env::kTss2Sel);
+    REQUIRE(gate.cpu.getSegReg(cpu::CS) == 0x08);
+    REQUIRE(gate.cpu.getEIP() == kTaskBCode);
+  }
+
+  SECTION("INT n and exceptions through IDT task gates") {
+    Env env;
+    env.enterProtected();
+    env.enterRing(3);
+    setupTaskB(env);
+    // INT 21h through a DPL 3 task gate.
+    env.gate(0x21, 0, 0xE5, Env::kTss2Sel);
+    env.run({0xCD, 0x21});
+    REQUIRE(env.cpu.getTRSelector() == Env::kTss2Sel);
+    REQUIRE(env.mem.read16(Env::kTss2) == Env::kTssSel);
+    REQUIRE((env.cpu.getEFLAGS() & 0x4000) != 0);
+    REQUIRE(env.mem.read32(Env::kTss + 0x20) == Env::kCode + 2);
+    REQUIRE(env.cpu.getReg32(cpu::ESP) == 0x7800); // no error code
+
+    // #GP through a task gate pushes the error code on the new stack.
+    Env fault;
+    fault.enterProtected();
+    fault.enterRing(3);
+    setupTaskB(fault);
+    fault.gate(13, 0, 0x85, Env::kTss2Sel);
+    fault.run({0xF4}); // HLT at CPL 3
+    REQUIRE(fault.cpu.getTRSelector() == Env::kTss2Sel);
+    REQUIRE(fault.cpu.getReg32(cpu::ESP) == 0x7800 - 4);
+    REQUIRE(fault.stack(0) == 0);
+    // The faulting task resumes at the HLT.
+    REQUIRE(fault.mem.read32(Env::kTss + 0x20) == Env::kCode);
+
+    // INT n to a DPL 0 task gate from CPL 3 is #GP(vector * 8 + 2).
+    Env denied;
+    denied.enterProtected();
+    denied.enterRing(3);
+    setupTaskB(denied);
+    denied.gate(0x21, 0, 0x85, Env::kTss2Sel);
+    denied.run({0xCD, 0x21});
+    REQUIRE(denied.pmVector() == 13);
+    REQUIRE(denied.stack(0) == 0x21 * 8 + 2);
+  }
+
+  SECTION("16-bit (286) TSS") {
+    Env env;
+    env.enterProtected();
+    env.enterRing(0, 0x202);
+    const uint32_t t = Env::kTss16;
+    for (uint32_t i = 0; i < 0x2C; ++i)
+      env.mem.write8(t + i, 0);
+    env.mem.write16(t + 0x0E, 0x5900);          // IP
+    env.mem.write16(t + 0x10, 0x0046);          // FLAGS (ZF PF)
+    env.mem.write16(t + 0x12, 0x1616);          // AX
+    env.mem.write16(t + 0x1A, 0x7A00);          // SP
+    env.mem.write16(t + 0x22, 0x10);            // ES
+    env.mem.write16(t + 0x24, 0x08);            // CS
+    env.mem.write16(t + 0x26, 0x10);            // SS
+    env.mem.write16(t + 0x28, 0x10);            // DS
+    env.descriptor(Env::kTss16Sel, t, 0x2B, 0x81);
+    env.cpu.setReg32(cpu::EAX, 0x12345678);
+    writeCode(env, 0x5900, {0x66, 0xCF}); // IRET (16-bit operand)
+    env.run({0x9A, 0, 0, 0, 0, Env::kTss16Sel, 0});
+    REQUIRE(env.cpu.getTRSelector() == Env::kTss16Sel);
+    REQUIRE(env.cpu.getEIP() == 0x5900);
+    REQUIRE(env.cpu.getReg32(cpu::EAX) == 0x12341616);
+    REQUIRE((env.cpu.getEFLAGS() & 0x40C6) == 0x4046);
+    REQUIRE(env.mem.read16(t) == Env::kTssSel);
+    REQUIRE((env.gdtHigh(Env::kTss16Sel) & 0x0F00) == 0x0300); // busy 286 TSS
+    env.decoder.step(); // IRET: back to the 32-bit task
+    REQUIRE(env.cpu.getTRSelector() == Env::kTssSel);
+    REQUIRE(env.cpu.getEIP() == Env::kCode + 7);
+    REQUIRE(env.mem.read16(t + 0x0E) == 0x5902);
+    REQUIRE(env.mem.read16(t + 0x12) == 0x1616);
+  }
+
+  SECTION("CR3 and the LDT are loaded from the new TSS; T bit traps") {
+    Env env;
+    env.enterProtected();
+    env.enterRing(0);
+    // Identity-map 4 MB through two page directories sharing one table.
+    for (uint32_t i = 0; i < 1024; ++i)
+      env.mem.write32(0x11000 + i * 4, (i << 12) | 3);
+    env.mem.write32(0x10000, 0x11003);
+    env.mem.write32(0x12000, 0x11003);
+    env.cpu.setCR(3, 0x10000);
+    env.cpu.setCR(0, env.cpu.getCR(0) | 0x80000000u);
+    setupTaskB(env);
+    env.mem.write32(Env::kTss2 + 0x1C, 0x12000);
+    // LDT with one data segment at base 0x20000 (selector 0x04|3? no: 0x04).
+    env.descriptor(0x48, 0x14000, 0x0F, 0x82);
+    env.mem.write32(0x14000, 0x0000FFFF);
+    env.mem.write32(0x14004, 0x00CF9202 | 0); // base 0x020000
+    env.mem.write32(Env::kTss2 + 0x60, 0x48);
+    env.mem.write32(Env::kTss2 + 0x54, 0x04); // DS = LDT selector 0
+    env.mem.write16(Env::kTss2 + 0x64, 1);    // T bit
+    env.run({0xEA, 0, 0, 0, 0, Env::kTss2Sel, 0});
+    REQUIRE(env.cpu.getCR(3) == 0x12000);
+    REQUIRE(env.cpu.getLDTRSelector() == 0x48);
+    REQUIRE(env.cpu.getSegBase(cpu::DS) == 0x20000);
+    REQUIRE(env.pmVector() == 1); // T bit: #DB before the first instruction
+    REQUIRE(env.stack(0) == kTaskBCode);
+    REQUIRE((env.cpu.getDR(6) & 0x8000) != 0);
+  }
+
+  SECTION("A task with VM set starts in virtual-8086 mode") {
+    Env env;
+    env.enterProtected();
+    env.enterRing(0);
+    setupTaskB(env, 0x00020202);
+    env.mem.write32(Env::kTss2 + 0x4C, 0x0580); // CS paragraph
+    env.mem.write32(Env::kTss2 + 0x20, 0x0010);
+    env.run({0xEA, 0, 0, 0, 0, Env::kTss2Sel, 0});
+    REQUIRE((env.cpu.getEFLAGS() & 0x00020000) != 0);
+    REQUIRE(env.cpu.getSegBase(cpu::CS) == 0x5800);
+    REQUIRE(env.cpu.getEIP() == 0x10);
+  }
+}

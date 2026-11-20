@@ -287,6 +287,11 @@ private:
   void nativeFarTransfer(uint16_t selector, uint32_t offset, bool isCall,
                          bool op32);
   void nativeRetf(uint16_t release, bool op32);
+  // Hardware task switch (Protection.cpp): JMP/CALL to a TSS or task
+  // gate, an interrupt through a task gate, IRET with NT=1.
+  enum class TaskSwitch : uint8_t { Jmp, Call, Int, Iret };
+  void taskSwitch(uint16_t selector, TaskSwitch kind, bool pushError = false,
+                  uint32_t errorCode = 0);
   void stepInstruction();
   // step() without the debug checks: one instruction, undone and restarted
   // after #PF when paging is on.
