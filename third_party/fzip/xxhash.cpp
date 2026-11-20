@@ -2,6 +2,8 @@
 // Based on the xxHash specification by Yann Collet.
 #include "xxhash.hpp"
 
+#include <cstring>
+
 namespace fzip {
 
 namespace {

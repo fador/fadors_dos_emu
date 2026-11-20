@@ -5849,4 +5849,4 @@ void InstructionDecoder::loadSegment(SegRegIndex seg, uint16_t selector) {
   syncSegments();
 }
 
-} // namespace fador::cpu
+} // namespace fador::cpu
