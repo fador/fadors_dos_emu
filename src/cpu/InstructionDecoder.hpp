@@ -4,6 +4,8 @@
 #include "CPU.hpp"
 #include <array>
 #include <cstdint>
+#include <cstring>
+#include <memory>
 #include <tuple>
 
 namespace fador::hw {
@@ -24,6 +26,42 @@ struct SIB {
   uint8_t scale;
   uint8_t index;
   uint8_t base;
+};
+
+class InstructionDecoder;
+
+// One predecoded instruction of the fast path (see FastPath.cpp).  Entries
+// live in a direct-mapped cache indexed by the linear address of the first
+// byte.  An entry is used only while the bytes in memory still equal
+// `bytes` (checked before every execution, so self-modifying code, code
+// loaded over old code and remapped pages need no invalidation) and the
+// code segment's default size matches `code32`.  A null handler marks an
+// instruction the legacy decoder executes.
+struct DecodedInsn {
+  using Handler = void (*)(InstructionDecoder &, const DecodedInsn &);
+  static constexpr uint32_t kNoEntry = 0xFFFFFFFFu;
+
+  uint32_t linear = kNoEntry; // tag: CS base + EIP of the first byte
+  uint8_t code32 = 0;         // CS.D the entry was decoded for
+  uint8_t len = 0;            // bytes, prefixes included (1..16)
+  uint8_t reg = 0;            // ModRM.reg, or the register in the opcode
+  uint8_t rm = 0;             // ModRM.rm (register operand)
+  Handler handler = nullptr;
+  uint64_t bytes[2] = {0, 0}; // instruction bytes, zero-padded
+  uint64_t byteMask[2] = {0, 0};
+  uint32_t maxEip = 0;        // 16-bit code: IP + len must not wrap
+  uint32_t disp = 0;          // memory operand displacement / branch offset
+  uint32_t imm = 0;           // immediate operand
+  uint32_t baseMask = 0;      // memory operand: offset = disp
+  uint32_t indexMask = 0;     //   + (reg[base] & baseMask)
+  uint32_t addrMask = 0;      //   + ((reg[index] & indexMask) << scale)
+  uint8_t base = 0;           //   then & addrMask
+  uint8_t index = 0;
+  uint8_t scale = 0;
+  uint8_t seg = 0;            // segment of the memory operand
+  uint16_t cycles = 0;        // guest cycles charged (opcode + operand)
+  uint8_t op = 0;             // opcode (second byte after 0F)
+  uint8_t aux = 0;            // handler-specific (condition, group op)
 };
 
 // Provides helper functions for fetching CPU instructions and processing
@@ -49,12 +87,35 @@ public:
   // Protected Mode segment loading (public for DPMI segment cache reload)
   void loadSegment(SegRegIndex seg, uint16_t selector);
 
+  // Runs up to `maxInstructions` instructions (each one as step() followed
+  // by CPU::addCycles(1)), stopping early after the instruction that makes
+  // the DOS program terminate.  Returns the number executed.
+  uint64_t run(uint64_t maxInstructions);
+
+  // The predecoded fast path (on by default).  Turning it off makes every
+  // instruction go through the legacy decoder; both must give identical
+  // results (tests/test_interpreter_fast_paths.cpp, tools/cpu_fuzz).
+  void setFastPathEnabled(bool on) { m_fastPathEnabled = on; }
+  bool fastPathEnabled() const { return m_fastPathEnabled; }
+  // Drops every predecoded instruction (tests; never needed for
+  // correctness since entries are validated against memory).
+  void flushDecodedCache();
+
 private:
   CPU &m_cpu;
   memory::MemoryBus &m_memory;
   hw::IOBus &m_iobus;
   hw::BIOS &m_bios;
   hw::DOS &m_dos;
+
+  friend struct FastOps;
+  static constexpr uint32_t kDecodedCacheSize = 4096; // power of two
+  std::unique_ptr<DecodedInsn[]> m_decoded =
+      std::make_unique<DecodedInsn[]>(kDecodedCacheSize);
+  bool m_fastPathEnabled = true;
+  bool tryFastPath(uint32_t startEIP);
+  void decodeFast(DecodedInsn &d, uint32_t linear, const uint8_t *code,
+                  bool code32);
 
   // Prefixes state for current instruction
   uint32_t m_instrStartEIP;
@@ -151,6 +212,9 @@ private:
   uint32_t incOp(uint32_t val, int size);
   uint32_t decOp(uint32_t val, int size);
 
+  // Shift/rotate group: op = ModRM.reg (ROL ROR RCL RCR SHL SHR SAL SAR)
+  uint32_t shiftRotate(uint8_t op, uint32_t val, uint8_t c, int size);
+
   // Checks branch/set conditions
   bool checkCondition(uint8_t cond);
 
@@ -207,5 +271,121 @@ private:
 
   Descriptor decodeDescriptor(uint32_t low, uint32_t high);
 };
+
+inline bool InstructionDecoder::tryFastPath(uint32_t startEIP) {
+  // Off while CPU debug logging is on, so --trace=cpu output is complete.
+  if (!m_fastPathEnabled || (utils::enabledCategories & utils::CAT_CPU))
+    [[unlikely]]
+    return false;
+  const uint32_t lin = m_segBase[CS] + startEIP;
+  DecodedInsn &d = m_decoded[(lin ^ (lin >> 12)) & (kDecodedCacheSize - 1)];
+  const uint8_t code32 = m_cpu.is32BitCode() ? 1 : 0;
+  const uint8_t *p;
+  if (d.linear == lin && d.code32 == code32) [[likely]] {
+    if (d.handler == nullptr)
+      return false;
+    p = m_memory.codeWindow(lin);
+    if (p == nullptr) [[unlikely]]
+      return false;
+    uint64_t w0, w1;
+    std::memcpy(&w0, p, 8);
+    std::memcpy(&w1, p + 8, 8);
+    if ((((w0 ^ d.bytes[0]) & d.byteMask[0]) |
+         ((w1 ^ d.bytes[1]) & d.byteMask[1])) != 0) [[unlikely]] {
+      decodeFast(d, lin, p, code32 != 0);
+      if (d.handler == nullptr)
+        return false;
+    }
+  } else {
+    p = m_memory.codeWindow(lin);
+    if (p == nullptr)
+      return false;
+    decodeFast(d, lin, p, code32 != 0);
+    if (d.handler == nullptr)
+      return false;
+  }
+  if (startEIP > d.maxEip) [[unlikely]]
+    return false;
+  m_cpu.setEIP(startEIP + d.len);
+  m_cpu.addGuestCycles(d.cycles);
+  d.handler(*this, d);
+  return true;
+}
+
+// ALU helpers are inline: the predecoded fast path (FastPath.cpp) and the
+// legacy decoder share them.
+inline uint32_t InstructionDecoder::aluOp(uint8_t op, uint32_t dest, uint32_t src,
+                                   int size) {
+  // The six arithmetic flags are recorded lazily (see LazyFlags.hpp).
+  const uint32_t msb = 1u << (size - 1);
+  const uint32_t mask = (msb << 1) - 1u;
+  const uint32_t d = dest & mask;
+  const uint32_t s = src & mask;
+  uint32_t r;
+  LazyFlags::Kind kind;
+  switch (op & 7) {
+  case 0: // ADD
+    r = d + s;
+    kind = LazyFlags::Add;
+    break;
+  case 2: // ADC
+    if (m_cpu.carryFlag()) {
+      r = d + s + 1;
+      kind = LazyFlags::AddC;
+    } else {
+      r = d + s;
+      kind = LazyFlags::Add;
+    }
+    break;
+  case 3: // SBB
+    if (m_cpu.carryFlag()) {
+      r = d - s - 1;
+      kind = LazyFlags::SubB;
+    } else {
+      r = d - s;
+      kind = LazyFlags::Sub;
+    }
+    break;
+  case 5: // SUB
+  case 7: // CMP
+    r = d - s;
+    kind = LazyFlags::Sub;
+    break;
+  case 1: // OR
+    r = d | s;
+    kind = LazyFlags::Logic;
+    break;
+  case 4: // AND
+    r = d & s;
+    kind = LazyFlags::Logic;
+    break;
+  default: // 6: XOR
+    r = d ^ s;
+    kind = LazyFlags::Logic;
+    break;
+  }
+  r &= mask;
+  m_cpu.setLazyFlags(kind, msb, d, s, r);
+  return r;
+}
+
+// INC/DEC preserve CF (setLazyFlags folds the current CF into EFLAGS).
+inline uint32_t InstructionDecoder::incOp(uint32_t val, int size) {
+  const uint32_t msb = 1u << (size - 1);
+  const uint32_t mask = (msb << 1) - 1u;
+  const uint32_t d = val & mask;
+  const uint32_t r = (d + 1) & mask;
+  m_cpu.setLazyFlags(LazyFlags::Inc, msb, d, 1, r);
+  return r;
+}
+
+inline uint32_t InstructionDecoder::decOp(uint32_t val, int size) {
+  const uint32_t msb = 1u << (size - 1);
+  const uint32_t mask = (msb << 1) - 1u;
+  const uint32_t d = val & mask;
+  const uint32_t r = (d - 1) & mask;
+  m_cpu.setLazyFlags(LazyFlags::Dec, msb, d, 1, r);
+  return r;
+}
 
 } // namespace fador::cpu

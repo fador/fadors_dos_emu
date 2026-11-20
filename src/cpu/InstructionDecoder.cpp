@@ -351,61 +351,6 @@ void InstructionDecoder::writeModRM8(const ModRM &modrm, uint8_t value) {
   }
 }
 
-uint32_t InstructionDecoder::aluOp(uint8_t op, uint32_t dest, uint32_t src,
-                                   int size) {
-  // The six arithmetic flags are recorded lazily (see LazyFlags.hpp).
-  const uint32_t msb = 1u << (size - 1);
-  const uint32_t mask = (msb << 1) - 1u;
-  const uint32_t d = dest & mask;
-  const uint32_t s = src & mask;
-  uint32_t r;
-  LazyFlags::Kind kind;
-  switch (op & 7) {
-  case 0: // ADD
-    r = d + s;
-    kind = LazyFlags::Add;
-    break;
-  case 2: // ADC
-    if (m_cpu.carryFlag()) {
-      r = d + s + 1;
-      kind = LazyFlags::AddC;
-    } else {
-      r = d + s;
-      kind = LazyFlags::Add;
-    }
-    break;
-  case 3: // SBB
-    if (m_cpu.carryFlag()) {
-      r = d - s - 1;
-      kind = LazyFlags::SubB;
-    } else {
-      r = d - s;
-      kind = LazyFlags::Sub;
-    }
-    break;
-  case 5: // SUB
-  case 7: // CMP
-    r = d - s;
-    kind = LazyFlags::Sub;
-    break;
-  case 1: // OR
-    r = d | s;
-    kind = LazyFlags::Logic;
-    break;
-  case 4: // AND
-    r = d & s;
-    kind = LazyFlags::Logic;
-    break;
-  default: // 6: XOR
-    r = d ^ s;
-    kind = LazyFlags::Logic;
-    break;
-  }
-  r &= mask;
-  m_cpu.setLazyFlags(kind, msb, d, s, r);
-  return r;
-}
-
 // MUL/IMUL: CF and OF report whether the upper half of the product is
 // significant; SF/ZF/AF/PF are architecturally undefined and left alone.
 void InstructionDecoder::setMulOverflow(bool overflow) {
@@ -415,24 +360,126 @@ void InstructionDecoder::setMulOverflow(bool overflow) {
   m_cpu.setEFLAGS(flags);
 }
 
-// INC/DEC preserve CF (setLazyFlags folds the current CF into EFLAGS).
-uint32_t InstructionDecoder::incOp(uint32_t val, int size) {
-  const uint32_t msb = 1u << (size - 1);
-  const uint32_t mask = (msb << 1) - 1u;
-  const uint32_t d = val & mask;
-  const uint32_t r = (d + 1) & mask;
-  m_cpu.setLazyFlags(LazyFlags::Inc, msb, d, 1, r);
-  return r;
+// Shift/rotate group (C0/C1/D0-D3, /op): result and flags.
+uint32_t InstructionDecoder::shiftRotate(uint8_t op, uint32_t val, uint8_t c,
+                                     int size) {
+  c &= 0x1F;
+  if (c == 0)
+    return val;
+  uint32_t mask = (size == 8)    ? 0xFFu
+                  : (size == 16) ? 0xFFFFu
+                                 : 0xFFFFFFFFu;
+  val &= mask;
+  uint32_t flags = m_cpu.getEFLAGS();
+  bool cf = flags & FLAG_CARRY;
+
+  switch (op & 7) {
+  case 0: { // ROL
+    uint8_t ec = c % size;
+    if (ec)
+      val = ((val << ec) | (val >> (size - ec))) & mask;
+    cf = val & 1;
+    flags = (flags & ~FLAG_CARRY) | (cf ? FLAG_CARRY : 0);
+    if (c == 1) {
+      bool msb = (val >> (size - 1)) & 1;
+      flags = (flags & ~FLAG_OVERFLOW) | ((msb ^ cf) ? FLAG_OVERFLOW : 0);
+    }
+    m_cpu.setEFLAGS(flags);
+    return val;
+  }
+  case 1: { // ROR
+    uint8_t ec = c % size;
+    if (ec)
+      val = ((val >> ec) | (val << (size - ec))) & mask;
+    cf = (val >> (size - 1)) & 1;
+    flags = (flags & ~FLAG_CARRY) | (cf ? FLAG_CARRY : 0);
+    if (c == 1) {
+      bool bit2 = (val >> (size - 2)) & 1;
+      flags = (flags & ~FLAG_OVERFLOW) | ((cf ^ bit2) ? FLAG_OVERFLOW : 0);
+    }
+    m_cpu.setEFLAGS(flags);
+    return val;
+  }
+  case 2: { // RCL
+    for (uint8_t i = 0; i < c; ++i) {
+      bool msb = (val >> (size - 1)) & 1;
+      val = ((val << 1) | (cf ? 1u : 0u)) & mask;
+      cf = msb;
+    }
+    flags = (flags & ~FLAG_CARRY) | (cf ? FLAG_CARRY : 0);
+    if (c == 1) {
+      bool msb = (val >> (size - 1)) & 1;
+      flags = (flags & ~FLAG_OVERFLOW) | ((msb ^ cf) ? FLAG_OVERFLOW : 0);
+    }
+    m_cpu.setEFLAGS(flags);
+    return val;
+  }
+  case 3: { // RCR
+    for (uint8_t i = 0; i < c; ++i) {
+      bool lsb = val & 1;
+      val = ((val >> 1) | (cf ? (1u << (size - 1)) : 0u)) & mask;
+      cf = lsb;
+    }
+    flags = (flags & ~FLAG_CARRY) | (cf ? FLAG_CARRY : 0);
+    if (c == 1) {
+      bool msb = (val >> (size - 1)) & 1;
+      bool bit2 = (val >> (size - 2)) & 1;
+      flags = (flags & ~FLAG_OVERFLOW) | ((msb ^ bit2) ? FLAG_OVERFLOW : 0);
+    }
+    m_cpu.setEFLAGS(flags);
+    return val;
+  }
+  case 4:
+  case 6: { // SHL/SAL
+    cf = (val >> (size - c)) & 1;
+    val = (val << c) & mask;
+    break;
+  }
+  case 5: { // SHR
+    bool oldMsb = (val >> (size - 1)) & 1;
+    cf = (val >> (c - 1)) & 1;
+    val = (val >> c) & mask;
+    flags = (flags & ~FLAG_OVERFLOW);
+    if (c == 1)
+      flags |= (oldMsb ? FLAG_OVERFLOW : 0);
+    break;
+  }
+  case 7: { // SAR
+    int32_t sval = (size == 8)    ? static_cast<int8_t>(val)
+                   : (size == 16) ? static_cast<int16_t>(val)
+                                  : static_cast<int32_t>(val);
+    cf = (sval >> (c - 1)) & 1;
+    val = static_cast<uint32_t>(sval >> c) & mask;
+    flags &= ~FLAG_OVERFLOW; // OF always 0 for SAR
+    break;
+  }
+  default:
+    return val;
+  }
+  // Common flag update for SHL/SHR/SAR (cases 4-7)
+  flags = (flags & ~(FLAG_CARRY | FLAG_ZERO | FLAG_SIGN | FLAG_PARITY));
+  if (cf)
+    flags |= FLAG_CARRY;
+  if (val == 0)
+    flags |= FLAG_ZERO;
+  if (val & (1u << (size - 1)))
+    flags |= FLAG_SIGN;
+  {
+    uint8_t p = val & 0xFF;
+    p ^= p >> 4;
+    p ^= p >> 2;
+    p ^= p >> 1;
+    if (!(p & 1))
+      flags |= FLAG_PARITY;
+  }
+  if (c == 1 && (op & 7) == 4) {
+    bool msb = (val >> (size - 1)) & 1;
+    flags = (flags & ~FLAG_OVERFLOW) | ((msb ^ cf) ? FLAG_OVERFLOW : 0);
+  }
+  m_cpu.setEFLAGS(flags);
+  return val;
 }
 
-uint32_t InstructionDecoder::decOp(uint32_t val, int size) {
-  const uint32_t msb = 1u << (size - 1);
-  const uint32_t mask = (msb << 1) - 1u;
-  const uint32_t d = val & mask;
-  const uint32_t r = (d - 1) & mask;
-  m_cpu.setLazyFlags(LazyFlags::Dec, msb, d, 1, r);
-  return r;
-}
 
 bool InstructionDecoder::checkCondition(uint8_t cond) {
   return m_cpu.testCondition(cond);
@@ -470,18 +517,24 @@ void InstructionDecoder::step() {
   }
 }
 
+uint64_t InstructionDecoder::run(uint64_t maxInstructions) {
+  uint64_t executed = 0;
+  while (executed < maxInstructions) {
+    step();
+    m_cpu.addCycles(1);
+    ++executed;
+    if (m_dos.isTerminated()) [[unlikely]]
+      break;
+  }
+  return executed;
+}
+
 void InstructionDecoder::stepInstruction() {
   // The instruction after STI / MOV SS runs; interrupts are allowed again
   // once it has finished (unless it starts a new shadow itself).
   if (m_cpu.interruptShadowActive()) [[unlikely]]
     m_cpu.endInterruptShadow();
   syncSegmentCacheIfNeeded();
-  m_hasPrefix66 = m_cpu.is32BitCode();
-  m_hasPrefix67 = m_cpu.is32BitCode();
-  m_hasRepnz = false;
-  m_hasRepz = false;
-  m_segmentOverride = 0xFF;
-  m_eaResolved = false;
 
   // Read everything first, then write: interleaving the 16-bit field
   // updates caused a store-forwarding stall that cost ~30% of step().
@@ -492,6 +545,18 @@ void InstructionDecoder::stepInstruction() {
   m_cpu.setInstructionStartEIP(startEIP);
   m_cpu.setPrevInstructionCS(prevCS);
   m_cpu.setInstructionStartCS(curCS);
+
+  // Predecoded fast path (FastPath.cpp); everything it does not handle
+  // falls through to the decoder below.
+  if (tryFastPath(startEIP)) [[likely]]
+    return;
+
+  m_hasPrefix66 = m_cpu.is32BitCode();
+  m_hasPrefix67 = m_cpu.is32BitCode();
+  m_hasRepnz = false;
+  m_hasRepz = false;
+  m_segmentOverride = 0xFF;
+  m_eaResolved = false;
   uint8_t opcode = fetch8();
   // Temporary diagnostic: log the next few bytes at the instruction start
   {
@@ -2344,132 +2409,15 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
             ? fetch8()
             : ((opcode == 0xD0 || opcode == 0xD1) ? 1 : m_cpu.getReg8(CL));
 
-    auto shiftRotate = [&](uint32_t val, uint8_t c, int size) -> uint32_t {
-      c &= 0x1F;
-      if (c == 0)
-        return val;
-      uint32_t mask = (size == 8)    ? 0xFFu
-                      : (size == 16) ? 0xFFFFu
-                                     : 0xFFFFFFFFu;
-      val &= mask;
-      uint32_t flags = m_cpu.getEFLAGS();
-      bool cf = flags & FLAG_CARRY;
-
-      switch (modrm.reg) {
-      case 0: { // ROL
-        uint8_t ec = c % size;
-        if (ec)
-          val = ((val << ec) | (val >> (size - ec))) & mask;
-        cf = val & 1;
-        flags = (flags & ~FLAG_CARRY) | (cf ? FLAG_CARRY : 0);
-        if (c == 1) {
-          bool msb = (val >> (size - 1)) & 1;
-          flags = (flags & ~FLAG_OVERFLOW) | ((msb ^ cf) ? FLAG_OVERFLOW : 0);
-        }
-        m_cpu.setEFLAGS(flags);
-        return val;
-      }
-      case 1: { // ROR
-        uint8_t ec = c % size;
-        if (ec)
-          val = ((val >> ec) | (val << (size - ec))) & mask;
-        cf = (val >> (size - 1)) & 1;
-        flags = (flags & ~FLAG_CARRY) | (cf ? FLAG_CARRY : 0);
-        if (c == 1) {
-          bool bit2 = (val >> (size - 2)) & 1;
-          flags = (flags & ~FLAG_OVERFLOW) | ((cf ^ bit2) ? FLAG_OVERFLOW : 0);
-        }
-        m_cpu.setEFLAGS(flags);
-        return val;
-      }
-      case 2: { // RCL
-        for (uint8_t i = 0; i < c; ++i) {
-          bool msb = (val >> (size - 1)) & 1;
-          val = ((val << 1) | (cf ? 1u : 0u)) & mask;
-          cf = msb;
-        }
-        flags = (flags & ~FLAG_CARRY) | (cf ? FLAG_CARRY : 0);
-        if (c == 1) {
-          bool msb = (val >> (size - 1)) & 1;
-          flags = (flags & ~FLAG_OVERFLOW) | ((msb ^ cf) ? FLAG_OVERFLOW : 0);
-        }
-        m_cpu.setEFLAGS(flags);
-        return val;
-      }
-      case 3: { // RCR
-        for (uint8_t i = 0; i < c; ++i) {
-          bool lsb = val & 1;
-          val = ((val >> 1) | (cf ? (1u << (size - 1)) : 0u)) & mask;
-          cf = lsb;
-        }
-        flags = (flags & ~FLAG_CARRY) | (cf ? FLAG_CARRY : 0);
-        if (c == 1) {
-          bool msb = (val >> (size - 1)) & 1;
-          bool bit2 = (val >> (size - 2)) & 1;
-          flags = (flags & ~FLAG_OVERFLOW) | ((msb ^ bit2) ? FLAG_OVERFLOW : 0);
-        }
-        m_cpu.setEFLAGS(flags);
-        return val;
-      }
-      case 4:
-      case 6: { // SHL/SAL
-        cf = (val >> (size - c)) & 1;
-        val = (val << c) & mask;
-        break;
-      }
-      case 5: { // SHR
-        bool oldMsb = (val >> (size - 1)) & 1;
-        cf = (val >> (c - 1)) & 1;
-        val = (val >> c) & mask;
-        flags = (flags & ~FLAG_OVERFLOW);
-        if (c == 1)
-          flags |= (oldMsb ? FLAG_OVERFLOW : 0);
-        break;
-      }
-      case 7: { // SAR
-        int32_t sval = (size == 8)    ? static_cast<int8_t>(val)
-                       : (size == 16) ? static_cast<int16_t>(val)
-                                      : static_cast<int32_t>(val);
-        cf = (sval >> (c - 1)) & 1;
-        val = static_cast<uint32_t>(sval >> c) & mask;
-        flags &= ~FLAG_OVERFLOW; // OF always 0 for SAR
-        break;
-      }
-      default:
-        return val;
-      }
-      // Common flag update for SHL/SHR/SAR (cases 4-7)
-      flags = (flags & ~(FLAG_CARRY | FLAG_ZERO | FLAG_SIGN | FLAG_PARITY));
-      if (cf)
-        flags |= FLAG_CARRY;
-      if (val == 0)
-        flags |= FLAG_ZERO;
-      if (val & (1u << (size - 1)))
-        flags |= FLAG_SIGN;
-      {
-        uint8_t p = val & 0xFF;
-        p ^= p >> 4;
-        p ^= p >> 2;
-        p ^= p >> 1;
-        if (!(p & 1))
-          flags |= FLAG_PARITY;
-      }
-      if (c == 1 && modrm.reg == 4) {
-        bool msb = (val >> (size - 1)) & 1;
-        flags = (flags & ~FLAG_OVERFLOW) | ((msb ^ cf) ? FLAG_OVERFLOW : 0);
-      }
-      m_cpu.setEFLAGS(flags);
-      return val;
-    };
 
     if (opcode == 0xC0 || opcode == 0xD0 || opcode == 0xD2) {
       writeModRM8(modrm, static_cast<uint8_t>(
-                             shiftRotate(readModRM8(modrm), count, 8)));
+                             shiftRotate(modrm.reg, readModRM8(modrm), count, 8)));
     } else if (m_hasPrefix66) {
-      writeModRM32(modrm, shiftRotate(readModRM32(modrm), count, 32));
+      writeModRM32(modrm, shiftRotate(modrm.reg, readModRM32(modrm), count, 32));
     } else {
       writeModRM16(modrm, static_cast<uint16_t>(
-                              shiftRotate(readModRM16(modrm), count, 16)));
+                              shiftRotate(modrm.reg, readModRM16(modrm), count, 16)));
     }
     break;
   }
@@ -4924,6 +4872,8 @@ void InstructionDecoder::syncSegments() {
   if (m_cycleTableModel != &m_cpu.model()) [[unlikely]] {
     m_cycleTableModel = &m_cpu.model();
     std::memcpy(m_cycleTable.data(), m_cpu.cycleTable(), m_cycleTable.size());
+    // Predecoded entries carry cycle costs and model-gated decisions.
+    flushDecodedCache();
   }
 }
 

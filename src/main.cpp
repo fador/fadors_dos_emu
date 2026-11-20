@@ -419,6 +419,8 @@ void printHelp(const char *programName) {
     "  --stop-after=N            Stop execution after N instruction cycles and dump state.\n"
     "  --stop-after-debugger     When --stop-after triggers, enter the interactive debugger.\n"
     "  --dump-on-exit            Dump CPU state when the program terminates.\n"
+    "  --no-fast-path            Run every instruction through the legacy decoder (no\n"
+    "                            predecoded instruction cache); for debugging the CPU.\n"
     "  --instruction-trace=N     Print a trace line per executed instruction for the next N.\n"
     "  --instruction-trace-from=ADDR[#N]\n"
     "                            Delay --instruction-trace until CS:EIP reaches this hex\n"
@@ -838,6 +840,8 @@ int main(int argc, char *argv[]) {
         // Applied before the CPU was constructed.
       } else if (arg == "--dump-on-exit") {
         dumpOnExit = true;
+      } else if (arg == "--no-fast-path") {
+        decoder.setFastPathEnabled(false);
       } else if (arg.find("--throttle-ips=") == 0) {
         const uint64_t ips = std::stoull(arg.substr(15));
         if (ips == 0) {
@@ -1573,14 +1577,7 @@ int main(int argc, char *argv[]) {
           }
         }
       } else {
-        for (; executed < batch; ++executed) {
-          decoder.step();
-          cpu.addCycles(1);
-          if (dos.isTerminated()) {
-            ++executed;
-            break;
-          }
-        }
+        executed = decoder.run(batch);
       }
       instrCount += executed;
 
@@ -1654,6 +1651,8 @@ int main(int argc, char *argv[]) {
                " s (", fador::hw::VirtualClock::pacingName(clock.pacing()),
                " pacing, ", std::dec, memory.read32(0x46C),
                " BIOS timer ticks)");
+      LOG_INFO("Guest CPU: ", cpu.model().cliName, ", ", cpu.cycles(),
+               " cycles");
     }
 
     if (wav.isOpen()) {

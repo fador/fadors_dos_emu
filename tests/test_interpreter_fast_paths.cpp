@@ -14,6 +14,9 @@
 #include "memory/MemoryBus.hpp"
 
 #include <bit>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
 #include <initializer_list>
 #include <random>
 #include <vector>
@@ -391,4 +394,460 @@ TEST_CASE("Lazy flags: #PF restart restores the pending record", "[CPU][LazyFlag
   const uint32_t esp = m.cpu.getReg32(cpu::ESP);
   REQUIRE(m.mem.read32(esp + 4) == 0x6002);
   REQUIRE((m.mem.read32(esp + 12) & kArith) == (ref & kArith));
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Predecoded fast path vs. legacy decoder
+// ═══════════════════════════════════════════════════════════════════════
+
+namespace {
+
+// A machine for differential runs: code at linear 0x10000, data segment
+// at 0x20000, stack at 0x30000; real mode (16-bit code) or flat-limit
+// protected mode with those bases (32-bit code), optionally with paging
+// identity-mapping the first 4 MiB.
+struct DiffMachine {
+  cpu::CPU cpu{cpu::CpuModelId::PentiumPro};
+  memory::MemoryBus mem;
+  hw::IOBus iobus;
+  hw::KeyboardController kbd;
+  hw::PIT8254 pit;
+  hw::PIC8259 pic{true};
+  hw::DOS dos{cpu, mem};
+  hw::BIOS bios{cpu, mem, kbd, pit, pic};
+  cpu::InstructionDecoder decoder{cpu, mem, iobus, bios, dos};
+  static constexpr uint32_t kCode = 0x10000, kData = 0x20000, kStack = 0x30000;
+  static constexpr uint32_t kGdt = 0x1000, kDir = 0x100000, kTable = 0x101000;
+
+  void desc(uint16_t sel, uint32_t base, uint32_t type) {
+    mem.write32(kGdt + sel, 0xFFFFu | ((base & 0xFFFF) << 16));
+    mem.write32(kGdt + sel + 4, ((base >> 16) & 0xFF) | (base & 0xFF000000u) |
+                                    0x00CF0000u | type);
+  }
+  DiffMachine(bool fast, bool code32, bool paging) {
+    decoder.setFastPathEnabled(fast);
+    mem.setA20(true);
+    if (!code32) {
+      cpu.setSegReg(cpu::CS, kCode >> 4);
+      cpu.setSegReg(cpu::DS, kData >> 4);
+      cpu.setSegReg(cpu::ES, kData >> 4);
+      cpu.setSegReg(cpu::FS, kData >> 4);
+      cpu.setSegReg(cpu::GS, kData >> 4);
+      cpu.setSegReg(cpu::SS, kStack >> 4);
+      decoder.syncSegments();
+      return;
+    }
+    desc(0x08, kCode, 0x9A00);
+    desc(0x10, kData, 0x9200);
+    desc(0x18, kStack, 0x9200);
+    cpu.setGDTR({0x1F, kGdt});
+    cpu.setCR(0, cpu.getCR(0) | 1);
+    if (paging) {
+      for (uint32_t i = 0; i < 1024; ++i)
+        mem.write32(kTable + i * 4, (i << 12) | 0x07);
+      mem.write32(kDir, kTable | 0x07);
+      cpu.setCR(3, kDir);
+      cpu.setCR(0, cpu.getCR(0) | 0x80000000u);
+    }
+    decoder.loadSegment(cpu::CS, 0x08);
+    for (auto s : {cpu::DS, cpu::ES, cpu::FS, cpu::GS})
+      decoder.loadSegment(s, 0x10);
+    decoder.loadSegment(cpu::SS, 0x18);
+  }
+};
+
+// Random instruction streams over the fast-path opcodes, some legacy ones
+// and stores through CS: (self-modifying code).
+struct StreamGen {
+  std::mt19937 &rng;
+  bool code32;
+  std::vector<uint8_t> out;
+  uint32_t r(uint32_t n) { return static_cast<uint32_t>(rng() % n); }
+  void b(uint32_t v) { out.push_back(static_cast<uint8_t>(v)); }
+  void imm(int n) {
+    for (int i = 0; i < n; ++i)
+      b(r(4) == 0 ? 0xFF : r(256));
+  }
+  // ModRM with a memory or register operand; memory operands stay in the
+  // data/stack/code segments (registers hold small values, see below).
+  void modrm(bool addr32, int reg = -1) {
+    const uint32_t mod = r(4);
+    const uint32_t rg = reg >= 0 ? static_cast<uint32_t>(reg) : r(8);
+    uint32_t rm = r(8);
+    b((mod << 6) | (rg << 3) | rm);
+    if (mod == 3)
+      return;
+    if (addr32) {
+      if (rm == 4)
+        b((r(4) << 6) | (r(8) << 3) | r(8)); // SIB
+      if (mod == 1)
+        b(r(256));
+      else if (mod == 2 || (mod == 0 && rm == 5))
+        imm(2), b(0), b(0);
+      else if (mod == 0 && rm == 4 && (out.back() & 7) == 5)
+        imm(2), b(0), b(0);
+    } else {
+      if (mod == 1)
+        b(r(256));
+      else if (mod == 2 || (mod == 0 && rm == 6))
+        imm(2);
+    }
+  }
+  void one() {
+    const uint32_t kind = r(40);
+    if (kind == 37) { // CALL to an inline subroutine ending in RET / RET imm
+      const int rel = code32 ? 4 : 2;
+      std::vector<uint8_t> body;
+      std::swap(out, body);
+      for (uint32_t i = 0, n = r(3); i < n; ++i)
+        b(0x40 + r(16));
+      if (r(2)) {
+        b(0xC3);
+      } else {
+        b(0xC2);
+        b(r(3) * 2);
+        b(0);
+      }
+      std::swap(out, body);
+      b(0xEB); // jump over the subroutine
+      b(static_cast<uint32_t>(body.size()));
+      const size_t sub = out.size();
+      out.insert(out.end(), body.begin(), body.end());
+      const int32_t disp =
+          static_cast<int32_t>(sub) - static_cast<int32_t>(out.size() + 1 + rel);
+      b(0xE8);
+      for (int i = 0; i < rel; ++i)
+        b(static_cast<uint32_t>(disp) >> (8 * i));
+      return;
+    }
+    bool op32 = code32, addr32 = code32;
+    switch (r(16)) {
+    case 0: b(0x66); op32 = !op32; break;
+    case 1: b(0x67); addr32 = !addr32; break;
+    case 2: b(0x2E); break; // CS: stores modify the code
+    case 3: b(0x36); break;
+    case 4: b(0x26); break;
+    case 5: b(0x66); b(0x66); break; // the legacy decoder toggles
+    default: break;
+    }
+    const int iw = op32 ? 4 : 2;
+    switch (kind) {
+    case 0: case 1: case 2: b(r(8) * 8 + r(4)); modrm(addr32); break; // ALU r/m
+    case 3: b(r(8) * 8 + 4); imm(1); break;
+    case 4: b(r(8) * 8 + 5); imm(iw); break;
+    case 5: b(0x40 + r(16)); break;           // INC/DEC
+    case 6: b(0x50 + r(8)); break;            // PUSH
+    case 7: b(0x58 + r(8)); break;            // POP
+    case 8: { const bool i8 = r(2); b(i8 ? 0x6A : 0x68); imm(i8 ? 1 : iw); break; }
+    case 9: { const bool i8 = r(2); b(i8 ? 0x6B : 0x69); modrm(addr32); imm(i8 ? 1 : iw); break; }
+    case 10: b(0x70 + r(16)); b(r(6)); break; // Jcc short forward
+    case 11: { const uint32_t op = 0x80 + r(4); b(op); modrm(addr32); imm(op == 0x81 ? iw : 1); break; }
+    case 12: b(0x84 + r(4)); modrm(addr32); break; // TEST / XCHG
+    case 13: case 14: case 15: b(0x88 + r(4)); modrm(addr32); break; // MOV
+    case 16: b(0x8D); modrm(addr32); break;   // LEA (mod 3: legacy)
+    case 17: b(0x90 + r(10)); break;          // NOP, XCHG, CBW, CWD
+    case 18: b(0xA0 + r(4)); imm(2); if (addr32) { b(0); b(0); } break;
+    case 19: b(0xA8); imm(1); break;
+    case 20: b(0xA9); imm(iw); break;
+    case 21: b(0xB0 + r(8)); imm(1); break;
+    case 22: b(0xB8 + r(8)); imm(iw); break;
+    case 23: b(0xC0 + r(2)); modrm(addr32); imm(1); break; // shifts
+    case 24: b(0xD0 + r(4)); modrm(addr32); break;
+    case 25: { const bool w = r(2); b(0xC6 + w); modrm(addr32, 0); imm(w ? iw : 1); break; }
+    case 26: b(0xF5); break;                  // CMC
+    case 27: b(0xF8 + r(2)); break;           // CLC/STC
+    case 28: { // TEST NOT NEG MUL IMUL (DIV: legacy, may fault)
+      const bool w = r(2);
+      const int reg = static_cast<int>(r(6));
+      b(0xF6 + w);
+      modrm(addr32, reg);
+      if (reg < 2)
+        imm(w ? iw : 1);
+      break;
+    }
+    case 29: b(0xFE + r(2)); modrm(addr32, static_cast<int>(r(2))); break;
+    case 30: b(0xFF); modrm(addr32, 6); break; // PUSH r/m
+    case 31: b(0x0F); b(0x80 + r(16)); b(r(6)); b(0); if (op32) { b(0); b(0); } break;
+    case 32: b(0x0F); b(0x90 + r(16)); modrm(addr32); break;
+    case 33: b(0x0F); b(0x40 + r(16)); modrm(addr32); break;
+    case 34: b(0x0F); b(0xAF); modrm(addr32); break;
+    case 35: b(0x0F); b(0xB6 + r(2) + 8 * r(2)); modrm(addr32); break;
+    case 36: // legacy instructions in between
+      switch (r(6)) {
+      case 0: b(0x9C); break;              // PUSHF
+      case 1: b(0x9F); break;              // LAHF
+      case 2: b(0x0F); b(0xA3); modrm(addr32); break; // BT
+      case 3: b(0xAA + r(6)); break;       // string ops, no REP
+      case 4: b(0x27 + 8 * r(4)); break;   // DAA/DAS/AAA/AAS
+      default: b(0x0F); b(0xBC + r(2)); modrm(addr32); break; // BSF/BSR
+      }
+      break;
+    case 38: b(0xE9); b(r(5)); b(0); if (op32) { b(0); b(0); } break;
+    default: b(0xEB); b(r(5)); break;
+    }
+  }
+};
+
+// Registers that keep memory operands near the segments' bases.
+uint32_t smallValue(std::mt19937 &rng) {
+  switch (rng() % 4) {
+  case 0: return rng() % 0x100;
+  case 1: return rng() % 0x10000;
+  case 2: return 0xFFFF0000u | (rng() % 0x10000);
+  default: return rng() % 0x8000;
+  }
+}
+
+std::string hexString(const std::vector<uint8_t> &v) {
+  std::string s;
+  char buf[4];
+  for (uint8_t x : v) {
+    std::snprintf(buf, sizeof buf, "%02X ", x);
+    s += buf;
+  }
+  return s;
+}
+
+void runDifferential(bool code32, bool paging, int sequences, uint32_t seed) {
+  std::mt19937 rng(seed);
+  DiffMachine fast(true, code32, paging), legacy(false, code32, paging);
+  for (int seq = 0; seq < sequences; ++seq) {
+    StreamGen gen{rng, code32, {}};
+    while (gen.out.size() < 160)
+      gen.one();
+    // Same initial state in both machines.
+    std::vector<uint8_t> data(0x400);
+    for (auto &x : data)
+      x = static_cast<uint8_t>(rng());
+    uint32_t regs[8];
+    for (auto &x : regs)
+      x = smallValue(rng);
+    regs[cpu::ESP] = 0x8000 + (rng() % 0x100) * 4;
+    const uint32_t flags = 0x2 | (rng() & 0x8D5);
+    for (DiffMachine *m : {&fast, &legacy}) {
+      for (uint32_t i = 0; i < 0x2000; ++i)
+        m->mem.write8(DiffMachine::kCode + i, 0x90);
+      for (size_t i = 0; i < gen.out.size(); ++i)
+        m->mem.write8(DiffMachine::kCode + static_cast<uint32_t>(i), gen.out[i]);
+      for (uint32_t i = 0; i < 0x10000; i += 0x400)
+        for (size_t j = 0; j < data.size(); ++j) {
+          m->mem.write8(DiffMachine::kData + i + static_cast<uint32_t>(j), data[j]);
+          m->mem.write8(DiffMachine::kStack + i + static_cast<uint32_t>(j), data[j]);
+        }
+      for (int i = 0; i < 8; ++i)
+        m->cpu.setReg32(static_cast<uint8_t>(i), regs[i]);
+      m->cpu.setEFLAGS(flags);
+      m->cpu.setEIP(0);
+    }
+    for (int step = 0; step < 120; ++step) {
+      const uint32_t eip = fast.cpu.getEIP();
+      if (eip >= 0x1F00)
+        break; // ran off the generated code
+      fast.decoder.step();
+      legacy.decoder.step();
+      bool same = fast.cpu.getEIP() == legacy.cpu.getEIP() &&
+                  fast.cpu.getEFLAGS() == legacy.cpu.getEFLAGS() &&
+                  fast.cpu.cycles() == legacy.cpu.cycles();
+      for (int i = 0; i < 8; ++i)
+        same = same && fast.cpu.getReg32(static_cast<uint8_t>(i)) ==
+                           legacy.cpu.getReg32(static_cast<uint8_t>(i));
+      for (int i = 0; i < 6; ++i)
+        same = same && fast.cpu.getSegReg(static_cast<uint8_t>(i)) ==
+                           legacy.cpu.getSegReg(static_cast<uint8_t>(i));
+      if (same && (step % 16 == 15 || step == 119)) {
+        for (uint32_t a = DiffMachine::kCode; a < DiffMachine::kStack + 0x10000; a += 4)
+          if (fast.mem.read32(a) != legacy.mem.read32(a)) {
+            same = false;
+            break;
+          }
+      }
+      if (!same) {
+        std::vector<uint8_t> at;
+        for (uint32_t i = 0; i < 12; ++i)
+          at.push_back(legacy.mem.read8(DiffMachine::kCode + eip + i));
+        std::fprintf(stderr,
+                     "fast/legacy mismatch: %s code, paging %d, seed %u, sequence %d, step %d\n"
+                     "  at EIP %04X: %s\n  fast   EIP=%08X FL=%08X EAX=%08X ECX=%08X EDX=%08X EBX=%08X ESP=%08X cyc=%llu\n"
+                     "  legacy EIP=%08X FL=%08X EAX=%08X ECX=%08X EDX=%08X EBX=%08X ESP=%08X cyc=%llu\n",
+                     code32 ? "32-bit" : "16-bit", paging ? 1 : 0, seed, seq, step,
+                     eip, hexString(at).c_str(), fast.cpu.getEIP(), fast.cpu.getEFLAGS(),
+                     fast.cpu.getReg32(0), fast.cpu.getReg32(1), fast.cpu.getReg32(2),
+                     fast.cpu.getReg32(3), fast.cpu.getReg32(4),
+                     static_cast<unsigned long long>(fast.cpu.cycles()),
+                     legacy.cpu.getEIP(), legacy.cpu.getEFLAGS(), legacy.cpu.getReg32(0),
+                     legacy.cpu.getReg32(1), legacy.cpu.getReg32(2), legacy.cpu.getReg32(3),
+                     legacy.cpu.getReg32(4),
+                     static_cast<unsigned long long>(legacy.cpu.cycles()));
+        REQUIRE(same);
+      }
+    }
+  }
+}
+
+int fuzzSequences(int dflt) {
+  const char *env = std::getenv("FASTPATH_FUZZ_SEQUENCES");
+  return env ? std::atoi(env) : dflt;
+}
+
+} // namespace
+
+TEST_CASE("Fast path: random 16-bit streams match the legacy decoder",
+          "[CPU][FastPath]") {
+  runDifferential(false, false, fuzzSequences(300), 1);
+}
+
+TEST_CASE("Fast path: random 32-bit streams match the legacy decoder",
+          "[CPU][FastPath]") {
+  runDifferential(true, false, fuzzSequences(300), 2);
+}
+
+TEST_CASE("Fast path: random 32-bit streams with paging match the legacy decoder",
+          "[CPU][FastPath][Paging]") {
+  runDifferential(true, true, fuzzSequences(150), 3);
+}
+
+TEST_CASE("Fast path: self-modifying code is re-decoded", "[CPU][FastPath][SMC]") {
+  for (bool fast : {true, false}) {
+    Machine m;
+    m.decoder.setFastPathEnabled(fast);
+    SECTION("an instruction changed after it was cached") {
+      // mov ax,0x1111 ; executed (and cached), then patched to mov ax,0x2222
+      m.run({0xB8, 0x11, 0x11}, 1);
+      REQUIRE(m.cpu.getReg16(cpu::AX) == 0x1111);
+      m.mem.write8(Machine::kCode + 1, 0x22);
+      m.mem.write8(Machine::kCode + 2, 0x22);
+      m.cpu.setEIP(0);
+      m.decoder.step();
+      REQUIRE(m.cpu.getReg16(cpu::AX) == 0x2222);
+      // A different instruction of a different length at the same place.
+      m.load({0x40}); // inc ax
+      m.cpu.setEIP(0);
+      m.decoder.step();
+      REQUIRE(m.cpu.getReg16(cpu::AX) == 0x2223);
+      REQUIRE(m.cpu.getEIP() == 1);
+    }
+    SECTION("an instruction patches the next one") {
+      // loop twice over: mov byte cs:[next+1],0x05 ; next: mov al,0x01
+      for (int pass = 0; pass < 2; ++pass) {
+        m.run({0x2E, 0xC6, 0x06, 0x07, 0x00, 0x05 + pass, // mov byte cs:[7],imm
+               0xB0, 0x01},                              // mov al,1
+              2);
+        REQUIRE(m.cpu.getReg8(cpu::AL) == 0x05 + pass);
+      }
+    }
+    SECTION("REP MOVSB copies new code over cached code") {
+      m.run({0xB0, 0x01, 0x90, 0x90}, 1); // mov al,1 (cached)
+      REQUIRE(m.cpu.getReg8(cpu::AL) == 1);
+      // Source: "mov al,7" at DS:0x100; copy it over CS:0 with ES = CS.
+      m.mem.write8(0x20100, 0xB0);
+      m.mem.write8(0x20101, 0x07);
+      m.cpu.setSegReg(cpu::ES, Machine::kCode >> 4);
+      m.cpu.setReg32(cpu::ESI, 0x100);
+      m.cpu.setReg32(cpu::EDI, 0x0);
+      m.cpu.setReg32(cpu::ECX, 2);
+      m.decoder.syncSegments();
+      m.load({0xF3, 0xA4}, 0x40);
+      m.cpu.setEIP(0x40);
+      m.decoder.step();
+      REQUIRE(m.cpu.getReg16(cpu::CX) == 0);
+      m.cpu.setEIP(0);
+      m.decoder.step();
+      REQUIRE(m.cpu.getReg8(cpu::AL) == 7);
+    }
+  }
+}
+
+TEST_CASE("Fast path: IP wrap-around and the 16-byte window", "[CPU][FastPath]") {
+  Machine fast, legacy;
+  legacy.decoder.setFastPathEnabled(false);
+  for (Machine *m : {&fast, &legacy}) {
+    // mov ax,imm16 at IP FFFE: IP wraps to 0001 after it.  (Which byte the
+    // immediate's high half comes from is the legacy decoder's business;
+    // the fast path must not handle IP-wrapping instructions at all.)
+    m->mem.write8(Machine::kCode + 0xFFFE, 0xB8);
+    m->mem.write8(Machine::kCode + 0xFFFF, 0x34);
+    m->mem.write8(Machine::kCode + 0x0000, 0x12);
+    m->mem.write8(Machine::kCode + 0x10000, 0x56);
+    for (int pass = 0; pass < 2; ++pass) {
+      m->cpu.setEIP(0xFFFE);
+      m->decoder.step();
+      REQUIRE(m->cpu.getEIP() == 1);
+    }
+    // Instructions in the last 15 bytes of a page use the legacy fetch.
+    m->load({0x66, 0xB8, 0x78, 0x56, 0x34, 0x12}, 0x0FFC);
+    m->cpu.setEIP(0x0FFC);
+    m->decoder.step();
+    REQUIRE(m->cpu.getReg32(cpu::EAX) == 0x12345678u);
+    REQUIRE(m->cpu.getEIP() == 0x1002);
+  }
+  fast.mem.write32(Machine::kCode + 0x0FFC, 0);
+  REQUIRE(fast.cpu.cycles() == legacy.cpu.cycles());
+  fast.cpu.setEIP(0xFFFE);
+  legacy.cpu.setEIP(0xFFFE);
+  fast.decoder.step();
+  legacy.decoder.step();
+  REQUIRE(fast.cpu.getReg32(cpu::EAX) == legacy.cpu.getReg32(cpu::EAX));
+}
+
+TEST_CASE("Fast path: code pages follow the TLB (INVLPG, CR3, page crossing)",
+          "[CPU][FastPath][Paging]") {
+  for (bool fast : {true, false}) {
+    PagedMachine m;
+    m.decoder.setFastPathEnabled(fast);
+    constexpr uint32_t kPte = PagedMachine::kTable + (0x60000 >> 12) * 4;
+    // Linear 0x60000 -> physical 0x60000 ("mov eax,1") or 0x70000 ("mov eax,2").
+    const std::vector<uint8_t> one = {0xB8, 1, 0, 0, 0}, two = {0xB8, 2, 0, 0, 0};
+    for (size_t i = 0; i < one.size(); ++i) {
+      m.mem.write8(0x60000 + static_cast<uint32_t>(i), one[i]);
+      m.mem.write8(0x70000 + static_cast<uint32_t>(i), two[i]);
+    }
+    auto exec = [&]() {
+      m.cpu.setEIP(0x60000);
+      m.decoder.step();
+      return m.cpu.getReg32(cpu::EAX);
+    };
+    REQUIRE(exec() == 1);
+    m.mem.write32(kPte, 0x70000 | 0x07); // remap behind the TLB's back
+    REQUIRE(exec() == 1);                // stale TLB entry, like the CPU
+    m.mem.invalidatePage(0x60000);       // INVLPG
+    REQUIRE(exec() == 2);
+    m.mem.write32(kPte, 0x60000 | 0x07);
+    m.cpu.setCR(3, PagedMachine::kDir); // CR3 reload flushes the TLB
+    REQUIRE(exec() == 1);
+
+    // An instruction straddling two pages whose frames are not adjacent:
+    // linear 0x61FFE.. -> 0x61000 page maps to 0x80000, 0x62000 to 0x90000.
+    m.mem.write32(PagedMachine::kTable + (0x61000 >> 12) * 4, 0x80000 | 0x07);
+    m.mem.write32(PagedMachine::kTable + (0x62000 >> 12) * 4, 0x90000 | 0x07);
+    m.cpu.setCR(3, PagedMachine::kDir);
+    m.mem.write8(0x80FFE, 0xB8);
+    m.mem.write8(0x80FFF, 0x44);
+    m.mem.write8(0x90000, 0x33);
+    m.mem.write8(0x90001, 0x22);
+    m.mem.write8(0x90002, 0x11);
+    m.cpu.setEIP(0x61FFE);
+    m.decoder.step();
+    REQUIRE(m.cpu.getReg32(cpu::EAX) == 0x11223344u);
+    REQUIRE(m.cpu.getEIP() == 0x62003);
+  }
+}
+
+TEST_CASE("Fast path: the batch runner counts like step() + addCycles(1)",
+          "[CPU][FastPath]") {
+  Machine a, b;
+  a.decoder.setFastPathEnabled(true);
+  b.decoder.setFastPathEnabled(false);
+  // inc ax ; jmp short -3 (an endless loop)
+  for (Machine *m : {&a, &b})
+    m->load({0x40, 0xEB, 0xFD});
+  REQUIRE(a.decoder.run(1000) == 1000);
+  for (int i = 0; i < 1000; ++i) {
+    b.decoder.step();
+    b.cpu.addCycles(1);
+  }
+  REQUIRE(a.cpu.getReg16(cpu::AX) == 500);
+  REQUIRE(a.cpu.getReg16(cpu::AX) == b.cpu.getReg16(cpu::AX));
+  REQUIRE(a.cpu.getCycles() == b.cpu.getCycles());
+  REQUIRE(a.cpu.cycles() == b.cpu.cycles());
+  REQUIRE(a.cpu.getEIP() == b.cpu.getEIP());
 }

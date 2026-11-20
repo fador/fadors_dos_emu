@@ -157,6 +157,36 @@ public:
     return contiguousAccess(translate(a, true), size);
   }
 
+  // Instruction-fetch window for the CPU's predecoded fast path: a host
+  // pointer to the 16 bytes at linear address `a` when they lie in one
+  // 4 KiB page of plain RAM (not the VGA plane window, not past the end of
+  // RAM).  With paging the page is translated exactly like an instruction
+  // fetch (TLB, accessed bits); a not-present page yields nullptr and
+  // leaves no fault pending, so the ordinary fetch raises it.
+  const uint8_t *codeWindow(uint32_t a) const {
+    if ((a & 0xFFF) > 0xFF0)
+      return nullptr;
+    uint32_t e;
+    if (!m_paging) [[likely]] {
+      e = a & m_a20Mask;
+    } else {
+      const auto &t = m_tlb[(a >> 12) & (kTlbSize - 1)];
+      if (t.tag == (a >> 12)) [[likely]] {
+        e = t.frame | (a & 0xFFF);
+      } else {
+        const bool hadFault = m_pageFault;
+        e = walkPageTables(a, false);
+        if (m_pageFault && !hadFault) {
+          m_pageFault = false;
+          return nullptr;
+        }
+      }
+    }
+    if (e > MEMORY_SIZE - 16 || (e >= VGA_PLANAR_START && e < VGA_PLANAR_END))
+      return nullptr;
+    return &m_ram[e];
+  }
+
   // REP STOS fast path: fills `bytes` bytes at linear address `a` with the
   // repeating little-endian 4-byte `pattern` (host-SIMD kernel) when the
   // range is plain RAM: no VGA plane window, no write tracing and, with
