@@ -4,6 +4,7 @@
 #include "KeyboardController.hpp"
 #include "PIC8259.hpp"
 #include "PIT8254.hpp"
+#include "CMOSRTC.hpp"
 #include "VGAController.hpp"
 #include "VideoMode.hpp"
 #include <algorithm>
@@ -184,6 +185,10 @@ bool BIOS::handleInterrupt(uint8_t vector) {
     handleEMSService();
     return true;
   case 0x70: { // IRQ8 — CMOS RTC
+    // Like a real BIOS, read register C: until it is read the RTC keeps
+    // IRQF set and raises no further interrupts.
+    if (m_cmos)
+      m_cmos->acknowledgeInterrupt();
     sendEOI(0x70);
     return true;
   }

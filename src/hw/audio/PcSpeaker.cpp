@@ -9,12 +9,23 @@ constexpr double kPitHz = 1193181.8181818181;
 constexpr float kVolume = 0.25f;
 } // namespace
 
-PcSpeaker::PcSpeaker(float sampleRate)
-    : m_sampleRate(sampleRate), m_start(Clock::now()) {}
-
-double PcSpeaker::now() const {
-  return std::chrono::duration<double>(Clock::now() - m_start).count();
+PcSpeaker::PcSpeaker(float sampleRate) : m_sampleRate(sampleRate) {
+  const auto start = Clock::now();
+  m_nowNs = [start] {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() -
+                                                             start)
+            .count());
+  };
 }
+
+void PcSpeaker::setTimeSource(std::function<uint64_t()> nowNs) {
+  m_nowNs = std::move(nowNs);
+  m_events.clear();
+  m_renderTime = now();
+}
+
+double PcSpeaker::now() const { return static_cast<double>(m_nowNs()) * 1e-9; }
 
 void PcSpeaker::port61Written(uint8_t value) {
   Event e = m_events.empty() ? m_state : m_events.back();

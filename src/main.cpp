@@ -14,6 +14,7 @@
 #include "hw/DriveManager.hpp"
 #include "hw/DosShell.hpp"
 #include "hw/VGAController.hpp"
+#include "hw/VirtualClock.hpp"
 #include "hw/audio/AdLib.hpp"
 #include "hw/audio/AudioBackend.hpp"
 #include "hw/audio/MidiDevice.hpp"
@@ -238,9 +239,9 @@ const char *benchmarkName(BenchmarkKind kind) {
 
 // Scripted keyboard input for unattended runs (--keys=...).
 // Spec: comma separated "<seconds>:<KEY>" entries, e.g. "2:ENTER,5.5:ESC".
-// Each key is pressed at the given wall-clock time after start and
-// released 100 ms later, through the 8042 (port 60h + IRQ1) and the BIOS
-// type-ahead buffer.
+// Each key is pressed at the given time after start (wall-clock seconds,
+// or virtual seconds with --deterministic) and released 100 ms later,
+// through the 8042 (port 60h + IRQ1) and the BIOS type-ahead buffer.
 class ScriptedKeys {
 public:
   bool parse(const std::string &spec, std::string &error) {
@@ -270,9 +271,7 @@ public:
     return true;
   }
 
-  void service(std::chrono::steady_clock::duration sinceStart,
-               fador::hw::KeyboardController &kbd) {
-    double t = std::chrono::duration<double>(sinceStart).count();
+  void service(double t, fador::hw::KeyboardController &kbd) {
     for (auto &ev : m_events) {
       if (!ev.pressed && t >= ev.time) {
         ev.pressed = true;
@@ -355,82 +354,6 @@ private:
   std::vector<Event> m_events;
 };
 
-class InstructionThrottle {
-public:
-  explicit InstructionThrottle(uint64_t targetInstructionsPerSecond)
-      : m_targetInstructionsPerSecond(targetInstructionsPerSecond) {}
-
-  bool enabled() const { return m_targetInstructionsPerSecond != 0; }
-
-  void reset() {
-    if (!enabled()) {
-      return;
-    }
-    m_start = std::chrono::steady_clock::now();
-    m_started = true;
-  }
-
-  void pace(uint64_t retiredInstructions) {
-    if (!m_started || !enabled()) {
-      return;
-    }
-
-    using Seconds = std::chrono::duration<double>;
-    auto targetElapsed = Seconds(static_cast<double>(retiredInstructions) /
-                                 static_cast<double>(m_targetInstructionsPerSecond));
-    auto targetTime =
-        m_start + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                      targetElapsed);
-    auto now = std::chrono::steady_clock::now();
-    if (targetTime > now) {
-      std::this_thread::sleep_until(targetTime);
-    }
-  }
-
-private:
-  uint64_t m_targetInstructionsPerSecond{0};
-  std::chrono::steady_clock::time_point m_start{};
-  bool m_started{false};
-};
-
-struct ThrottleMachinePreset {
-  const char *name;
-  uint64_t instructionsPerSecond;
-};
-
-constexpr std::array<ThrottleMachinePreset, 5> kThrottleMachinePresets{{
-    {"8088", 330000},
-    {"286-12", 1200000},
-    {"386dx-33", 4000000},
-    {"486dx2-66", 8000000},
-    {"pentium-90", 20000000},
-}};
-
-uint64_t throttleMachineInstructionsPerSecond(const std::string &name) {
-  if (name == "xt" || name == "pc-xt")
-    return 330000;
-  if (name == "286" || name == "at" || name == "at-12")
-    return 1200000;
-  if (name == "386" || name == "386dx")
-    return 4000000;
-  if (name == "486" || name == "486dx2")
-    return 8000000;
-  if (name == "pentium" || name == "p90")
-    return 20000000;
-
-  for (const auto &preset : kThrottleMachinePresets) {
-    if (name == preset.name) {
-      return preset.instructionsPerSecond;
-    }
-  }
-
-  return 0;
-}
-
-const char *throttleMachinePresetList() {
-  return "8088, 286-12, 386dx-33, 486dx2-66, pentium-90";
-}
-
 std::optional<uint32_t> parseLinearHexAddress(const std::string &value) {
   try {
     size_t parsed = 0;
@@ -466,16 +389,23 @@ void printHelp(const char *programName) {
     "                            Defaults: BLASTER=A220 I5 D1 H5 P330 T6, CAUSEWAY=DPMI.\n"
     "  --headless                No window, terminal output or host input; for scripted\n"
     "                            runs.  Exit status 124 when --max-seconds expires.\n"
-    "  --max-seconds=S           Stop after S seconds of wall-clock time.\n"
+    "  --max-seconds=S           Stop after S seconds (wall clock; virtual time with\n"
+    "                            --deterministic).\n"
     "  --screenshot=FILE.png     Save the screen (text or graphics) as PNG at exit, or at\n"
-    "  --screenshot-at=S         S seconds after start.\n"
+    "  --screenshot-at=S         S seconds after start (virtual with --deterministic).\n"
     "  --audio-wav=FILE.wav      Record the sound output (AdLib, Sound Blaster, MIDI).\n"
     "  --keys=T:KEY,...          Type KEY at T seconds (letters, digits, ESC, ENTER, SPACE,\n"
-    "                            TAB, BKSP, arrows, F1-F10, LCTRL, LALT, LSHIFT, ...).\n"
+    "                            TAB, BKSP, arrows, F1-F10, LCTRL, LALT, LSHIFT, ...);\n"
+    "                            virtual seconds with --deterministic.\n"
     "  --sdl                     Force the SDL graphical frontend (requires SDL2 build).\n"
     "  --no-sdl                  Force headless/text-mode execution even in SDL builds.\n"
-    "  --throttle-ips=N          Pace guest execution to roughly N retired instructions/sec.\n"
-    "  --throttle-machine=name   Apply a named speed preset: %s.\n"
+    "  --throttle-ips=N          Run at a fixed N instructions per second of emulated time.\n"
+    "  --throttle-machine=name   Run at a fixed machine speed (MHz x cycles/instruction):\n"
+    "                            %s.\n"
+    "                            Default: as fast as the host allows, timers in real time.\n"
+    "  --deterministic           Emulated time depends only on the executed instructions\n"
+    "                            (486dx2-66 speed unless --throttle-* is given) and never on\n"
+    "                            the host clock: runs are reproducible and not paced.\n"
     "  --stop-after=N            Stop execution after N instruction cycles and dump state.\n"
     "  --stop-after-debugger     When --stop-after triggers, enter the interactive debugger.\n"
     "  --dump-on-exit            Dump CPU state when the program terminates.\n"
@@ -512,7 +442,7 @@ void printHelp(const char *programName) {
     "  %s --exec=\"MOV AX, 4C00h; INT 21h\"\n"
     "  %s --no-sdl --bench=decoder-loop --bench-steps=5000000\n",
     programName,
-    throttleMachinePresetList(),
+    fador::hw::machinePresetList().c_str(),
     programName, programName, programName, programName, programName, programName);
   // clang-format on
 }
@@ -558,6 +488,15 @@ int main(int argc, char *argv[]) {
     fador::hw::DMA8237 dma;
     fador::hw::CMOSRTC cmos;
     fador::cpu::CPU cpu;
+
+    // The single emulated time base.  Virtual time advances with the
+    // instructions the CPU retires (CPU::m_cycles counts one per
+    // instruction until the CPU model reports real cycles); every timed
+    // device reads it.  Pacing is chosen after the command line is parsed.
+    fador::hw::VirtualClock clock;
+    clock.attachInstructionCounter(&cpu.getCyclesRef());
+    pit.setTimeSource(clock.timeSource());
+    cmos.setTimeSource(clock.timeSource());
 
     // Connect VGA plane memory to the memory bus
     memory.setVGA(&vga);
@@ -625,6 +564,7 @@ int main(int argc, char *argv[]) {
 
     // Wire CMOS RTC to slave PIC for IRQ8 delivery
     cmos.setPIC(&picSlave);
+    bios.setCMOS(&cmos);
 
     // Wire up HIMEM (XMS) driver: BIOS handles detection (INT 2Fh) and dispatch
     // (INT E0h)
@@ -650,7 +590,14 @@ int main(int argc, char *argv[]) {
 
     sb.setFM(&adlib);
     fador::hw::audio::PcSpeaker pcSpeaker(44100.0f);
-    kbd.setPort61Callback([&pcSpeaker](uint8_t v) { pcSpeaker.port61Written(v); });
+    pcSpeaker.setTimeSource(clock.timeSource());
+    // Port 61h: bit 0 gates PIT channel 2, bit 1 enables the speaker; the
+    // refresh toggle (bit 4) and OUT2 (bit 5) come from the PIT.
+    kbd.setPort61Callback([&pcSpeaker, &pit](uint8_t v) {
+      pit.setGate(2, (v & 1) != 0);
+      pcSpeaker.port61Written(v);
+    });
+    kbd.setPort61StatusSource([&pit]() { return pit.port61Status(); });
     pit.setChannel2Callback([&pcSpeaker](uint16_t reload, uint8_t mode) {
       pcSpeaker.channel2Programmed(reload, mode);
     });
@@ -806,8 +753,9 @@ int main(int argc, char *argv[]) {
     uint64_t instructionTraceSkipSteps = 0;
     std::optional<uint32_t> instructionTraceFrom;
     uint64_t instructionTraceSkipHits = 0;
-    uint64_t throttleInstructionsPerSecond = 0; // 0 = disabled
+    std::optional<fador::hw::MachineSpeed> throttleMachine; // fixed speed
     std::string throttleLabel;
+    bool deterministic = false;     // --deterministic: virtual time only
     std::string execAsm;          // --exec="asm instructions"
     std::string benchmarkArg;
     BenchmarkKind benchmark = BenchmarkKind::None;
@@ -848,18 +796,25 @@ int main(int argc, char *argv[]) {
       } else if (arg == "--dump-on-exit") {
         dumpOnExit = true;
       } else if (arg.find("--throttle-ips=") == 0) {
-        throttleInstructionsPerSecond = std::stoull(arg.substr(15));
-        throttleLabel = arg.substr(15);
-      } else if (arg.find("--throttle-machine=") == 0) {
-        std::string presetName = arg.substr(19);
-        throttleInstructionsPerSecond =
-            throttleMachineInstructionsPerSecond(presetName);
-        if (throttleInstructionsPerSecond == 0) {
-          LOG_ERROR("Unknown throttle machine preset: ", presetName,
-                    ". Use one of ", throttleMachinePresetList());
+        const uint64_t ips = std::stoull(arg.substr(15));
+        if (ips == 0) {
+          LOG_ERROR("--throttle-ips needs a positive rate");
           return 1;
         }
-        throttleLabel = presetName;
+        throttleMachine =
+            fador::hw::MachineSpeed{"", static_cast<double>(ips) / 1e6, 1.0};
+        throttleLabel = arg.substr(15) + " instructions/s";
+      } else if (arg.find("--throttle-machine=") == 0) {
+        std::string presetName = arg.substr(19);
+        throttleMachine = fador::hw::findMachinePreset(presetName);
+        if (!throttleMachine) {
+          LOG_ERROR("Unknown throttle machine preset: ", presetName,
+                    ". Use one of ", fador::hw::machinePresetList());
+          return 1;
+        }
+        throttleLabel = std::string(throttleMachine->name);
+      } else if (arg == "--deterministic") {
+        deterministic = true;
       } else if (arg.find("--stop-after=") == 0) {
         stopAfterCycles = std::stoull(arg.substr(13));
       } else if (arg == "--stop-after-debugger") {
@@ -1007,6 +962,15 @@ int main(int argc, char *argv[]) {
     if (!headless)
       audio.init(44100, 2, 1024);
 
+    if (deterministic) {
+      clock.setMachine(
+          throttleMachine.value_or(fador::hw::defaultDeterministicMachine()));
+      clock.setPacing(fador::hw::VirtualClock::Pacing::Deterministic);
+    } else if (throttleMachine) {
+      clock.setMachine(*throttleMachine);
+      clock.setPacing(fador::hw::VirtualClock::Pacing::Fixed);
+    }
+
     // Apply CLI mounts
     for (auto& m : cliMounts) {
       const bool ok = m.cdrom ? driveManager.mountCdrom(m.letter, m.hostPath, m.label)
@@ -1151,16 +1115,16 @@ int main(int argc, char *argv[]) {
         return 1;
       }
       decoder.syncSegments();
-      if (throttleInstructionsPerSecond > 0) {
-        if (!throttleLabel.empty()) {
-          LOG_INFO("Execution throttle enabled: ", throttleLabel, " -> ",
-                   std::dec, throttleInstructionsPerSecond,
-                   " instructions/sec");
-        } else {
-          LOG_INFO("Execution throttle enabled at ", std::dec,
-                   throttleInstructionsPerSecond,
-                   " instructions/sec");
-        }
+      if (clock.pacing() != fador::hw::VirtualClock::Pacing::Auto) {
+        LOG_INFO("Emulated time: ",
+                 fador::hw::VirtualClock::pacingName(clock.pacing()), ", ",
+                 throttleLabel.empty() ? std::string("486dx2-66")
+                                       : throttleLabel,
+                 " (", clock.cpuHz() / 1e6, " MHz, ",
+                 clock.cyclesPerInstruction(), " cycles/instruction = ",
+                 std::dec,
+                 static_cast<uint64_t>(clock.instructionsPerSecond()),
+                 " instructions/s)");
       }
     } else if (path.empty() && (!benchmarkArg.empty() || !execAsm.empty())) {
       auto runExecLoop = [&](uint64_t steps) {
@@ -1353,31 +1317,39 @@ int main(int argc, char *argv[]) {
       renderFrame = [&](bool force) { renderer.render(force); };
     }
 
-    InstructionThrottle throttle(throttleInstructionsPerSecond);
-    throttle.reset();
     const auto runStart = std::chrono::steady_clock::now();
+    clock.start();
+    const uint64_t virtualStart = clock.nowNs();
+    // Seconds since start for --max-seconds, --keys and --screenshot-at:
+    // virtual time with --deterministic, the wall clock otherwise.
+    auto runSeconds = [&](std::chrono::steady_clock::time_point now) {
+      if (deterministic)
+        return static_cast<double>(clock.nowNs() - virtualStart) * 1e-9;
+      return std::chrono::duration<double>(now - runStart).count();
+    };
     auto lastRender = runStart;
-    auto lastAudio = runStart;
     std::vector<float> audioBuf;
     fador::hw::audio::WavWriter wav;
     if (!audioWavPath.empty() && !wav.open(audioWavPath, 44100, 2))
       LOG_WARN("Could not open ", audioWavPath, " for --audio-wav");
 
-    // Timers, keyboard, RTC and the Sound Blaster's DMA run on emulated
-    // (wall-clock) time and raise their IRQs here.
-    auto lastHardware = std::chrono::steady_clock::now();
+    // Timers, keyboard, RTC and the Sound Blaster's DMA run on virtual time
+    // and raise their IRQs here.  Cheap when nothing is due: the clock sync
+    // reads the host clock once (not at all with --deterministic) and the
+    // PIT/RTC compare against their next interrupt time.
+    uint64_t lastHardwareNs = clock.nowNs();
     auto serviceHardware = [&]() {
-      const auto hwNow = std::chrono::steady_clock::now();
-      const double hwDt =
-          std::chrono::duration<double>(hwNow - lastHardware).count();
-      lastHardware = hwNow;
-      sb.advance((std::min)(hwDt, 0.1));
-      pit.update();
+      clock.sync();
+      const uint64_t now = clock.nowNs();
+      sb.advance(static_cast<double>((std::min<uint64_t>)(
+                     now - lastHardwareNs, 100'000'000)) * 1e-9);
+      lastHardwareNs = now;
+      pit.advanceTo(now);
       while (pit.checkPendingIRQ0())
         pic.raiseIRQ(0);
       if (kbd.checkPendingIRQ())
         pic.raiseIRQ(1);
-      cmos.advanceTime();
+      cmos.advanceTo(now);
       while (cmos.checkPendingIRQ8())
         picSlave.raiseIRQ(0);
     };
@@ -1387,54 +1359,82 @@ int main(int argc, char *argv[]) {
         lastRender = now;
       }
     };
-    // Generate audio.  With a host audio device the queue depth paces
-    // generation; without one (headless or no SDL) samples are produced at
-    // the real-time rate and discarded, so Sound Blaster DMA and OPL timers
-    // still advance at the correct speed without wasting host CPU.
-    auto serviceAudio = [&](std::chrono::steady_clock::time_point now) {
-      size_t samplesNeeded = 0;
-      if (audio.isActive()) {
-        constexpr uint32_t targetQueueBytes = 32768; // 4096 samples
-        constexpr uint32_t thresholdBytes = 16384;   // 2048 samples
-        uint32_t queued = audio.getQueuedAudioSize();
-        if (queued < thresholdBytes)
-          samplesNeeded = (targetQueueBytes - queued) / 8; // 2ch * float
-      } else {
-        auto elapsed = std::chrono::duration<double>(now - lastAudio).count();
-        if (elapsed < 0.005)
-          return;
-        samplesNeeded = static_cast<size_t>(elapsed * 44100.0);
-        if (samplesNeeded > 4096)
-          samplesNeeded = 4096;
-      }
-      lastAudio = now;
-      if (samplesNeeded == 0)
+    // Generate audio for the virtual time that has passed (44100 frames
+    // per virtual second), so the OPL timers, the Sound Blaster and the
+    // recording follow emulated time.  The host queue only steers: in auto
+    // pacing a queue that runs low or high nudges the virtual clock, an
+    // underrun is padded with silence and an overflow (a guest running
+    // faster than real time) is dropped.
+    constexpr uint64_t kSampleRate = 44100;
+    constexpr uint32_t kFrameBytes = 2 * sizeof(float);
+    constexpr uint64_t kTargetQueueFrames = 3072; // ~70 ms of latency
+    auto framesAt = [](uint64_t ns) {
+      return ns / 1'000'000'000 * kSampleRate +
+             (ns % 1'000'000'000) * kSampleRate / 1'000'000'000;
+    };
+    uint64_t audioFramesDone = framesAt(clock.nowNs());
+    auto serviceAudio = [&]() {
+      const uint64_t due = framesAt(clock.nowNs());
+      if (due < audioFramesDone + 128) // generate in chunks of >= ~3 ms
         return;
-      audioBuf.assign(samplesNeeded * 2, 0.0f);
-      adlib.generateSamples(audioBuf.data(), samplesNeeded);
-      sb.generateSamples(audioBuf.data(), samplesNeeded);
-      pcSpeaker.generateSamples(audioBuf.data(), samplesNeeded);
-      if (audio.isActive())
-        audio.queueSamples(audioBuf.data(), samplesNeeded * 2);
+      constexpr uint64_t kMaxChunk = kSampleRate / 4;
+      if (due - audioFramesDone > kMaxChunk)
+        audioFramesDone = due - kMaxChunk; // after a stall: skip ahead
+      const auto frames = static_cast<size_t>(due - audioFramesDone);
+      audioFramesDone = due;
+      audioBuf.assign(frames * 2, 0.0f);
+      adlib.generateSamples(audioBuf.data(), frames);
+      sb.generateSamples(audioBuf.data(), frames);
+      pcSpeaker.generateSamples(audioBuf.data(), frames);
+      adlib.updateTimers(static_cast<double>(frames) / kSampleRate);
       if (wav.isOpen())
-        wav.write(audioBuf.data(), samplesNeeded * 2);
-      adlib.updateTimers(static_cast<double>(samplesNeeded) / 44100.0);
+        wav.write(audioBuf.data(), frames * 2);
+      if (!audio.isActive())
+        return;
+      const uint64_t queued = audio.getQueuedAudioSize() / kFrameBytes;
+      if (queued < kTargetQueueFrames / 4) {
+        // Underrun (start-up or a host stall): restore the latency cushion.
+        std::vector<float> silence((kTargetQueueFrames - queued) * 2, 0.0f);
+        audio.queueSamples(silence.data(), silence.size());
+      } else if (queued > 4 * kTargetQueueFrames) {
+        return; // the guest is ahead of the audio device: drop
+      }
+      audio.queueSamples(audioBuf.data(), frames * 2);
+      if (clock.pacing() == fador::hw::VirtualClock::Pacing::Auto) {
+        // Keep the queue near its target by running the virtual clock a
+        // little slower or faster than the host clock (at most ~1%).
+        const int64_t error = static_cast<int64_t>(queued) -
+                              static_cast<int64_t>(kTargetQueueFrames);
+        const int64_t step = static_cast<int64_t>(frames) * 1'000'000'000 /
+                             static_cast<int64_t>(kSampleRate) / 100;
+        if (error > static_cast<int64_t>(kTargetQueueFrames / 2))
+          clock.adjustSkew(-step);
+        else if (error < -static_cast<int64_t>(kTargetQueueFrames / 2))
+          clock.adjustSkew(step);
+      }
     };
 
     bios.setInputPollCallback(pollHostInput);
-    bios.setIdleCallback([&]() {
+    // A guest waiting in BIOS/DOS input retires one instruction per retry
+    // (the host sleeps 1 ms each time), so the instruction-count based
+    // periodic services would only run every ~16 s: run them from here too.
+    std::function<void()> servicePeriodicWhileIdle = [] {};
+    unsigned idleCalls = 0;
+    auto guestIdle = [&]() {
       cpu.addCycles(8);
+      clock.idle();
       serviceHardware();
       dispatchPendingHardwareInterrupt();
+      if ((++idleCalls & 7) == 0)
+        servicePeriodicWhileIdle();
+    };
+    bios.setIdleCallback([&]() {
+      guestIdle();
       maybeRender(std::chrono::steady_clock::now());
     });
     dos.setKeyboard(kbd);
     dos.setInputPollCallback(pollHostInput);
-    dos.setIdleCallback([&]() {
-      cpu.addCycles(8);
-      serviceHardware();
-      dispatchPendingHardwareInterrupt();
-    });
+    dos.setIdleCallback(guestIdle);
 
     cpu.setEFLAGS(cpu.getEFLAGS() | fador::cpu::FLAG_INTERRUPT);
 
@@ -1450,9 +1450,10 @@ int main(int argc, char *argv[]) {
     // Host services that also run while the shell waits for input.
     auto servicePeriodic = [&](std::chrono::steady_clock::time_point now) {
       pollHostInput();
-      scriptedKeys.service(now - runStart, kbd);
+      const double elapsed = runSeconds(now);
+      scriptedKeys.service(elapsed, kbd);
       if (screenshotAt >= 0 && !screenshotPath.empty() &&
-          now - runStart >= std::chrono::duration<double>(screenshotAt)) {
+          elapsed >= screenshotAt) {
         fador::ui::FrameRenderer frame(memory, vga);
         frame.setBIOS(&bios);
         if (frame.render(false) && frame.savePNG(screenshotPath))
@@ -1462,19 +1463,21 @@ int main(int argc, char *argv[]) {
         screenshotAt = -1.0;
         screenshotPath.clear(); // do not overwrite it at exit
       }
-      serviceAudio(now);
+      serviceAudio();
       maybeRender(now);
       if (quitRequested()) {
         LOG_INFO("Window closed by user after ", instrCount, " instructions");
         running = false;
       }
-      if (maxSeconds > 0 &&
-          now - runStart > std::chrono::duration<double>(maxSeconds)) {
+      if (maxSeconds > 0 && elapsed > maxSeconds) {
         LOG_INFO("Time limit of ", maxSeconds, " s reached after ",
                  instrCount, " instructions");
         exitStatus = 124;
         running = false;
       }
+    };
+    servicePeriodicWhileIdle = [&]() {
+      servicePeriodic(std::chrono::steady_clock::now());
     };
     // Runs the loaded program until it terminates (true) or the emulator
     // has to stop (false).
@@ -1534,7 +1537,6 @@ int main(int argc, char *argv[]) {
 
       if ((instrCount & 0x3FFF) < kBatch) {
         servicePeriodic(std::chrono::steady_clock::now());
-        throttle.pace(instrCount);
       }
     }
     return false;
@@ -1548,8 +1550,11 @@ int main(int argc, char *argv[]) {
       shell.setInputPollCallback(pollHostInput);
       // At the prompt no guest code runs, so no interrupts are delivered
       // (an IRQ dispatched now would stay in service, unacknowledged).
-      shell.setIdleCallback(
-          [&]() { servicePeriodic(std::chrono::steady_clock::now()); });
+      shell.setIdleCallback([&]() {
+        clock.idle(); // time passes at the prompt (scripted keys, RTC)
+        clock.sync();
+        servicePeriodic(std::chrono::steady_clock::now());
+      });
       shell.setStopCheck([&]() { return !running; });
       shell.setProgramRunner(runGuest);
       if (!startupBatCommand.empty()) {
@@ -1570,6 +1575,11 @@ int main(int argc, char *argv[]) {
       LOG_INFO("Executed ", instrCount, " instructions in ", elapsed,
                " s (", elapsed > 0 ? instrCount / elapsed / 1e6 : 0.0,
                " MIPS)");
+      LOG_INFO("Emulated time ",
+               static_cast<double>(clock.nowNs() - virtualStart) * 1e-9,
+               " s (", fador::hw::VirtualClock::pacingName(clock.pacing()),
+               " pacing, ", std::dec, memory.read32(0x46C),
+               " BIOS timer ticks)");
     }
 
     if (wav.isOpen()) {

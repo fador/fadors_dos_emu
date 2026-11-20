@@ -14,6 +14,7 @@ namespace fador::hw {
 class KeyboardController;
 class PIC8259;
 class PIT8254;
+class CMOSRTC;
 class VGAController;
 
 class BIOS {
@@ -34,6 +35,8 @@ public:
 
     // Set slave PIC (for IRQ8-15 EOI through port A0h)
     void setSlavePIC(PIC8259* slave) { m_slavePic = slave; }
+    // RTC whose register C the IRQ 8 handler reads (re-arms the interrupt).
+    void setCMOS(CMOSRTC* cmos) { m_cmos = cmos; }
 
     // Ctrl+Alt+Del reset flag
     bool shouldReset() const { return m_resetRequested; }
@@ -132,6 +135,7 @@ private:
     PIT8254& m_pit;
     PIC8259& m_pic;
     PIC8259* m_slavePic = nullptr;
+    CMOSRTC* m_cmos = nullptr;
     bool m_resetRequested = false;
 
 

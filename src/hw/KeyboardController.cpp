@@ -32,8 +32,10 @@ uint8_t KeyboardController::read8(uint16_t port) {
   } else if (port == 0x64) { // Status Port
     return m_status;
   } else if (port == 0x61) { // PPI Port B
-    // Bit 4 toggles on every few reads to simulate DRAM refresh timing (~15us)
-    // Games often use this bit for high-resolution delay loops.
+    // Bits 0-3 read back as written; bit 4 is the DRAM refresh toggle
+    // (~15 us, used by delay loops) and bit 5 is PIT channel 2's OUT.
+    if (m_port61Status)
+      return static_cast<uint8_t>((m_port61 & 0x0F) | (m_port61Status() & 0x30));
     m_refreshCounter++;
     if ((m_refreshCounter & 0x01) == 0) {
       m_port61 ^= 0x10;
