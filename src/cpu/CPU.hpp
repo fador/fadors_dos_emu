@@ -103,6 +103,7 @@ public:
   // Guest clock: approximate core clock cycles executed so far, weighted by
   // the model's per-instruction costs.  Monotonic; never reset.
   uint64_t cycles() const { return m_guestCycles; }
+  const uint64_t &cyclesRef() const { return m_guestCycles; } // VirtualClock
   void addGuestCycles(uint32_t c) { m_guestCycles += c; }
   // Per-opcode cost table (see CpuModel.hpp); decoders keep a copy and
   // refresh it when the segment-state version changes.
@@ -110,9 +111,14 @@ public:
   uint32_t memOperandCycles() const { return m_memOperandCycles; }
   uint32_t mulExtraCycles() const { return m_mulExtraCycles; }
   uint32_t divExtraCycles() const { return m_divExtraCycles; }
-  // Time-stamp counter (RDTSC, MSR 0x10): cycles() plus a WRMSR offset.
-  uint64_t readTSC() const { return m_guestCycles + m_tscOffset; }
-  void writeTSC(uint64_t value) { m_tscOffset = value - m_guestCycles; }
+  // Time-stamp counter (RDTSC, MSR 0x10): the time-stamp source (default:
+  // cycles()) plus a WRMSR offset.  Reads are strictly increasing until
+  // the next write.
+  uint64_t readTSC();
+  void writeTSC(uint64_t value);
+  // The emulator derives the TSC from emulated time (CPU clock periods of
+  // emulated ns); keeps the current TSC value continuous.
+  void setTimeStampSource(std::function<uint64_t()> source);
 
   // Register accessors are defined inline: they are on every instruction's
   // hot path.
@@ -529,6 +535,16 @@ public:
     if (m_fpuErrorCallback)
       m_fpuErrorCallback();
   }
+  // HLT: called after the instruction has executed (EIP points past it).
+  // The host waits for and delivers the next interrupt; without a callback
+  // HLT falls through to the next instruction.
+  void setHaltCallback(std::function<void()> callback) {
+    m_haltCallback = std::move(callback);
+  }
+  void halt() {
+    if (m_haltCallback)
+      m_haltCallback();
+  }
   bool fpuErrorSignalled() const { return m_fpu.ferrSignalled(); }
   void setFPUErrorSignalled(bool v) { m_fpu.setFerrSignalled(v); }
 
@@ -565,6 +581,7 @@ private:
   uint16_t m_trSelector{0};
   x87::FPU m_fpu;
   std::function<void()> m_fpuErrorCallback;
+  std::function<void()> m_haltCallback;
 
   std::vector<HLEFrame> m_hleStack;
 
@@ -574,6 +591,9 @@ private:
   uint32_t m_mulExtraCycles{0};
   uint32_t m_divExtraCycles{0};
   uint64_t m_tscOffset{0};
+  uint64_t m_lastTsc{0};
+  bool m_tscRead{false};
+  std::function<uint64_t()> m_tscSource;
   CycleTable m_cycleTable{};
 };
 
