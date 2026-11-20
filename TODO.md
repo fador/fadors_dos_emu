@@ -123,7 +123,10 @@
   - [x] Optional via `--sdl` / `--no-sdl` flags
 - [x] Instruction throttle system (`--throttle-ips=N`, `--throttle-machine=name`)
 - [x] `--deterministic`: reproducible headless runs on emulated time
-- [ ] GUI renderer pixel-perfect VGA/CGA graphics mode rendering
+- [x] GUI renderer pixel-perfect VGA/CGA graphics mode rendering
+  - [x] Geometry, addressing, split screen, pel panning, palettes and text attributes derived from the VGA registers (`FrameRenderer::decodeLayout`)
+  - [x] Text fonts from plane 2 (INT 10h AH=11h, direct plane writes, character map select), 9-dot line graphics, CRTC cursor and blinking
+  - [ ] Hercules graphics, per-scanline register changes (raster effects within a frame)
 
 ## Phase 7: Audio Subsystem
 - [x] **Native Audio Backend**
@@ -231,7 +234,9 @@
 - [ ] Fallback/logging for unhandled INTs (warn with vector/reg state)
 - [ ] Stubs for common but unimplemented INTs to avoid program crashes
 - [x] Automated test coverage for INT HLEs
-- [ ] GUI renderer pixel-perfect VGA/CGA hardware-accelerated graphics
+- [x] GUI renderer pixel-perfect VGA/CGA graphics (register-driven rendering, SDL texture scaling)
+- [ ] INT 10h text output (AH=09h/0Ah/0Eh/13h) in graphics modes and to B000h in mode 7
+- [ ] VGA vertical retrace interrupt (IRQ2, CRTC 11h bits 4-5)
 - [ ] CD-ROM / ISO image support (MSCDEX / INT 2Fh/1500h)
 - [ ] Serial port (INT 14h) actual emulation
 - [ ] Parallel port (INT 17h) actual emulation

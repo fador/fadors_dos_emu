@@ -213,6 +213,7 @@ public:
   // Connect VGA controller for plane-aware VRAM access
   void setVGA(hw::VGAController *vga) { m_vga = vga; }
   const hw::VGAController *getVGA() const { return m_vga; }
+  hw::VGAController *getVGA() { return m_vga; }
 
   // Clear all VGA plane memory (used on video mode change)
   void clearVGA();

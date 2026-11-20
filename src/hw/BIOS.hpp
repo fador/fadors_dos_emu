@@ -169,8 +169,35 @@ private:
     void handleEMSService();        // INT 67h
     void handleXMSDispatch();       // INT E0h (XMS far-call entry)
 
-    // Program VGA sequencer/GC registers to match the requested video mode
+    // ── VGA BIOS (BIOSVga.cpp) ──────────────────────────────────────
+    // Text-mode vertical resolution selected by INT 10h AX=12xxh BL=30h
+    enum class TextScanLines : uint8_t { Lines200, Lines350, Lines400 };
+    // Load the IBM VGA parameter table for a standard mode (00h-13h)
+    // into the sequencer, CRTC, graphics and attribute controllers.
     void programVGARegisters(uint8_t mode);
+    void setVgaMode(uint8_t mode, bool clearScreen); // INT 10h AH=00h
+    void loadDefaultDac(uint8_t mode);
+    void initializeVgaRom();          // ROM fonts at C000h
+    void loadRomFontToPlane(uint8_t points, uint8_t block);
+    void loadUserFontToPlane(uint32_t src, uint16_t count, uint16_t first,
+                             uint8_t block, uint8_t points);
+    void recalcTextRows(uint8_t points); // after an AX=111xh font load
+    void setCursorShape(uint8_t start, uint8_t end); // INT 10h AH=01h
+    void setActivePage(uint8_t page);                 // INT 10h AH=05h
+    void setCgaPalette(uint8_t bh, uint8_t bl);       // INT 10h AH=0Bh
+    void handlePaletteService();    // INT 10h AH=10h
+    void handleFontService();       // INT 10h AH=11h
+    void handleAltSelectService();  // INT 10h AH=12h
+    uint8_t currentCharHeight() const;
+    TextScanLines textScanLines() const;
+
+    // ROM font locations (segment VGA_ROM_SEG)
+    static constexpr uint16_t VGA_ROM_SEG = 0xC000;
+    static constexpr uint16_t ROM_FONT_8X8 = 0x1000;   // 256 chars (+0x400: upper half)
+    static constexpr uint16_t ROM_FONT_8X14 = 0x1800;  // 256 * 14
+    static constexpr uint16_t ROM_FONT_ALT9X14 = 0x2600; // empty alternate table
+    static constexpr uint16_t ROM_FONT_ALT9X16 = 0x2610;
+    static constexpr uint16_t ROM_FONT_8X16 = 0x3000;  // 256 * 16
 
     VGAController* m_vga = nullptr;
 

@@ -519,6 +519,7 @@ int main(int argc, char *argv[]) {
     clock.attachInstructionCounter(&cpu.getCyclesRef());
     pit.setTimeSource(clock.timeSource());
     cmos.setTimeSource(clock.timeSource());
+    vga.setTimeSource(clock.timeSource()); // 3DAh retrace, cursor and text blink
 
     // Connect VGA plane memory to the memory bus
     memory.setVGA(&vga);
@@ -546,6 +547,8 @@ int main(int argc, char *argv[]) {
     iobus.registerDevice(0x61, 0x61, &kbd); // PPI port B: speaker, refresh
     iobus.registerDevice(0x64, 0x64, &kbd);
     iobus.registerDevice(0x201, 0x201, &joystick);
+    iobus.registerDevice(0x3B4, 0x3B5, &vga); // CRTC (monochrome addressing)
+    iobus.registerDevice(0x3BA, 0x3BA, &vga); // input status 1 / feature control
     iobus.registerDevice(0x3C0, 0x3CF, &vga);
     iobus.registerDevice(0x3D0, 0x3DF, &vga);
     iobus.registerDevice(0x00, 0x0F, &dma);

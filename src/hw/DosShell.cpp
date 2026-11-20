@@ -5,6 +5,7 @@
 #include "DriveManager.hpp"
 #include "KeyboardController.hpp"
 #include "ProgramLoader.hpp"
+#include "VGAController.hpp"
 #include "../cpu/CPU.hpp"
 #include "../cpu/InstructionDecoder.hpp"
 #include "../memory/MemoryBus.hpp"
@@ -1007,6 +1008,7 @@ int DosShell::cmdCls(const ParsedCommand&)
     }
     m_memory.write8(0x450, 0);
     m_memory.write8(0x451, 0);
+    syncCursorFromBDA(m_memory);
     return 0;
 }
 

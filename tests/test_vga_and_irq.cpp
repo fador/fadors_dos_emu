@@ -30,18 +30,19 @@ TEST_CASE("VGA: Chain-4 write distributes to correct plane", "[VGA]") {
     REQUIRE(vga.isChain4() == true);
 
     SECTION("Chain-4 address bits [1:0] select plane") {
-        // In Chain-4, byte at offset N goes to plane (N & 3), planeOffset (N >> 2)
+        // In Chain-4, byte at offset N goes to plane (N & 3), planeOffset (N & ~3)
         vga.planeWrite8(0, 0xAA);   // plane 0, offset 0
         vga.planeWrite8(1, 0xBB);   // plane 1, offset 0
         vga.planeWrite8(2, 0xCC);   // plane 2, offset 0
         vga.planeWrite8(3, 0xDD);   // plane 3, offset 0
-        vga.planeWrite8(4, 0x11);   // plane 0, offset 1
+        vga.planeWrite8(4, 0x11);   // plane 0, offset 4
 
         REQUIRE(vga.readPlane(0, 0) == 0xAA);
         REQUIRE(vga.readPlane(1, 0) == 0xBB);
         REQUIRE(vga.readPlane(2, 0) == 0xCC);
         REQUIRE(vga.readPlane(3, 0) == 0xDD);
-        REQUIRE(vga.readPlane(0, 1) == 0x11);
+        REQUIRE(vga.readPlane(0, 4) == 0x11);
+        REQUIRE(vga.readPlane(0, 1) == 0x00); // only every 4th byte is used
     }
 
     SECTION("Chain-4 read returns correct plane byte") {
@@ -1470,7 +1471,8 @@ TEST_CASE("VGA: Chain-4 full roundtrip write via MemoryBus, read via readPlane",
     mem.setVGA(&vga);
 
     // Simulate what a DOS program does: write 320x200 bytes to 0xA0000
-    // Then verify the renderer can read them back via readPlane(offset & 3, offset >> 2)
+    // Then verify the renderer can read them back: chain-4 stores CPU
+    // address A in plane A&3 at plane offset A&~3 (IBM VGA layout).
     constexpr int w = 320, h = 3; // Test 3 rows for speed
 
     // Write a simple pattern: each pixel gets (y*32 + x) % 256
@@ -1481,13 +1483,13 @@ TEST_CASE("VGA: Chain-4 full roundtrip write via MemoryBus, read via readPlane",
         }
     }
 
-    // Read back the way the SDLRenderer does for chain-4:
-    //   readPlane(offset & 3, offset >> 2) where offset = y*w + x
+    // Read back the way the CRTC does in doubleword mode:
+    //   readPlane(offset & 3, offset & ~3) where offset = y*w + x
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
             uint32_t offset = y * w + x;
             uint8_t expected = static_cast<uint8_t>((y * 32 + x) & 0xFF);
-            uint8_t actual = vga.readPlane(offset & 3, offset >> 2);
+            uint8_t actual = vga.readPlane(offset & 3, offset & ~3u);
             if (actual != expected) {
                 // Fail with context
                 REQUIRE(actual == expected);
