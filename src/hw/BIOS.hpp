@@ -11,6 +11,7 @@ namespace fador::memory { class HIMEM; }
 
 namespace fador::hw {
 
+class IOBus;
 class KeyboardController;
 class PIC8259;
 class PIT8254;
@@ -42,6 +43,21 @@ public:
     bool shouldReset() const { return m_resetRequested; }
     void clearReset() { m_resetRequested = false; }
 
+    // ── Serial / parallel ports (BIOSPorts.cpp) ─────────────────────
+    // INT 14h / 17h program the UARTs and printer ports through the I/O
+    // bus at the addresses in the BDA, like the ROM BIOS.
+    void setIOBus(IOBus* bus) { m_iobus = bus; }
+    // Emulated time (ns) for the INT 14h / 17h time-outs.
+    void setPortTimeSource(std::function<uint64_t()> nowNs) { m_portTimeSource = std::move(nowNs); }
+    // I/O addresses of COM1-COM4 and LPT1-LPT3 (0 = not installed): written
+    // to the BDA (40:00, 40:08) and the equipment word (40:10) now and by
+    // initialize().
+    void setPortAddresses(const std::array<uint16_t, 4>& com,
+                          const std::array<uint16_t, 3>& lpt);
+    // One BDA time-out unit (40:78 / 40:7C) of INT 14h / 17h waits: the
+    // ROM's 65536 status polls took roughly this long on an AT.
+    static constexpr uint64_t PORT_TIMEOUT_UNIT_NS = 250'000'000;
+
     // Set a callback that polls host input; called by INT 16h when blocking.
     void setInputPollCallback(std::function<void()> cb) { m_pollInput = std::move(cb); }
     void setIdleCallback(std::function<void()> cb) { m_idleCallback = std::move(cb); }
@@ -57,6 +73,7 @@ public:
         int16_t lastPressX[3] = {}, lastPressY[3] = {};
         int16_t lastReleaseX[3] = {}, lastReleaseY[3] = {};
         int16_t mickeysX = 0, mickeysY = 0; // Accumulated motion counters (mickeys)
+        int32_t hostMotionX = 0, hostMotionY = 0; // Raw host motion, never reset (serial mouse)
         int16_t minX = 0, maxX = 639;       // Horizontal bounds (set via AH=07h)
         int16_t minY = 0, maxY = 199;       // Vertical bounds (set via AH=08h)
     };
@@ -163,6 +180,24 @@ private:
     void handleKeyboardService();   // INT 16h
     static uint8_t scancodeToAscii(uint8_t scancode, uint8_t shiftFlags);
     void handleMouseService();      // INT 33h
+    void handleSerialService();     // INT 14h
+    void handlePrinterService();    // INT 17h
+    void writePortTables();         // BDA port addresses / equipment word
+    // Waits (by restarting the INT through the idle callback) until
+    // ready() or the BDA time-out expires: 1 ready, 0 time-out, -1 retry.
+    int waitForPort(uint8_t vector, uint8_t timeoutUnits,
+                    const std::function<bool()>& ready);
+    IOBus* m_iobus = nullptr;
+    std::function<uint64_t()> m_portTimeSource;
+    std::array<uint16_t, 4> m_comPorts{};
+    std::array<uint16_t, 3> m_lptPorts{};
+    struct PortWait {
+        bool active = false;
+        uint8_t vector = 0;
+        uint16_t cs = 0;
+        uint32_t eip = 0;
+        uint64_t deadlineNs = 0;
+    } m_portWait;
     void handleTimeService();       // INT 1Ah
     void handleDiskService();       // INT 13h
     void handleSystemService();     // INT 15h

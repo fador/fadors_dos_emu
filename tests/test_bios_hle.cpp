@@ -12,7 +12,7 @@ struct DummyKbd : hw::KeyboardController { DummyKbd() : KeyboardController() {} 
 struct DummyPit : hw::PIT8254 { DummyPit() : PIT8254() {} };
 struct DummyPic : hw::PIC8259 { DummyPic() : PIC8259(true) {} };
 
-TEST_CASE("BIOS HLE INT 11h/12h/14h/15h/17h/2Fh/1Bh-1Fh stubs work", "[bios][hle]") {
+TEST_CASE("BIOS HLE INT 11h/12h/14h/15h/17h/2Fh/1Bh-1Fh basics", "[bios][hle]") {
     memory::MemoryBus mem;
     cpu::CPU cpu;
     DummyKbd kbd;
@@ -22,18 +22,35 @@ TEST_CASE("BIOS HLE INT 11h/12h/14h/15h/17h/2Fh/1Bh-1Fh stubs work", "[bios][hle
 
     cpu.setReg8(cpu::AH, 0); cpu.setReg8(cpu::AL, 0); cpu.setReg16(cpu::AX, 0);
 
-    SECTION("INT 11h returns plausible equipment list") {
+    SECTION("INT 11h returns the equipment word") {
+        bios.initialize();
         REQUIRE(bios.handleInterrupt(0x11));
-        REQUIRE(cpu.getReg16(cpu::AX) == 0x002F);
+        REQUIRE(cpu.getReg16(cpu::AX) == 0x002F); // no serial / parallel ports
+        bios.setPortAddresses({0x3F8, 0x2F8, 0, 0}, {0x378, 0, 0});
+        REQUIRE(bios.handleInterrupt(0x11));
+        REQUIRE(cpu.getReg16(cpu::AX) == (0x002F | (2 << 9) | (1 << 14)));
+        REQUIRE(mem.read16(0x400) == 0x3F8);
+        REQUIRE(mem.read16(0x402) == 0x2F8);
+        REQUIRE(mem.read16(0x404) == 0);
+        REQUIRE(mem.read16(0x408) == 0x378);
+        // Ports are listed without gaps: COM2 alone becomes the first entry.
+        bios.setPortAddresses({0, 0x2F8, 0, 0}, {0, 0, 0});
+        REQUIRE(mem.read16(0x400) == 0x2F8);
+        REQUIRE(mem.read16(0x402) == 0);
+        REQUIRE(mem.read16(0x408) == 0);
+        REQUIRE(mem.read16(0x410) == (0x002F | (1 << 9)));
+        REQUIRE(mem.read8(0x47C) == 1);  // COM time-outs
+        REQUIRE(mem.read8(0x478) == 20); // printer time-outs
     }
     SECTION("INT 12h returns 640KB memory") {
         REQUIRE(bios.handleInterrupt(0x12));
         REQUIRE(cpu.getReg16(cpu::AX) == 640);
     }
-    SECTION("INT 14h returns no error") {
-        cpu.setReg8(cpu::AH, 0xFF);
+    SECTION("INT 14h without a port leaves the registers unchanged") {
+        cpu.setReg16(cpu::AX, 0x0341);
+        cpu.setReg16(cpu::DX, 0);
         REQUIRE(bios.handleInterrupt(0x14));
-        REQUIRE((cpu.getReg8(cpu::AH) == 0 && !(cpu.getEFLAGS() & cpu::FLAG_CARRY)));
+        REQUIRE(cpu.getReg16(cpu::AX) == 0x0341);
     }
     SECTION("INT 15h returns not supported") {
         cpu.setReg8(cpu::AH, 0);
@@ -41,10 +58,11 @@ TEST_CASE("BIOS HLE INT 11h/12h/14h/15h/17h/2Fh/1Bh-1Fh stubs work", "[bios][hle
         REQUIRE(cpu.getReg8(cpu::AH) == 0x86);
         REQUIRE(cpu.getEFLAGS() & cpu::FLAG_CARRY);
     }
-    SECTION("INT 17h returns no error") {
-        cpu.setReg8(cpu::AH, 0xFF);
+    SECTION("INT 17h without a port leaves the registers unchanged") {
+        cpu.setReg16(cpu::AX, 0x0241);
+        cpu.setReg16(cpu::DX, 0);
         REQUIRE(bios.handleInterrupt(0x17));
-        REQUIRE((cpu.getReg8(cpu::AH) == 0 && !(cpu.getEFLAGS() & cpu::FLAG_CARRY)));
+        REQUIRE(cpu.getReg16(cpu::AX) == 0x0241);
     }
     SECTION("INT 2Fh returns not present") {
         cpu.setReg8(cpu::AL, 0xFF);
