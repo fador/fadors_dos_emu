@@ -12,7 +12,7 @@ Fador's DOS Emulator is a multiplatform MS-DOS emulator written in modern C++20.
 - **Memory Model:** 128 MB of physical memory: conventional memory managed through a DOS-compatible MCB chain, an XMS/DPMI pool from 1 MB to 112 MB, 8 MB of SVGA video memory at `0x07000000` (the VBE linear frame buffer), and host tables (DPMI LDT/IDT/GDT) above it so programs can never allocate over them.
 - **Expanded and Extended Memory:** EMS services via `INT 67h` with an `EMMXXXX0` device, page-frame mappings, and private API stubs, plus optional HIMEM/XMS 3.0 support (32-bit sizes beyond 64 MB) wired through `INT 2Fh` and far-call dispatch stubs.
 - **BIOS & DOS APIs:** Support for core BIOS and DOS interrupts including `INT 10h`, `INT 13h`, `INT 15h`, `INT 16h`, `INT 1Ah`, `INT 21h`, `INT 2Fh`, `INT 31h`, `INT 33h`, and `INT 67h`. Refer to the `docs/` folder (Ralph Brown's interrupt list) for specifications.
-- **Hardware Devices:** PIC 8259, PIT 8254, DMA 8237, keyboard controller, joystick, VGA (text, CGA, EGA/VGA planar, mode 13h and Mode X), AdLib (OPL2), Sound Blaster DSP, and MPU-401 MIDI interface emulation.
+- **Hardware Devices:** PIC 8259, PIT 8254 (all six counter modes, gates, latch and read-back commands, BCD), MC146818 RTC/CMOS (periodic, alarm and update interrupts), DMA 8237, keyboard controller, joystick, VGA (text, CGA, EGA/VGA planar, mode 13h and Mode X), AdLib (OPL2), Sound Blaster DSP, and MPU-401 MIDI interface emulation.
 - **SVGA / VESA:** VBE 2.0 (`INT 10h` AX=4F00h-4F0Ah) with 8/15/16/32-bit modes from 320x200 to 1024x768, a banked A000h window, a linear frame buffer, and the protected-mode interface.
 - **Audio:** AdLib OPL2 (YM3812) FM synthesis with 9 channels, 2 operators per channel, ADSR envelopes, and waveform selection. Sound Blaster DSP emulation for 8/16-bit mono/stereo DMA playback (single-cycle, auto-init, high-speed). MPU-401 MIDI UART at port 0x330–0x331 with an OPL2-based General MIDI synthesizer supporting 128 instruments across 16 MIDI channels with velocity, pitch bend, sustain, and 9-voice polyphonic note allocation.
 - **Program Loading and Overlays:** `.COM` and MZ `.EXE` loading with relocation support, PSP/environment block creation, MCB-backed program memory, embedded 32-bit payload launching, and VROOMM/FBOV overlay loading for segmented applications.
@@ -20,6 +20,7 @@ Fador's DOS Emulator is a multiplatform MS-DOS emulator written in modern C++20.
 - **Built-in Assembler:** x86 real-mode assembler (`src/cpu/Assembler.{hpp,cpp}`) used by the interactive debugger and `--exec` CLI mode. Supports ALU ops, MOV, shifts, jumps, Jcc, CALL/RET, PUSH/POP, INC/DEC, NOT/NEG, MUL/DIV, IN/OUT, string ops, segment overrides, MOVZX/MOVSX, BT family, LEA, LES/LDS, ENTER/LEAVE, INT, XCHG, TEST, and more.
 - **Interactive Debugger and CLI Tooling:** Single-step execution, one-line instruction tracing with raw bytes and register snapshots, register and memory inspection, disassembly, inline assembly, `--exec` for one-shot assembly execution, and `--stop-after`, `--stop-after-debugger`, `--instruction-trace`, and `--dump-on-exit` state dumps.
 - **Benchmark Modes and Profiles:** Built-in `decoder-loop`, `rep-movsb`, and `rep-movsd` benchmarks for interpreter hot paths, plus fixed-workload DOS programs (`tests/perf`) that report guest MIPS for integer, memory, x87, call, string, VGA and 16-bit real-mode code.
+- **Emulated Time:** One virtual clock drives the PIT, RTC, Sound Blaster, OPL timers, PC speaker and the port 61h refresh bit. By default the guest runs at full host speed while timers stay real-time-correct; `--throttle-*` sets a fixed machine speed and `--deterministic` makes timing a pure function of the executed instructions (see [Emulated time](#emulated-time)).
 - **Headless Mode:** `--headless` runs without a window or terminal, with a time limit, PNG screenshots and scripted key presses, for automated testing of DOS programs.
 - **Frontends:** Text-mode terminal rendering by default, with optional SDL rendering when the project is built with SDL2.
 - **Test Coverage:** Custom unit tests cover CPU execution, instruction decoding, assembler/disassembler behavior, BIOS/DOS/DPMI services, memory managers, paging, interrupts, and hardware devices. Differential fuzzers compare integer instructions (`cpu_fuzz`) and x87 instruction sequences (`fpu_fuzz`: 80-bit stack, status/tag words, memory results) against the host CPU.
@@ -71,14 +72,15 @@ run exactly like that too, with interrupts, sound and the headless options.
 | `--mount=L:/path` | Mount a host directory as drive `L` (repeatable) |
 | `--env=NAME=VALUE` | Add or replace a DOS environment variable (repeatable). Defaults: `BLASTER=A220 I5 D1 H5 P330 T6`, `CAUSEWAY=DPMI` |
 | `--headless` | No window, terminal output or host input. Exit status is 124 when `--max-seconds` expires |
-| `--max-seconds=S` | Stop after `S` seconds of wall-clock time |
+| `--max-seconds=S` | Stop after `S` seconds of wall-clock time (of emulated time with `--deterministic`) |
 | `--screenshot=FILE.png` | Save the screen (text or graphics mode) as PNG at exit |
-| `--screenshot-at=S` | Take the `--screenshot` `S` seconds after start instead |
-| `--keys=T:KEY,...` | Press `KEY` at `T` seconds (letters, digits, `ESC`, `ENTER`, `SPACE`, `TAB`, `BKSP`, arrows, `F1`-`F10`, `LCTRL`, `LALT`, `LSHIFT`, ...) |
+| `--screenshot-at=S` | Take the `--screenshot` `S` seconds after start instead (emulated seconds with `--deterministic`) |
+| `--keys=T:KEY,...` | Press `KEY` at `T` seconds (letters, digits, `ESC`, `ENTER`, `SPACE`, `TAB`, `BKSP`, arrows, `F1`-`F10`, `LCTRL`, `LALT`, `LSHIFT`, ...); emulated seconds with `--deterministic` |
 | `--sdl` | Force the SDL frontend when SDL2 support is available |
 | `--no-sdl` | Force headless/text-mode execution even in SDL builds |
-| `--throttle-ips=N` | Pace guest execution to roughly `N` retired instructions per second |
-| `--throttle-machine=name` | Apply a rough named speed preset: `8088`, `286-12`, `386dx-33`, `486dx2-66`, or `pentium-90` |
+| `--throttle-ips=N` | Run at a fixed `N` instructions per second of emulated time; the host sleeps when the guest gets ahead |
+| `--throttle-machine=name` | Run at a fixed machine speed, clock (MHz) times an average cycles-per-instruction estimate: `8088`, `286-12`, `386sx-16`, `386dx-25`, `386dx-33`, `486sx-25`, `486dx-33`, `486dx2-66`, `486dx4-100`, `pentium-60`, `pentium-90`, `pentium-100`, `pentium-133` (aliases `xt`, `286`, `386`, `486`, `pentium`, ...) |
+| `--deterministic` | Emulated time is a function of the executed instructions only (at `486dx2-66` speed, or the `--throttle-*` speed) and never reads the host clock: headless runs, screenshots and `--audio-wav` recordings are reproducible. Execution is not paced |
 | `--stop-after=N` | Stop execution after N instruction cycles and dump CPU state |
 | `--stop-after-debugger` | When `--stop-after` triggers, enter the interactive debugger at that exact instruction instead of exiting |
 | `--dump-on-exit` | Dump CPU state when the program terminates |
@@ -93,6 +95,26 @@ run exactly like that too, with interrupts, sound and the headless options.
 | `--bench-steps=N` | Number of measured instruction steps for `--bench` |
 | `--bench-warmup=N` | Number of warmup instruction steps before `--bench` timing |
 | `--exec="asm"` | Assemble and execute instructions without loading a program (semicolons separate lines) |
+
+### Emulated time
+
+All timed devices read one virtual clock (`src/hw/VirtualClock.hpp`): the
+8254 PIT (IRQ 0, speaker, port 61h refresh toggle every ~15 us and OUT2),
+the RTC (seconds, UIP, periodic/alarm/update-ended IRQ 8), Sound Blaster
+DMA, OPL timers, the PC speaker and audio generation (44100 frames per
+emulated second). Virtual time advances with the instructions the CPU
+retires, so a timer read in the middle of a loop sees time move. How it
+relates to the host clock depends on the pacing mode:
+
+| Mode | Selected by | Behaviour |
+|------|-------------|-----------|
+| auto | default | The guest runs as fast as the host allows; the instruction rate is measured continuously so emulated time tracks the wall clock. After a host stall (debugger, window drag) emulated time jumps by at most 20 ms. With an audio device, the audio queue level nudges the clock so it neither underruns nor grows. |
+| fixed | `--throttle-ips`, `--throttle-machine` | Emulated time = instructions x cycles per instruction / clock rate; the host sleeps while emulated time is ahead of the wall clock. |
+| deterministic | `--deterministic` | Emulated time = instructions x cycles per instruction / clock rate; the host clock is never read and execution is not paced. A guest that is only waiting (blocking `INT 16h`/DOS input, the shell prompt) lets 1 ms pass per poll. `--max-seconds`, `--keys` and `--screenshot-at` count emulated seconds. |
+
+At exit the emulator logs the emulated time and the BIOS tick count
+(18.2 per emulated second) next to the host time and MIPS. The RTC's date
+and time start from the host clock.
 
 ### Examples
 ```bash
@@ -110,8 +132,12 @@ run exactly like that too, with interrupts, sound and the headless options.
 # Run with an execution throttle of about 4 MIPS
 ./fadors_emu --throttle-ips=4000000 program.exe
 
-# Run with a rough 486DX2/66-class throttle preset
-./fadors_emu --throttle-machine=486dx2-66 program.exe
+# Run at 386DX/33 speed (33 MHz, ~4.5 cycles per instruction)
+./fadors_emu --throttle-machine=386dx-33 program.exe
+
+# Reproducible headless run: same screenshot and recording every time
+./fadors_emu --headless --deterministic --max-seconds=20 --keys=5:ENTER \
+    --screenshot=shot.png --audio-wav=out.wav game.exe
 
 # Use the SDL frontend when it is available in the build
 ./fadors_emu --sdl program.exe

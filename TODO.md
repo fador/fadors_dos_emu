@@ -59,12 +59,21 @@
 - [x] Port I/O dispatching (IOBus)
 - [x] PIC (8259)
 - [x] PIT (8254)
+  - [x] Modes 0-5 with OUT waveforms, gates (channel 2 via port 61h bit 0), BCD
+  - [x] Counter latch and read-back (status byte) commands, read/write flip-flops
+  - [x] Port 61h bit 4 refresh toggle (~15 us) and bit 5 OUT2 from emulated time
+- [x] Virtual clock (`VirtualClock`): one emulated time base for all devices
+  - [x] Auto pacing (full speed, timers track the wall clock), fixed rate, `--deterministic`
+  - [x] Audio generated per emulated time; host queue only steers auto pacing
+  - [ ] Feed real per-instruction cycle counts from the CPU model (`advanceCycles` / counter with CPI 1)
+  - [ ] HLT idles until the next interrupt instead of spinning
 - [x] Keyboard Controller (8042)
 - [x] VGA Controller (Text/Graphics modes)
 - [x] DMA Controller (8237)
 - [x] Joystick (game port 0x201)
 - [x] CMOS/RTC (MC146818 at ports 0x70-0x71)
   - [x] Unit tests covering all registers, RTC time, status, memory sizing, checksum, NMI mask
+  - [x] Clock, UIP, periodic / alarm / update-ended IRQ 8 on emulated time
 
 ## Phase 4: BIOS Emulation
 - [x] System initialization (IVT setup)
@@ -72,6 +81,7 @@
 - [x] INT 13h (Disk Services) - Basic floppy/hard drive image support
 - [x] INT 16h (Keyboard Services)
 - [x] INT 1Ah (Time of Day / RTC Services)
+  - [ ] AH=02h/04h and DOS INT 21h AH=2Ch read the emulated RTC / tick count instead of the host clock
 - [x] INT 33h (Mouse Services)
 - [x] INT 11h, 12h, 14h, 15h, 17h, 1Bh, 1Ch, 1Dh, 1Eh, 1Fh (system stubs)
 - [x] INT 2Fh (Multiplex/TSR/Network)
@@ -112,6 +122,7 @@
   - [x] Frame-rate limited rendering (~30 FPS)
   - [x] Optional via `--sdl` / `--no-sdl` flags
 - [x] Instruction throttle system (`--throttle-ips=N`, `--throttle-machine=name`)
+- [x] `--deterministic`: reproducible headless runs on emulated time
 - [ ] GUI renderer pixel-perfect VGA/CGA graphics mode rendering
 
 ## Phase 7: Audio Subsystem
@@ -172,7 +183,7 @@
 - [x] **Performance profiles** (`tests/perf`: fixed-workload DOS programs, MIPS table)
 - [x] **Differential CPU fuzzer** (`cpu_fuzz`, integer instructions vs. the host CPU)
 - [x] **Differential x87 fuzzer** (`fpu_fuzz`, x87 sequences vs. the host FPU; `--backend` soft vs. host)
-- [ ] Cycle-weighted `--throttle-machine` presets (currently instructions/second)
+- [x] Cycle-weighted `--throttle-machine` presets (MHz x cycles-per-instruction estimate)
 - [ ] Further interpreter speed-ups (decoded-instruction cache or a JIT)
 
 ## Phase 10: Memory & Extended Memory

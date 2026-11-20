@@ -13,6 +13,12 @@ class KeyboardController : public IODevice {
 public:
   // Called with the new value when port 61h (PC speaker control) is written.
   void setPort61Callback(std::function<void(uint8_t)> cb) { m_port61Callback = std::move(cb); }
+  // Supplies the timer-driven input bits of port 61h: bit 4 (DRAM refresh
+  // toggle) and bit 5 (PIT channel 2 OUT).  Without a source, bit 4
+  // toggles on every second read so delay loops still terminate.
+  void setPort61StatusSource(std::function<uint8_t()> source) {
+    m_port61Status = std::move(source);
+  }
     KeyboardController();
     ~KeyboardController() = default;
 
@@ -67,6 +73,7 @@ private:
     uint8_t m_port61{0};
     uint64_t m_refreshCounter{0};
     std::function<void(uint8_t)> m_port61Callback;
+    std::function<uint8_t()> m_port61Status;
 };
 
 } // namespace fador::hw

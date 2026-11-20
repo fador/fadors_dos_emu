@@ -1,6 +1,7 @@
 #include "CMOSRTC.hpp"
 #include "../utils/Logger.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <ctime>
 
@@ -35,26 +36,22 @@ void CMOSRTC::setExtendedMemoryKB(uint32_t kb) {
 }
 
 uint8_t CMOSRTC::read8(uint16_t port) {
-  if (port == 0x71) {
-    // Reading port 0x71 returns the byte at the currently selected index.
-    uint8_t idx = m_cmosIndex & 0x7F; // index is 7-bit
+  if (port != 0x71)
+    return 0xFF; // port 0x70 is write-only
 
-    // RTC time registers – refresh from host clock on first time-register read
-    if (idx <= 0x09) {
-      syncTime();
-    }
+  const uint8_t idx = m_cmosIndex & 0x7F; // index is 7-bit
+  if (idx <= 0x0D)
+    sync(); // clock registers and flags follow virtual time
 
-    // Status Register C is read-then-clear (bit 7 IRQ flag)
-    if (idx == 0x0C) {
-      uint8_t val = m_cmosRAM[0x0C];
-      m_cmosRAM[0x0C] = 0;
-      return val;
-    }
-
-    return m_cmosRAM[idx];
+  if (idx == 0x0A) {
+    const bool uip = dividerRunning() && !(m_cmosRAM[0x0B] & 0x80) &&
+                     nextSecondTick() - static_cast<int64_t>(m_lastTick) <=
+                         static_cast<int64_t>(kUipTicks);
+    return static_cast<uint8_t>((m_cmosRAM[0x0A] & 0x7F) | (uip ? 0x80 : 0));
   }
-  // Port 0x70 is write-only; reads return 0xFF
-  return 0xFF;
+  if (idx == 0x0C)
+    return acknowledgeInterrupt(); // read-then-clear
+  return m_cmosRAM[idx];
 }
 
 void CMOSRTC::write8(uint16_t port, uint8_t value) {
@@ -62,38 +59,77 @@ void CMOSRTC::write8(uint16_t port, uint8_t value) {
     // Bit 7 = NMI disable (1 = disable, 0 = enable)
     m_nmiEnabled = (value & 0x80) == 0;
     m_cmosIndex = value & 0x7F;
-  } else if (port == 0x71) {
-    uint8_t idx = m_cmosIndex & 0x7F;
+    return;
+  }
+  if (port != 0x71)
+    return;
 
-    // Status Register A: only bits 6-4 (divider) are writable; bit 7 is RO
-    if (idx == 0x0A) {
-      m_cmosRAM[0x0A] = (m_cmosRAM[0x0A] & 0x80) | (value & 0x70) | (value & 0x0F);
-      return;
-    }
-    // Status Register B: all eight bits (including SET, bit 7) are R/W
-    if (idx == 0x0B) {
-      m_cmosRAM[0x0B] = value;
-      return;
-    }
-    // Status Register C and D are read-only
-    if (idx == 0x0C || idx == 0x0D) {
-      return;
-    }
+  const uint8_t idx = m_cmosIndex & 0x7F;
+  if (idx <= 0x0D)
+    sync();
+  switch (idx) {
+  case 0x0A:
+    writeStatusA(value);
+    return;
+  case 0x0B:
+    writeStatusB(value);
+    return;
+  case 0x0C: // Status Register C and D are read-only
+  case 0x0D:
+    return;
+  default:
+    break;
+  }
 
-    // All other registers are writable
-    if (idx < 0x80) {
-      m_cmosRAM[idx] = value;
+  m_cmosRAM[idx] = value;
+  // Writing anywhere below 0x2E invalidates the checksum; recalculate so
+  // programs that validate the checksum don't reject us.
+  if (idx < 0x2E)
+    recalcChecksum();
+  if (idx <= 0x09)
+    recomputeNextIrq();
+}
 
-      // Writing anywhere below 0x2E invalidates the checksum;
-      // recalculate so programs that validate the checksum don't reject us.
-      // Exclude the RTC time area (0x00-0x09) because those are RO in
-      // many implementations, but for simplicity we let writes through
-      // and fix the checksum regardless.
-      if (idx < 0x2E) {
-        recalcChecksum();
-      }
+uint8_t CMOSRTC::acknowledgeInterrupt() {
+  sync();
+  const uint8_t val = m_cmosRAM[0x0C];
+  m_cmosRAM[0x0C] = 0;
+  recomputeNextIrq(); // IRQF is clear again: the next flag raises IRQ 8
+  return val;
+}
+
+void CMOSRTC::writeStatusA(uint8_t value) {
+  // Bit 7 (UIP) is read-only.  Divider values 11x hold the chain in
+  // reset; leaving reset starts it so the first update is 500 ms later.
+  const bool wasRunning = dividerRunning();
+  m_cmosRAM[0x0A] = value & 0x7F;
+  if (!wasRunning && dividerRunning())
+    m_divOrigin = static_cast<int64_t>(m_lastTick) -
+                  static_cast<int64_t>(kTicksPerSecond / 2);
+  recomputeNextIrq();
+}
+
+void CMOSRTC::writeStatusB(uint8_t value) {
+  const uint8_t old = m_cmosRAM[0x0B];
+  if (value & 0x80)
+    value &= static_cast<uint8_t>(~0x10); // SET clears UIE
+  // Changing the data format (binary/BCD, 12/24 h) converts the clock and
+  // alarm registers, so the clock keeps the right time.
+  if ((old ^ value) & 0x06) {
+    for (int reg : {0x00, 0x01, 0x02, 0x03, 0x06, 0x07, 0x08, 0x09, 0x32}) {
+      if ((reg == 0x01 || reg == 0x03) && (m_cmosRAM[reg] & 0xC0) == 0xC0)
+        continue; // alarm "don't care"
+      m_cmosRAM[reg] = encode(decode(m_cmosRAM[reg], old), value);
+    }
+    for (int reg : {0x04, 0x05}) {
+      if (reg == 0x05 && (m_cmosRAM[reg] & 0xC0) == 0xC0)
+        continue;
+      m_cmosRAM[reg] = hourRaw(hour24(m_cmosRAM[reg], old), value);
     }
   }
+  m_cmosRAM[0x0B] = value;
+  updateIrqLine(); // enabling an interrupt whose flag is set raises it
+  recomputeNextIrq();
 }
 
 // ────────────────────────────────────────────────────────────
@@ -110,39 +146,193 @@ void CMOSRTC::syncTime() {
   localtime_r(&t, &lt);
 #endif
 
-  // Registers 0x00–0x09 (BCD format expected by DOS programs)
-  m_cmosRAM[0x00] = toBcd8(lt.tm_sec);          // seconds
-  m_cmosRAM[0x02] = toBcd8(lt.tm_min);          // minutes
-  // Hours: honour 24/12h flag in Status B
-  if (m_cmosRAM[0x0B] & 0x02) {
-    // 24-hour mode
-    m_cmosRAM[0x04] = toBcd8(lt.tm_hour);
-  } else {
-    // 12-hour mode
-    int hour12 = lt.tm_hour % 12;
-    if (hour12 == 0)
-      hour12 = 12;
-    m_cmosRAM[0x04] = toBcd8(hour12);
-    if (lt.tm_hour >= 12)
-      m_cmosRAM[0x04] |= 0x80; // PM bit
-  }
-
-  m_cmosRAM[0x06] = toBcd8(lt.tm_wday + 1);     // day of week (1=Sun)
-  m_cmosRAM[0x07] = toBcd8(lt.tm_mday);          // day of month
-  m_cmosRAM[0x08] = toBcd8(lt.tm_mon + 1);       // month
-  m_cmosRAM[0x09] = toBcd8((lt.tm_year + 1900) % 100); // year within century
-  m_cmosRAM[0x32] = toBcd8((lt.tm_year + 1900) / 100); // century
+  const uint8_t b = m_cmosRAM[0x0B];
+  m_cmosRAM[0x00] = encode(lt.tm_sec, b);
+  m_cmosRAM[0x02] = encode(lt.tm_min, b);
+  m_cmosRAM[0x04] = hourRaw(lt.tm_hour, b);
+  m_cmosRAM[0x06] = encode(lt.tm_wday + 1, b); // day of week (1=Sun)
+  m_cmosRAM[0x07] = encode(lt.tm_mday, b);
+  m_cmosRAM[0x08] = encode(lt.tm_mon + 1, b);
+  m_cmosRAM[0x09] = encode((lt.tm_year + 1900) % 100, b);
+  m_cmosRAM[0x32] = encode((lt.tm_year + 1900) / 100, b); // century
 }
 
+void CMOSRTC::advanceTime(std::chrono::nanoseconds elapsed) {
+  if (elapsed.count() > 0)
+    m_nowNs += static_cast<uint64_t>(elapsed.count());
+  catchUp();
+}
+
+void CMOSRTC::sync() {
+  if (m_timeSource) {
+    const uint64_t now = m_timeSource();
+    if (now > m_nowNs)
+      m_nowNs = now;
+  }
+  catchUp();
+}
+
+bool CMOSRTC::dividerRunning() const {
+  return (m_cmosRAM[0x0A] & 0x60) != 0x60; // 110 / 111 = divider reset
+}
+
+uint64_t CMOSRTC::periodTicks() const {
+  const uint8_t rate = m_cmosRAM[0x0A] & 0x0F;
+  if (rate == 0)
+    return 0;
+  if (rate <= 2) // 1 and 2 behave like 8 and 9 with a 32.768 kHz base
+    return 1ULL << (rate + 6);
+  return 1ULL << (rate - 1);
+}
+
+double CMOSRTC::periodicRateHz() const {
+  const uint64_t p = periodTicks();
+  return p ? static_cast<double>(kTicksPerSecond) / static_cast<double>(p)
+           : 0.0;
+}
+
+int64_t CMOSRTC::nextSecondTick() const {
+  const int64_t rel = static_cast<int64_t>(m_lastTick) - m_divOrigin;
+  const int64_t sec = static_cast<int64_t>(kTicksPerSecond);
+  return m_divOrigin + (rel / sec + 1) * sec;
+}
+
+void CMOSRTC::catchUp() {
+  const uint64_t tick = ticksAt(m_nowNs);
+  if (tick <= m_lastTick)
+    return;
+  const int64_t from = static_cast<int64_t>(m_lastTick) - m_divOrigin;
+  const int64_t to = static_cast<int64_t>(tick) - m_divOrigin;
+  m_lastTick = tick;
+  if (dividerRunning()) {
+    if (const uint64_t p = periodTicks()) {
+      const auto period = static_cast<int64_t>(p);
+      if (to / period > from / period)
+        setFlags(0x40); // PF
+    }
+    if (!(m_cmosRAM[0x0B] & 0x80)) { // SET inhibits updates
+      const auto sec = static_cast<int64_t>(kTicksPerSecond);
+      for (int64_t s = from / sec; s < to / sec; ++s) {
+        tickSecond();
+        uint8_t flags = 0x10; // UF
+        if (alarmMatches())
+          flags |= 0x20; // AF
+        setFlags(flags);
+      }
+    }
+  }
+  recomputeNextIrq();
+}
+
+void CMOSRTC::setFlags(uint8_t flags) {
+  m_cmosRAM[0x0C] |= flags;
+  updateIrqLine();
+}
+
+// IRQF = (PF & PIE) | (AF & AIE) | (UF & UIE); IRQ 8 fires on its rising
+// edge and the line stays asserted until register C is read.
+void CMOSRTC::updateIrqLine() {
+  const bool irqf = (m_cmosRAM[0x0C] & m_cmosRAM[0x0B] & 0x70) != 0;
+  if (irqf && !(m_cmosRAM[0x0C] & 0x80)) {
+    m_cmosRAM[0x0C] |= 0x80;
+    ++m_pendingIRQ8;
+  }
+}
+
+void CMOSRTC::recomputeNextIrq() {
+  m_nextIrqNs = kNever;
+  if (!dividerRunning() || (m_cmosRAM[0x0C] & 0x80))
+    return; // no new edge until register C is read
+  const uint8_t b = m_cmosRAM[0x0B];
+  int64_t next = std::numeric_limits<int64_t>::max();
+  if (b & 0x40) {
+    if (const uint64_t p = periodTicks()) {
+      const auto period = static_cast<int64_t>(p);
+      const int64_t rel = static_cast<int64_t>(m_lastTick) - m_divOrigin;
+      next = m_divOrigin + (rel / period + 1) * period;
+    }
+  }
+  if ((b & 0x30) && !(b & 0x80))
+    next = std::min(next, nextSecondTick());
+  if (next != std::numeric_limits<int64_t>::max())
+    m_nextIrqNs = nsAtTick(static_cast<uint64_t>(next));
+}
+
+bool CMOSRTC::checkPendingIRQ8() {
+  if (m_pendingIRQ8 == 0)
+    return false;
+  --m_pendingIRQ8;
+  return true;
+}
+
+// One update cycle: advance seconds and carry into the calendar.
+void CMOSRTC::tickSecond() {
+  const uint8_t b = m_cmosRAM[0x0B];
+  auto &r = m_cmosRAM;
+  auto bump = [&](int reg, int limit, int reset) {
+    const int v = decode(r[reg], b) + 1;
+    r[reg] = encode(v >= limit ? reset : v, b);
+    return v >= limit;
+  };
+  if (!bump(0x00, 60, 0) || !bump(0x02, 60, 0))
+    return;
+  const int hour = hour24(r[0x04], b) + 1;
+  r[0x04] = hourRaw(hour % 24, b);
+  if (hour < 24)
+    return;
+  r[0x06] = encode(decode(r[0x06], b) % 7 + 1, b);
+  const int year = decode(r[0x32], b) * 100 + decode(r[0x09], b);
+  const int month = decode(r[0x08], b);
+  static constexpr int kDays[12] = {31, 28, 31, 30, 31, 30,
+                                    31, 31, 30, 31, 30, 31};
+  const bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+  const int days =
+      (month >= 1 && month <= 12) ? kDays[month - 1] + (month == 2 && leap) : 31;
+  if (!bump(0x07, days + 1, 1) || !bump(0x08, 13, 1) || !bump(0x09, 100, 0))
+    return;
+  r[0x32] = encode(decode(r[0x32], b) + 1, b);
+}
+
+bool CMOSRTC::alarmMatches() const {
+  auto match = [&](int alarm, int time) {
+    return (m_cmosRAM[alarm] & 0xC0) == 0xC0 ||
+           m_cmosRAM[alarm] == m_cmosRAM[time];
+  };
+  return match(0x01, 0x00) && match(0x03, 0x02) && match(0x05, 0x04);
+}
+
+int CMOSRTC::decode(uint8_t v, uint8_t regB) {
+  return (regB & 0x04) ? v : fromBcd8(v);
+}
+
+uint8_t CMOSRTC::encode(int v, uint8_t regB) {
+  return (regB & 0x04) ? static_cast<uint8_t>(v) : toBcd8(v);
+}
+
+int CMOSRTC::hour24(uint8_t raw, uint8_t regB) {
+  if (regB & 0x02)
+    return decode(raw, regB);
+  const int h = decode(raw & 0x7F, regB) % 12;
+  return (raw & 0x80) ? h + 12 : h;
+}
+
+uint8_t CMOSRTC::hourRaw(int hour, uint8_t regB) {
+  if (regB & 0x02)
+    return encode(hour, regB);
+  int h12 = hour % 12;
+  if (h12 == 0)
+    h12 = 12;
+  return static_cast<uint8_t>(encode(h12, regB) | (hour >= 12 ? 0x80 : 0));
+}
 // ────────────────────────────────────────────────────────────
 //  initialisation helpers
 // ────────────────────────────────────────────────────────────
 
 void CMOSRTC::initializeDefaults() {
   m_cmosRAM = {}; // all zeros
-  m_lastAdvance = std::chrono::steady_clock::now();
-  m_accumulatedUs = 0;
   m_pendingIRQ8 = 0;
+  m_lastTick = 0;
+  m_divOrigin = 0;
 
   // ── Status Register A (0x0A) ──────────────────────────
   // Bits 6-4 = 010 (time base = 32768 Hz)
@@ -205,8 +395,9 @@ void CMOSRTC::initializeDefaults() {
 
   // ── Other reserved fields stay at 0x00 ────────────────
 
-  // Sync the RTC time registers from host clock
+  // Date and time start from the host clock; virtual time moves them on.
   syncTime();
+  recomputeNextIrq();
 }
 
 // ────────────────────────────────────────────────────────────
@@ -230,78 +421,6 @@ uint8_t CMOSRTC::toBcd8(int value) {
 
 int CMOSRTC::fromBcd8(uint8_t bcd) {
   return ((bcd >> 4) & 0x0F) * 10 + (bcd & 0x0F);
-}
-
-int CMOSRTC::periodicRateHz() const {
-  uint8_t rate = m_cmosRAM[0x0A] & 0x0F;
-  if (rate == 0) return 0;
-  static const int rates[] = {
-    0, 256, 128, 8192, 4096, 2048, 1024,
-    512, 256, 128, 64, 32, 16, 8, 4, 2
-  };
-  return (rate <= 15) ? rates[rate] : 1024;
-}
-
-long long CMOSRTC::periodicIntervalUs() const {
-  int hz = periodicRateHz();
-  if (hz == 0) return 0;
-  return 1000000LL / hz;
-}
-
-bool CMOSRTC::checkAlarm() {
-  if (!(m_cmosRAM[0x0B] & 0x20)) return false; // AIE not enabled
-
-  uint8_t alarmSec = m_cmosRAM[0x01];
-  uint8_t alarmMin = m_cmosRAM[0x03];
-  uint8_t alarmHr  = m_cmosRAM[0x05];
-
-  syncTime(); // refresh current time
-
-  uint8_t curSec = m_cmosRAM[0x00];
-  uint8_t curMin = m_cmosRAM[0x02];
-  uint8_t curHr  = m_cmosRAM[0x04];
-
-  // Don't care bits: 0xC0 = "don't care" in BCD for hours, 0x80 for others
-  bool secMatch = (alarmSec & 0xC0) || (fromBcd8(alarmSec & 0x3F) == fromBcd8(curSec & 0x3F));
-  bool minMatch = (alarmMin & 0xC0) || (fromBcd8(alarmMin & 0x3F) == fromBcd8(curMin & 0x3F));
-  bool hrMatch  = (alarmHr & 0xC0)  || (fromBcd8(alarmHr & 0x3F) == fromBcd8(curHr & 0x3F));
-
-  return secMatch && minMatch && hrMatch;
-}
-
-void CMOSRTC::advanceTime() {
-  auto now = std::chrono::steady_clock::now();
-  long long elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
-      now - m_lastAdvance).count();
-  m_lastAdvance = now;
-
-  if (elapsedUs <= 0) return;
-
-  m_accumulatedUs += elapsedUs;
-
-  // Periodic interrupt
-  bool pie = (m_cmosRAM[0x0B] & 0x40) != 0;
-  if (pie) {
-    long long interval = periodicIntervalUs();
-    while (interval > 0 && m_accumulatedUs >= interval) {
-      m_accumulatedUs -= interval;
-      ++m_pendingIRQ8;
-      // Set PF (Periodic Interrupt Flag) in Status C
-      m_cmosRAM[0x0C] |= 0xC0; // IRQF + PF
-    }
-  }
-
-  // Alarm interrupt
-  if ((m_cmosRAM[0x0B] & 0x20) && checkAlarm()) {
-    ++m_pendingIRQ8;
-    m_cmosRAM[0x0C] |= 0xA0; // IRQF + AF
-  }
-}
-
-bool CMOSRTC::checkPendingIRQ8() {
-  if (m_pendingIRQ8 == 0) return false;
-  --m_pendingIRQ8;
-  return true;
 }
 
 } // namespace fador::hw
