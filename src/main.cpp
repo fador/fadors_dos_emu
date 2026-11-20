@@ -1156,8 +1156,12 @@ int main(int argc, char *argv[]) {
           picSlave.raiseIRQ(static_cast<uint8_t>(line - 8));
       });
       const uint16_t base = gusConfig->basePort;
+      if (base == 0x220)
+        LOG_WARN("--gus=220 takes the Sound Blaster's ports 220h-22Fh");
       iobus.registerDevice(base, base + 0x0F, gus.get());
-      iobus.registerDevice(base + 0x100, base + 0x107, gus.get());
+      // 3X0/3X1 (the GUS MIDI port) stay with the MPU-401 at 330h.
+      iobus.registerDevice(base == 0x230 ? base + 0x102 : base + 0x100,
+                           base + 0x107, gus.get());
       auto hasEnv = [](const char *name) {
         for (const auto &entry : fador::hw::ProgramLoader::defaultEnvironment())
           if (entry.first == name)
