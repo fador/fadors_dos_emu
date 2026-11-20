@@ -681,6 +681,15 @@ int main(int argc, char *argv[]) {
 
     fador::hw::ProgramLoader loader(cpu, memory, dos.getHIMEM());
     fador::ui::TerminalRenderer renderer(memory);
+    // Emulated frames: the VGA captures them scanline by scanline (palette
+    // and register changes land on the line the beam was on) and publishes
+    // each when its display ends; frontends and screenshots use the latest.
+    fador::ui::FrameRenderer video(memory, vga);
+    video.setBIOS(&bios);
+    vga.setRasterSink(&video);
+    // Vertical retrace interrupt: the ISA IRQ2 line is IRQ9 on an AT
+    // (INT 71h, which the BIOS redirects to INT 0Ah).
+    vga.setIrqCallback([&picSlave]() { picSlave.raiseIRQ(1); });
     fador::ui::Debugger debugger(cpu, memory, decoder);
 
     auto dispatchPendingHardwareInterrupt = [&]() {
@@ -1500,7 +1509,12 @@ int main(int argc, char *argv[]) {
       sdlRenderer = std::make_unique<fador::ui::SDLRenderer>(memory, kbd, vga);
       sdlRenderer->setBIOS(bios);
       pollHostInput = [&]() { sdlRenderer->pollInput(); };
-      renderFrame = [&](bool force) { sdlRenderer->render(force); };
+      // Present the latest completed emulated frame and ask for the next
+      // one (frames are only rasterised when the window wants one).
+      renderFrame = [&](bool) {
+        sdlRenderer->present(video.completedFrame());
+        vga.requestFrame();
+      };
       quitRequested = [&]() { return sdlRenderer->shouldQuit(); };
     }
 #endif
@@ -1523,6 +1537,17 @@ int main(int argc, char *argv[]) {
       return std::chrono::duration<double>(now - runStart).count();
     };
     auto lastRender = runStart;
+    // Screenshots are emulated frames: capture every frame while one is
+    // wanted (without the text cursor, so they are reproducible).
+    uint64_t screenshotSerial = 0;
+    if (!screenshotPath.empty()) {
+      video.setCaptureCursor(false);
+      vga.setContinuousCapture(true);
+    }
+    auto saveFrame = [](const fador::ui::FrameRenderer::Frame &f,
+                        const std::string &path) {
+      return fador::ui::writePNG(path, f.width, f.height, f.pixels);
+    };
     std::vector<float> audioBuf;
     fador::hw::audio::WavWriter wav;
     if (!audioWavPath.empty() && !wav.open(audioWavPath, 44100, 2))
@@ -1547,12 +1572,14 @@ int main(int argc, char *argv[]) {
       cmos.advanceTo(now);
       while (cmos.checkPendingIRQ8())
         picSlave.raiseIRQ(0);
+      vga.advanceTo(now); // frame completion, retrace interrupt
       for (auto &uart : uarts)
         uart->advanceTo(now); // raises IRQ 3/4 through its callback
       for (auto &lpt : lpts)
         lpt->advanceTo(now);
     };
     auto maybeRender = [&](std::chrono::steady_clock::time_point now) {
+      vga.advanceTo(clock.nowNs()); // also at the shell prompt
       if (now - lastRender > std::chrono::milliseconds(33)) {
         renderFrame(false);
         lastRender = now;
@@ -1661,16 +1688,19 @@ int main(int argc, char *argv[]) {
       }
       const double elapsed = runSeconds(now);
       scriptedKeys.service(elapsed, kbd);
-      if (screenshotAt >= 0 && !screenshotPath.empty() &&
-          elapsed >= screenshotAt) {
-        fador::ui::FrameRenderer frame(memory, vga);
-        frame.setBIOS(&bios);
-        if (frame.render(false) && frame.savePNG(screenshotPath))
-          LOG_INFO("Screenshot written to ", screenshotPath, " (",
-                   frame.width(), "x", frame.height(), ") at ",
-                   screenshotAt, " s");
-        screenshotAt = -1.0;
-        screenshotPath.clear(); // do not overwrite it at exit
+      if (screenshotAt >= 0 && !screenshotPath.empty()) {
+        // The first emulated frame completed after the time is reached
+        if (elapsed < screenshotAt) {
+          screenshotSerial = video.completedFrame().serial;
+        } else if (video.completedFrame().serial > screenshotSerial) {
+          if (saveFrame(video.completedFrame(), screenshotPath))
+            LOG_INFO("Screenshot written to ", screenshotPath, " (",
+                     video.completedFrame().width, "x",
+                     video.completedFrame().height, ") at ", screenshotAt,
+                     " s");
+          screenshotAt = -1.0;
+          screenshotPath.clear(); // do not overwrite it at exit
+        }
       }
       serviceAudio();
       maybeRender(now);
@@ -1691,6 +1721,8 @@ int main(int argc, char *argv[]) {
     // HLT and the idle waits stop at the next device event.
     machineTime.addWakeSource([&pit] { return pit.nextIrq0Ns(); });
     machineTime.addWakeSource([&cmos] { return cmos.nextIrqNs(); });
+    // Vertical retrace interrupt; never due unless the guest enabled it
+    machineTime.addWakeSource([&vga] { return vga.nextIrqNs(); });
     machineTime.addWakeSource([&sb, &lastHardwareNs] {
       const double s = sb.secondsUntilIrq();
       return s < 0.0 ? fador::hw::MachineTime::kNever
@@ -1820,9 +1852,24 @@ int main(int argc, char *argv[]) {
       fador::ui::FrameRenderer frame(memory, vga);
       frame.setBIOS(&bios);
       if (!screenshotPath.empty()) {
-        if (frame.render(false) && frame.savePNG(screenshotPath))
-          LOG_INFO("Screenshot written to ", screenshotPath, " (",
-                   frame.width(), "x", frame.height(), ")");
+        // A program that is still running is shown by the last emulated
+        // frame it produced (mid-frame effects included); after it exited,
+        // the screen is what it left behind.
+        bool ok;
+        int w, h;
+        if (!dos.isTerminated() && video.completedFrame().serial > 0) {
+          const auto &f = video.completedFrame();
+          ok = saveFrame(f, screenshotPath);
+          w = f.width;
+          h = f.height;
+        } else {
+          ok = frame.render(false) && frame.savePNG(screenshotPath);
+          w = frame.width();
+          h = frame.height();
+        }
+        if (ok)
+          LOG_INFO("Screenshot written to ", screenshotPath, " (", w, "x", h,
+                   ")");
         else
           LOG_WARN("Could not write screenshot to ", screenshotPath);
       }

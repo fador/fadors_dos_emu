@@ -1,6 +1,7 @@
 #pragma once
 #include "IODevice.hpp"
 #include "../memory/MemoryBus.hpp"
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -22,6 +23,23 @@ struct VgaTiming {
   double refreshHz() const {
     return frameNs ? 1e9 / static_cast<double>(frameNs) : 0.0;
   }
+};
+
+// Receives the scan-out of captured frames (implemented by the renderer,
+// ui::FrameRenderer).  While a frame is being captured, the VGA calls
+// scanTo() just before every change that affects the display (DAC, PEL
+// mask, attribute, CRTC, sequencer clocking / character map, graphics
+// controller display bits), with the number of scanlines the emulated beam
+// has finished, so each line is rasterised with the state it was shown
+// with.  endFrame() finishes the lines left and publishes the frame.
+class VgaRasterSink {
+public:
+  virtual ~VgaRasterSink() = default;
+  virtual void beginFrame(uint64_t frameNumber) = 0;
+  // Rasterise the lines before physical scanline `line` (exclusive) that
+  // are not done yet, from the current register / memory state.
+  virtual void scanTo(uint32_t line) = 0;
+  virtual void endFrame() = 0;
 };
 
 // IBM VGA register file and plane memory.
@@ -62,6 +80,49 @@ public:
   uint64_t frameCounter() const;
   // Input status 1 value without the flip-flop side effect.
   uint8_t inputStatus1() const;
+  // Input status 0 (3C2h): bit 7 = vertical retrace interrupt pending,
+  // bit 4 = switch sense (colour monitor).
+  uint8_t inputStatus0();
+
+  // ── Frame capture (scanline-accurate rendering) ───────────────────
+  // Frames are captured on demand: requestFrame() captures the next frame
+  // that starts after the call; with continuous capture every frame is.
+  // The sink's endFrame() runs when the beam leaves the frame's last
+  // displayed line (or later, at the next advanceTo()/display change).
+  // Nothing is rendered while no capture is requested.
+  void setRasterSink(VgaRasterSink *sink) { m_sink = sink; }
+  void requestFrame();
+  void setContinuousCapture(bool on);
+  bool continuousCapture() const { return m_continuous; }
+  // Finish the frame being captured now (the remaining lines from the
+  // current state); without one, capture a whole frame from the current
+  // state.
+  void flushFrame();
+  // Called by the VGA itself (and by the BIOS before it changes the DAC or
+  // registers directly): rasterise the lines the beam has passed with the
+  // state before the change.  A single test when no capture is pending.
+  void beforeDisplayChange() {
+    if (m_rasterActive)
+      rasterSync(nowNs());
+  }
+
+  // ── Events on emulated time ───────────────────────────────────────
+  // Frame completion and the vertical retrace interrupt.  Cheap (one
+  // compare) until something is due.
+  void advanceTo(uint64_t nowNs) {
+    if (nowNs >= m_nextEventNs)
+      serviceEvents(nowNs);
+  }
+  // Raises the vertical retrace interrupt (IRQ2, i.e. IRQ9 on an AT).
+  void setIrqCallback(std::function<void()> raise) {
+    m_raiseIrq = std::move(raise);
+  }
+  // Time of the next vertical retrace interrupt, or UINT64_MAX when it is
+  // not enabled (CRTC 11h bit 4 set, bit 5 clear) or already pending.
+  uint64_t nextIrqNs() const {
+    return (m_crtc[0x11] & 0x20) ? UINT64_MAX : m_vintNextNs;
+  }
+  bool retraceInterruptPending() const { return m_vintPending; }
 
   // ── Register access for BIOS HLE and renderers ────────────────────
   uint8_t seqReg(uint8_t index) const { return index < 5 ? m_seq[index] : 0; }
@@ -86,10 +147,8 @@ public:
   void setCrtcReg(uint8_t index, uint8_t value);
   void setAttrReg(uint8_t index, uint8_t value);
   void setMiscOutput(uint8_t value);
-  void setPelMask(uint8_t value) { m_pelMask = value; }
-  void setAttrPaletteSource(bool enabled) {
-    m_attrIndex = static_cast<uint8_t>((m_attrIndex & 0x1F) | (enabled ? 0x20 : 0));
-  }
+  void setPelMask(uint8_t value);
+  void setAttrPaletteSource(bool enabled);
   void resetAttrFlipFlop() { m_attrFlipFlop = false; }
 
   // Composite CRTC values (overflow bits included)
@@ -173,6 +232,17 @@ private:
   void updateAccessPath();
   void recomputeTiming() const;
   void writeCrtc(uint8_t index, uint8_t value);
+  void rasterSync(uint64_t now);
+  void serviceEvents(uint64_t now);
+  void rescheduleRetraceInterrupt(uint64_t now);
+  void timingChanged();
+  void updateNextEvent() {
+    m_nextEventNs = std::min(m_rasterNextNs, m_vintNextNs);
+  }
+  // Start of the frame containing `now` with the current timing
+  uint64_t frameStartNs(uint64_t now) const {
+    return now - now % timing().frameNs;
+  }
   void writeAttr(uint8_t value);
   bool crtcPortActive(uint16_t port) const;
 
@@ -221,6 +291,22 @@ private:
   uint64_t m_epochNs = 0;
   mutable VgaTiming m_timing{};
   mutable bool m_timingDirty = true;
+
+  // Frame capture
+  VgaRasterSink *m_sink = nullptr;
+  bool m_rasterActive = false; // a capture is requested or in progress
+  bool m_capturing = false;    // a frame is being captured
+  bool m_wantFrame = false;    // capture the next frame starting >= m_requestNs
+  bool m_continuous = false;
+  uint64_t m_requestNs = 0;
+  uint64_t m_capFrame = 0;
+  uint64_t m_rasterNextNs = UINT64_MAX;
+
+  // Vertical retrace interrupt (CRTC 11h bits 4/5, input status 0 bit 7)
+  bool m_vintPending = false;
+  uint64_t m_vintNextNs = UINT64_MAX; // next retrace start while armed
+  std::function<void()> m_raiseIrq;
+  uint64_t m_nextEventNs = UINT64_MAX;
 
   // VGA plane memory (4 planes × 64KB each = 256KB total)
   std::array<std::array<uint8_t, 65536>, 4> m_planes{};

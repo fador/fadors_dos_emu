@@ -18,7 +18,15 @@ namespace fador::ui {
 // modes) into a 32-bit ARGB image.  Used by the SDL frontend and by the
 // headless screenshot / regression-test path, so both always agree on
 // what the guest is showing.
-class FrameRenderer {
+//
+// Two ways to use it:
+//  - render(): rasterise the whole screen from the current state now.
+//  - as the VGA's raster sink (VGAController::setRasterSink): emulated
+//    frames are captured scanline by scanline as the beam passes display
+//    changes (palette per line, split screens, mid-frame start address or
+//    panning changes) and published as completedFrame() when the frame's
+//    display ends.  Frontends present the latest completed frame.
+class FrameRenderer : public hw::VgaRasterSink {
 public:
   FrameRenderer(memory::MemoryBus &memory, hw::VGAController &vga)
       : m_memory(memory), m_vga(vga) {}
@@ -28,6 +36,23 @@ public:
   // Rasterise the current screen.  Returns false when the video mode is
   // unknown (the previous image is kept in that case).
   bool render(bool drawCursor = true);
+
+  // ── Captured frames (VgaRasterSink) ──────────────────────────────
+  struct Frame {
+    int width = 0;
+    int height = 0;
+    uint32_t modeKey = 0xFFFFFFFFu;
+    uint64_t number = 0; // emulated frame number (VGAController::frameCounter)
+    uint64_t serial = 0; // completed frames so far (0: none yet)
+    std::vector<uint32_t> pixels;
+  };
+  void beginFrame(uint64_t frameNumber) override;
+  void scanTo(uint32_t line) override;
+  void endFrame() override;
+  // Draw the text cursor (and blink) in captured frames
+  void setCaptureCursor(bool on) { m_captureCursor = on; }
+  const Frame &completedFrame() const { return m_completed; }
+  bool captureOpen() const { return m_capOpen; }
 
   int width() const { return m_width; }
   int height() const { return m_height; }
@@ -78,6 +103,11 @@ private:
   void buildAttributeLut();
   uint32_t mapAddress(const CrtLayout &l, uint32_t counter, int rowScan) const;
   void renderRegisters(const CrtLayout &l, bool drawCursor);
+  // Output lines [fromY, toY) of a register-described frame
+  void renderRegisterLines(const CrtLayout &l, int fromY, int toY,
+                           uint64_t frameNumber, bool drawCursor);
+  bool vbeActive() const;
+  bool renderFallback(bool drawCursor);
   void renderTextLine(const CrtLayout &l, uint32_t rowAddr, int rowScan,
                       bool cursorOn, bool blinkOn);
   void renderGraphicsLine(const CrtLayout &l, uint32_t rowAddr, int rowScan);
@@ -96,6 +126,13 @@ private:
   std::vector<uint8_t> m_line;          // one scanline of DAC indices
   std::array<uint32_t, 256> m_palette{}; // DAC index -> ARGB (PEL mask applied)
   std::array<uint8_t, 16> m_attrLut{};  // 4-bit pixel -> DAC index
+
+  // Frame capture
+  bool m_capOpen = false;
+  bool m_captureCursor = true;
+  uint64_t m_capNumber = 0;
+  int m_capNextY = 0; // first output line not rasterised yet
+  Frame m_completed;
 };
 
 // Encode an ARGB image as a PNG file.

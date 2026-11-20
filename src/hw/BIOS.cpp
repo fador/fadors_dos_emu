@@ -196,8 +196,10 @@ bool BIOS::handleInterrupt(uint8_t vector) {
     return true;
   }
   case 0x71: { // IRQ9 — Redirected to INT 0Ah by BIOS (AT compatibility)
+    // Slave EOI here; the INT 0Ah handler acknowledges the master.
+    if (m_slavePic)
+      m_slavePic->write8(0xA0, 0x20);
     handleInterrupt(0x0A);
-    sendEOI(0x71);
     return true;
   }
   case 0x74: { // IRQ12 — PS/2 Mouse
@@ -1371,6 +1373,28 @@ void BIOS::initialize() {
     m_originalIVT[0x75] = {IRQ13_HANDLER, HLE_STUB_SEG};
   }
 
+  // INT 71h (IRQ9, the ISA IRQ2 line: VGA vertical retrace interrupt) as
+  // on the IBM AT: EOI the slave PIC and run INT 0Ah, so programs written
+  // for the PC/EGA IRQ2 (hooking INT 0Ah, EOI to the master) work.
+  {
+    constexpr uint16_t IRQ9_HANDLER = 0x1F40;
+    const uint32_t base =
+        (static_cast<uint32_t>(HLE_STUB_SEG) << 4) + IRQ9_HANDLER;
+    const uint8_t code[] = {
+        0x50,       // PUSH AX
+        0xB0, 0x20, // MOV AL, 20h
+        0xE6, 0xA0, // OUT A0h, AL
+        0x58,       // POP AX
+        0xCD, 0x0A, // INT 0Ah
+        0xCF        // IRET
+    };
+    for (size_t i = 0; i < sizeof(code); ++i)
+      m_memory.write8(base + i, code[i]);
+    m_memory.write16(0x71 * 4, IRQ9_HANDLER);
+    m_memory.write16(0x71 * 4 + 2, HLE_STUB_SEG);
+    m_originalIVT[0x71] = {IRQ9_HANDLER, HLE_STUB_SEG};
+  }
+
   // Mouse driver stub at F000:0033 — programs check if INT 33h handler is a
   // bare IRET to detect presence. NOP + IRET avoids false "no driver"
   // detection. HLE intercepts INT 33h before this code ever executes.
@@ -1456,8 +1480,12 @@ void BIOS::initialize() {
   m_pic.unmaskIRQ(0);
   m_pic.unmaskIRQ(1);
   m_pic.unmaskIRQ(2); // Cascade line for slave PIC (IRQ8-15 pass through IRQ2)
-  if (m_slavePic)
+  if (m_slavePic) {
     m_slavePic->unmaskIRQ(5); // IRQ13: x87 FERR# (enabled by the AT POST)
+    // IRQ9 carries the ISA IRQ2 line; like AT BIOSes leave it enabled so
+    // programs that only unmask IRQ2 on the master get it.
+    m_slavePic->unmaskIRQ(1);
+  }
 
   LOG_INFO("BIOS: BDA and IVT initialized.");
 }
