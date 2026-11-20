@@ -104,7 +104,7 @@ public:
   // Guest clock: approximate core clock cycles executed so far, weighted by
   // the model's per-instruction costs.  Monotonic; never reset.
   uint64_t cycles() const { return m_guestCycles; }
-  void addGuestCycles(uint32_t c) { m_guestCycles += c; }
+  void addGuestCycles(uint64_t c) { m_guestCycles += c; }
   // Per-opcode cost table (see CpuModel.hpp); decoders keep a copy and
   // refresh it when the segment-state version changes.
   const uint8_t *cycleTable() const { return m_cycleTable.data(); }
@@ -412,7 +412,7 @@ public:
   // plus idle ticks); see cycles() for the model-weighted guest clock.
   uint64_t getCycles() const { return m_cycles; }
   const uint64_t &getCyclesRef() const { return m_cycles; }
-  void addCycles(uint32_t c) { m_cycles += c; }
+  void addCycles(uint64_t c) { m_cycles += c; }
 
   uint64_t getSegmentStateVersion() const { return m_segmentStateVersion; }
   uint8_t getDirtySegmentMask() const { return m_dirtySegmentMask; }
@@ -459,23 +459,37 @@ public:
   // the carry flag is first folded into m_eflags (INC/DEC preserve CF).
   void setLazyFlags(LazyFlags::Kind kind, uint32_t msb, uint32_t dst,
                     uint32_t src, uint32_t res) {
+    uint32_t fromEflags = 0;
     if (kind == LazyFlags::Inc || kind == LazyFlags::Dec) {
       const uint32_t cf = carryFlag() ? FLAG_CARRY : 0u;
       m_eflags = (m_eflags & ~FLAG_CARRY) | cf;
+      fromEflags = FLAG_CARRY;
     }
     m_lazy.kind = kind;
+    m_lazy.fromEflags = fromEflags;
     m_lazy.msb = msb;
     m_lazy.dst = dst;
     m_lazy.src = src;
     m_lazy.res = res;
   }
+  // Sets the arithmetic flags in `mask` (a subset of OF SF ZF AF PF CF) to
+  // `value` without folding a pending record in: the other arithmetic
+  // flags keep coming from it (shifts leave AF, MUL leaves SF ZF AF PF).
+  void setArithFlags(uint32_t mask, uint32_t value) {
+    m_eflags = (m_eflags & ~mask) | (value & mask);
+    if (m_lazy.kind != LazyFlags::None) {
+      m_lazy.fromEflags |= mask;
+      if (m_lazy.fromEflags == LazyFlags::kArithMask)
+        m_lazy.kind = LazyFlags::None;
+    }
+  }
   bool carryFlag() const {
-    if (m_lazy.kind == LazyFlags::None || m_lazy.kind >= LazyFlags::Inc)
+    if (m_lazy.kind == LazyFlags::None || (m_lazy.fromEflags & FLAG_CARRY))
       return (m_eflags & FLAG_CARRY) != 0;
     return m_lazy.carry();
   }
   bool zeroFlag() const {
-    if (m_lazy.kind == LazyFlags::None)
+    if (m_lazy.kind == LazyFlags::None || (m_lazy.fromEflags & FLAG_ZERO))
       return (m_eflags & FLAG_ZERO) != 0;
     return m_lazy.res == 0;
   }
@@ -610,7 +624,8 @@ private:
   mutable uint32_t m_eflags{0x00000002}; // bit 1 is always reserved as 1
   mutable LazyFlags m_lazy{};
   void materializeFlags() const {
-    m_eflags = (m_eflags & ~m_lazy.definedMask()) | m_lazy.flags(m_eflags);
+    const uint32_t defined = m_lazy.definedMask();
+    m_eflags = (m_eflags & ~defined) | (m_lazy.flags() & defined);
     m_lazy.kind = LazyFlags::None;
   }
 
@@ -640,8 +655,20 @@ private:
 
 inline bool CPU::testCondition(uint8_t cond) const {
   bool r;
-  if (m_lazy.kind == LazyFlags::None) {
-    const uint32_t f = m_eflags;
+  if (m_lazy.kind != LazyFlags::None &&
+      (m_lazy.fromEflags & ~FLAG_CARRY) == 0) [[likely]] {
+    switch ((cond >> 1) & 7) {
+    case 0: r = m_lazy.overflow(); break;
+    case 1: r = carryFlag(); break;
+    case 2: r = m_lazy.zero(); break;
+    case 3: r = m_lazy.zero() || carryFlag(); break;
+    case 4: r = m_lazy.sign(); break;
+    case 5: r = m_lazy.parity(); break;
+    case 6: r = m_lazy.sign() != m_lazy.overflow(); break;
+    default: r = m_lazy.zero() || (m_lazy.sign() != m_lazy.overflow()); break;
+    }
+  } else {
+    const uint32_t f = getEFLAGS();
     const bool of = (f & FLAG_OVERFLOW) != 0, sf = (f & FLAG_SIGN) != 0;
     const bool zf = (f & FLAG_ZERO) != 0, cf = (f & FLAG_CARRY) != 0;
     switch ((cond >> 1) & 7) {
@@ -653,17 +680,6 @@ inline bool CPU::testCondition(uint8_t cond) const {
     case 5: r = (f & FLAG_PARITY) != 0; break;
     case 6: r = sf != of; break;
     default: r = zf || (sf != of); break;
-    }
-  } else {
-    switch ((cond >> 1) & 7) {
-    case 0: r = m_lazy.overflow(); break;
-    case 1: r = carryFlag(); break;
-    case 2: r = m_lazy.zero(); break;
-    case 3: r = m_lazy.zero() || carryFlag(); break;
-    case 4: r = m_lazy.sign(); break;
-    case 5: r = m_lazy.parity(); break;
-    case 6: r = m_lazy.sign() != m_lazy.overflow(); break;
-    default: r = m_lazy.zero() || (m_lazy.sign() != m_lazy.overflow()); break;
     }
   }
   return r != ((cond & 1) != 0);

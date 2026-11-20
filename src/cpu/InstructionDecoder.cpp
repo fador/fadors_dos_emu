@@ -354,132 +354,108 @@ void InstructionDecoder::writeModRM8(const ModRM &modrm, uint8_t value) {
 // MUL/IMUL: CF and OF report whether the upper half of the product is
 // significant; SF/ZF/AF/PF are architecturally undefined and left alone.
 void InstructionDecoder::setMulOverflow(bool overflow) {
-  uint32_t flags = m_cpu.getEFLAGS() & ~(FLAG_CARRY | FLAG_OVERFLOW);
-  if (overflow)
-    flags |= FLAG_CARRY | FLAG_OVERFLOW;
-  m_cpu.setEFLAGS(flags);
+  m_cpu.setArithFlags(FLAG_CARRY | FLAG_OVERFLOW,
+                      overflow ? FLAG_CARRY | FLAG_OVERFLOW : 0u);
 }
 
-// Shift/rotate group (C0/C1/D0-D3, /op): result and flags.
+// Shift/rotate group (C0/C1/D0-D3, /op): result and flags.  Only the flags
+// the operation writes are set; AF (and SF ZF PF for rotates, OF for
+// rotates/SHL by more than one) keep their values, including a pending
+// lazy record.
 uint32_t InstructionDecoder::shiftRotate(uint8_t op, uint32_t val, uint8_t c,
-                                     int size) {
+                                         int size) {
   c &= 0x1F;
   if (c == 0)
     return val;
-  uint32_t mask = (size == 8)    ? 0xFFu
-                  : (size == 16) ? 0xFFFFu
-                                 : 0xFFFFFFFFu;
+  const uint32_t mask = (size == 8)    ? 0xFFu
+                        : (size == 16) ? 0xFFFFu
+                                       : 0xFFFFFFFFu;
   val &= mask;
-  uint32_t flags = m_cpu.getEFLAGS();
-  bool cf = flags & FLAG_CARRY;
-
+  bool cf;
+  uint32_t written = FLAG_CARRY, value = 0;
+  auto setOF = [&](bool of) {
+    written |= FLAG_OVERFLOW;
+    if (of)
+      value |= FLAG_OVERFLOW;
+  };
   switch (op & 7) {
   case 0: { // ROL
-    uint8_t ec = c % size;
+    const uint8_t ec = c % size;
     if (ec)
       val = ((val << ec) | (val >> (size - ec))) & mask;
     cf = val & 1;
-    flags = (flags & ~FLAG_CARRY) | (cf ? FLAG_CARRY : 0);
-    if (c == 1) {
-      bool msb = (val >> (size - 1)) & 1;
-      flags = (flags & ~FLAG_OVERFLOW) | ((msb ^ cf) ? FLAG_OVERFLOW : 0);
-    }
-    m_cpu.setEFLAGS(flags);
-    return val;
+    if (c == 1)
+      setOF(((val >> (size - 1)) & 1) ^ cf);
+    break;
   }
   case 1: { // ROR
-    uint8_t ec = c % size;
+    const uint8_t ec = c % size;
     if (ec)
       val = ((val >> ec) | (val << (size - ec))) & mask;
     cf = (val >> (size - 1)) & 1;
-    flags = (flags & ~FLAG_CARRY) | (cf ? FLAG_CARRY : 0);
-    if (c == 1) {
-      bool bit2 = (val >> (size - 2)) & 1;
-      flags = (flags & ~FLAG_OVERFLOW) | ((cf ^ bit2) ? FLAG_OVERFLOW : 0);
-    }
-    m_cpu.setEFLAGS(flags);
-    return val;
+    if (c == 1)
+      setOF(cf ^ ((val >> (size - 2)) & 1));
+    break;
   }
   case 2: { // RCL
+    cf = m_cpu.carryFlag();
     for (uint8_t i = 0; i < c; ++i) {
-      bool msb = (val >> (size - 1)) & 1;
+      const bool msb = (val >> (size - 1)) & 1;
       val = ((val << 1) | (cf ? 1u : 0u)) & mask;
       cf = msb;
     }
-    flags = (flags & ~FLAG_CARRY) | (cf ? FLAG_CARRY : 0);
-    if (c == 1) {
-      bool msb = (val >> (size - 1)) & 1;
-      flags = (flags & ~FLAG_OVERFLOW) | ((msb ^ cf) ? FLAG_OVERFLOW : 0);
-    }
-    m_cpu.setEFLAGS(flags);
-    return val;
+    if (c == 1)
+      setOF(((val >> (size - 1)) & 1) ^ cf);
+    break;
   }
   case 3: { // RCR
+    cf = m_cpu.carryFlag();
     for (uint8_t i = 0; i < c; ++i) {
-      bool lsb = val & 1;
+      const bool lsb = val & 1;
       val = ((val >> 1) | (cf ? (1u << (size - 1)) : 0u)) & mask;
       cf = lsb;
     }
-    flags = (flags & ~FLAG_CARRY) | (cf ? FLAG_CARRY : 0);
-    if (c == 1) {
-      bool msb = (val >> (size - 1)) & 1;
-      bool bit2 = (val >> (size - 2)) & 1;
-      flags = (flags & ~FLAG_OVERFLOW) | ((msb ^ bit2) ? FLAG_OVERFLOW : 0);
-    }
-    m_cpu.setEFLAGS(flags);
-    return val;
-  }
-  case 4:
-  case 6: { // SHL/SAL
-    cf = (val >> (size - c)) & 1;
-    val = (val << c) & mask;
-    break;
-  }
-  case 5: { // SHR
-    bool oldMsb = (val >> (size - 1)) & 1;
-    cf = (val >> (c - 1)) & 1;
-    val = (val >> c) & mask;
-    flags = (flags & ~FLAG_OVERFLOW);
     if (c == 1)
-      flags |= (oldMsb ? FLAG_OVERFLOW : 0);
+      setOF(((val >> (size - 1)) & 1) ^ ((val >> (size - 2)) & 1));
     break;
   }
-  case 7: { // SAR
-    int32_t sval = (size == 8)    ? static_cast<int8_t>(val)
-                   : (size == 16) ? static_cast<int16_t>(val)
-                                  : static_cast<int32_t>(val);
-    cf = (sval >> (c - 1)) & 1;
-    val = static_cast<uint32_t>(sval >> c) & mask;
-    flags &= ~FLAG_OVERFLOW; // OF always 0 for SAR
+  default: { // SHL/SAL, SHR, SAR
+    const uint8_t sop = op & 7;
+    if (sop == 4 || sop == 6) {
+      // Counts above the operand size: the shift count is taken modulo 32
+      // like the x86 SHR the compiler emits for it.
+      cf = (val >> ((size - c) & 31)) & 1;
+      val = (val << c) & mask;
+      if (c == 1 && sop == 4)
+        setOF(((val >> (size - 1)) & 1) ^ cf);
+    } else if (sop == 5) {
+      const bool oldMsb = (val >> (size - 1)) & 1;
+      cf = (val >> (c - 1)) & 1;
+      val = (val >> c) & mask;
+      setOF(c == 1 && oldMsb);
+    } else {
+      const int32_t sval = (size == 8)    ? static_cast<int8_t>(val)
+                           : (size == 16) ? static_cast<int16_t>(val)
+                                          : static_cast<int32_t>(val);
+      cf = (sval >> (c - 1)) & 1;
+      val = static_cast<uint32_t>(sval >> c) & mask;
+      setOF(false); // OF always 0 for SAR
+    }
+    written |= FLAG_ZERO | FLAG_SIGN | FLAG_PARITY;
+    if (val == 0)
+      value |= FLAG_ZERO;
+    if (val & (1u << (size - 1)))
+      value |= FLAG_SIGN;
+    if (!(std::popcount(static_cast<uint8_t>(val)) & 1))
+      value |= FLAG_PARITY;
     break;
   }
-  default:
-    return val;
   }
-  // Common flag update for SHL/SHR/SAR (cases 4-7)
-  flags = (flags & ~(FLAG_CARRY | FLAG_ZERO | FLAG_SIGN | FLAG_PARITY));
   if (cf)
-    flags |= FLAG_CARRY;
-  if (val == 0)
-    flags |= FLAG_ZERO;
-  if (val & (1u << (size - 1)))
-    flags |= FLAG_SIGN;
-  {
-    uint8_t p = val & 0xFF;
-    p ^= p >> 4;
-    p ^= p >> 2;
-    p ^= p >> 1;
-    if (!(p & 1))
-      flags |= FLAG_PARITY;
-  }
-  if (c == 1 && (op & 7) == 4) {
-    bool msb = (val >> (size - 1)) & 1;
-    flags = (flags & ~FLAG_OVERFLOW) | ((msb ^ cf) ? FLAG_OVERFLOW : 0);
-  }
-  m_cpu.setEFLAGS(flags);
+    value |= FLAG_CARRY;
+  m_cpu.setArithFlags(written, value);
   return val;
 }
-
 
 bool InstructionDecoder::checkCondition(uint8_t cond) {
   return m_cpu.testCondition(cond);
@@ -518,6 +494,8 @@ void InstructionDecoder::step() {
 }
 
 uint64_t InstructionDecoder::run(uint64_t maxInstructions) {
+  const bool burst = m_fastPathEnabled &&
+                     !(utils::enabledCategories & utils::CAT_CPU);
   uint64_t executed = 0;
   while (executed < maxInstructions) {
     step();
@@ -525,8 +503,54 @@ uint64_t InstructionDecoder::run(uint64_t maxInstructions) {
     ++executed;
     if (m_dos.isTerminated()) [[unlikely]]
       break;
+    // Consecutive fast-path instructions run in a tight loop.  None of
+    // them can load a segment, start an interrupt shadow, enable paging
+    // or end the program, so those checks are done once per burst.
+    if (burst && executed < maxInstructions && !m_memory.pagingEnabled() &&
+        !m_cpu.interruptShadowActive() &&
+        m_cachedSegStateVersion == m_cpu.getSegmentStateVersion())
+      executed += runFastBurst(maxInstructions - executed);
   }
   return executed;
+}
+
+uint64_t InstructionDecoder::runFastBurst(uint64_t maxInstructions) {
+  const uint32_t csBase = m_segBase[CS];
+  const uint8_t code32 = m_cpu.is32BitCode() ? 1 : 0;
+  const uint16_t cs = m_cpu.getSegReg(CS);
+  uint16_t prevCS = m_cpu.getInstructionStartCS();
+  uint64_t n = 0, cycles = 0;
+  while (n < maxInstructions) {
+    const uint32_t eip = m_cpu.getEIP();
+    const uint32_t lin = csBase + eip;
+    const DecodedInsn &d =
+        m_decoded[(lin ^ (lin >> 12)) & (kDecodedCacheSize - 1)];
+    if (d.linear != lin || d.code32 != code32 || d.handler == nullptr)
+      break; // not decoded yet or not a fast-path instruction
+    const uint8_t *p = m_memory.codeWindow(lin);
+    if (p == nullptr) [[unlikely]]
+      break;
+    uint64_t w0, w1;
+    std::memcpy(&w0, p, 8);
+    std::memcpy(&w1, p + 8, 8);
+    if ((((w0 ^ d.bytes[0]) & d.byteMask[0]) |
+         ((w1 ^ d.bytes[1]) & d.byteMask[1])) != 0 ||
+        eip > d.maxEip) [[unlikely]]
+      break;
+    // Same bookkeeping as stepInstruction().
+    m_instrStartEIP = eip;
+    m_cpu.setInstructionStartEIP(eip);
+    m_cpu.setPrevInstructionCS(prevCS);
+    m_cpu.setInstructionStartCS(cs);
+    prevCS = cs;
+    m_cpu.setEIP(eip + d.len);
+    cycles += d.cycles;
+    d.handler(*this, d);
+    ++n;
+  }
+  m_cpu.addGuestCycles(cycles);
+  m_cpu.addCycles(n);
+  return n;
 }
 
 void InstructionDecoder::stepInstruction() {

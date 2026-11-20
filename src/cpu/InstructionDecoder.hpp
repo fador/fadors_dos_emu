@@ -114,6 +114,7 @@ private:
       std::make_unique<DecodedInsn[]>(kDecodedCacheSize);
   bool m_fastPathEnabled = true;
   bool tryFastPath(uint32_t startEIP);
+  uint64_t runFastBurst(uint64_t maxInstructions);
   void decodeFast(DecodedInsn &d, uint32_t linear, const uint8_t *code,
                   bool code32);
 

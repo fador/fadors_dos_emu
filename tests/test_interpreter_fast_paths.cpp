@@ -277,6 +277,55 @@ TEST_CASE("Lazy flags: shifts by zero and masked counts leave them pending",
   REQUIRE((m.cpu.getEFLAGS() & 0x041) == 0x041);
 }
 
+TEST_CASE("Lazy flags: shifts and rotates replace only the flags they write",
+          "[CPU][LazyFlags]") {
+  Machine m;
+  SECTION("ROL by 3 after ADD: CF from the rotate, the rest from the ADD") {
+    m.cpu.setReg32(cpu::EAX, 0x8F);
+    m.cpu.setReg32(cpu::ECX, 0x71);
+    m.cpu.setReg32(cpu::EBX, 0x2001);
+    m.cpu.setEFLAGS(0x2 | 0x800);
+    m.run({0x00, 0xC8, 0xC1, 0xC3, 0x03}, 2); // add al,cl ; rol bx,3
+    uint32_t ref = 0x2 | 0x800;
+    eagerAlu(0, 0x8F, 0x71, 8, ref); // 0x100: CF ZF AF PF, OF clear
+    ref = (ref & ~1u) | 1u;          // ROL 0x2001 by 3 = 0x0009: CF = 1
+    REQUIRE(m.cpu.getReg16(cpu::BX) == 0x0009);
+    REQUIRE(m.cpu.testCondition(0x4)); // JZ from the ADD
+    REQUIRE(m.cpu.getEFLAGS() == ref);
+  }
+  SECTION("SHL by 2 after SUB: AF and OF stay from the SUB") {
+    m.cpu.setReg32(cpu::EAX, 0x10);
+    m.cpu.setReg32(cpu::ECX, 0x81);
+    m.cpu.setReg32(cpu::EBX, 0x4001);
+    m.cpu.setEFLAGS(0x2);
+    m.run({0x28, 0xC8, 0xC1, 0xE3, 0x02}, 2); // sub al,cl ; shl bx,2
+    uint32_t ref = 0x2;
+    eagerAlu(5, 0x10, 0x81, 8, ref); // 0x8F: CF AF OF SF
+    // SHL 0x4001 by 2 = 0x0004: CF = 1, ZF = 0, SF = 0, PF = 0
+    ref = (ref & ~(0x001u | 0x040u | 0x080u | 0x004u)) | 0x001u;
+    REQUIRE(m.cpu.getReg16(cpu::BX) == 0x0004);
+    REQUIRE(m.cpu.getEFLAGS() == ref);
+  }
+  SECTION("RCL takes its carry in from a pending SUB") {
+    m.cpu.setReg32(cpu::EAX, 1);
+    m.cpu.setReg32(cpu::ECX, 2);
+    m.cpu.setReg32(cpu::EBX, 0);
+    m.run({0x28, 0xC8, 0xD1, 0xD3}, 2); // sub al,cl (CF=1) ; rcl bx,1
+    REQUIRE(m.cpu.getReg16(cpu::BX) == 1);
+    REQUIRE(!m.cpu.carryFlag());
+  }
+  SECTION("CLC/STC/CMC after CMP keep ZF and SF") {
+    m.cpu.setReg32(cpu::EAX, 5);
+    m.cpu.setReg32(cpu::ECX, 5);
+    m.run({0x38, 0xC8, 0xF9, 0xF5, 0xF5}, 4); // cmp al,cl ; stc ; cmc ; cmc
+    REQUIRE(m.cpu.carryFlag());
+    REQUIRE(m.cpu.testCondition(0x4));
+    uint32_t ref = 0x2;
+    eagerAlu(7, 5, 5, 8, ref);
+    REQUIRE(m.cpu.getEFLAGS() == (ref | 1u));
+  }
+}
+
 TEST_CASE("Lazy flags: MUL, IMUL and DIV see the pending flags", "[CPU][LazyFlags]") {
   Machine m;
   SECTION("MUL keeps SF/ZF/AF/PF of the preceding SUB") {
@@ -639,22 +688,41 @@ void runDifferential(bool code32, bool paging, int sequences, uint32_t seed) {
       m->cpu.setEFLAGS(flags);
       m->cpu.setEIP(0);
     }
-    for (int step = 0; step < 120; ++step) {
+    for (int step = 0; step < 120;) {
       const uint32_t eip = fast.cpu.getEIP();
       if (eip >= 0x1F00)
         break; // ran off the generated code
-      fast.decoder.step();
-      legacy.decoder.step();
+      // The fast machine alternates single steps and batches (bursts of
+      // fast-path instructions); the legacy one always single-steps.
+      const uint64_t k = (seq & 1) ? 1 + rng() % 8 : 1;
+      if (k == 1) {
+        fast.decoder.step();
+        fast.cpu.addCycles(1);
+      } else {
+        REQUIRE(fast.decoder.run(k) == k);
+      }
+      for (uint64_t i = 0; i < k; ++i) {
+        legacy.decoder.step();
+        legacy.cpu.addCycles(1);
+      }
+      step += static_cast<int>(k);
       bool same = fast.cpu.getEIP() == legacy.cpu.getEIP() &&
                   fast.cpu.getEFLAGS() == legacy.cpu.getEFLAGS() &&
-                  fast.cpu.cycles() == legacy.cpu.cycles();
+                  fast.cpu.cycles() == legacy.cpu.cycles() &&
+                  fast.cpu.getCycles() == legacy.cpu.getCycles() &&
+                  fast.cpu.getInstructionStartEIP() ==
+                      legacy.cpu.getInstructionStartEIP() &&
+                  fast.cpu.getInstructionStartCS() ==
+                      legacy.cpu.getInstructionStartCS() &&
+                  fast.cpu.getPrevInstructionCS() ==
+                      legacy.cpu.getPrevInstructionCS();
       for (int i = 0; i < 8; ++i)
         same = same && fast.cpu.getReg32(static_cast<uint8_t>(i)) ==
                            legacy.cpu.getReg32(static_cast<uint8_t>(i));
       for (int i = 0; i < 6; ++i)
         same = same && fast.cpu.getSegReg(static_cast<uint8_t>(i)) ==
                            legacy.cpu.getSegReg(static_cast<uint8_t>(i));
-      if (same && (step % 16 == 15 || step == 119)) {
+      if (same && (step % 16 < static_cast<int>(k) || step >= 119)) {
         for (uint32_t a = DiffMachine::kCode; a < DiffMachine::kStack + 0x10000; a += 4)
           if (fast.mem.read32(a) != legacy.mem.read32(a)) {
             same = false;

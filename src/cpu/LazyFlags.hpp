@@ -17,6 +17,11 @@ namespace fador::cpu {
 // All values are masked to the operand size (msb = 0x80, 0x8000 or
 // 0x80000000).  ADC with CF=0 is recorded as Add and SBB with CF=0 as Sub
 // (identical flags); with a carry in they use AddC / SubB.
+//
+// `fromEflags` lists arithmetic flags that later instructions have set
+// explicitly (INC/DEC keep CF, shifts/rotates/MUL/CLC/STC write some
+// flags but not AF or the rest); those bits are then taken from EFLAGS
+// instead of the record.
 struct LazyFlags {
   enum Kind : uint8_t {
     None = 0, // EFLAGS holds the architectural value
@@ -33,6 +38,7 @@ struct LazyFlags {
   static constexpr uint32_t kArithMask = kCF | kPF | kAF | kZF | kSF | kOF;
 
   Kind kind = None;
+  uint32_t fromEflags = 0; // arithmetic flags not defined by this record
   uint32_t msb = 0;
   uint32_t dst = 0;
   uint32_t src = 0;
@@ -40,10 +46,8 @@ struct LazyFlags {
 
   uint32_t mask() const { return (msb << 1) - 1u; }
 
-  // The flags this record defines (Inc/Dec leave CF alone).
-  uint32_t definedMask() const {
-    return (kind == Inc || kind == Dec) ? kArithMask & ~kCF : kArithMask;
-  }
+  // The flags this record defines.
+  uint32_t definedMask() const { return kArithMask & ~fromEflags; }
 
   bool carry() const {
     switch (kind) {
@@ -80,10 +84,11 @@ struct LazyFlags {
   }
   bool aux() const { return kind != Logic && ((dst ^ src ^ res) & 0x10) != 0; }
 
-  // Value of the bits in definedMask().
-  uint32_t flags(uint32_t /*eflags*/) const {
+  // Value of the six arithmetic flags as computed from the record (only
+  // the definedMask() bits are meaningful).
+  uint32_t flags() const {
     uint32_t f = 0;
-    if (kind != Inc && kind != Dec && carry())
+    if (carry())
       f |= kCF;
     if (overflow())
       f |= kOF;

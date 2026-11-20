@@ -309,9 +309,11 @@ struct FastOps {
   }
 
   // ── flags ─────────────────────────────────────────────────────────
-  static void cmc(ID &c, const D &) { c.m_cpu.setEFLAGS(c.m_cpu.getEFLAGS() ^ FLAG_CARRY); }
-  static void clc(ID &c, const D &) { c.m_cpu.setEFLAGS(c.m_cpu.getEFLAGS() & ~0x0001u); }
-  static void stc(ID &c, const D &) { c.m_cpu.setEFLAGS(c.m_cpu.getEFLAGS() | 0x0001u); }
+  static void cmc(ID &c, const D &) {
+    c.m_cpu.setArithFlags(FLAG_CARRY, c.m_cpu.carryFlag() ? 0u : FLAG_CARRY);
+  }
+  static void clc(ID &c, const D &) { c.m_cpu.setArithFlags(FLAG_CARRY, 0); }
+  static void stc(ID &c, const D &) { c.m_cpu.setArithFlags(FLAG_CARRY, FLAG_CARRY); }
   static void cld(ID &c, const D &) { c.m_cpu.setEFLAGS(c.m_cpu.getEFLAGS() & ~0x0400u); }
   static void std_(ID &c, const D &) { c.m_cpu.setEFLAGS(c.m_cpu.getEFLAGS() | 0x0400u); }
 
