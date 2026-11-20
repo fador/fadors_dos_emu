@@ -654,6 +654,8 @@ int main(int argc, char *argv[]) {
     pit.setChannel2Callback([&pcSpeaker](uint16_t reload, uint8_t mode) {
       pcSpeaker.channel2Programmed(reload, mode);
     });
+    // x87 FERR# (unmasked FPU exception with CR0.NE=0) -> IRQ13
+    cpu.setFPUErrorCallback([&picSlave]() { picSlave.raiseIRQ(5); });
     sb.setIRQCallback([&pic, &picSlave, &sb]() {
       const int line = sb.getIRQ();
       if (line < 8)

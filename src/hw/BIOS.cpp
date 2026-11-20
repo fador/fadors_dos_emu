@@ -1558,6 +1558,31 @@ void BIOS::initialize() {
     m_originalIVT[0x08] = {INT8_HANDLER, HLE_STUB_SEG};
   }
 
+  // INT 75h (IRQ13, x87 FERR#) handler as on the IBM AT: clear the
+  // coprocessor busy latch, EOI both PICs and report the error as an NMI
+  // (INT 02h), so programs that hook INT 02h or INT 75h see FPU errors.
+  {
+    constexpr uint16_t IRQ13_HANDLER = 0x1F00;
+    const uint32_t base =
+        (static_cast<uint32_t>(HLE_STUB_SEG) << 4) + IRQ13_HANDLER;
+    const uint8_t code[] = {
+        0x50,       // PUSH AX
+        0x30, 0xC0, // XOR AL, AL
+        0xE6, 0xF0, // OUT F0h, AL
+        0xB0, 0x20, // MOV AL, 20h
+        0xE6, 0xA0, // OUT A0h, AL
+        0xE6, 0x20, // OUT 20h, AL
+        0x58,       // POP AX
+        0xCD, 0x02, // INT 02h
+        0xCF        // IRET
+    };
+    for (size_t i = 0; i < sizeof(code); ++i)
+      m_memory.write8(base + i, code[i]);
+    m_memory.write16(0x75 * 4, IRQ13_HANDLER);
+    m_memory.write16(0x75 * 4 + 2, HLE_STUB_SEG);
+    m_originalIVT[0x75] = {IRQ13_HANDLER, HLE_STUB_SEG};
+  }
+
   // Mouse driver stub at F000:0033 — programs check if INT 33h handler is a
   // bare IRET to detect presence. NOP + IRET avoids false "no driver"
   // detection. HLE intercepts INT 33h before this code ever executes.
@@ -1635,6 +1660,8 @@ void BIOS::initialize() {
   m_pic.unmaskIRQ(0);
   m_pic.unmaskIRQ(1);
   m_pic.unmaskIRQ(2); // Cascade line for slave PIC (IRQ8-15 pass through IRQ2)
+  if (m_slavePic)
+    m_slavePic->unmaskIRQ(5); // IRQ13: x87 FERR# (enabled by the AT POST)
 
   LOG_INFO("BIOS: BDA and IVT initialized.");
 }
