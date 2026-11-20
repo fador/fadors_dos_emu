@@ -45,6 +45,15 @@ constexpr std::array<uint8_t, 9> kGcMask{0x0F, 0x0F, 0x0F, 0x1F, 0x03,
 VGAController::VGAController(memory::MemoryBus &memory)
     : m_memory(memory), m_epochNs(steadyNowNs()) {
   updateAccessPath();
+  updateTextAlias();
+}
+
+void VGAController::updateTextAlias() {
+  const bool alphanumeric = (m_attr[0x10] & 0x01) == 0;
+  const bool oddEven = (m_seq[4] & 0x04) == 0;
+  const uint8_t map = (m_gc[6] >> 2) & 3;
+  m_textRam = alphanumeric && oddEven ? m_memory.directAccess(map == 2 ? 0xB0000 : 0xB8000)
+                           : nullptr;
 }
 
 // ── Time source and CRT timing ─────────────────────────────────────────
@@ -285,6 +294,8 @@ void VGAController::setSeqReg(uint8_t index, uint8_t value) {
   m_seq[index] = value;
   if (index == 1)
     timingChanged();
+  if (index == 4)
+    updateTextAlias();
   if (index == 4 || index == 2)
     updateAccessPath();
 }
@@ -299,6 +310,8 @@ void VGAController::setGcReg(uint8_t index, uint8_t value) {
       (index == 6 && m_gc[6] != value))
     beforeDisplayChange();
   m_gc[index] = value;
+  if (index == 6)
+    updateTextAlias();
   updateAccessPath();
 }
 
@@ -375,6 +388,8 @@ void VGAController::setAttrReg(uint8_t index, uint8_t value) {
   if (m_attr[index] != value) {
     beforeDisplayChange();
     m_attr[index] = value;
+    if (index == 0x10)
+      updateTextAlias();
   }
 }
 
@@ -566,7 +581,7 @@ void VGAController::write8(uint16_t port, uint8_t value) {
 void VGAController::loadLatches(uint32_t planeOffset) const {
   uint32_t index = planeOffset & 0xFFFF;
   for (int plane = 0; plane < 4; ++plane)
-    m_latches[plane] = m_planes[plane][index];
+    m_latches[plane] = cpuPlane(plane, index);
 }
 
 void VGAController::writeThroughPipeline(uint32_t planeOff, uint8_t value,
@@ -581,7 +596,7 @@ void VGAController::writeThroughPipeline(uint32_t planeOff, uint8_t value,
     if ((planeMask & (1u << plane)) == 0)
       return;
     const uint8_t latch = m_latches[plane];
-    m_planes[plane][planeOff] =
+    cpuPlane(plane, planeOff) =
         static_cast<uint8_t>((applyLogicalOp(logicalOp, data, latch) & mask) |
                              (latch & ~mask));
   };
@@ -602,7 +617,7 @@ void VGAController::writeThroughPipeline(uint32_t planeOff, uint8_t value,
     // are all ignored.
     for (int plane = 0; plane < 4; ++plane)
       if (planeMask & (1u << plane))
-        m_planes[plane][planeOff] = m_latches[plane];
+        cpuPlane(plane, planeOff) = m_latches[plane];
     break;
   case 0x02:
     for (int plane = 0; plane < 4; ++plane)

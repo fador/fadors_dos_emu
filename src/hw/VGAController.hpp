@@ -181,10 +181,10 @@ public:
 
   // Read / write a specific plane byte (renderer, BIOS font loading)
   uint8_t readPlane(int plane, uint32_t offset) const {
-    return m_planes[plane & 3][offset & 0xFFFF];
+    return cpuPlane(plane & 3, offset & 0xFFFF);
   }
   void writePlane(int plane, uint32_t offset, uint8_t value) {
-    m_planes[plane & 3][offset & 0xFFFF] = value;
+    cpuPlane(plane & 3, offset & 0xFFFF) = value;
   }
   const uint8_t *planeData(int plane) const { return m_planes[plane & 3].data(); }
 
@@ -232,6 +232,15 @@ private:
   };
 
   void loadLatches(uint32_t planeOffset) const;
+  // Plane byte.  In alphanumeric modes with odd/even addressing the
+  // character and attribute planes (0/1, even offsets below 8000h) are the
+  // text buffer in RAM (B8000h, or B0000h with GC 06h memory map 2).
+  uint8_t &cpuPlane(int plane, uint32_t off) const {
+    if (m_textRam && plane < 2 && !(off & 1) && off < 0x8000)
+      return m_textRam[off + static_cast<uint32_t>(plane)];
+    return m_planes[plane][off];
+  }
+  void updateTextAlias();
   void writeThroughPipeline(uint32_t planeOff, uint8_t value, uint8_t planeMask);
   uint8_t readThroughPipeline(uint32_t planeOff, int plane) const;
   void updateAccessPath();
@@ -288,6 +297,9 @@ private:
   std::array<uint8_t, 0x15> m_attr{};
 
   AccessPath m_path = AccessPath::Chain4Fast;
+  // Text buffer (B8000h / B0000h in RAM) while the attribute controller is
+  // in alphanumeric mode with odd/even addressing, else nullptr
+  uint8_t *m_textRam = nullptr;
 
   bool m_svgaWindowEnabled = false;
   uint32_t m_svgaWindowBase = 0;
@@ -320,7 +332,7 @@ private:
   uint64_t m_nextEventNs = UINT64_MAX;
 
   // VGA plane memory (4 planes × 64KB each = 256KB total)
-  std::array<std::array<uint8_t, 65536>, 4> m_planes{};
+  mutable std::array<std::array<uint8_t, 65536>, 4> m_planes{};
 };
 
 // BIOS-HLE helper: program the CRTC cursor location from the BDA cursor

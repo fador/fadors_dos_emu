@@ -324,3 +324,33 @@ TEST_CASE("INT 10h text: mode 7 uses B0000h", "[VideoText]") {
   // The B8000h window is not used
   REQUIRE(rig.mem.read8(0xB8000) != 'A');
 }
+
+TEST_CASE("Text memory: A0000h odd/even access reaches the text buffer",
+          "[VideoText]") {
+  TextRig rig;
+  rig.int10(0x0003);
+  rig.int10(0x0E41); // 'A' at B8000h through the BIOS
+  // Map the 64 KiB A0000h window (GC 06h memory map 1, odd/even kept)
+  rig.vga.write8(0x3CE, 0x06);
+  rig.vga.write8(0x3CF, 0x06);
+  REQUIRE(rig.mem.read8(0xA0000) == 'A');
+  REQUIRE(rig.mem.read8(0xA0001) == 0x07);
+  rig.mem.write8(0xA0002, 'Z'); // even: plane 0 (characters)
+  rig.mem.write8(0xA0003, 0x4E); // odd: plane 1 (attributes)
+  REQUIRE(rig.mem.read16(0xB8002) == 0x4E5A);
+  // Plane 2 (the font) is still reached by planar addressing
+  rig.vga.write8(0x3C4, 0x02);
+  rig.vga.write8(0x3C5, 0x04); // map mask: plane 2
+  rig.vga.write8(0x3C4, 0x04);
+  rig.vga.write8(0x3C5, 0x06); // sequential addressing
+  rig.vga.write8(0x3CE, 0x05);
+  rig.vga.write8(0x3CF, 0x00);
+  rig.vga.write8(0x3CE, 0x04);
+  rig.vga.write8(0x3CF, 0x02); // read map 2
+  rig.mem.write8(0xA0000 + 'A' * 32, 0xFF);
+  REQUIRE(rig.vga.readPlane(2, 'A' * 32) == 0xFF);
+  REQUIRE(rig.mem.read8(0xA0000 + 'A' * 32) == 0xFF);
+  REQUIRE(rig.mem.read16(0xB8000) == 0x0741);
+  rig.frame.render(false);
+  REQUIRE(rig.frame.textScreen().rfind("AZ", 0) == 0);
+}
