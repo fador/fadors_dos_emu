@@ -640,7 +640,7 @@ public:
 };
 
 struct Emu {
-  cpu::CPU cpu;
+  cpu::CPU cpu{cpu::CpuModelId::PentiumPro}; // FCMOVcc and FCOMI are P6 instructions
   memory::MemoryBus mem;
   hw::IOBus iobus;
   hw::KeyboardController kbd;
