@@ -220,9 +220,24 @@ void glyph8x14(int ch, uint8_t *out) {
 }
 
 void glyph8x8(int ch, uint8_t *out) {
-  for (int r = 0; r < 8; ++r)
-    out[r] = static_cast<uint8_t>(ui::kVGAFont8x16[ch][r * 2] |
-                                  ui::kVGAFont8x16[ch][r * 2 + 1]);
+  const uint8_t *g = ui::kVGAFont8x16[ch];
+  if (ch >= 0xB0 && ch <= 0xDF) {
+    // Block and box-drawing characters fill the whole cell: OR row pairs
+    // so vertical strokes stay continuous.
+    for (int r = 0; r < 8; ++r)
+      out[r] = static_cast<uint8_t>(g[r * 2] | g[r * 2 + 1]);
+    return;
+  }
+  // Other glyphs: the 10-row body (rows 2-11) folded into 7 rows by
+  // merging every other pair, then the descender rows into the last row.
+  out[0] = g[2];
+  out[1] = static_cast<uint8_t>(g[3] | g[4]);
+  out[2] = g[5];
+  out[3] = static_cast<uint8_t>(g[6] | g[7]);
+  out[4] = g[8];
+  out[5] = static_cast<uint8_t>(g[9] | g[10]);
+  out[6] = g[11];
+  out[7] = static_cast<uint8_t>(g[12] | g[13]);
 }
 
 // Offset of character map `block` (0-7) inside plane 2
