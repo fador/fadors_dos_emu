@@ -13,8 +13,8 @@ constexpr uint32_t kCr0PE = 0x00000001, kCr0MP = 0x00000002,
 constexpr uint32_t kCr0Mask386 = kCr0PE | kCr0MP | kCr0EM | kCr0TS | kCr0ET | kCr0PG;
 constexpr uint32_t kCr0Mask486 = kCr0PE | kCr0MP | kCr0EM | kCr0TS | kCr0NE |
                                  kCr0WP | kCr0AM | kCr0NW | kCr0CD | kCr0PG;
-// CR4: TSD, DE, PSE, MCE.  VME/PVI are not emulated and stay clear.
-constexpr uint32_t kCr4MaskP5 = 0x0000005C;
+// CR4: VME, PVI, TSD, DE, PSE, MCE.
+constexpr uint32_t kCr4MaskP5 = 0x0000005F;
 
 constexpr uint32_t kFlags386 = eflags::kBase | eflags::kRF | eflags::kVM;
 constexpr uint32_t kFlags486 = kFlags386 | eflags::kAC;
@@ -27,7 +27,8 @@ constexpr uint32_t kFeatP5 = kFeat486Cpuid | feature::kTsc | feature::kMsr |
                              feature::kCx8 | feature::kCr4;
 constexpr uint32_t kFeatP6 = kFeatP5 | feature::kCmov;
 
-constexpr uint32_t kEdxP5 = cpuid_edx::kFpu | cpuid_edx::kPse |
+constexpr uint32_t kEdxP5 = cpuid_edx::kFpu | cpuid_edx::kVme |
+                            cpuid_edx::kDe | cpuid_edx::kPse |
                             cpuid_edx::kTsc | cpuid_edx::kMsr | cpuid_edx::kCx8;
 
 using Costs = std::array<uint8_t, kCycleClassCount>;

@@ -20,6 +20,8 @@ constexpr uint32_t kFlagRF = 0x00010000;
 constexpr uint32_t kFlagVM = 0x00020000;
 constexpr uint32_t kFlagVIF = 0x00080000;
 constexpr uint32_t kFlagVIP = 0x00100000;
+constexpr uint32_t kCr4VME = 0x1;
+constexpr uint32_t kCr4PVI = 0x2;
 
 // Exceptions that push an error code in protected mode.
 bool hasErrorCode(uint8_t vector) {
@@ -69,12 +71,95 @@ void InstructionDecoder::writeFlags(uint32_t value, uint32_t mask, bool op32) {
     m_rfLoaded = true; // IRET: the next instruction ignores breakpoints
 }
 
-bool InstructionDecoder::checkIOPL() {
-  if (!m_cpu.nativeProtection() ||
-      currentCPL() <= ((m_cpu.getEFLAGS() & kFlagIOPL) >> 12))
+bool InstructionDecoder::interruptFlagAccess(bool sti) {
+  const uint32_t flags = m_cpu.getEFLAGS();
+  const uint8_t cpl = currentCPL();
+  if (cpl <= ((flags & kFlagIOPL) >> 12))
     return true;
+  const uint32_t cr4 = m_cpu.getCR(4);
+  const bool vm = (flags & kFlagVM) != 0;
+  if ((vm && (cr4 & kCr4VME)) || (!vm && cpl == 3 && (cr4 & kCr4PVI))) {
+    // Virtual interrupt flag: STI with a virtual interrupt pending traps
+    // to the monitor so it can deliver it.
+    if (!sti)
+      m_cpu.setEFLAGS(flags & ~kFlagVIF);
+    else if (flags & kFlagVIP)
+      raiseException(13, 0);
+    else
+      m_cpu.setEFLAGS(flags | kFlagVIF);
+    return false;
+  }
   raiseException(13, 0);
   return false;
+}
+
+bool InstructionDecoder::v86FlagsTrap(bool pop) {
+  if (!m_cpu.nativeProtection())
+    return false;
+  const uint32_t flags = m_cpu.getEFLAGS();
+  if ((flags & kFlagIOPL) == kFlagIOPL)
+    return false;
+  if (m_hasPrefix66 || !(m_cpu.getCR(4) & kCr4VME)) {
+    raiseException(13, 0);
+    return true;
+  }
+  if (!pop) {
+    // PUSHF: IF shows VIF, IOPL shows 3.
+    uint16_t image = static_cast<uint16_t>((flags & ~kFlagIF) | kFlagIOPL);
+    if (flags & kFlagVIF)
+      image |= kFlagIF;
+    m_cpu.push16(image);
+    return true;
+  }
+  const uint32_t ss = m_cpu.getSegBase(SS);
+  const uint16_t sp = m_cpu.getReg16(SP);
+  const uint16_t image = m_memory.lread16(ss + sp);
+  if ((image & kFlagTF) || ((image & kFlagIF) && (flags & kFlagVIP))) {
+    raiseException(13, 0);
+    return true;
+  }
+  m_cpu.setReg16(SP, static_cast<uint16_t>(sp + 2));
+  writeFlags(image & ~kFlagRF, flagsWriteMask(false), false);
+  const uint32_t f = m_cpu.getEFLAGS();
+  m_cpu.setEFLAGS((image & kFlagIF) ? (f | kFlagVIF) : (f & ~kFlagVIF));
+  return true;
+}
+
+bool InstructionDecoder::v86InterruptRedirected(uint8_t vector) const {
+  // The 32-byte redirection bitmap ends just below the I/O permission
+  // bitmap of a 32-bit TSS; a clear bit redirects.
+  uint32_t low = 0, high = 0;
+  if (!readDescriptor(m_cpu.getTRSelector(), low, high) ||
+      !((high >> 8) & 0x08))
+    return false;
+  const DescriptorRegister tr = m_cpu.getTR();
+  const uint32_t iopb = m_memory.lread16(tr.base + 0x66);
+  if (iopb < 32 || iopb - 32 + vector / 8u > tr.limit)
+    return false;
+  const uint8_t bits = m_memory.lread8(tr.base + iopb - 32 + vector / 8u);
+  return ((bits >> (vector & 7)) & 1) == 0;
+}
+
+void InstructionDecoder::v86RedirectInterrupt(uint8_t vector) {
+  // Real-mode style delivery through the IVT at linear 0 of the V86 task.
+  const uint32_t flags = m_cpu.getEFLAGS();
+  const bool iopl3 = (flags & kFlagIOPL) == kFlagIOPL;
+  uint16_t image = static_cast<uint16_t>(flags);
+  if (!iopl3) {
+    image = static_cast<uint16_t>((image & ~kFlagIF) | kFlagIOPL);
+    if (flags & kFlagVIF)
+      image |= kFlagIF;
+  }
+  m_cpu.push16(image);
+  m_cpu.push16(m_cpu.getSegReg(CS));
+  m_cpu.push16(static_cast<uint16_t>(m_cpu.getEIP()));
+  const uint16_t ip = m_memory.lread16(vector * 4u);
+  const uint16_t cs = m_memory.lread16(vector * 4u + 2);
+  uint32_t newFlags = flags & ~(kFlagTF | kFlagRF);
+  newFlags &= iopl3 ? ~kFlagIF : ~kFlagVIF;
+  m_cpu.setEFLAGS(newFlags);
+  loadSegment(CS, cs);
+  m_cpu.setEIP(ip);
 }
 
 bool InstructionDecoder::requireCPL0() {
@@ -251,19 +336,28 @@ void InstructionDecoder::raiseException(uint8_t vector, uint32_t errorCode) {
 }
 
 void InstructionDecoder::nativeInterrupt(uint8_t vector, bool software,
-                                         bool pushError, uint32_t errorCode) {
+                                         bool pushError, uint32_t errorCode,
+                                         bool intN) {
   ++m_interruptCount;
   const uint32_t oldFlags = m_cpu.getEFLAGS();
   const bool fromV86 = (oldFlags & kFlagVM) != 0;
   const uint8_t cpl = currentCPL();
 
-  // A software INT in virtual-8086 mode with IOPL < 3 is a #GP to the
-  // monitor, which then emulates it.
-  if (software && fromV86 && (oldFlags & kFlagIOPL) != kFlagIOPL) {
-    software = false;
-    pushError = true;
-    errorCode = 0;
-    vector = 13;
+  if (intN && fromV86) {
+    // VME: INT n whose bit is clear in the TSS interrupt redirection
+    // bitmap goes to the V86 program's own IVT, without the monitor.
+    if ((m_cpu.getCR(4) & kCr4VME) && v86InterruptRedirected(vector)) {
+      v86RedirectInterrupt(vector);
+      return;
+    }
+    // Otherwise INT n with IOPL < 3 is a #GP to the monitor, which then
+    // emulates it.  (INT3 and INTO are not IOPL-sensitive.)
+    if ((oldFlags & kFlagIOPL) != kFlagIOPL) {
+      software = false;
+      pushError = true;
+      errorCode = 0;
+      vector = 13;
+    }
   }
 
   const DescriptorRegister idtr = m_cpu.getIDTR();
@@ -356,7 +450,27 @@ void InstructionDecoder::nativeIret(bool op32) {
   const uint32_t flags = m_cpu.getEFLAGS();
   if (flags & kFlagVM) {
     if ((flags & kFlagIOPL) != kFlagIOPL) {
-      raiseException(13, 0);
+      // VME: a 16-bit IRET loads VIF from the popped IF, unless it would
+      // set TF or enable interrupts with one pending (VIP).
+      if (op32 || !(m_cpu.getCR(4) & kCr4VME)) {
+        raiseException(13, 0);
+        return;
+      }
+      const uint32_t sp = m_cpu.getReg16(SP);
+      const uint32_t ss = m_cpu.getSegBase(SS);
+      const uint16_t ip = m_memory.lread16(ss + sp);
+      const uint16_t cs = m_memory.lread16(ss + ((sp + 2) & 0xFFFF));
+      const uint16_t image = m_memory.lread16(ss + ((sp + 4) & 0xFFFF));
+      if ((image & kFlagTF) || ((image & kFlagIF) && (flags & kFlagVIP))) {
+        raiseException(13, 0);
+        return;
+      }
+      m_cpu.setReg16(SP, static_cast<uint16_t>(sp + 6));
+      writeFlags(image, flagsWriteMask(true), false);
+      const uint32_t f = m_cpu.getEFLAGS();
+      m_cpu.setEFLAGS((image & kFlagIF) ? (f | kFlagVIF) : (f & ~kFlagVIF));
+      loadSegment(CS, cs);
+      m_cpu.setEIP(ip);
       return;
     }
     // IOPL 3 V86 IRET behaves like real mode; VM, IOPL, VIF and VIP stay

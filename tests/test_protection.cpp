@@ -49,7 +49,9 @@ struct Env {
   static constexpr uint32_t kHandlers = 0x8000; // vector v at + v * 16
   static constexpr uint32_t kCode = 0x5000;
   static constexpr uint32_t kRing0Stack = 0x9F00;
-  static constexpr uint32_t kIopb = 0x68;
+  // I/O permission bitmap offset; the V86 interrupt redirection bitmap
+  // occupies the 32 bytes below it (68h-87h).
+  static constexpr uint32_t kIopb = 0x88;
   static constexpr uint16_t kTssSel = 0x28, kTss2Sel = 0x30, kTss16Sel = 0x38;
   static constexpr uint16_t kTaskGateSel = 0x40;
 
@@ -126,7 +128,7 @@ struct Env {
     // 32-bit TSS with a full I/O permission bitmap (all ports allowed)
     // and the terminating FFh byte.
     descriptor(kTssSel, kTss, kIopb + 0x2000, 0x89);
-    for (uint32_t i = 0; i < 0x68; ++i)
+    for (uint32_t i = 0; i < kIopb; ++i)
       mem.write8(kTss + i, 0);
     mem.write32(kTss + 4, kRing0Stack);
     mem.write32(kTss + 8, 0x10);
@@ -878,5 +880,169 @@ TEST_CASE("Protection: hardware task switches", "[CPU][Protection][Task]") {
     REQUIRE((env.cpu.getEFLAGS() & 0x00020000) != 0);
     REQUIRE(env.cpu.getSegBase(cpu::CS) == 0x5800);
     REQUIRE(env.cpu.getEIP() == 0x10);
+  }
+}
+
+// ── virtual-8086 mode ───────────────────────────────────────────────────
+
+TEST_CASE("Protection: V86 INT n / IRETD round trip through the monitor",
+          "[CPU][Protection][V86]") {
+  Env env;
+  env.enterProtected();
+  constexpr uint32_t kMonitor = 0x8400;
+  env.gate(0x21, kMonitor); // DPL 3 interrupt gate
+  writeCode(env, kMonitor, {0xCF}); // IRETD
+  env.enterV86(3);
+  for (auto s : {cpu::DS, cpu::ES, cpu::FS, cpu::GS})
+    env.decoder.loadSegment(s, static_cast<uint16_t>(0x1000 + s));
+  env.cpu.setReg32(cpu::ESP, 0x6FF0);
+  env.run({0xCD, 0x21, 0x40});
+  REQUIRE(env.cpu.getSegReg(cpu::CS) == 0x08);
+  REQUIRE(env.cpu.getEIP() == kMonitor);
+  REQUIRE((env.cpu.getEFLAGS() & 0x00020000) == 0);
+  // The V86 frame: EIP CS EFLAGS ESP SS ES DS FS GS; data segments nulled.
+  REQUIRE(env.stack(0) == 2);
+  REQUIRE(env.stack(1) == (Env::kCode >> 4));
+  REQUIRE((env.stack(2) & 0x00023000) == 0x00023000);
+  REQUIRE(env.stack(3) == 0x6FF0);
+  REQUIRE(env.stack(4) == 0);
+  REQUIRE(env.stack(5) == 0x1000 + cpu::ES);
+  REQUIRE(env.stack(6) == 0x1000 + cpu::DS);
+  REQUIRE(env.stack(7) == 0x1000 + cpu::FS);
+  REQUIRE(env.stack(8) == 0x1000 + cpu::GS);
+  REQUIRE(env.cpu.getSegReg(cpu::DS) == 0);
+  REQUIRE(env.cpu.getReg32(cpu::ESP) == Env::kRing0Stack - 36);
+  env.decoder.step(); // IRETD back to V86
+  REQUIRE((env.cpu.getEFLAGS() & 0x00020000) != 0);
+  REQUIRE(env.cpu.getSegReg(cpu::CS) == (Env::kCode >> 4));
+  REQUIRE(env.cpu.getEIP() == 2);
+  REQUIRE(env.cpu.getReg32(cpu::ESP) == 0x6FF0);
+  REQUIRE(env.cpu.getSegReg(cpu::DS) == 0x1000 + cpu::DS);
+  REQUIRE(env.cpu.getSegBase(cpu::GS) == (0x1000u + cpu::GS) << 4);
+  env.decoder.step(); // INC AX in V86
+  REQUIRE(env.cpu.getReg16(cpu::AX) == 1);
+
+  SECTION("INT3 is not IOPL-sensitive; INT n to a DPL 0 gate is #GP") {
+    Env e;
+    e.enterProtected();
+    e.enterV86(0);
+    e.run({0xCC});
+    REQUIRE(e.pmVector() == 3);
+    Env g;
+    g.enterProtected();
+    g.gate(0x21, kMonitor, 0x8E);
+    g.enterV86(3);
+    g.run({0xCD, 0x21});
+    REQUIRE(g.pmVector() == 13);
+    REQUIRE(g.stack(0) == 0x21 * 8 + 2);
+  }
+  SECTION("V86 segment loads are paragraphs; LAR and ARPL are #UD") {
+    Env e;
+    e.enterProtected();
+    e.enterV86(3);
+    e.cpu.setReg32(cpu::EAX, 0x1234);
+    e.run({0x8E, 0xD8}); // MOV DS, AX
+    REQUIRE(e.cpu.getSegBase(cpu::DS) == 0x12340);
+    Env u;
+    u.enterProtected();
+    u.enterV86(3);
+    u.run({0x0F, 0x02, 0xC0}); // LAR AX, AX
+    REQUIRE(u.pmVector() == 6);
+  }
+}
+
+TEST_CASE("Protection: VME and PVI virtual interrupt flag", "[CPU][Protection][VME]") {
+  constexpr uint32_t kVIF = 0x00080000, kVIP = 0x00100000, kIF = 0x200;
+  auto vme = [](Env &env, uint32_t extraFlags = 0) {
+    env.enterProtected();
+    env.cpu.setCR(4, 0x1);
+    env.enterV86(0, extraFlags);
+  };
+
+  SECTION("CLI/STI change VIF, not IF; STI with VIP faults") {
+    Env env;
+    vme(env, kVIF);
+    env.run({0xFA});
+    REQUIRE(env.pmVector() == kNone);
+    REQUIRE((env.cpu.getEFLAGS() & (kVIF | kIF)) == kIF);
+    env.run({0xFA, 0xFB}, 1);
+    REQUIRE((env.cpu.getEFLAGS() & kVIF) == kVIF);
+
+    Env pending;
+    vme(pending, kVIP);
+    pending.run({0xFB});
+    REQUIRE(pending.pmVector() == 13);
+  }
+
+  SECTION("PUSHF shows VIF as IF and IOPL 3; POPF loads VIF; PUSHFD faults") {
+    Env env;
+    vme(env, kVIF);
+    env.cpu.setEFLAGS(env.cpu.getEFLAGS() & ~kIF);
+    env.run({0x9C});
+    const uint16_t image = env.mem.read16(env.cpu.getReg32(cpu::ESP));
+    REQUIRE((image & 0x3200) == 0x3200);
+
+    Env pop;
+    vme(pop);
+    pop.cpu.push16(0x0201); // IF, CF
+    pop.run({0x9D});
+    REQUIRE(pop.pmVector() == kNone);
+    REQUIRE((pop.cpu.getEFLAGS() & (kVIF | 0x3001)) == (kVIF | 0x0001));
+
+    Env tf;
+    vme(tf);
+    tf.cpu.push16(0x0100);
+    tf.run({0x9D});
+    REQUIRE(tf.pmVector() == 13);
+
+    Env d;
+    vme(d);
+    d.run({0x66, 0x9C});
+    REQUIRE(d.pmVector() == 13);
+  }
+
+  SECTION("INT n: redirection bitmap clear -> V86 IVT, set -> monitor") {
+    Env env;
+    vme(env, kVIF);
+    env.mem.write16(0x21 * 4, 0x0040);
+    env.mem.write16(0x21 * 4 + 2, 0x0600);
+    const uint16_t sp = static_cast<uint16_t>(env.cpu.getReg32(cpu::ESP));
+    env.run({0xCD, 0x21});
+    REQUIRE((env.cpu.getEFLAGS() & 0x00020000) != 0);
+    REQUIRE(env.cpu.getSegReg(cpu::CS) == 0x0600);
+    REQUIRE(env.cpu.getEIP() == 0x0040);
+    REQUIRE((env.cpu.getEFLAGS() & kVIF) == 0);
+    REQUIRE((env.cpu.getEFLAGS() & kIF) == kIF); // the real IF is untouched
+    REQUIRE(env.mem.read16(sp - 2) == (0x0200 | 0x3000 | 0x2)); // VIF as IF
+    REQUIRE(env.mem.read16(sp - 4) == (Env::kCode >> 4));
+    REQUIRE(env.mem.read16(sp - 6) == 2);
+    // IRET (16-bit) returns and restores VIF from the popped IF.
+    writeCode(env, 0x6040, {0xCF});
+    env.decoder.step();
+    REQUIRE(env.cpu.getSegReg(cpu::CS) == (Env::kCode >> 4));
+    REQUIRE(env.cpu.getEIP() == 2);
+    REQUIRE((env.cpu.getEFLAGS() & kVIF) == kVIF);
+
+    Env set;
+    vme(set);
+    set.mem.write8(Env::kTss + Env::kIopb - 32 + 0x21 / 8, 1u << (0x21 & 7));
+    set.run({0xCD, 0x21});
+    REQUIRE(set.pmVector() == 13); // IOPL 0: the monitor emulates it
+  }
+
+  SECTION("PVI: CLI/STI at CPL 3 change VIF") {
+    Env env;
+    env.enterProtected();
+    env.cpu.setCR(4, 0x2);
+    env.enterRing(3, 0x202);
+    env.run({0xFA});
+    REQUIRE(env.pmVector() == kNone);
+    REQUIRE((env.cpu.getEFLAGS() & (kVIF | kIF)) == kIF);
+    Env pending;
+    pending.enterProtected();
+    pending.cpu.setCR(4, 0x2);
+    pending.enterRing(3, 0x202 | kVIP);
+    pending.run({0xFB});
+    REQUIRE(pending.pmVector() == 13);
   }
 }

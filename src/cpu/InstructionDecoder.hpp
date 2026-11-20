@@ -281,8 +281,20 @@ private:
   // Faults: EIP is rewound to the faulting instruction and, in native
   // protected mode, the error code is pushed where the CPU would.
   void raiseException(uint8_t vector, uint32_t errorCode = 0);
+  // `intN`: an INT n instruction (IOPL-sensitive and redirectable in V86
+  // mode, unlike INT3/INTO).
   void nativeInterrupt(uint8_t vector, bool software, bool pushError,
-                       uint32_t errorCode);
+                       uint32_t errorCode, bool intN = false);
+  // Virtual-8086 mode extensions (Pentium CR4.VME) and protected-mode
+  // virtual interrupts (CR4.PVI), Protection.cpp.
+  // CLI/STI with CPL > IOPL: true when the instruction should change IF;
+  // otherwise it changed VIF or raised #GP.
+  bool interruptFlagAccess(bool sti);
+  // PUSHF/POPF in V86 mode: true when handled here (#GP, or the VME
+  // forms); false when the normal (IOPL 3) instruction runs.
+  bool v86FlagsTrap(bool pop);
+  bool v86InterruptRedirected(uint8_t vector) const;
+  void v86RedirectInterrupt(uint8_t vector);
   void nativeIret(bool op32);
   void nativeFarTransfer(uint16_t selector, uint32_t offset, bool isCall,
                          bool op32);
@@ -320,9 +332,6 @@ private:
   // Merges `value` into EFLAGS under `mask` (low word only for 16-bit
   // operands), keeping bit 1 set and nonexistent bits clear.
   void writeFlags(uint32_t value, uint32_t mask, bool op32);
-  // IOPL-sensitive instructions (CLI/STI/PUSHF/POPF in V86) under guest-owned
-  // protection: raises #GP(0) and returns false when CPL > IOPL.
-  bool checkIOPL();
   // Privileged instructions (LGDT, LIDT, LLDT, LTR, LMSW, CLTS, MOV
   // CRn/DRn, INVD, WBINVD, INVLPG, HLT, RDMSR/WRMSR) under guest-owned
   // protection: #GP(0) and false at CPL > 0 (V86 mode is CPL 3).

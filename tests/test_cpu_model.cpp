@@ -230,19 +230,19 @@ TEST_CASE("CPU model: CPUID per model", "[CPU][Model][CPUID]") {
     }
   }
 
-  SECTION("Pentium: family 5 model 2, FPU PSE TSC MSR CX8") {
+  SECTION("Pentium: family 5 model 2, FPU VME DE PSE TSC MSR CX8") {
     ModelEnv env(CpuModelId::Pentium);
     env.cpu.setReg32(cpu::EAX, 1);
     env.run({0x0F, 0xA2});
     REQUIRE(env.cpu.getReg32(cpu::EAX) == 0x0525);
-    REQUIRE(env.cpu.getReg32(cpu::EDX) == 0x00000139);
+    REQUIRE(env.cpu.getReg32(cpu::EDX) == 0x0000013F);
     REQUIRE((env.cpu.getReg32(cpu::EDX) & 0x00800000) == 0); // no MMX
     // Leaves above the maximum return the highest basic leaf (Intel).
     for (uint32_t leaf : {2u, 7u, 0x80000000u}) {
       env.cpu.setReg32(cpu::EAX, leaf);
       env.run({0x0F, 0xA2});
       REQUIRE(env.cpu.getReg32(cpu::EAX) == 0x0525);
-      REQUIRE(env.cpu.getReg32(cpu::EDX) == 0x00000139);
+      REQUIRE(env.cpu.getReg32(cpu::EDX) == 0x0000013F);
     }
   }
 
@@ -434,12 +434,12 @@ TEST_CASE("CPU model: control registers", "[CPU][Model][CR]") {
     REQUIRE(env.raisedGP());
   }
 
-  SECTION("Pentium CR4: TSD/DE/PSE/MCE writable, VME refused") {
+  SECTION("Pentium CR4: VME/PVI/TSD/DE/PSE/MCE writable, PGE refused") {
     ModelEnv env(CpuModelId::Pentium);
-    env.cpu.setReg32(cpu::EAX, 0x10);
+    env.cpu.setReg32(cpu::EAX, 0x13);
     env.run({0x0F, 0x22, 0xE0}); // MOV CR4, EAX
-    REQUIRE(env.cpu.getCR(4) == 0x10);
-    env.cpu.setReg32(cpu::EAX, 0x01);
+    REQUIRE(env.cpu.getCR(4) == 0x13);
+    env.cpu.setReg32(cpu::EAX, 0x80);
     env.run({0x0F, 0x22, 0xE0});
     REQUIRE(env.raisedGP());
   }

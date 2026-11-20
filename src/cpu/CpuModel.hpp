@@ -39,6 +39,8 @@ inline constexpr uint32_t kCmov = 1u << 6;  // CMOVcc, FCMOVcc, FCOMI/FUCOMI(P)
 // CPUID leaf 1 EDX feature flags.
 namespace cpuid_edx {
 inline constexpr uint32_t kFpu = 1u << 0;
+inline constexpr uint32_t kVme = 1u << 1;
+inline constexpr uint32_t kDe = 1u << 2;
 inline constexpr uint32_t kPse = 1u << 3;
 inline constexpr uint32_t kTsc = 1u << 4;
 inline constexpr uint32_t kMsr = 1u << 5;

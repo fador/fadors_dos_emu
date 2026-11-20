@@ -770,7 +770,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
   case 0xCD: { // INT imm8
     uint8_t vec = fetch8();
     if (m_cpu.nativeProtection())
-      nativeInterrupt(vec, true, false, 0);
+      nativeInterrupt(vec, true, false, 0, true);
     else
       triggerInterrupt(vec);
     break;
@@ -1338,8 +1338,9 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
 
   // PUSHF / POPF
   case 0x9C:
-    // V86 with IOPL < 3: #GP to the monitor.  PUSHFD stores VM and RF as 0.
-    if ((m_cpu.getEFLAGS() & eflags::kVM) && !checkIOPL())
+    // V86 with IOPL < 3: #GP to the monitor (VME: PUSHF shows VIF as IF).
+    // PUSHFD stores VM and RF as 0.
+    if ((m_cpu.getEFLAGSNonArith() & eflags::kVM) && v86FlagsTrap(false))
       break;
     if (m_hasPrefix66)
       m_cpu.push32(m_cpu.getEFLAGS() & ~(eflags::kVM | eflags::kRF));
@@ -1347,7 +1348,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
       m_cpu.push16(static_cast<uint16_t>(m_cpu.getEFLAGS()));
     break;
   case 0x9D: {
-    if ((m_cpu.getEFLAGS() & eflags::kVM) && !checkIOPL())
+    if ((m_cpu.getEFLAGSNonArith() & eflags::kVM) && v86FlagsTrap(true))
       break;
     const uint32_t value = m_hasPrefix66 ? m_cpu.pop32() : m_cpu.pop16();
     // Reserved bits, VM and (per model) AC/ID are not loaded; RF is cleared.
@@ -1561,6 +1562,10 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
   }
   case 0x63: { // ARPL r/m16, r16
     ModRM modrm = decodeModRM(fetch8());
+    if ((m_cpu.getEFLAGSNonArith() & eflags::kVM) && m_cpu.nativeProtection()) {
+      raiseException(6); // not recognised in virtual-8086 mode
+      break;
+    }
     uint16_t src = m_cpu.getReg16(modrm.reg);
     uint16_t dest = readModRM16(modrm);
     if ((dest & 3) < (src & 3)) {
@@ -2576,12 +2581,12 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() | 0x0001);
     break; // STC
   case 0xFA: // CLI
-    if (m_cpu.nativeProtection() && !checkIOPL())
+    if (m_cpu.nativeProtection() && !interruptFlagAccess(false))
       break;
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~0x0200);
     break;
   case 0xFB: // STI
-    if (m_cpu.nativeProtection() && !checkIOPL())
+    if (m_cpu.nativeProtection() && !interruptFlagAccess(true))
       break;
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() | 0x0200);
     m_cpu.beginInterruptShadow();
@@ -3202,6 +3207,10 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
   }
   case 0x02: { // LAR r, r/m
     ModRM modrm = decodeModRM(fetch8());
+    if ((m_cpu.getEFLAGSNonArith() & eflags::kVM) && m_cpu.nativeProtection()) {
+      raiseException(6); // not recognised in virtual-8086 mode
+      break;
+    }
     uint16_t selector = readModRM16(modrm);
     bool isRealMode = !(m_cpu.getCR(0) & 1) || (m_cpu.getEFLAGS() & 0x00020000);
     if (isRealMode || selector == 0) {
@@ -3249,6 +3258,10 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
   }
   case 0x03: { // LSL r, r/m
     ModRM modrm = decodeModRM(fetch8());
+    if ((m_cpu.getEFLAGSNonArith() & eflags::kVM) && m_cpu.nativeProtection()) {
+      raiseException(6); // not recognised in virtual-8086 mode
+      break;
+    }
     uint16_t selector = readModRM16(modrm);
     bool isRealMode = !(m_cpu.getCR(0) & 1) || (m_cpu.getEFLAGS() & 0x00020000);
     if (isRealMode || selector == 0) {
