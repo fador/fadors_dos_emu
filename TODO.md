@@ -203,7 +203,7 @@
   - [ ] Cheaper burst dispatch: per-instruction byte verification and lookup are now most of the per-instruction cost (~40 host instructions); block linking (next-entry pointer) or code-page write tracking would remove them
   - [ ] More opcodes on the fast path: BT family, SHLD/SHRD, BSF/BSR, XADD/CMPXCHG, DIV/IDIV, string instructions without REP, MOV SS / POP SS, far CALL/RET
   - [ ] Faster single-byte VGA-window stores (inline chain-4 path in `MemoryBus`)
-  - [ ] REP STOS into RAM never charged per-element guest cycles (only the opcode cost, unlike the element-wise and VGA paths); fixing it changes guest cycle counts, so it was left as is
+  - [x] REP STOS into RAM charges the per-element guest cycles of the element-wise loop (like the VGA-window path)
   - [ ] A JIT
 - [x] **Host SIMD dispatch** (CPUID/XGETBV detection, `--host-simd`, SSE2/SSE4/AVX2/NEON kernels for frame conversion, audio and REP STOS fills)
   - [ ] Text-mode glyph expansion and CGA modes through the kernels

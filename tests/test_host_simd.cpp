@@ -507,6 +507,7 @@ struct StosRun {
   std::vector<uint8_t> memory; // 0x20000..0x5FFFF after the run
   uint32_t ecx = 0, edi = 0, eip = 0;
   int steps = 0;
+  uint64_t guestCycles = 0;
 };
 
 // Runs one string instruction at 0000:0100 until it completes.  With
@@ -541,6 +542,7 @@ StosRun runStos(const std::vector<uint8_t> &code, bool slowPath, uint16_t es,
   cpu.setEIP(0x100);
   mem.setWriteTracing(slowPath);
   StosRun r;
+  const uint64_t startCycles = cpu.cycles();
   while (cpu.getEIP() == 0x100 && r.steps < 100000) {
     decoder.step();
     ++r.steps;
@@ -551,6 +553,7 @@ StosRun runStos(const std::vector<uint8_t> &code, bool slowPath, uint16_t es,
   r.ecx = cpu.getReg32(cpu::ECX);
   r.edi = cpu.getReg32(cpu::EDI);
   r.eip = cpu.getEIP();
+  r.guestCycles = cpu.cycles() - startCycles;
   return r;
 }
 
@@ -586,5 +589,7 @@ TEST_CASE("HostSimd: REP STOS fast path matches the element-wise loop",
     REQUIRE_MSG(fast.edi == slow.edi, c.name);
     REQUIRE_MSG(fast.eip == slow.eip, c.name);
     REQUIRE_MSG(fast.steps == slow.steps, c.name); // same batching
+    // The bulk fill charges the per-element cycles of the element loop.
+    REQUIRE_MSG(fast.guestCycles == slow.guestCycles, c.name);
   }
 }

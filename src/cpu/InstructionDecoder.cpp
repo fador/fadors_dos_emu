@@ -148,16 +148,14 @@ bool InstructionDecoder::tryFastRepStos(uint32_t elementSize) {
     pattern = m_cpu.getReg32(EAX);
 
   const uint32_t byteCount = iterations * elementSize;
-  if (!m_memory.lfillPattern(m_segBase[ES] + dstOff, byteCount, pattern)) {
-    // Fills of the VGA window in bulk.  Unlike the RAM fill above (which
-    // has never charged them), they keep the per-element cycles of the
-    // element-wise loop they replace.
-    if (!m_memory.lwriteVgaElements(m_segBase[ES] + dstOff, nullptr, pattern,
-                                    elementSize, iterations))
-      return false;
-    m_cpu.addGuestCycles(iterations *
-                         m_cycleTable[512 + (elementSize == 1 ? 0xAA : 0xAB)]);
-  }
+  // RAM fills and VGA-window fills (in bulk) both charge the per-element
+  // cycles of the element-wise loop they replace.
+  if (!m_memory.lfillPattern(m_segBase[ES] + dstOff, byteCount, pattern) &&
+      !m_memory.lwriteVgaElements(m_segBase[ES] + dstOff, nullptr, pattern,
+                                  elementSize, iterations))
+    return false;
+  m_cpu.addGuestCycles(iterations *
+                       m_cycleTable[512 + (elementSize == 1 ? 0xAA : 0xAB)]);
 
   const uint32_t remaining = count - iterations;
   if (m_hasPrefix67) {
