@@ -523,7 +523,9 @@ TEST_CASE("CPU model: assembler and disassembler know the system opcodes",
   };
   for (const Op &op : {Op{"CPUID", {0x0F, 0xA2}}, Op{"RDTSC", {0x0F, 0x31}},
                        Op{"RDMSR", {0x0F, 0x32}}, Op{"WRMSR", {0x0F, 0x30}},
-                       Op{"WBINVD", {0x0F, 0x09}}}) {
+                       Op{"WBINVD", {0x0F, 0x09}}, Op{"CLTS", {0x0F, 0x06}},
+                       Op{"INT1", {0xF1}}, Op{"OUTSB", {0x6E}},
+                       Op{"INSW", {0x6D}}}) {
     const auto r = as.assembleLine(op.text, 0x100);
     REQUIRE(r.error.empty());
     REQUIRE(r.bytes == op.bytes);
