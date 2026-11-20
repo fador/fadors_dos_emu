@@ -1,6 +1,7 @@
 #include "SoundBlaster.hpp"
 #include "AdLib.hpp"
 #include "../../utils/Logger.hpp"
+#include "../../utils/simd/Simd.hpp"
 #include <algorithm>
 #include <cmath>
 
@@ -460,11 +461,23 @@ void SoundBlaster::produce(size_t frames) {
     }
     s[0] += m_dacLevel;
     s[1] += m_dacLevel;
-    m_out.push_back({s[0] * voice[0] * master[0], s[1] * voice[1] * master[1]});
+    m_out.push_back(s[0] * voice[0] * master[0]);
+    m_out.push_back(s[1] * voice[1] * master[1]);
   }
   m_dacPending.clear();
-  while (m_out.size() > kMaxQueuedFrames)
-    m_out.pop_front();
+  if (outFrames() > kMaxQueuedFrames)
+    dropOutFrames(outFrames() - kMaxQueuedFrames);
+}
+
+void SoundBlaster::dropOutFrames(size_t frames) {
+  m_outHead += 2 * std::min(frames, outFrames());
+  if (m_outHead == m_out.size()) {
+    m_out.clear();
+    m_outHead = 0;
+  } else if (m_outHead >= 4 * kMaxQueuedFrames) {
+    m_out.erase(m_out.begin(), m_out.begin() + static_cast<std::ptrdiff_t>(m_outHead));
+    m_outHead = 0;
+  }
 }
 
 void SoundBlaster::advance(double seconds) {
@@ -482,19 +495,16 @@ void SoundBlaster::generateSamples(float *buffer, size_t numSamples) {
   // it, emulated time alone moves the DSP: an underrun is padded with
   // silence instead of running the DMA ahead of the program's timeline,
   // and a backlog beyond ~100 ms is dropped to keep the latency bounded.
-  if (!m_timeDriven && m_out.size() < numSamples)
-    produce(numSamples - m_out.size());
+  if (!m_timeDriven && outFrames() < numSamples)
+    produce(numSamples - outFrames());
   constexpr size_t kMaxLatencyFrames = 4410;
-  while (m_out.size() > numSamples + kMaxLatencyFrames)
-    m_out.pop_front();
-  const size_t available = std::min(numSamples, m_out.size());
+  if (outFrames() > numSamples + kMaxLatencyFrames)
+    dropOutFrames(outFrames() - numSamples - kMaxLatencyFrames);
+  const size_t available = std::min(numSamples, outFrames());
   const size_t start = numSamples - available; // pad at the front
-  for (size_t i = 0; i < available; ++i) {
-    const auto &f = m_out.front();
-    buffer[(start + i) * 2 + 0] += f[0];
-    buffer[(start + i) * 2 + 1] += f[1];
-    m_out.pop_front();
-  }
+  utils::simd::kernels().mixAddF32(buffer + start * 2, m_out.data() + m_outHead,
+                                   available * 2, 1.0f);
+  dropOutFrames(available);
 }
 
 } // namespace fador::hw::audio

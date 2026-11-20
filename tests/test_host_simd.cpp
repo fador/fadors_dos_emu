@@ -375,3 +375,88 @@ TEST_CASE("HostSimd: VGA scanline helpers wrap at 64 KiB", "[simd]") {
   setActiveLevel(saved);
 }
 
+// ── Integration: audio consumers of the kernels ──────────────────────
+
+#include "hw/DMA8237.hpp"
+#include "hw/audio/SoundBlaster.hpp"
+#include "hw/audio/WavWriter.hpp"
+#include "memory/MemoryBus.hpp"
+
+#include <filesystem>
+#include <fstream>
+
+TEST_CASE("HostSimd: WavWriter converts blocks with clamp, rounding and peak",
+          "[simd][audio]") {
+  const auto path = std::filesystem::temp_directory_path() /
+                    ("fador_simd_wav_" + std::to_string(std::random_device{}()) +
+                     ".wav");
+  // More than one 4096-sample conversion block.
+  std::vector<float> samples(5000);
+  for (size_t i = 0; i < samples.size(); ++i)
+    samples[i] = std::sin(static_cast<float>(i) * 0.01f) * 0.8f;
+  samples[1] = 1.5f;   // clamps to +32767
+  samples[2] = -3.0f;  // clamps to -32767
+  samples[3] = 0.25f;
+  samples[4999] = -0.5f;
+  {
+    fador::hw::audio::WavWriter wav;
+    REQUIRE(wav.open(path.string(), 44100, 2));
+    wav.write(samples.data(), 3);
+    wav.write(samples.data() + 3, samples.size() - 3);
+    REQUIRE(wav.framesWritten() == samples.size() / 2);
+    REQUIRE(wav.peak() == 1.0f);
+  }
+  std::ifstream in(path, std::ios::binary);
+  std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)),
+                             std::istreambuf_iterator<char>());
+  in.close();
+  std::filesystem::remove(path);
+  REQUIRE(bytes.size() == 44 + samples.size() * 2);
+  auto sampleAt = [&](size_t i) {
+    return static_cast<int16_t>(bytes[44 + 2 * i] | (bytes[45 + 2 * i] << 8));
+  };
+  REQUIRE(sampleAt(1) == 32767);
+  REQUIRE(sampleAt(2) == -32767);
+  REQUIRE(sampleAt(3) == static_cast<int16_t>(std::lrint(0.25f * 32767.0f)));
+  REQUIRE(sampleAt(4999) == static_cast<int16_t>(std::lrint(-0.5f * 32767.0f)));
+  for (size_t i = 5; i < 4999; i += 97)
+    REQUIRE(sampleAt(i) == static_cast<int16_t>(std::lrint(samples[i] * 32767.0f)));
+}
+
+TEST_CASE("HostSimd: SoundBlaster output queue mixes, pads and drops frames",
+          "[simd][audio]") {
+  fador::memory::MemoryBus memory;
+  fador::hw::DMA8237 dma;
+  fador::hw::audio::SoundBlaster sb(memory, dma, 44100.0f);
+  sb.write8(0x226, 0x01);
+  sb.write8(0x226, 0x00);
+  sb.read8(0x22A);
+  sb.write8(0x22C, 0x10); // direct DAC output
+  sb.write8(0x22C, 0xFF);
+
+  // Time-driven: 10 frames are produced, 16 requested → 6 padded in front.
+  sb.advance(10.5 / 44100.0);
+  std::vector<float> buf(2 * 16, 0.25f);
+  sb.generateSamples(buf.data(), 16);
+  for (size_t i = 0; i < 12; ++i)
+    REQUIRE(buf[i] == 0.25f);
+  const float level = buf[12];
+  REQUIRE(level > 0.25f);
+  for (size_t i = 12; i < buf.size(); ++i)
+    REQUIRE(buf[i] == level);
+
+  // A long backlog is capped: 4410 frames of latency stay queued.
+  sb.advance(1.0);
+  buf.assign(2 * 16, 0.0f);
+  sb.generateSamples(buf.data(), 16);
+  REQUIRE(buf.front() != 0.0f);
+  std::vector<float> rest(2 * 5000, 0.0f);
+  sb.generateSamples(rest.data(), 5000);
+  // 4410 frames left → the first 590 frames are padding.
+  REQUIRE(rest[2 * 589] == 0.0f && rest[2 * 589 + 1] == 0.0f);
+  REQUIRE(rest[2 * 590] != 0.0f && rest.back() != 0.0f);
+  buf.assign(2 * 4, 0.5f);
+  sb.generateSamples(buf.data(), 4); // queue drained: nothing added
+  for (float v : buf)
+    REQUIRE(v == 0.5f);
+}

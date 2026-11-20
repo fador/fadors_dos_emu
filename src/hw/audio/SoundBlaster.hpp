@@ -120,8 +120,13 @@ private:
   bool m_irq8Pending = false;
   bool m_irq16Pending = false;
 
-  // Output queue (stereo frames at the output rate)
-  std::deque<std::array<float, 2>> m_out;
+  // Output queue: interleaved L/R frames at the output rate.  Frames are
+  // consumed from m_outHead (a float index) so generateSamples() can mix a
+  // contiguous block with the host-SIMD kernel.
+  std::vector<float> m_out;
+  size_t m_outHead = 0;
+  size_t outFrames() const { return (m_out.size() - m_outHead) / 2; }
+  void dropOutFrames(size_t frames);
   double m_outAcc = 0.0;
   bool m_timeDriven = false; // advance() is in use: never run ahead of it
 
