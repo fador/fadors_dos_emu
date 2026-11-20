@@ -58,7 +58,11 @@ void TerminalRenderer::renderTextMode(bool force) {
     }
 
     bool changed = false;
-    uint32_t vramBase = 0xB8000;
+    // Displayed page of the text buffer (B0000h in mode 7)
+    const uint8_t page = m_memory.read8(0x462) & 7;
+    const uint32_t vramBase =
+        ((m_memory.read8(0x449) & 0x7F) == 0x07 ? 0xB0000u : 0xB8000u) +
+        (m_memory.read16(0x44E) & 0x7FFFu);
 
     for (int i = 0; i < totalCells; ++i) {
         uint8_t c = m_memory.read8(vramBase + i * 2);
@@ -69,8 +73,8 @@ void TerminalRenderer::renderTextMode(bool force) {
         }
     }
 
-    uint8_t curCol = m_memory.read8(0x450);
-    uint8_t curRow = m_memory.read8(0x451);
+    uint8_t curCol = m_memory.read8(0x450 + page * 2);
+    uint8_t curRow = m_memory.read8(0x451 + page * 2);
 
     if (!changed) {
         // Only the cursor moved — reposition without repainting

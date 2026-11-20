@@ -136,7 +136,7 @@
   - [x] Per-scanline register changes (raster effects within a frame): frames are captured on emulated time as the beam passes DAC / attribute / CRTC / sequencer changes (`VgaRasterSink`), start address latched at vertical retrace, line compare per scanline
   - [ ] Hercules graphics (720x348 via 3B8h/3BFh): needs a Hercules machine type, a VGA does not decode those ports
   - [ ] Mid-frame VRAM writes are seen when the lines are rasterised (at the next display change or the end of the frame), not as the beam passes them; VBE modes are rasterised whole at the end of the frame
-  - [ ] `TerminalRenderer` still reads B8000h through the BDA mode number
+  - [ ] `TerminalRenderer` (ANSI terminal frontend) locates the text page from the BDA (mode 7 and display pages work), not from the CRTC registers
 
 ## Phase 7: Audio Subsystem
 - [x] **Native Audio Backend**
