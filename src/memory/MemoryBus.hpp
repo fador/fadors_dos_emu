@@ -246,12 +246,14 @@ private:
   bool isPlain(uint32_t e, uint32_t n) const {
     if (e > MEMORY_SIZE - n)
       return false;
-    return m_vga == nullptr || e >= VGA_PLANAR_END || e + n <= VGA_PLANAR_START;
+    // Range test first: it settles almost every access without the load.
+    return e >= VGA_PLANAR_END || e + n <= VGA_PLANAR_START || m_vga == nullptr;
   }
   bool isPlainLinear(uint32_t e, uint32_t n) const {
     if (static_cast<uint64_t>(e) + n > m_linearLimit)
       return false;
-    return m_vga == nullptr || e >= VGA_PLANAR_END || e + n <= VGA_PLANAR_START;
+    // Range test first: it settles almost every access without the load.
+    return e >= VGA_PLANAR_END || e + n <= VGA_PLANAR_START || m_vga == nullptr;
   }
   bool isPlainWrite(uint32_t e, uint32_t n) const {
     return !m_traceWrites && isPlain(e, n);
