@@ -9,7 +9,7 @@ builds and independent of host start-up time.
 |----------|-----------------------|----------------------------------------------------|
 | `int32`  | `perfbench int 100`   | 32-bit ALU, branches, IMUL (DJGPP, DPMI flat)      |
 | `mem32`  | `perfbench mem 3000`  | `memset`/`memcpy` (REP STOS/MOVS) and array walks  |
-| `fpu32`  | `perfbench fpu 10`    | x87: FSIN/FCOS/FSQRT/FPREM                         |
+| `fpu32`  | `perfbench fpu 10`    | x87 via DJGPP libm sin/cos/sqrt/fmod: FLD/FST m64, FMUL/FADD, FXCH, FIST, FSQRT |
 | `call32` | `perfbench call 1000` | recursive CALL/RET, stack traffic                  |
 | `str32`  | `perfbench str 20`    | libc `strcpy`/`strlen`/`strcmp`/`strchr`          |
 | `vga32`  | `perfbench vga 100`   | mode 13h writes via `dosmemput` and `_farpokeb`    |
@@ -57,3 +57,8 @@ Release build, GCC 13, one core of a cloud x86-64 VM, median of 3 runs
 memory accessors, a flat-RAM fast path in `MemoryBus`, inline instruction
 fetch, cheaper logging guards and avoiding store-forwarding stalls in
 `InstructionDecoder::step`).
+
+The x87 runs on the host FPU in normal x86/x86-64 GCC/Clang builds. A
+`-DFADOR_SOFT_X87=ON` build (portable software 80-bit arithmetic, as used
+by MSVC and non-x86 hosts) runs `fpu32` at roughly 75% of that speed
+(about 40 vs. 55 MIPS on the VM above).
