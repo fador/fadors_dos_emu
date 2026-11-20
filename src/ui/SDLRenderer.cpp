@@ -17,7 +17,7 @@ namespace fador::ui {
 
 SDLRenderer::SDLRenderer(memory::MemoryBus &memory, hw::KeyboardController &kbd,
                          hw::VGAController &vga)
-    : m_memory(memory), m_kbd(kbd), m_vga(vga), m_frame(memory, vga) {
+    : m_memory(memory), m_kbd(kbd), m_vga(vga) {
   SDL_SetMainReady();
   if (SDL_Init(SDL_INIT_VIDEO) < 0) {
     LOG_ERROR("SDL_Init failed: ", SDL_GetError());
@@ -68,20 +68,20 @@ SDLRenderer::~SDLRenderer() {
 
 // ── Rendering ──────────────────────────────────────────────────────────
 
-void SDLRenderer::render(bool /*force*/) {
+void SDLRenderer::present(const FrameRenderer::Frame &frame) {
   if (!m_window || !m_renderer)
     return;
-
-  if (!m_frame.render(true) || m_frame.width() <= 0 || m_frame.height() <= 0)
+  if (frame.serial == 0 || frame.width <= 0 || frame.height <= 0 ||
+      frame.pixels.size() < static_cast<size_t>(frame.width) * frame.height)
     return;
 
   // Recreate the texture when the resolution / mode changes
-  if (!m_texture || m_frame.width() != m_texWidth ||
-      m_frame.height() != m_texHeight || m_frame.modeKey() != m_lastModeKey) {
-    LOG_INFO("Video mode key 0x", std::hex, m_frame.modeKey(), std::dec,
-             " requires texture size ", m_frame.width(), "x", m_frame.height());
-    m_texWidth = m_frame.width();
-    m_texHeight = m_frame.height();
+  if (!m_texture || frame.width != m_texWidth ||
+      frame.height != m_texHeight || frame.modeKey != m_lastModeKey) {
+    LOG_INFO("Video mode key 0x", std::hex, frame.modeKey, std::dec,
+             " requires texture size ", frame.width, "x", frame.height);
+    m_texWidth = frame.width;
+    m_texHeight = frame.height;
     if (m_texture)
       SDL_DestroyTexture(m_texture);
     m_texture =
@@ -112,11 +112,11 @@ void SDLRenderer::render(bool /*force*/) {
     }
 
     SDL_SetWindowSize(m_window, targetW, targetH);
-    m_lastModeKey = m_frame.modeKey();
+    m_lastModeKey = frame.modeKey;
   }
 
   // Upload framebuffer to texture and present
-  SDL_UpdateTexture(m_texture, nullptr, m_frame.pixels().data(),
+  SDL_UpdateTexture(m_texture, nullptr, frame.pixels.data(),
                     m_texWidth * static_cast<int>(sizeof(uint32_t)));
   SDL_RenderClear(m_renderer);
 

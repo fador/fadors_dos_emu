@@ -312,6 +312,8 @@ void BIOS::programVGARegisters(uint8_t mode) {
 }
 
 void BIOS::loadDefaultDac(uint8_t mode) {
+  if (m_vga)
+    m_vga->beforeDisplayChange(); // the DAC is written directly
   uint8_t *pal = m_memory.dacPalette();
   auto put = [pal](int i, const std::array<uint8_t, 3> &c) {
     pal[i * 3 + 0] = c[0];
@@ -649,6 +651,8 @@ void BIOS::handlePaletteService() {
   const uint32_t esdx = (static_cast<uint32_t>(m_cpu.getSegReg(cpu::ES)) << 4) +
                         m_cpu.getReg16(cpu::DX);
   VGAController *vga = m_vga;
+  if (vga)
+    vga->beforeDisplayChange(); // DAC functions write the palette directly
 
   switch (al) {
   case 0x00: // Set individual palette register

@@ -3,6 +3,7 @@
 
 #include "../utils/Logger.hpp"
 #include "DOS.hpp"
+#include "VideoText.hpp"
 #include "CMOSRTC.hpp"
 #include "MachineTime.hpp"
 #include "DPMI.hpp"
@@ -2205,65 +2206,10 @@ std::string DOS::resolvePath(const std::string &path) {
 }
 
 void DOS::writeCharToVRAM(uint8_t c) {
-  uint16_t cols = m_memory.read16(0x44A);
-  uint8_t maxRow = m_memory.read8(0x484);
-  if (cols == 0)
-    cols = 80;
-  if (maxRow == 0)
-    maxRow = 24;
-
-  uint8_t col = m_memory.read8(0x450);
-  uint8_t row = m_memory.read8(0x451);
-
-  switch (c) {
-  case 0x07:
-    break;   // BEL
-  case 0x08: // Backspace
-    if (col > 0)
-      col--;
-    break;
-  case 0x0A: // Line Feed
-    row++;
-    break;
-  case 0x0D: // Carriage Return
-    col = 0;
-    break;
-  default: {
-    uint32_t off = (row * cols + col) * 2;
-    m_memory.write8(0xB8000 + off, c);
-    uint8_t attr = m_memory.read8(0xB8000 + off + 1);
-    if (attr == 0)
-      m_memory.write8(0xB8000 + off + 1, 0x07);
-    col++;
-    if (col >= cols) {
-      col = 0;
-      row++;
-    }
-    break;
-  }
-  }
-
-  // Scroll up if past last row
-  if (row > maxRow) {
-    for (uint8_t r = 0; r < maxRow; ++r) {
-      for (uint16_t cc = 0; cc < cols; ++cc) {
-        uint32_t dst = (r * cols + cc) * 2;
-        uint32_t src = ((r + 1) * cols + cc) * 2;
-        m_memory.write8(0xB8000 + dst, m_memory.read8(0xB8000 + src));
-        m_memory.write8(0xB8000 + dst + 1, m_memory.read8(0xB8000 + src + 1));
-      }
-    }
-    for (uint16_t cc = 0; cc < cols; ++cc) {
-      uint32_t off = (maxRow * cols + cc) * 2;
-      m_memory.write8(0xB8000 + off, ' ');
-      m_memory.write8(0xB8000 + off + 1, 0x07);
-    }
-    row = maxRow;
-  }
-
-  m_memory.write8(0x450, col);
-  m_memory.write8(0x451, row);
-  syncCursorFromBDA(m_memory);
+  // As the CON driver does through INT 29h / INT 10h AH=0Eh (BL = 07h):
+  // the active page in text modes, glyphs in graphics modes.
+  VideoText text(m_memory);
+  text.teletype(text.activePage(), c, 0x07, false);
 }
 
 DOS::MCB DOS::readMCB(uint16_t segment) {

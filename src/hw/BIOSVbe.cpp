@@ -364,6 +364,8 @@ void BIOS::handleVbeService() {
     const uint8_t bl = m_cpu.getReg8(cpu::BL) & 0x7F;
     const uint16_t count = m_cpu.getReg16(cpu::CX);
     const uint16_t first = m_cpu.getReg16(cpu::DX);
+    if (m_vga && bl == 0x00)
+      m_vga->beforeDisplayChange();
     uint8_t *pal = m_memory.dacPalette();
     for (uint32_t i = 0; i < count && first + i < 256; ++i) {
       const uint32_t entry = esdi + i * 4;

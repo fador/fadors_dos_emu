@@ -45,6 +45,15 @@ constexpr std::array<uint8_t, 9> kGcMask{0x0F, 0x0F, 0x0F, 0x1F, 0x03,
 VGAController::VGAController(memory::MemoryBus &memory)
     : m_memory(memory), m_epochNs(steadyNowNs()) {
   updateAccessPath();
+  updateTextAlias();
+}
+
+void VGAController::updateTextAlias() {
+  const bool alphanumeric = (m_attr[0x10] & 0x01) == 0;
+  const bool oddEven = (m_seq[4] & 0x04) == 0;
+  const uint8_t map = (m_gc[6] >> 2) & 3;
+  m_textRam = alphanumeric && oddEven ? m_memory.directAccess(map == 2 ? 0xB0000 : 0xB8000)
+                           : nullptr;
 }
 
 // ── Time source and CRT timing ─────────────────────────────────────────
@@ -122,6 +131,138 @@ uint64_t VGAController::frameCounter() const {
   return nowNs() / timing().frameNs;
 }
 
+uint8_t VGAController::inputStatus0() {
+  const uint64_t now = nowNs();
+  if (now >= m_vintNextNs)
+    serviceEvents(now);
+  return static_cast<uint8_t>((m_vintPending ? 0x80 : 0x00) | 0x10);
+}
+
+// ── Frame capture and retrace interrupt ────────────────────────────────
+
+void VGAController::requestFrame() {
+  if (!m_sink)
+    return;
+  if (!m_wantFrame) {
+    m_wantFrame = true;
+    m_requestNs = nowNs();
+  }
+  m_rasterActive = true;
+  m_rasterNextNs = 0; // the next advanceTo() schedules the capture
+  updateNextEvent();
+}
+
+void VGAController::setContinuousCapture(bool on) {
+  m_continuous = on;
+  if (on)
+    requestFrame();
+  else
+    m_wantFrame = false;
+}
+
+void VGAController::rasterSync(uint64_t now) {
+  if (!m_sink) {
+    m_rasterActive = false;
+    m_rasterNextNs = UINT64_MAX;
+    updateNextEvent();
+    return;
+  }
+  const VgaTiming &t = timing();
+  const uint64_t frame = now / t.frameNs;
+  auto finishCapture = [&] {
+    m_capturing = false;
+    if (m_continuous) {
+      // The following frame is captured too.  Nothing changed since the
+      // captured frame's display ended (every change syncs first), so a
+      // capture that starts late in that frame is still exact.
+      m_wantFrame = true;
+      m_requestNs = (m_capFrame + 1) * t.frameNs;
+    }
+    m_sink->endFrame();
+  };
+  if (m_capturing && frame != m_capFrame)
+    finishCapture();
+  if (!m_capturing && m_wantFrame && frame > 0 &&
+      (frame - 1) * t.frameNs >= m_requestNs) {
+    // Whole frames passed since the request without a display change:
+    // the last of them looked like the current state.
+    m_capturing = true;
+    m_capFrame = frame - 1;
+    if (!m_continuous)
+      m_wantFrame = false;
+    m_sink->beginFrame(m_capFrame);
+    finishCapture();
+  }
+  if (!m_capturing) {
+    const uint64_t start = frame * t.frameNs;
+    if (!m_wantFrame) {
+      m_rasterActive = false;
+      m_rasterNextNs = UINT64_MAX;
+      updateNextEvent();
+      return;
+    }
+    if (start < m_requestNs) {
+      // This frame began before the request: its earlier lines may have
+      // been shown with a state nobody recorded.  Capture the next one.
+      m_rasterNextNs = start + t.frameNs;
+      updateNextEvent();
+      return;
+    }
+    m_capturing = true;
+    m_capFrame = frame;
+    if (!m_continuous)
+      m_wantFrame = false;
+    m_sink->beginFrame(frame);
+  }
+  // Lines whose active display the beam has finished
+  const uint64_t posPs = (now - frame * t.frameNs) * 1000u;
+  uint64_t line = posPs / t.linePs;
+  if (posPs % t.linePs >= t.displayPs)
+    ++line;
+  if (line >= t.displayLines) {
+    finishCapture();
+    m_rasterActive = m_wantFrame;
+    m_rasterNextNs = m_wantFrame ? (frame + 1) * t.frameNs : UINT64_MAX;
+  } else {
+    m_sink->scanTo(static_cast<uint32_t>(line));
+    const uint64_t endPs = (t.displayLines - 1u) * t.linePs + t.displayPs;
+    m_rasterNextNs = frame * t.frameNs + (endPs + 999u) / 1000u;
+  }
+  updateNextEvent();
+}
+
+void VGAController::rescheduleRetraceInterrupt(uint64_t now) {
+  if (!(m_crtc[0x11] & 0x10)) {
+    // Clear Vertical Interrupt = 0 holds the latch cleared
+    m_vintPending = false;
+    m_vintNextNs = UINT64_MAX;
+  } else if (!m_vintPending) {
+    const VgaTiming &t = timing();
+    uint64_t start = frameStartNs(now) + t.retraceStart * t.linePs / 1000u;
+    if (start <= now)
+      start += t.frameNs;
+    m_vintNextNs = start;
+  }
+  updateNextEvent();
+}
+
+void VGAController::serviceEvents(uint64_t now) {
+  if (now >= m_rasterNextNs)
+    rasterSync(now);
+  if (now >= m_vintNextNs) {
+    // Start of vertical retrace: set the latch; the IRQ line follows it
+    // unless Disable Vertical Interrupt (CRTC 11h bit 5) is set.  The
+    // latch stays set (no further edges) until the program clears it.
+    m_vintNextNs = UINT64_MAX;
+    if ((m_crtc[0x11] & 0x10) && !m_vintPending) {
+      m_vintPending = true;
+      if (!(m_crtc[0x11] & 0x20) && m_raiseIrq)
+        m_raiseIrq();
+    }
+  }
+  updateNextEvent();
+}
+
 uint8_t VGAController::inputStatus1() const {
   const VgaTiming &t = timing();
   const uint64_t posPs = (nowNs() % t.frameNs) * 1000u;
@@ -147,9 +288,14 @@ bool VGAController::crtcPortActive(uint16_t port) const {
 void VGAController::setSeqReg(uint8_t index, uint8_t value) {
   if (index >= m_seq.size())
     return;
-  m_seq[index] = value & kSeqMask[index];
+  value &= kSeqMask[index];
+  if ((index == 1 || index == 3) && m_seq[index] != value)
+    beforeDisplayChange(); // clocking mode / character map select
+  m_seq[index] = value;
   if (index == 1)
-    m_timingDirty = true;
+    timingChanged();
+  if (index == 4)
+    updateTextAlias();
   if (index == 4 || index == 2)
     updateAccessPath();
 }
@@ -157,15 +303,67 @@ void VGAController::setSeqReg(uint8_t index, uint8_t value) {
 void VGAController::setGcReg(uint8_t index, uint8_t value) {
   if (index >= m_gc.size())
     return;
-  m_gc[index] = value & kGcMask[index];
+  value &= kGcMask[index];
+  // Shift register modes (05h bits 5/6) and the memory map / graphics
+  // bits (06h) change what the display shows.
+  if ((index == 5 && ((m_gc[5] ^ value) & 0x60)) ||
+      (index == 6 && m_gc[6] != value))
+    beforeDisplayChange();
+  m_gc[index] = value;
+  if (index == 6)
+    updateTextAlias();
   updateAccessPath();
 }
 
 void VGAController::setCrtcReg(uint8_t index, uint8_t value) {
   if (index >= m_crtc.size())
     return;
+  if (m_crtc[index] == value)
+    return;
+  beforeDisplayChange();
+  if (index == 0x0C || index == 0x0D) {
+    // Remember the value the last retrace latched before this write
+    const uint64_t now = nowNs();
+    if (!m_startWritten || m_startLastWriteNs < lastRetraceStartNs(now))
+      m_startLatchVal = getDisplayStart();
+    m_startWritten = true;
+    m_startLastWriteNs = now;
+  }
   m_crtc[index] = value;
+  if (index == 0x11 && !(m_crtc[0x11] & 0x10))
+    rescheduleRetraceInterrupt(0); // Clear Vertical Interrupt
+  // Registers recomputeTiming() reads
+  if (index <= 0x07 || (index >= 0x10 && index <= 0x12) || index == 0x15 ||
+      index == 0x16)
+    timingChanged();
+}
+
+uint64_t VGAController::lastRetraceStartNs(uint64_t now) const {
+  const VgaTiming &t = timing();
+  uint64_t start = frameStartNs(now) + t.retraceStart * t.linePs / 1000u;
+  if (start > now)
+    start = start >= t.frameNs ? start - t.frameNs : 0;
+  return start;
+}
+
+uint32_t VGAController::displayStartForFrame(uint64_t frame) const {
+  if (!m_startWritten || frame == 0)
+    return getDisplayStart();
+  const VgaTiming &t = timing();
+  const uint64_t latchNs =
+      (frame - 1) * t.frameNs + t.retraceStart * t.linePs / 1000u;
+  return m_startLastWriteNs < latchNs ? getDisplayStart() : m_startLatchVal;
+}
+
+void VGAController::timingChanged() {
   m_timingDirty = true;
+  // The next retrace and frame boundary move with the timing
+  if (m_crtc[0x11] & 0x10)
+    rescheduleRetraceInterrupt(nowNs());
+  if (m_rasterActive) {
+    m_rasterNextNs = 0;
+    updateNextEvent();
+  }
 }
 
 void VGAController::writeCrtc(uint8_t index, uint8_t value) {
@@ -175,7 +373,7 @@ void VGAController::writeCrtc(uint8_t index, uint8_t value) {
     // Protect bit: registers 0-7 are read-only, except the line compare
     // bit 8 in the overflow register.
     if (index == 0x07)
-      m_crtc[0x07] = static_cast<uint8_t>((m_crtc[0x07] & ~0x10) | (value & 0x10));
+      setCrtcReg(0x07, static_cast<uint8_t>((m_crtc[0x07] & ~0x10) | (value & 0x10)));
     return;
   }
   setCrtcReg(index, value);
@@ -184,14 +382,36 @@ void VGAController::writeCrtc(uint8_t index, uint8_t value) {
 void VGAController::setAttrReg(uint8_t index, uint8_t value) {
   static constexpr std::array<uint8_t, 5> kAttrCtlMask{0xEF, 0xFF, 0x3F,
                                                        0x0F, 0x0F};
-  if (index < 0x10)
-    m_attr[index] = value & 0x3F;
-  else if (index < m_attr.size())
-    m_attr[index] = value & kAttrCtlMask[index - 0x10];
+  if (index >= m_attr.size())
+    return;
+  value &= index < 0x10 ? 0x3F : kAttrCtlMask[index - 0x10];
+  if (m_attr[index] != value) {
+    beforeDisplayChange();
+    m_attr[index] = value;
+    if (index == 0x10)
+      updateTextAlias();
+  }
+}
+
+void VGAController::setAttrPaletteSource(bool enabled) {
+  const uint8_t index =
+      static_cast<uint8_t>((m_attrIndex & 0x1F) | (enabled ? 0x20 : 0));
+  if ((index ^ m_attrIndex) & 0x20)
+    beforeDisplayChange();
+  m_attrIndex = index;
+}
+
+void VGAController::setPelMask(uint8_t value) {
+  if (m_pelMask != value) {
+    beforeDisplayChange();
+    m_pelMask = value;
+  }
 }
 
 void VGAController::writeAttr(uint8_t value) {
   if (!m_attrFlipFlop) {
+    if ((m_attrIndex ^ value) & 0x20)
+      beforeDisplayChange(); // palette address source: blanking
     m_attrIndex = value & 0x3F;
   } else {
     uint8_t index = m_attrIndex & 0x1F;
@@ -204,8 +424,11 @@ void VGAController::writeAttr(uint8_t value) {
 }
 
 void VGAController::setMiscOutput(uint8_t value) {
+  if (m_misc == value)
+    return;
+  beforeDisplayChange();
   m_misc = value;
-  m_timingDirty = true;
+  timingChanged();
 }
 
 void VGAController::updateAccessPath() {
@@ -236,7 +459,7 @@ uint8_t VGAController::read8(uint16_t port) {
   }
 
   // --- Input status 0 (bit 4: switch sense / colour monitor present) ---
-  case 0x3C2: return 0x10;
+  case 0x3C2: return inputStatus0();
   case 0x3C3: return m_videoEnable;
 
   // --- Sequencer ---
@@ -298,7 +521,7 @@ void VGAController::write8(uint16_t port, uint8_t value) {
   case 0x3C5: setSeqReg(m_seqIndex, value); break;
 
   // --- DAC ---
-  case 0x3C6: m_pelMask = value; break;
+  case 0x3C6: setPelMask(value); break;
   case 0x3C7:
     m_dacReadIndex = value;
     m_dacWriteIndex = static_cast<uint8_t>(value + 1);
@@ -311,13 +534,18 @@ void VGAController::write8(uint16_t port, uint8_t value) {
     m_dacColorCycle = 0;
     m_dacState = 0x00;
     break;
-  case 0x3C9:
-    m_memory.dacPalette()[m_dacWriteIndex * 3 + m_dacColorCycle] = value & 0x3F;
+  case 0x3C9: {
+    uint8_t &entry = m_memory.dacPalette()[m_dacWriteIndex * 3 + m_dacColorCycle];
+    if (entry != (value & 0x3F)) {
+      beforeDisplayChange();
+      entry = value & 0x3F;
+    }
     if (++m_dacColorCycle >= 3) {
       m_dacColorCycle = 0;
       m_dacWriteIndex++;
     }
     break;
+  }
 
   // --- Graphics Controller ---
   case 0x3CE: m_gcIndex = value; break;
@@ -353,7 +581,7 @@ void VGAController::write8(uint16_t port, uint8_t value) {
 void VGAController::loadLatches(uint32_t planeOffset) const {
   uint32_t index = planeOffset & 0xFFFF;
   for (int plane = 0; plane < 4; ++plane)
-    m_latches[plane] = m_planes[plane][index];
+    m_latches[plane] = cpuPlane(plane, index);
 }
 
 void VGAController::writeThroughPipeline(uint32_t planeOff, uint8_t value,
@@ -368,7 +596,7 @@ void VGAController::writeThroughPipeline(uint32_t planeOff, uint8_t value,
     if ((planeMask & (1u << plane)) == 0)
       return;
     const uint8_t latch = m_latches[plane];
-    m_planes[plane][planeOff] =
+    cpuPlane(plane, planeOff) =
         static_cast<uint8_t>((applyLogicalOp(logicalOp, data, latch) & mask) |
                              (latch & ~mask));
   };
@@ -389,7 +617,7 @@ void VGAController::writeThroughPipeline(uint32_t planeOff, uint8_t value,
     // are all ignored.
     for (int plane = 0; plane < 4; ++plane)
       if (planeMask & (1u << plane))
-        m_planes[plane][planeOff] = m_latches[plane];
+        cpuPlane(plane, planeOff) = m_latches[plane];
     break;
   case 0x02:
     for (int plane = 0; plane < 4; ++plane)

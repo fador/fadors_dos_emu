@@ -138,7 +138,10 @@
 - [x] GUI renderer pixel-perfect VGA/CGA graphics mode rendering
   - [x] Geometry, addressing, split screen, pel panning, palettes and text attributes derived from the VGA registers (`FrameRenderer::decodeLayout`)
   - [x] Text fonts from plane 2 (INT 10h AH=11h, direct plane writes, character map select), 9-dot line graphics, CRTC cursor and blinking
-  - [ ] Hercules graphics, per-scanline register changes (raster effects within a frame)
+  - [x] Per-scanline register changes (raster effects within a frame): frames are captured on emulated time as the beam passes DAC / attribute / CRTC / sequencer changes (`VgaRasterSink`), start address latched at vertical retrace, line compare per scanline
+  - [ ] Hercules graphics (720x348 via 3B8h/3BFh): needs a Hercules machine type, a VGA does not decode those ports
+  - [ ] Mid-frame VRAM writes are seen when the lines are rasterised (at the next display change or the end of the frame), not as the beam passes them; VBE modes are rasterised whole at the end of the frame
+  - [ ] `TerminalRenderer` (ANSI terminal frontend) locates the text page from the BDA (mode 7 and display pages work), not from the CRTC registers
 
 ## Phase 7: Audio Subsystem
 - [x] **Native Audio Backend**
@@ -262,8 +265,8 @@
 - [ ] Stubs for common but unimplemented INTs to avoid program crashes
 - [x] Automated test coverage for INT HLEs
 - [x] GUI renderer pixel-perfect VGA/CGA graphics (register-driven rendering, SDL texture scaling)
-- [ ] INT 10h text output (AH=09h/0Ah/0Eh/13h) in graphics modes and to B000h in mode 7
-- [ ] VGA vertical retrace interrupt (IRQ2, CRTC 11h bits 4-5)
+- [x] INT 10h text output (AH=08h/09h/0Ah/0Eh/13h, scrolling AH=06h/07h) in every mode with display pages: text (B000h in mode 7), CGA 4/5/6, EGA/VGA planar, 13h and VBE (`hw::VideoText`); the DOS console uses it too
+- [x] VGA vertical retrace interrupt (IRQ2 = IRQ9 on the AT, CRTC 11h bits 4-5, input status 0 bit 7)
 - [ ] CD-ROM / ISO image support (MSCDEX / INT 2Fh/1500h)
 - [x] Serial port: 16550A UART (FIFOs, loopback, interrupts, emulated line timing), INT 14h, serial mouse, file and TCP null modem backends
 - [x] Parallel port: SPP registers, INT 17h, printer-to-file, Covox Speech Thing, Disney Sound Source

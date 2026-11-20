@@ -144,8 +144,12 @@ void FrameRenderer::resize(int w, int h) {
   }
 }
 
+bool FrameRenderer::vbeActive() const {
+  return m_bios && m_bios->vbeState().mode != 0;
+}
+
 bool FrameRenderer::render(bool drawCursor) {
-  if (m_bios && m_bios->vbeState().mode != 0) {
+  if (vbeActive()) {
     const auto &v = m_bios->vbeState();
     m_modeKey = 0x10000u | v.mode;
     return renderVbe();
@@ -157,6 +161,78 @@ bool FrameRenderer::render(bool drawCursor) {
     renderRegisters(layout, drawCursor);
     return true;
   }
+  return renderFallback(drawCursor);
+}
+
+// ── Frame capture ─────────────────────────────────────────────────────
+
+void FrameRenderer::beginFrame(uint64_t frameNumber) {
+  m_capOpen = true;
+  m_capNumber = frameNumber;
+  m_capNextY = 0;
+  m_capPhys = 0;
+  m_capSplitAt = kNoSplit;
+}
+
+void FrameRenderer::scanTo(uint32_t line) {
+  if (!m_capOpen || vbeActive())
+    return; // VBE modes are rasterised whole at the end of the frame
+  CrtLayout l;
+  if (!decodeLayout(l))
+    return;
+  const uint32_t mode = m_memory.read8(0x449);
+  if (l.width != m_width || l.height != m_height || mode != m_modeKey) {
+    // The geometry changed mid-frame (mode set): start the image again
+    resize(l.width, l.height);
+    m_modeKey = mode;
+    m_capNextY = 0;
+  }
+  // The start address is latched at the start of vertical retrace, so a
+  // frame shows the value it had at the previous retrace.
+  l.start = m_vga.displayStartForFrame(m_capNumber) +
+            ((m_vga.crtcReg(0x08) >> 5) & 3u);
+  // Line compare: the address counter restarts after the scanline whose
+  // number equals CRTC 18h when the beam reaches it, so a split point
+  // moved above the beam takes effect in the next frame.
+  if (l.lineCompare >= m_capPhys && l.lineCompare < line)
+    m_capSplitAt = l.lineCompare;
+  m_capPhys = std::max(m_capPhys, line);
+  l.lineCompare = m_capSplitAt;
+  const uint32_t repeat = static_cast<uint32_t>(l.lineRepeat);
+  const int endY = static_cast<int>(std::min<uint64_t>(
+      static_cast<uint64_t>(l.height), (uint64_t{line} + repeat - 1) / repeat));
+  if (endY <= m_capNextY)
+    return;
+  renderRegisterLines(l, m_capNextY, endY, m_capNumber, m_captureCursor);
+  m_capNextY = endY;
+}
+
+void FrameRenderer::endFrame() {
+  if (!m_capOpen)
+    return;
+  bool ok;
+  if (vbeActive()) {
+    m_modeKey = 0x10000u | m_bios->vbeState().mode;
+    ok = renderVbe();
+  } else if (CrtLayout l; decodeLayout(l)) {
+    scanTo(UINT32_MAX);
+    ok = true;
+  } else {
+    ok = renderFallback(m_captureCursor);
+  }
+  m_capOpen = false;
+  if (!ok)
+    return;
+  m_completed.width = m_width;
+  m_completed.height = m_height;
+  m_completed.modeKey = m_modeKey;
+  m_completed.number = m_capNumber;
+  ++m_completed.serial;
+  m_completed.pixels = m_pixels;
+}
+
+bool FrameRenderer::renderFallback(bool drawCursor) {
+  const uint8_t mode = m_memory.read8(0x449);
   const auto *mi = hw::findVideoMode(mode);
   if (!mi)
     return false;
@@ -265,6 +341,12 @@ uint32_t FrameRenderer::mapAddress(const CrtLayout &l, uint32_t c,
 
 void FrameRenderer::renderRegisters(const CrtLayout &l, bool drawCursor) {
   resize(l.width, l.height);
+  renderRegisterLines(l, 0, l.height, drawCursor ? m_vga.frameCounter() : 0,
+                      drawCursor);
+}
+
+void FrameRenderer::renderRegisterLines(const CrtLayout &l, int fromY, int toY,
+                                        uint64_t frameNumber, bool drawCursor) {
   // Sequencer screen-off blanks to black; a cleared palette address
   // source bit shows the overscan colour.
   if (m_vga.screenOff() || !m_vga.attrPaletteSourceEnabled()) {
@@ -273,19 +355,20 @@ void FrameRenderer::renderRegisters(const CrtLayout &l, bool drawCursor) {
       buildPalette();
       fill = m_palette[m_vga.attrReg(0x11)];
     }
-    std::fill(m_pixels.begin(), m_pixels.end(), fill);
+    std::fill(m_pixels.begin() + static_cast<ptrdiff_t>(fromY) * l.width,
+              m_pixels.begin() + static_cast<ptrdiff_t>(toY) * l.width, fill);
     return;
   }
   buildPalette();
   buildAttributeLut();
   m_line.assign(static_cast<size_t>(l.charClocks + 2) * 9 + 16, 0);
 
-  const uint64_t frame = drawCursor ? m_vga.frameCounter() : 0;
+  const uint64_t frame = drawCursor ? frameNumber : 0;
   const bool cursorPhase = ((frame >> 3) & 1) == 0; // 16-frame cursor blink
   const bool blinkPhase = ((frame >> 4) & 1) == 0;  // 32-frame text blink
   const bool text = l.kind == CrtLayout::Kind::Text;
 
-  for (int y = 0; y < l.height; ++y) {
+  for (int y = fromY; y < toY; ++y) {
     const uint32_t phys = static_cast<uint32_t>(y * l.lineRepeat);
     // Line compare: the lines after it restart at address 0
     const bool split = phys > l.lineCompare;

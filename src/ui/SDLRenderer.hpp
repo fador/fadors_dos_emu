@@ -27,11 +27,10 @@ public:
 
   void setBIOS(hw::BIOS &bios) {
     m_bios = &bios;
-    m_frame.setBIOS(&bios);
   }
 
-  // Renders the current VRAM state to the SDL window
-  void render(bool force = false);
+  // Shows an emulated frame (FrameRenderer::completedFrame()) in the window
+  void present(const FrameRenderer::Frame &frame);
 
   // Polls SDL events and pushes keys/mouse to the keyboard controller
   // Returns true if input was processed
@@ -62,8 +61,6 @@ private:
   // Window scale factor for small resolutions
   static constexpr int SCALE = 3;
 
-  // Backend-independent rasteriser shared with the headless screenshots
-  FrameRenderer m_frame;
   uint32_t m_lastModeKey = 0xFFFFFFFFu;
 
   // Handle an SDL key event

@@ -1,4 +1,5 @@
 #include "BIOS.hpp"
+#include "VideoText.hpp"
 #include "../memory/himem/HIMEM.hpp"
 #include "../utils/Logger.hpp"
 #include "KeyboardController.hpp"
@@ -202,8 +203,10 @@ bool BIOS::handleInterrupt(uint8_t vector) {
     return true;
   }
   case 0x71: { // IRQ9 — Redirected to INT 0Ah by BIOS (AT compatibility)
+    // Slave EOI here; the INT 0Ah handler acknowledges the master.
+    if (m_slavePic)
+      m_slavePic->write8(0xA0, 0x20);
     handleInterrupt(0x0A);
-    sendEOI(0x71);
     return true;
   }
   case 0x74: { // IRQ12 — PS/2 Mouse
@@ -564,6 +567,20 @@ void BIOS::handleMouseService() {
   }
 }
 
+const VbeTextSurface *BIOS::vbeTextSurface(VbeTextSurface &out) const {
+  if (m_vbe.mode == 0)
+    return nullptr;
+  const uint32_t bytes = (m_vbe.bpp + 7u) / 8u;
+  out.base = memory::MemoryBus::VBE_LFB_BASE + m_vbe.startY * m_vbe.pitch +
+             m_vbe.startX * bytes;
+  out.pitch = m_vbe.pitch;
+  out.width = m_vbe.width;
+  out.height = m_vbe.height;
+  out.bpp = m_vbe.bpp;
+  out.fontAddr = (static_cast<uint32_t>(VGA_ROM_SEG) << 4) + ROM_FONT_8X16;
+  return &out;
+}
+
 void BIOS::handleVideoService() {
   uint8_t ah = m_cpu.getReg8(cpu::AH);
   switch (ah) {
@@ -641,126 +658,40 @@ void BIOS::handleVideoService() {
     break;
   }
   case 0x06:   // Scroll Up
-  case 0x07: { // Scroll Down
-    uint8_t al = m_cpu.getReg8(cpu::AL);
-    uint8_t row1 = m_cpu.getReg8(cpu::CH);
-    uint8_t row2 = m_cpu.getReg8(cpu::DH);
-    uint8_t col1 = m_cpu.getReg8(cpu::CL);
-    uint8_t col2 = m_cpu.getReg8(cpu::DL);
-    uint8_t attr = m_cpu.getReg8(cpu::BH);
-    uint16_t cols = m_memory.read16(0x44A);
-    uint8_t maxRow = m_memory.read8(0x484);
-    if (row2 > maxRow)
-      row2 = maxRow;
-    if (col2 >= cols)
-      col2 = static_cast<uint8_t>(cols - 1);
-    uint8_t lines = al;
-    if (lines == 0 || lines > (row2 - row1 + 1)) {
-      for (uint8_t r = row1; r <= row2; ++r) {
-        for (uint8_t c = col1; c <= col2; ++c) {
-          uint32_t off = (r * cols + c) * 2;
-          m_memory.write8(0xB8000 + off, ' ');
-          m_memory.write8(0xB8000 + off + 1, attr);
-        }
-      }
-    } else if (ah == 0x06) {
-      for (uint8_t r = row1; r <= row2 - lines; ++r) {
-        for (uint8_t c = col1; c <= col2; ++c) {
-          uint32_t dst = (r * cols + c) * 2;
-          uint32_t src = ((r + lines) * cols + c) * 2;
-          m_memory.write8(0xB8000 + dst, m_memory.read8(0xB8000 + src));
-          m_memory.write8(0xB8000 + dst + 1, m_memory.read8(0xB8000 + src + 1));
-        }
-      }
-      for (uint8_t r = row2 - lines + 1; r <= row2; ++r) {
-        for (uint8_t c = col1; c <= col2; ++c) {
-          uint32_t off = (r * cols + c) * 2;
-          m_memory.write8(0xB8000 + off, ' ');
-          m_memory.write8(0xB8000 + off + 1, attr);
-        }
-      }
-    } else {
-      for (uint8_t r = row2; r >= row1 + lines; --r) {
-        for (uint8_t c = col1; c <= col2; ++c) {
-          uint32_t dst = (r * cols + c) * 2;
-          uint32_t src = ((r - lines) * cols + c) * 2;
-          m_memory.write8(0xB8000 + dst, m_memory.read8(0xB8000 + src));
-          m_memory.write8(0xB8000 + dst + 1, m_memory.read8(0xB8000 + src + 1));
-        }
-      }
-      for (uint8_t r = row1; r < row1 + lines; ++r) {
-        for (uint8_t c = col1; c <= col2; ++c) {
-          uint32_t off = (r * cols + c) * 2;
-          m_memory.write8(0xB8000 + off, ' ');
-          m_memory.write8(0xB8000 + off + 1, attr);
-        }
-      }
-    }
+  case 0x07: { // Scroll Down (the active page)
+    VbeTextSurface vbe;
+    VideoText text(m_memory, vbeTextSurface(vbe));
+    text.scroll(ah == 0x06, m_cpu.getReg8(cpu::AL), m_cpu.getReg8(cpu::CH),
+                m_cpu.getReg8(cpu::CL), m_cpu.getReg8(cpu::DH),
+                m_cpu.getReg8(cpu::DL), m_cpu.getReg8(cpu::BH),
+                text.activePage());
     LOG_VIDEO("BIOS INT 10h: Scroll ", (ah == 0x06 ? "Up" : "Down"),
-              " AL=", (int)al, " Window=", (int)row1, ",", (int)col1, "-",
-              (int)row2, ",", (int)col2);
+              " AL=", (int)m_cpu.getReg8(cpu::AL), " CX=", m_cpu.getReg16(cpu::CX),
+              " DX=", m_cpu.getReg16(cpu::DX));
     break;
   }
   case 0x08: { // Read Character and Attribute at Cursor
-    uint8_t page = m_cpu.getReg8(cpu::BH);
-    if (page > 7)
-      page = 0;
-    uint16_t cols = m_memory.read16(0x44A);
-    uint8_t col = m_memory.read8(0x450 + page * 2);
-    uint8_t row = m_memory.read8(0x450 + page * 2 + 1);
-    uint32_t off = (row * cols + col) * 2;
-    m_cpu.setReg8(cpu::AL, m_memory.read8(0xB8000 + off));
-    m_cpu.setReg8(cpu::AH, m_memory.read8(0xB8000 + off + 1));
+    VbeTextSurface vbe;
+    VideoText text(m_memory, vbeTextSurface(vbe));
+    const uint8_t page = m_cpu.getReg8(cpu::BH) & 7;
+    uint8_t row, col;
+    text.cursor(page, row, col);
+    m_cpu.setReg16(cpu::AX, text.readChar(page, row, col));
     break;
   }
-  case 0x09: { // Write Character and Attribute at Cursor
-    uint8_t c = m_cpu.getReg8(cpu::AL);
-    uint8_t attr = m_cpu.getReg8(cpu::BL);
-    uint16_t count = m_cpu.getReg16(cpu::CX);
-    uint16_t cols = m_memory.read16(0x44A);
-    uint8_t maxRow = m_memory.read8(0x484);
-    uint8_t cursorCol = m_memory.read8(0x450);
-    uint8_t cursorRow = m_memory.read8(0x451);
-    for (uint16_t i = 0; i < count; ++i) {
-      uint32_t off = (cursorRow * cols + cursorCol) * 2;
-      m_memory.write8(0xB8000 + off, c);
-      m_memory.write8(0xB8000 + off + 1, attr);
-      cursorCol++;
-      if (cursorCol >= cols) {
-        cursorCol = 0;
-        cursorRow++;
-      }
-      if (cursorRow > maxRow) {
-        cursorRow = maxRow;
-      }
-    }
-    // AH=09h does NOT advance the cursor in the BDA
-    LOG_VIDEO("BIOS INT 10h AH=09h: Write Char '", (char)c, "' attr=", std::hex,
-              (int)attr, " count=", count);
-    break;
-  }
-  case 0x0A: { // Write Character Only at Cursor (no attribute change)
-    uint8_t c = m_cpu.getReg8(cpu::AL);
-    uint16_t count = m_cpu.getReg16(cpu::CX);
-    uint16_t cols = m_memory.read16(0x44A);
-    uint8_t maxRow = m_memory.read8(0x484);
-    uint8_t cursorCol = m_memory.read8(0x450);
-    uint8_t cursorRow = m_memory.read8(0x451);
-    for (uint16_t i = 0; i < count; ++i) {
-      uint32_t off = (cursorRow * cols + cursorCol) * 2;
-      m_memory.write8(0xB8000 + off, c);
-      // attribute byte left unchanged
-      cursorCol++;
-      if (cursorCol >= cols) {
-        cursorCol = 0;
-        cursorRow++;
-      }
-      if (cursorRow > maxRow) {
-        cursorRow = maxRow;
-      }
-    }
-    LOG_VIDEO("BIOS INT 10h AH=0Ah: Write Char Only '", (char)c,
-              "' count=", count);
+  case 0x09:   // Write Character and Attribute at Cursor
+  case 0x0A: { // Write Character Only at Cursor (graphics: BL = colour)
+    VbeTextSurface vbe;
+    VideoText text(m_memory, vbeTextSurface(vbe));
+    const uint8_t page = m_cpu.getReg8(cpu::BH) & 7;
+    uint8_t row, col;
+    text.cursor(page, row, col);
+    // The cursor does not move
+    text.writeChars(page, row, col, m_cpu.getReg8(cpu::AL),
+                    m_cpu.getReg8(cpu::BL), ah == 0x09, m_cpu.getReg16(cpu::CX));
+    LOG_VIDEO("BIOS INT 10h AH=", (int)ah, ": Write Char '",
+              (char)m_cpu.getReg8(cpu::AL), "' BL=", std::hex,
+              (int)m_cpu.getReg8(cpu::BL), " count=", m_cpu.getReg16(cpu::CX));
     break;
   }
   case 0x0B: { // Set Color Palette / Background/Border
@@ -885,65 +816,11 @@ void BIOS::handleVideoService() {
     LOG_TRACE("BIOS INT 10h AH=0Dh: Read Pixel");
     break;
   }
-  case 0x0E: { // Teletype Output
-    uint8_t al = m_cpu.getReg8(cpu::AL);
-    uint8_t page = m_cpu.getReg8(cpu::BH);
-    if (page > 7)
-      page = 0;
-    uint16_t cols = m_memory.read16(0x44A);
-    uint8_t maxRow = m_memory.read8(0x484);
-    uint8_t cursorCol = m_memory.read8(0x450 + page * 2);
-    uint8_t cursorRow = m_memory.read8(0x450 + page * 2 + 1);
-
-    switch (al) {
-    case 0x07: // BEL
-      break;
-    case 0x08: // Backspace
-      if (cursorCol > 0)
-        cursorCol--;
-      break;
-    case 0x0A: // Line Feed
-      cursorRow++;
-      break;
-    case 0x0D: // Carriage Return
-      cursorCol = 0;
-      break;
-    default: { // Printable character
-      uint32_t off = (cursorRow * cols + cursorCol) * 2;
-      m_memory.write8(0xB8000 + off, al);
-      // Keep existing attribute
-      if (m_memory.read8(0xB8000 + off + 1) == 0)
-        m_memory.write8(0xB8000 + off + 1, 0x07);
-      cursorCol++;
-      if (cursorCol >= cols) {
-        cursorCol = 0;
-        cursorRow++;
-      }
-      break;
-    }
-    }
-    // Scroll up if past last row
-    if (cursorRow > maxRow) {
-      // Scroll entire screen up one line
-      for (uint8_t r = 0; r < maxRow; ++r) {
-        for (uint16_t c = 0; c < cols; ++c) {
-          uint32_t dst = (r * cols + c) * 2;
-          uint32_t src = ((r + 1) * cols + c) * 2;
-          m_memory.write8(0xB8000 + dst, m_memory.read8(0xB8000 + src));
-          m_memory.write8(0xB8000 + dst + 1, m_memory.read8(0xB8000 + src + 1));
-        }
-      }
-      // Clear last line
-      for (uint16_t c = 0; c < cols; ++c) {
-        uint32_t off = (maxRow * cols + c) * 2;
-        m_memory.write8(0xB8000 + off, ' ');
-        m_memory.write8(0xB8000 + off + 1, 0x07);
-      }
-      cursorRow = maxRow;
-    }
-    m_memory.write8(0x450 + page * 2, cursorCol);
-    m_memory.write8(0x450 + page * 2 + 1, cursorRow);
-    syncCursorFromBDA(m_memory);
+  case 0x0E: { // Teletype Output (active page; graphics: BL = colour)
+    VbeTextSurface vbe;
+    VideoText text(m_memory, vbeTextSurface(vbe));
+    text.teletype(text.activePage(), m_cpu.getReg8(cpu::AL),
+                  m_cpu.getReg8(cpu::BL), false);
     break;
   }
   case 0x10: // Palette registers and DAC
@@ -955,71 +832,27 @@ void BIOS::handleVideoService() {
   case 0x12: // Alternate function select
     handleAltSelectService();
     break;
-  case 0x13: {                           // Write String
-    uint8_t al = m_cpu.getReg8(cpu::AL); // Write mode
-    uint8_t page = m_cpu.getReg8(cpu::BH);
-    uint8_t attr = m_cpu.getReg8(cpu::BL);
-    uint16_t count = m_cpu.getReg16(cpu::CX);
-    uint8_t row = m_cpu.getReg8(cpu::DH);
-    uint8_t col = m_cpu.getReg8(cpu::DL);
-    uint16_t es = m_cpu.getSegReg(cpu::ES);
-    uint16_t bp = m_cpu.getReg16(cpu::BP);
-    uint32_t strAddr = (es << 4) + bp;
-    uint16_t cols = m_memory.read16(0x44A);
-    uint8_t maxRow = m_memory.read8(0x484);
-
-    if (page > 7)
-      page = 0;
-
+  case 0x13: { // Write String
+    const uint8_t al = m_cpu.getReg8(cpu::AL); // bit 0: move cursor, bit 1: attrs
+    const uint8_t page = m_cpu.getReg8(cpu::BH) & 7;
+    const uint8_t attr = m_cpu.getReg8(cpu::BL);
+    const uint16_t count = m_cpu.getReg16(cpu::CX);
+    uint32_t str = (static_cast<uint32_t>(m_cpu.getSegReg(cpu::ES)) << 4) +
+                   m_cpu.getReg16(cpu::BP);
+    VbeTextSurface vbe;
+    VideoText text(m_memory, vbeTextSurface(vbe));
+    uint8_t savedRow, savedCol;
+    text.cursor(page, savedRow, savedCol);
+    text.setCursor(page, m_cpu.getReg8(cpu::DH), m_cpu.getReg8(cpu::DL));
     for (uint16_t i = 0; i < count; ++i) {
-      uint8_t c;
-      uint8_t charAttr = attr;
-      if (al & 0x02) {
-        // Mode 2/3: string contains char, attr pairs
-        c = m_memory.read8(strAddr++);
-        charAttr = m_memory.read8(strAddr++);
-      } else {
-        // Mode 0/1: string is chars only, use BL for attribute
-        c = m_memory.read8(strAddr++);
-      }
-
-      // Handle control characters
-      if (c == 0x0D) {
-        col = 0;
-        continue;
-      }
-      if (c == 0x0A) {
-        row++;
-        continue;
-      }
-      if (c == 0x08) {
-        if (col > 0)
-          col--;
-        continue;
-      }
-      if (c == 0x07) {
-        continue;
-      } // BEL
-
-      uint32_t off = (row * cols + col) * 2;
-      m_memory.write8(0xB8000 + off, c);
-      m_memory.write8(0xB8000 + off + 1, charAttr);
-      col++;
-      if (col >= cols) {
-        col = 0;
-        row++;
-      }
-      if (row > maxRow) {
-        row = maxRow;
-      }
+      const uint8_t c = m_memory.read8(str++);
+      const uint8_t a = (al & 0x02) ? m_memory.read8(str++) : attr;
+      // BEL, BS, LF and CR are control characters, as with AH=0Eh
+      const bool control = c == 0x07 || c == 0x08 || c == 0x0A || c == 0x0D;
+      text.teletype(page, c, a, !control);
     }
-
-    // Modes 1 and 3 update the cursor position
-    if (al & 0x01) {
-      m_memory.write8(0x450 + page * 2, col);
-      m_memory.write8(0x450 + page * 2 + 1, row);
-    }
-    syncCursorFromBDA(m_memory);
+    if (!(al & 0x01))
+      text.setCursor(page, savedRow, savedCol);
     LOG_VIDEO("BIOS INT 10h AH=13h: Write String mode=", (int)al,
               " count=", count);
     break;
@@ -1377,6 +1210,28 @@ void BIOS::initialize() {
     m_originalIVT[0x75] = {IRQ13_HANDLER, HLE_STUB_SEG};
   }
 
+  // INT 71h (IRQ9, the ISA IRQ2 line: VGA vertical retrace interrupt) as
+  // on the IBM AT: EOI the slave PIC and run INT 0Ah, so programs written
+  // for the PC/EGA IRQ2 (hooking INT 0Ah, EOI to the master) work.
+  {
+    constexpr uint16_t IRQ9_HANDLER = 0x1F40;
+    const uint32_t base =
+        (static_cast<uint32_t>(HLE_STUB_SEG) << 4) + IRQ9_HANDLER;
+    const uint8_t code[] = {
+        0x50,       // PUSH AX
+        0xB0, 0x20, // MOV AL, 20h
+        0xE6, 0xA0, // OUT A0h, AL
+        0x58,       // POP AX
+        0xCD, 0x0A, // INT 0Ah
+        0xCF        // IRET
+    };
+    for (size_t i = 0; i < sizeof(code); ++i)
+      m_memory.write8(base + i, code[i]);
+    m_memory.write16(0x71 * 4, IRQ9_HANDLER);
+    m_memory.write16(0x71 * 4 + 2, HLE_STUB_SEG);
+    m_originalIVT[0x71] = {IRQ9_HANDLER, HLE_STUB_SEG};
+  }
+
   // Mouse driver stub at F000:0033 — programs check if INT 33h handler is a
   // bare IRET to detect presence. NOP + IRET avoids false "no driver"
   // detection. HLE intercepts INT 33h before this code ever executes.
@@ -1462,8 +1317,12 @@ void BIOS::initialize() {
   m_pic.unmaskIRQ(0);
   m_pic.unmaskIRQ(1);
   m_pic.unmaskIRQ(2); // Cascade line for slave PIC (IRQ8-15 pass through IRQ2)
-  if (m_slavePic)
+  if (m_slavePic) {
     m_slavePic->unmaskIRQ(5); // IRQ13: x87 FERR# (enabled by the AT POST)
+    // IRQ9 carries the ISA IRQ2 line; like AT BIOSes leave it enabled so
+    // programs that only unmask IRQ2 on the master get it.
+    m_slavePic->unmaskIRQ(1);
+  }
 
   LOG_INFO("BIOS: BDA and IVT initialized.");
 }
