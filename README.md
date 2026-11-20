@@ -268,13 +268,17 @@ command line (programs may reprogram them through 2XBh), line out on.
   next sample in DRAM (as the GF1 does, so players' loop-end guard samples
   matter), 8- and 16-bit data (16-bit addresses translated within 256 KB
   banks), loops, bidirectional loops, rollover, 12-bit logarithmic volumes,
-  volume ramps stepped every 1/8/64/512 voice cycles, 16 pan positions.
+  volume ramps stepped every 1/8/64/512 voice cycles, 16 constant-power pan
+  positions.
   Wavetable and ramp interrupts are queued in the order they happen and
   read back through 8Fh. The GF1 stream is resampled to 44.1 kHz with a
   16-tap Kaiser-windowed sinc filter.
 - DMA uploads (and downloads) go through the 8237 at 650 kHz / (rate
   divisor + 1) transfers per second, with 8/16-bit data, invert-MSB and the
-  terminal-count IRQ (2X6 bit 7, acknowledged by reading 41h).
+  terminal-count flag/IRQ (41h bit 6 / 2X6 bit 7, cleared by reading 41h);
+  42h follows the transfer.
+- Interrupts reach the latched IRQ line when 2X0 bit 3 is set; voice
+  interrupts also need 4Ch bit 2. 2XB is written only right after 2X0.
 - Not emulated: sampling/recording (48h/49h are stored only), the MIDI
   port, the SB emulation (SBOS/MEGA-EM), the GUS MAX codec and the ICS
   mixer of rev 3.7+ boards. Programs that load MIDI patches from

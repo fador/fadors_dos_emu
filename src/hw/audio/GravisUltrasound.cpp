@@ -374,6 +374,7 @@ void GravisUltrasound::write8(uint16_t port, uint8_t value) {
     break;
   case 0x103:
     m_regSel = value;
+    m_dataLow = 0;
     break;
   case 0x104:
     m_dataLow = value;
@@ -524,6 +525,9 @@ void GravisUltrasound::writeRegister(uint16_t value) {
   switch (reg) {
   case 0x0E: // active voices: bits 5-0 = voices - 1
     setActiveVoices((hi & 0x3F) + 1, m_lastNs);
+    // As DOSBox does (Jazz Jackrabbit needs it): the written value
+    // becomes the register select, so a repeated data write goes nowhere.
+    m_regSel = hi;
     break;
   case 0x41:
     writeDmaControl(hi);
@@ -859,7 +863,7 @@ float GravisUltrasound::sampleAt(const Voice &v) const {
 // a wavetable IRQ is due.
 bool GravisUltrasound::waveBoundary(Voice &v) {
   const bool irq = (v.ctrl & kIrqEnable) != 0;
-  if (v.volCtrl & kData16) // rollover: IRQ only, the voice plays on
+  if (rollover(v)) // IRQ only, the voice plays on
     return irq;
   const bool dec = (v.ctrl & kDecreasing) != 0;
   const int32_t left = dec ? v.start - v.pos : v.pos - v.end;
@@ -914,7 +918,7 @@ uint64_t GravisUltrasound::ticksToVoiceEvent(const Voice &v) const {
     if (inc > 0) {
       const bool dec = (v.ctrl & kDecreasing) != 0;
       const int64_t d = dec ? int64_t{v.pos} - v.start : int64_t{v.end} - v.pos;
-      if (d > 0 || !(v.volCtrl & kData16)) // rollover IRQs only on crossing
+      if (d > 0 || !rollover(v)) // rollover IRQs only on crossing
         best = ceilDiv(d, inc);
     }
   }
@@ -948,12 +952,11 @@ void GravisUltrasound::renderVoice(int index, uint32_t ticks, float *left,
       if (v.ctrl & kDecreasing) {
         const int32_t old = v.pos;
         v.pos -= inc;
-        crossed = v.pos <= v.start &&
-                  (!(v.volCtrl & kData16) || old > v.start);
+        crossed = v.pos <= v.start && (!rollover(v) || old > v.start);
       } else {
         const int32_t old = v.pos;
         v.pos += inc;
-        crossed = v.pos >= v.end && (!(v.volCtrl & kData16) || old < v.end);
+        crossed = v.pos >= v.end && (!rollover(v) || old < v.end);
       }
       if (crossed) {
         if (waveBoundary(v))

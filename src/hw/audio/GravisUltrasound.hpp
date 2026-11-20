@@ -39,16 +39,17 @@ std::string ultrasndVariable(const GusConfig &config);
 /// The GF1 runs on emulated time: it produces one stereo frame per voice
 /// cycle, 617400 / active voices per second (44100 Hz at 14 voices), with
 /// per-voice linear interpolation, 12-bit logarithmic volumes and volume
-/// ramps processed at that rate, and 16 pan positions.  Every port access
+/// ramps processed at that rate, and 16 constant-power pan positions.  Every port access
 /// first runs the GF1 up to the current time (sync()); advanceTo() does so
 /// only when the next interrupt (voice wavetable/ramp IRQ, timer, DMA
 /// terminal count) is due.  generateSamples() resamples the GF1 stream to
 /// the 44.1 kHz mixer rate with a windowed-sinc filter.
 ///
-/// Voice, timer and DMA interrupts go through the IRQ latch (2XB) and are
-/// gated by mix control bit 3 (enable latches) and reset register 4Ch
-/// bit 2 (GF1 master IRQ enable).  DMA uploads read host memory through the
-/// 8237 at the rate selected in register 41h.
+/// Voice, timer and DMA interrupts go to the line selected by the IRQ latch
+/// (2XB) when mix control bit 3 (enable latches) is set; voice IRQs also
+/// need reset register 4Ch bit 2.  DMA uploads read host memory through the
+/// 8237 at the rate selected in register 41h; a transfer waits while the
+/// channel is masked and stops at terminal count.
 class GravisUltrasound : public IODevice {
 public:
   static constexpr uint32_t kGf1Clock = 617400; // 9.8784 MHz / 16
@@ -157,6 +158,10 @@ private:
   float sampleAt(const Voice &v) const;
   void updateGain(Voice &v);
   bool waveBoundary(Voice &v);
+  // Rollover (volume control bit 2): the wavetable IRQ fires when the end
+  // is crossed but the voice plays on.  Looping takes precedence (SDK 3.11;
+  // the Windows 3.1 drivers depend on it).
+  static bool rollover(const Voice &v) { return (v.volCtrl & 0x04) && !(v.ctrl & 0x08); }
   bool rampStep(Voice &v);
   uint64_t ticksToVoiceEvent(const Voice &v) const;
   void buildResampler();

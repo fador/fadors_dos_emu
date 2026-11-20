@@ -730,3 +730,30 @@ TEST_CASE("GUS: master reset stops voices and clears IRQs", "[gus]") {
   e.advance(e.ticksNs(40));
   REQUIRE(e.position() == p);
 }
+
+TEST_CASE("GUS: rollover raises the IRQ and plays on unless looping", "[gus]") {
+  GusEnv e;
+  e.run();
+  e.startVoice(0, 0x000, 0x020, 0x00);
+  e.reg8(0x0D, 0x03 | 0x04); // ramp stopped, rollover
+  e.reg8(0x00, 0x20);        // go with the wavetable IRQ, no loop
+  e.advance(e.ticksNs(40));
+  REQUIRE(e.irqs.size() == 1);
+  e.voice(0);
+  REQUIRE((e.rreg8(0x80) & 0x01) == 0x00); // still running
+  REQUIRE(e.position() > 0x020);
+  REQUIRE(e.rreg8(0x8F) == (0x40 | 0x20 | 0));
+  e.advance(e.ticksNs(40)); // past the end: no further IRQs
+  REQUIRE(e.irqs.size() == 1);
+  // Loop + rollover: loops.
+  e.voice(0);
+  e.addr(0x0A, 0x000);
+  e.reg8(0x00, 0x28);
+  for (int t = 0; t < 100; ++t) {
+    e.advance(e.ticksNs(1));
+    e.voice(0);
+    REQUIRE(e.position() <= 0x020);
+    e.rreg8(0x8F); // acknowledge
+  }
+  REQUIRE(e.irqs.size() == 4); // at ticks 32, 64 and 96
+}
