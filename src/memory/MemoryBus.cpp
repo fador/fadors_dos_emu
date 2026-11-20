@@ -2,6 +2,7 @@
 #include "../hw/VGAController.hpp"
 #include "../utils/simd/Simd.hpp"
 #include <algorithm>
+#include <cstring>
 #include <iostream>
 #include <new>
 
@@ -170,6 +171,31 @@ bool MemoryBus::lfillPattern(uint32_t a, uint32_t bytes, uint32_t pattern) {
   if (p == nullptr)
     return false;
   utils::simd::kernels().fillPattern32(p, bytes, pattern);
+  return true;
+}
+
+bool MemoryBus::lwriteVgaElements(uint32_t a, const uint8_t *src,
+                                  uint32_t pattern, uint32_t elementSize,
+                                  uint32_t count) {
+  if (m_vga == nullptr || m_paging || m_traceWrites || count == 0)
+    return false;
+  const uint64_t bytes = static_cast<uint64_t>(elementSize) * count;
+  const uint32_t e = a & m_a20Mask;
+  if (e < VGA_PLANAR_START || e + bytes > VGA_PLANAR_END ||
+      ((a + static_cast<uint32_t>(bytes) - 1) & m_a20Mask) != e + bytes - 1)
+    return false;
+  // Same per-byte effect as write8Slow(): the RAM shadow, then the planes.
+  uint32_t off = e - VGA_PLANAR_START;
+  uint8_t element[4];
+  std::memcpy(element, &pattern, 4);
+  for (uint32_t i = 0; i < count; ++i) {
+    if (src != nullptr)
+      std::memcpy(element, src + static_cast<size_t>(i) * elementSize, elementSize);
+    for (uint32_t b = 0; b < elementSize; ++b, ++off) {
+      m_ram[VGA_PLANAR_START + off] = element[b];
+      m_vga->planeWrite8(off, element[b]);
+    }
+  }
   return true;
 }
 

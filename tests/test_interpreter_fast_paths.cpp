@@ -11,9 +11,11 @@
 #include "hw/KeyboardController.hpp"
 #include "hw/PIC8259.hpp"
 #include "hw/PIT8254.hpp"
+#include "hw/VGAController.hpp"
 #include "memory/MemoryBus.hpp"
 
 #include <bit>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -947,4 +949,145 @@ TEST_CASE("Fast path: the batch runner counts like step() + addCycles(1)",
   REQUIRE(a.cpu.getCycles() == b.cpu.getCycles());
   REQUIRE(a.cpu.cycles() == b.cpu.cycles());
   REQUIRE(a.cpu.getEIP() == b.cpu.getEIP());
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Bulk REP MOVS / REP STOS into the VGA window
+// ═══════════════════════════════════════════════════════════════════════
+
+namespace {
+
+struct VgaPair {
+  memory::MemoryBus bulkMem, refMem;
+  hw::VGAController bulkVga{bulkMem}, refVga{refMem};
+  VgaPair() {
+    bulkMem.setVGA(&bulkVga);
+    refMem.setVGA(&refVga);
+  }
+  void seq(uint8_t i, uint8_t v) { bulkVga.setSeqReg(i, v); refVga.setSeqReg(i, v); }
+  void gc(uint8_t i, uint8_t v) { bulkVga.setGcReg(i, v); refVga.setGcReg(i, v); }
+  bool same() {
+    for (int p = 0; p < 4; ++p)
+      for (uint32_t o = 0; o < 0x10000; ++o)
+        if (bulkVga.readPlane(p, o) != refVga.readPlane(p, o))
+          return false;
+    for (uint32_t a = 0xA0000; a < 0xB0000; ++a)
+      if (bulkMem.read8(a) != refMem.read8(a))
+        return false;
+    return true;
+  }
+};
+
+} // namespace
+
+TEST_CASE("VGA bulk writes match element-wise writes in every write path",
+          "[Memory][VGA][FastPath]") {
+  std::mt19937 rng(77);
+  struct Config {
+    const char *name;
+    uint8_t seq4, mapMask, gcMode, setReset, enableSR, rotate, bitMask, misc6;
+  };
+  const Config configs[] = {
+      {"chain-4 (mode 13h)", 0x0E, 0x0F, 0x40, 0, 0, 0, 0xFF, 0x05},
+      {"chain-4, partial map mask", 0x0E, 0x05, 0x40, 0, 0, 0, 0xFF, 0x05},
+      {"chain-4 with a bit mask", 0x0E, 0x0F, 0x40, 0, 0, 0, 0x3C, 0x05},
+      {"planar write mode 0", 0x06, 0x0F, 0x00, 0, 0, 0, 0xFF, 0x05},
+      {"planar, set/reset, rotate+XOR, bit mask", 0x06, 0x0B, 0x00, 0x0A, 0x05, 0x1B, 0x5A, 0x05},
+      {"planar write mode 1 (latches)", 0x06, 0x0F, 0x01, 0, 0, 0, 0xFF, 0x05},
+      {"planar write mode 2", 0x06, 0x0F, 0x02, 0, 0, 0x08, 0xF0, 0x05},
+      {"planar write mode 3", 0x06, 0x0F, 0x03, 0x06, 0, 0x03, 0x99, 0x05},
+      {"odd/even", 0x02, 0x0F, 0x10, 0, 0, 0, 0xFF, 0x0E},
+  };
+  for (const Config &c : configs) {
+    VgaPair v;
+    v.seq(2, c.mapMask);
+    v.seq(4, c.seq4);
+    v.gc(0, c.setReset);
+    v.gc(1, c.enableSR);
+    v.gc(3, c.rotate);
+    v.gc(5, c.gcMode);
+    v.gc(6, c.misc6);
+    v.gc(8, c.bitMask);
+    // Same latches in both (a read loads them).
+    for (int p = 0; p < 4; ++p)
+      for (uint32_t o = 0; o < 0x10000; o += 97) {
+        const uint8_t x = static_cast<uint8_t>(rng());
+        v.bulkVga.writePlane(p, o, x);
+        v.refVga.writePlane(p, o, x);
+      }
+    REQUIRE(v.bulkMem.read8(0xA0123) == v.refMem.read8(0xA0123));
+    for (int round = 0; round < 40; ++round) {
+      const uint32_t es = 1u << (rng() % 3);
+      const uint32_t count = 1 + rng() % 300;
+      const uint32_t a = 0xA0000 + rng() % (0x10000 - es * count);
+      std::vector<uint8_t> src(es * count);
+      for (auto &x : src)
+        x = static_cast<uint8_t>(rng());
+      const bool fill = rng() & 1;
+      const uint32_t pattern = static_cast<uint32_t>(rng());
+      REQUIRE(v.bulkMem.lwriteVgaElements(a, fill ? nullptr : src.data(), pattern,
+                                          es, count));
+      for (uint32_t i = 0; i < count; ++i) {
+        uint32_t x;
+        if (fill) {
+          x = pattern;
+        } else {
+          x = 0;
+          std::memcpy(&x, &src[i * es], es);
+        }
+        const uint32_t at = a + i * es;
+        if (es == 1)
+          v.refMem.lwrite8(at, static_cast<uint8_t>(x));
+        else if (es == 2)
+          v.refMem.lwrite16(at, static_cast<uint16_t>(x));
+        else
+          v.refMem.lwrite32(at, x);
+      }
+    }
+    if (!v.same())
+      std::fprintf(stderr, "VGA bulk mismatch: %s\n", c.name);
+    REQUIRE(v.same());
+  }
+  // Ranges not entirely in the window, or with paging / tracing, are refused.
+  VgaPair v;
+  const uint8_t b[8] = {};
+  REQUIRE(!v.bulkMem.lwriteVgaElements(0x9FFFC, b, 0, 4, 2));
+  REQUIRE(!v.bulkMem.lwriteVgaElements(0xAFFFE, b, 0, 4, 1));
+  v.bulkMem.setWriteTracing(true);
+  REQUIRE(!v.bulkMem.lwriteVgaElements(0xA0000, b, 0, 4, 2));
+}
+
+TEST_CASE("REP MOVS/STOS into the VGA window keep the element-wise cycles",
+          "[CPU][VGA][FastPath]") {
+  Machine m;
+  hw::VGAController vga(m.mem);
+  m.mem.setVGA(&vga);
+  vga.setSeqReg(4, 0x0E); // chain-4
+  vga.setSeqReg(2, 0x0F);
+  vga.setGcReg(5, 0x40);
+  vga.setGcReg(8, 0xFF);
+  const uint8_t *table = m.cpu.cycleTable();
+  for (uint8_t op : {0xA4, 0xA5, 0xAA, 0xAB}) {
+    m.cpu.setSegReg(cpu::ES, 0xA000);
+    m.cpu.setSegReg(cpu::DS, 0x2000);
+    m.decoder.syncSegments();
+    for (uint32_t i = 0; i < 400; ++i)
+      m.mem.write8(0x20000 + i, static_cast<uint8_t>(i * 7));
+    m.cpu.setReg32(cpu::ESI, 0);
+    m.cpu.setReg32(cpu::EDI, 0x10);
+    m.cpu.setReg32(cpu::ECX, 100);
+    m.cpu.setReg32(cpu::EAX, 0x11223344);
+    const uint64_t before = m.cpu.cycles();
+    m.run({0xF3, 0x66, op}, 1); // rep movs/stos (32-bit elements for A5/AB)
+    REQUIRE(m.cpu.getReg16(cpu::CX) == 0);
+    const uint32_t es = (op & 1) ? 4 : 1;
+    REQUIRE(m.cpu.getReg16(cpu::DI) == 0x10 + 100 * es);
+    REQUIRE(m.cpu.cycles() - before == table[op] + 100u * table[512 + op]);
+    for (uint32_t i = 0; i < 100 * es; ++i) {
+      const uint32_t a = 0x10 + i;
+      const uint8_t want = (op <= 0xA5) ? static_cast<uint8_t>(i * 7)
+                                         : static_cast<uint8_t>(0x11223344u >> (8 * (i % es)));
+      REQUIRE(vga.readPlane(static_cast<int>(a & 3), a & ~3u) == want);
+    }
+  }
 }

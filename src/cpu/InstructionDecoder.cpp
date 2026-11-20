@@ -84,13 +84,18 @@ bool InstructionDecoder::tryFastRepMovs(uint32_t elementSize) {
 
   uint8_t *srcPtr =
       m_memory.lcontiguousAccess(srcPhysStart, byteCount);
+  if (srcPtr == nullptr)
+    return false;
   uint8_t *dstPtr =
       m_memory.lcontiguousAccess(dstPhysStart, byteCount);
-  if (srcPtr == nullptr || dstPtr == nullptr) {
+  if (dstPtr != nullptr) {
+    std::memmove(dstPtr, srcPtr, byteCount);
+  } else if (!m_memory.lwriteVgaElements(dstPhysStart, srcPtr, 0, elementSize,
+                                         iterations)) {
+    // RAM to the VGA window (mode 13h / Mode X blits) in bulk; anything
+    // else goes element by element.
     return false;
   }
-
-  std::memmove(dstPtr, srcPtr, byteCount);
   m_cpu.addGuestCycles(iterations * m_cycleTable[512 + 0xA4]);
 
   uint32_t remaining = count - iterations;
@@ -143,8 +148,16 @@ bool InstructionDecoder::tryFastRepStos(uint32_t elementSize) {
     pattern = m_cpu.getReg32(EAX);
 
   const uint32_t byteCount = iterations * elementSize;
-  if (!m_memory.lfillPattern(m_segBase[ES] + dstOff, byteCount, pattern))
-    return false;
+  if (!m_memory.lfillPattern(m_segBase[ES] + dstOff, byteCount, pattern)) {
+    // Fills of the VGA window in bulk.  Unlike the RAM fill above (which
+    // has never charged them), they keep the per-element cycles of the
+    // element-wise loop they replace.
+    if (!m_memory.lwriteVgaElements(m_segBase[ES] + dstOff, nullptr, pattern,
+                                    elementSize, iterations))
+      return false;
+    m_cpu.addGuestCycles(iterations *
+                         m_cycleTable[512 + (elementSize == 1 ? 0xAA : 0xAB)]);
+  }
 
   const uint32_t remaining = count - iterations;
   if (m_hasPrefix67) {

@@ -193,6 +193,17 @@ public:
   // paging on, inside one page.  Returns false without writing otherwise.
   bool lfillPattern(uint32_t a, uint32_t bytes, uint32_t pattern);
 
+  // REP MOVS/STOS into the VGA plane window (A0000h-AFFFFh): `count`
+  // elements of `elementSize` (1, 2 or 4) bytes at ascending linear
+  // addresses from `a`, element i taken from src + i * elementSize (or the
+  // repeating little-endian `pattern` when src is null).  Equivalent to
+  // `count` lwrite8/16/32 calls (each element's source bytes are read
+  // before it is written), without the per-access dispatch.  Returns false
+  // and writes nothing unless the whole range is inside the window, paging
+  // is off and writes are not traced.
+  bool lwriteVgaElements(uint32_t a, const uint8_t *src, uint32_t pattern,
+                         uint32_t elementSize, uint32_t count);
+
   // Called by the CPU whenever CR0, CR3 or CR4 change.
   void setPaging(bool enabled, uint32_t cr3, bool pse) {
     m_paging = enabled;
