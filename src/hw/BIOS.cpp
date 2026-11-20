@@ -19,7 +19,10 @@ namespace fador::hw {
 
 BIOS::BIOS(cpu::CPU &cpu, memory::MemoryBus &memory, KeyboardController &kbd,
            PIT8254 &pit, PIC8259 &pic)
-    : m_cpu(cpu), m_memory(memory), m_kbd(kbd), m_pit(pit), m_pic(pic) {}
+    : m_cpu(cpu), m_memory(memory), m_kbd(kbd), m_pit(pit), m_pic(pic),
+      m_vcpi(cpu, memory) {
+  m_vcpi.setPICs(&m_pic, nullptr);
+}
 
 bool BIOS::loadDiskImage(const std::string &path) {
   std::ifstream file(path, std::ios::binary | std::ios::ate);
@@ -183,6 +186,9 @@ bool BIOS::handleInterrupt(uint8_t vector) {
     return true;
   case 0xE0: // XMS far-call dispatch (our internal HLE vector)
     handleXMSDispatch();
+    return true;
+  case VCPI::kEntryTrap: // VCPI protected-mode entry (far CALL)
+    m_vcpi.handleProtectedEntry();
     return true;
   case 0x67: // EMS / EMM386
     handleEMSService();
@@ -1500,6 +1506,9 @@ void BIOS::initializeEMS() {
   }
 
   updateEMSImportRecord();
+
+  m_vcpi.reset();
+  m_vcpi.installEntryStub();
 }
 
 void BIOS::flushEMSPhysicalPage(uint8_t physicalPage) {
@@ -2026,6 +2035,11 @@ void BIOS::handleEMSService() {
   switch (function) {
   case 0x40: // Get Status
     m_cpu.setReg8(cpu::AH, 0x00);
+    break;
+
+  case 0xDE: // VCPI (AX=DE00h-DE0Ch)
+    if (!m_vcpi.handleInt67())
+      fail(0x84);
     break;
 
   case 0x41: // Get Page Frame Address

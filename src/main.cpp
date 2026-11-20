@@ -400,6 +400,11 @@ void printHelp(const char *programName) {
     "  --cpu=MODEL               Emulated CPU: %s\n"
     "                            (default 486dx2).  Sets CPUID, EFLAGS/CR0 bits, the\n"
     "                            available instructions and the guest cycle costs.\n"
+    "  --no-fpu                  No x87 coprocessor (a 386 or 486SX without a 387): x87\n"
+    "                            instructions do nothing, CR0.ET / CPUID / INT 11h say so.\n"
+    "  --dpmi=off                No DPMI host (INT 2Fh AX=1687h fails): extenders use\n"
+    "                            VCPI or raw mode.\n"
+    "  --vcpi=off                No VCPI server (INT 67h AX=DE00h fails).\n"
     "  --env=NAME=VALUE          Add or replace a DOS environment variable (repeatable).\n"
     "                            Defaults: BLASTER=A220 I5 D1 H5 P330 T6, CAUSEWAY=DPMI.\n"
     "  --headless                No window, terminal output or host input; for scripted\n"
@@ -874,6 +879,13 @@ int main(int argc, char *argv[]) {
         dumpOnExit = true;
       } else if (arg == "--no-fast-path") {
         decoder.setFastPathEnabled(false);
+      } else if (arg == "--no-fpu") {
+        cpu.setFpuPresent(false);
+        memory.write16(0x410, memory.read16(0x410) & ~0x0002u);
+      } else if (arg == "--dpmi=off" || arg == "--dpmi=on") {
+        dos.setDPMI(arg == "--dpmi=on" ? &dpmi : nullptr);
+      } else if (arg == "--vcpi=off" || arg == "--vcpi=on") {
+        bios.vcpi().setEnabled(arg == "--vcpi=on");
       } else if (arg.find("--throttle-ips=") == 0) {
         const uint64_t ips = std::stoull(arg.substr(15));
         if (ips == 0) {

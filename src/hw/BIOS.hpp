@@ -6,6 +6,7 @@
 #include <functional>
 #include "../cpu/CPU.hpp"
 #include "../memory/MemoryBus.hpp"
+#include "VCPI.hpp"
 
 namespace fador::memory { class HIMEM; }
 
@@ -35,7 +36,10 @@ public:
     void sendEOI(uint8_t vector);
 
     // Set slave PIC (for IRQ8-15 EOI through port A0h)
-    void setSlavePIC(PIC8259* slave) { m_slavePic = slave; }
+    void setSlavePIC(PIC8259* slave) {
+        m_slavePic = slave;
+        m_vcpi.setPICs(&m_pic, slave);
+    }
     // RTC whose register C the IRQ 8 handler reads (re-arms the interrupt).
     void setCMOS(CMOSRTC* cmos) { m_cmos = cmos; }
     // Timer tick as the INT 8 handler counts it: increments the BIOS tick
@@ -128,7 +132,12 @@ public:
     bool loadDiskImage(const std::string& path);
 
     // Set HIMEM (XMS) driver for INT 2Fh detection and XMS function dispatch
-    void setHIMEM(memory::HIMEM* himem) { m_himem = himem; }
+    void setHIMEM(memory::HIMEM* himem) {
+        m_himem = himem;
+        m_vcpi.setHIMEM(himem);
+    }
+    // VCPI server behind INT 67h AH=DEh (on by default; --vcpi=off).
+    VCPI& vcpi() { return m_vcpi; }
 
     // XMS entry point stub location in ROM (F000:XMS_ENTRY_OFFSET)
     // Code at this address: INT E0h; RETF
@@ -147,8 +156,11 @@ public:
     static constexpr uint8_t VBE_PM_SET_WINDOW = 0xE5;
     static constexpr uint8_t VBE_PM_SET_DISPLAY_START = 0xE6;
     static constexpr uint8_t VBE_PM_SET_PALETTE = 0xE7;
+    // The VCPI protected-mode entry (VCPI::kEntryTrap = E4h) works the
+    // same way with a far CALL / RETF.
     static bool isCallStyleTrap(uint8_t vector) {
-        return vector >= VBE_PM_SET_WINDOW && vector <= VBE_PM_SET_PALETTE;
+        return (vector >= VBE_PM_SET_WINDOW && vector <= VBE_PM_SET_PALETTE) ||
+               vector == VCPI::kEntryTrap;
     }
 
 private:
@@ -264,6 +276,7 @@ private:
     void updateEMSImportRecord();
 
     memory::HIMEM* m_himem = nullptr;
+    VCPI m_vcpi;
     std::vector<EMSHandle> m_emsHandles;
     std::array<EMSMapping, EMS_PHYSICAL_PAGE_COUNT> m_emsMappings{};
 };

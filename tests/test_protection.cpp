@@ -1046,3 +1046,178 @@ TEST_CASE("Protection: VME and PVI virtual interrupt flag", "[CPU][Protection][V
     REQUIRE(pending.pmVector() == 13);
   }
 }
+
+// ── VCPI ────────────────────────────────────────────────────────────────
+
+#include "memory/himem/HIMEM.hpp"
+
+namespace {
+
+struct VcpiEnv : Env {
+  VcpiEnv() {
+    dos.getHIMEM()->setMemoryBus(&mem);
+    bios.setHIMEM(dos.getHIMEM());
+  }
+  // INT 67h from real mode with AX = ax; returns AH.
+  uint8_t int67(uint16_t ax) {
+    cpu.setReg32(cpu::EAX, ax);
+    runReal({0xCD, 0x67});
+    return cpu.getReg8(cpu::AH);
+  }
+};
+
+} // namespace
+
+TEST_CASE("VCPI: detection and real-mode services", "[VCPI]") {
+  VcpiEnv env;
+  REQUIRE(env.int67(0xDE00) == 0);
+  REQUIRE(env.cpu.getReg16(cpu::BX) == 0x0100);
+  REQUIRE(env.int67(0xDE02) == 0);
+  REQUIRE(env.cpu.getReg32(cpu::EDX) == memory::MemoryBus::XMS_LIMIT - 0x1000);
+  REQUIRE(env.int67(0xDE03) == 0);
+  const uint32_t freePages = env.cpu.getReg32(cpu::EDX);
+  REQUIRE(freePages > 1000);
+  REQUIRE(env.int67(0xDE04) == 0);
+  const uint32_t page = env.cpu.getReg32(cpu::EDX);
+  REQUIRE((page & 0xFFF) == 0);
+  REQUIRE(page >= 0x100000);
+  REQUIRE(env.int67(0xDE04) == 0);
+  REQUIRE(env.cpu.getReg32(cpu::EDX) == page + 0x1000);
+  env.cpu.setReg32(cpu::EDX, page);
+  REQUIRE(env.int67(0xDE05) == 0);
+  env.cpu.setReg32(cpu::EDX, page);
+  REQUIRE(env.int67(0xDE05) == 0x8A); // already free
+  env.cpu.setReg32(cpu::ECX, 0xB8);
+  REQUIRE(env.int67(0xDE06) == 0);
+  REQUIRE(env.cpu.getReg32(cpu::EDX) == 0xB8000);
+  env.cpu.setReg32(cpu::ECX, 0x100);
+  REQUIRE(env.int67(0xDE06) == 0x8B);
+  REQUIRE(env.int67(0xDE07) == 0);
+  REQUIRE(env.cpu.getReg32(cpu::EBX) == env.cpu.getCR(0));
+  REQUIRE(env.int67(0xDE0A) == 0);
+  REQUIRE(env.cpu.getReg16(cpu::BX) == 0x08);
+  REQUIRE(env.cpu.getReg16(cpu::CX) == 0x70);
+  // DE09h/DE08h: debug registers through ES:DI.
+  for (uint32_t i = 0; i < 8; ++i)
+    env.mem.write32(0x600 + i * 4, 0x1000 * (i + 1));
+  env.mem.write32(0x600 + 7 * 4, 0); // DR7: nothing armed
+  env.cpu.setReg32(cpu::EDI, 0x600);
+  REQUIRE(env.int67(0xDE09) == 0);
+  REQUIRE(env.cpu.getDR(2) == 0x3000);
+  env.cpu.setReg32(cpu::EDI, 0x700);
+  REQUIRE(env.int67(0xDE08) == 0);
+  REQUIRE(env.mem.read32(0x700 + 3 * 4) == 0x4000);
+  REQUIRE(env.int67(0xDE77) == 0x8F);
+
+  SECTION("--vcpi=off: not present") {
+    VcpiEnv off;
+    off.bios.vcpi().setEnabled(false);
+    REQUIRE(off.int67(0xDE00) != 0);
+  }
+}
+
+TEST_CASE("VCPI: real mode -> protected mode -> real mode round trip", "[VCPI]") {
+  VcpiEnv env;
+  constexpr uint32_t kPageTable = 0x20000, kPageDir = 0x21000;
+  constexpr uint32_t kSwitch = 0x3000, kFarPtr = 0x4000, kFrame = 0x6F00;
+  constexpr uint32_t kClient = 0x5100; // protected-mode entry
+  // DE01h: page table 0 at 2000:0000, server descriptors at GDT 18h-28h.
+  env.cpu.setSegReg(cpu::ES, 0x2000);
+  env.cpu.setReg32(cpu::EDI, 0);
+  env.cpu.setSegReg(cpu::DS, Env::kGdt >> 4);
+  env.cpu.setReg32(cpu::ESI, 0x18);
+  REQUIRE(env.int67(0xDE01) == 0);
+  REQUIRE(env.cpu.getReg16(cpu::DI) == 0x400);
+  const uint32_t entry = env.cpu.getReg32(cpu::EBX);
+  REQUIRE(env.mem.read32(kPageTable + 0xB8 * 4) == (0xB8000u | 0x67));
+  // The server code segment is a present 32-bit code segment.
+  REQUIRE((env.mem.read32(Env::kGdt + 0x18 + 4) & 0x00409A00) == 0x00409A00);
+  env.cpu.setSegReg(cpu::DS, 0);
+  env.cpu.setSegReg(cpu::ES, 0);
+
+  // Client GDT: flat ring-0 code/data, the VCPI descriptors, a TSS.
+  env.descriptor(0x08, 0, 0xFFFFF, 0x9A, 0xC);
+  env.descriptor(0x10, 0, 0xFFFFF, 0x92, 0xC);
+  env.descriptor(0x30, Env::kTss, 0x67, 0x89);
+  env.mem.write32(kPageDir, kPageTable | 7);
+  env.mem.write16(0x3100, 0x37);
+  env.mem.write32(0x3102, Env::kGdt);
+  env.mem.write16(0x3108, 0x7FF);
+  env.mem.write32(0x310A, Env::kIdt);
+  env.mem.write32(kSwitch + 0x00, kPageDir);
+  env.mem.write32(kSwitch + 0x04, 0x3100);
+  env.mem.write32(kSwitch + 0x08, 0x3108);
+  env.mem.write16(kSwitch + 0x0C, 0);
+  env.mem.write16(kSwitch + 0x0E, 0x30);
+  env.mem.write32(kSwitch + 0x10, kClient);
+  env.mem.write16(kSwitch + 0x14, 0x08);
+  env.mem.write32(kFarPtr, entry);
+  env.mem.write16(kFarPtr + 4, 0x18);
+  // V86 (here: real-mode) context for the switch back.
+  const uint32_t frame[] = {0x0010, 0x0600, 0, 0x0400, 0x0700,
+                            0x0123, 0x0234, 0x0345, 0x0456};
+  for (uint32_t i = 0; i < 9; ++i)
+    env.mem.write32(kFrame + i * 4, frame[i]);
+  env.mem.write8(0x6010, 0x90); // NOP at 0600:0010
+
+  writeCode(env, kClient,
+            {0x66, 0xB8, 0x10, 0x00,             // MOV AX, 10h
+             0x8E, 0xD0,                         // MOV SS, AX
+             0x8E, 0xD8,                         // MOV DS, AX
+             0xBC, 0x00, 0x6F, 0x00, 0x00,       // MOV ESP, 6F00h
+             0xB8, 0x03, 0xDE, 0x00, 0x00,       // MOV EAX, DE03h
+             0xFF, 0x1D, 0x00, 0x40, 0x00, 0x00, // CALL FAR [4000h]
+             0x89, 0xD3,                         // MOV EBX, EDX
+             0xB8, 0x04, 0xDE, 0x00, 0x00,       // MOV EAX, DE04h
+             0xFF, 0x1D, 0x00, 0x40, 0x00, 0x00, // CALL FAR [4000h]
+             0x89, 0xD7,                         // MOV EDI, EDX
+             0xB8, 0x0C, 0xDE, 0x00, 0x00,       // MOV EAX, DE0Ch
+             0xFF, 0x1D, 0x00, 0x40, 0x00, 0x00}); // CALL FAR [4000h]
+
+  env.cpu.setEFLAGS(0x202);
+  // MOV ESI, 3000h; MOV AX, DE0Ch; INT 67h
+  env.runReal({0x66, 0xBE, 0x00, 0x30, 0x00, 0x00, 0xB8, 0x0C, 0xDE, 0xCD, 0x67},
+              3);
+  REQUIRE((env.cpu.getCR(0) & 0x80000001u) == 0x80000001u);
+  REQUIRE(env.cpu.nativeProtection());
+  REQUIRE(env.cpu.getCR(3) == kPageDir);
+  REQUIRE(env.cpu.getSegReg(cpu::CS) == 0x08);
+  REQUIRE(env.cpu.is32BitCode());
+  REQUIRE(env.cpu.getEIP() == kClient);
+  REQUIRE((env.cpu.getEFLAGS() & 0x200) == 0); // interrupts disabled
+  REQUIRE(env.cpu.getTRSelector() == 0x30);
+  REQUIRE(env.busy(0x30));
+  REQUIRE(env.cpu.getGDTR().base == Env::kGdt);
+  REQUIRE(env.cpu.getIDTR().base == Env::kIdt);
+
+  // Run the client until it is back in real mode.
+  int steps = 0;
+  while ((env.cpu.getCR(0) & 1) && steps < 40) {
+    env.decoder.step();
+    ++steps;
+  }
+  REQUIRE(steps < 40);
+  REQUIRE(env.cpu.getReg32(cpu::EBX) > 1000);      // DE03h from PM
+  REQUIRE((env.cpu.getReg32(cpu::EDI) & 0xFFF) == 0); // DE04h page
+  REQUIRE(env.cpu.getReg32(cpu::EDI) >= 0x100000);
+  REQUIRE(env.bios.vcpi().allocatedPages() == 1);
+  REQUIRE(!env.cpu.nativeProtection());
+  REQUIRE((env.cpu.getCR(0) & 0x80000001u) == 0);
+  REQUIRE(env.cpu.getIDTR().base == 0);
+  REQUIRE(env.cpu.getIDTR().limit == 0x3FF);
+  REQUIRE(env.cpu.getSegReg(cpu::CS) == 0x0600);
+  REQUIRE(env.cpu.getEIP() == 0x0010);
+  REQUIRE(!env.cpu.is32BitCode());
+  REQUIRE(env.cpu.getSegReg(cpu::SS) == 0x0700);
+  REQUIRE(env.cpu.getSegBase(cpu::SS) == 0x7000);
+  REQUIRE(env.cpu.getReg32(cpu::ESP) == 0x0400);
+  REQUIRE(env.cpu.getSegBase(cpu::ES) == 0x1230);
+  REQUIRE(env.cpu.getSegBase(cpu::DS) == 0x2340);
+  REQUIRE(env.cpu.getSegBase(cpu::FS) == 0x3450);
+  REQUIRE(env.cpu.getSegBase(cpu::GS) == 0x4560);
+  REQUIRE((env.cpu.getEFLAGS() & 0x200) == 0);
+  env.decoder.step(); // NOP in real mode
+  REQUIRE(env.cpu.getEIP() == 0x0011);
+  // A real-mode INT goes through the IVT again.
+  REQUIRE(env.int67(0xDE00) == 0);
+}

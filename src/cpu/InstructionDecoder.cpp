@@ -3977,6 +3977,7 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
 
     // Capture flags at trap entry before any handlers may modify them
     uint32_t entryFlags = m_cpu.getEFLAGS();
+    const uint32_t entryPE = m_cpu.getCR(0) & 1;
     bool handled = false;
 
     // First try DOS, then BIOS
@@ -4022,6 +4023,14 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
         loadSegment(ES, m_cpu.getSegReg(ES));
         loadSegment(FS, m_cpu.getSegReg(FS));
         loadSegment(GS, m_cpu.getSegReg(GS));
+        break;
+      }
+      if ((m_cpu.getCR(0) & 1) != entryPE) {
+        // The service switched modes (VCPI DE0Ch from real mode): it set
+        // CS:EIP and the segment registers itself, and the interrupt
+        // frame is abandoned like on a V86 VCPI server.
+        m_cpu.popHLEFrameForVector(vector);
+        syncSegments();
         break;
       }
     }

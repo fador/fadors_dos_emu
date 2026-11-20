@@ -23,6 +23,9 @@ public:
     // Check if an IRQ is currently in service (ISR bit set)
     bool isIRQInService(uint8_t irq) const;
 
+    // Vector of IRQ 0 (ICW2), as programmed by the BIOS or the guest.
+    uint8_t baseVector() const { return m_baseVector; }
+
 private:
     bool m_master;
     uint8_t m_baseVector;
