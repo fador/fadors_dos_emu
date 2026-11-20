@@ -171,7 +171,7 @@
 - [x] Assembler-driven interrupt integration tests (`test_int_asm.cpp`)
   - [x] INT 10h (13 subfunctions), INT 16h, INT 1Ah
   - [x] INT 11h, INT 12h, INT 13h (3 subfunctions)
-  - [x] INT 14h, INT 15h, INT 17h stubs
+  - [x] INT 14h (AH=00h-05h on the UART, time-outs), INT 15h, INT 17h (print/init/status)
   - [x] INT 33h (5 subfunctions), INT 2Fh
   - [x] INT 20h, INT 21h (~20 subfunctions incl. file I/O roundtrip)
   - [x] Full integration test (set mode + print string + terminate)
@@ -259,8 +259,11 @@
 - [ ] INT 10h text output (AH=09h/0Ah/0Eh/13h) in graphics modes and to B000h in mode 7
 - [ ] VGA vertical retrace interrupt (IRQ2, CRTC 11h bits 4-5)
 - [ ] CD-ROM / ISO image support (MSCDEX / INT 2Fh/1500h)
-- [ ] Serial port (INT 14h) actual emulation
-- [ ] Parallel port (INT 17h) actual emulation
+- [x] Serial port: 16550A UART (FIFOs, loopback, interrupts, emulated line timing), INT 14h, serial mouse, file and TCP null modem backends
+- [x] Parallel port: SPP registers, INT 17h, printer-to-file, Covox Speech Thing, Disney Sound Source
+- [ ] DOS character devices AUX/COM1-4 and PRN/LPT1-3 (INT 21h file handles) routed to the ports
+- [ ] Serial: parity/framing errors and break between mismatched line settings; Logitech 3-button / Mouse Systems mouse protocols; modem (Hayes AT) emulation
+- [ ] Parallel: bidirectional/EPP/ECP modes, Stereo-on-1 DAC
 - [ ] Network (packet driver / NE2000) emulation
 
 ## Phase 12: DOS 6.22 Command Prompt (COMMAND.COM)

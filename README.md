@@ -13,6 +13,7 @@ Fador's DOS Emulator is a multiplatform MS-DOS emulator written in modern C++20.
 - **Expanded and Extended Memory:** EMS services via `INT 67h` with an `EMMXXXX0` device, page-frame mappings, and private API stubs, plus optional HIMEM/XMS 3.0 support (32-bit sizes beyond 64 MB) wired through `INT 2Fh` and far-call dispatch stubs.
 - **BIOS & DOS APIs:** Support for core BIOS and DOS interrupts including `INT 10h`, `INT 13h`, `INT 15h`, `INT 16h`, `INT 1Ah`, `INT 21h`, `INT 2Fh`, `INT 31h`, `INT 33h`, and `INT 67h`. Refer to the `docs/` folder (Ralph Brown's interrupt list) for specifications.
 - **Hardware Devices:** PIC 8259, PIT 8254 (all six counter modes, gates, latch and read-back commands, BCD), MC146818 RTC/CMOS (periodic, alarm and update interrupts), DMA 8237, keyboard controller, joystick, VGA (text, CGA, EGA/VGA planar, mode 13h and Mode X), AdLib (OPL2), Sound Blaster DSP, and MPU-401 MIDI interface emulation.
+- **Serial and Parallel Ports:** 16550A UARTs (COM1 3F8h IRQ 4, COM2 2F8h IRQ 3; COM3/COM4 optional) with 16-byte FIFOs, trigger levels, the character timeout interrupt, exact loopback mode, modem status deltas and character timing from the baud rate on emulated time; a Microsoft serial mouse, file output and a TCP null modem can be attached (`--com1=...`). Standard parallel ports (LPT1 378h IRQ 7) with the PC's status polarity, a printer-to-file device, a Covox Speech Thing and a Disney Sound Source (16-byte FIFO played at 7 kHz) mixed into the audio output (`--lpt1=...`). `INT 14h` (AH=00h-05h) and `INT 17h` drive them through their registers with the BDA time-outs; the BDA port tables and equipment word list the configured ports. See [Serial and parallel ports](#serial-and-parallel-ports).
 - **VGA:** Register-accurate IBM VGA: attribute controller (index/data flip-flop, palette, colour select, pel panning, blink/intensity), DAC with PEL mask and read/write auto-increment, sequencer, graphics controller (write modes 0-3, read modes 0-1, latches, odd/even and chain-4 with the hardware plane layout), CRTC with protect bit and overflow registers, misc output (3Bxh/3Dxh addressing). Port 3DAh retrace timing follows the programmed CRTC timings (70 Hz for 400/350-line modes, 60 Hz for 480-line modes) from an injectable clock. The renderer derives the picture from the registers, so tweaked modes (Mode X, 320x400, 360x480, split screen, smooth scrolling, 80x50/90x30 text, custom fonts in plane 2) display like on hardware; INT 10h mode sets load the IBM VGA parameter tables, default palettes and ROM fonts.
 - **SVGA / VESA:** VBE 2.0 (`INT 10h` AX=4F00h-4F0Ah) with 8/15/16/32-bit modes from 320x200 to 1024x768, a banked A000h window, a linear frame buffer, and the protected-mode interface.
 - **Audio:** AdLib OPL2 (YM3812) FM synthesis with 9 channels, 2 operators per channel, ADSR envelopes, and waveform selection. Sound Blaster DSP emulation for 8/16-bit mono/stereo DMA playback (single-cycle, auto-init, high-speed). MPU-401 MIDI UART at port 0x330–0x331 with an OPL2-based General MIDI synthesizer supporting 128 instruments across 16 MIDI channels with velocity, pitch bend, sustain, and 9-voice polyphonic note allocation.
@@ -144,6 +145,8 @@ run exactly like that too, with interrupts, sound and the headless options.
 | `--bench-steps=N` | Number of measured instruction steps for `--bench` |
 | `--bench-warmup=N` | Number of warmup instruction steps before `--bench` timing |
 | `--exec="asm"` | Assemble and execute instructions without loading a program (semicolons separate lines) |
+| `--com1=DEV` ... `--com4=DEV` | What is attached to a serial port: `none` (port present, nothing attached; COM1/COM2 default), `off` (no port; COM3/COM4 default), `mouse`, `file:PATH`, `tcp:HOST:PORT`, `listen:PORT` |
+| `--lpt1=DEV` ... `--lpt3=DEV` | What is attached to a parallel port: `none` (LPT1 default), `off` (LPT2/LPT3 default), `file:PATH`, `covox`, `disney` |
 
 ### Emulated time
 
@@ -216,6 +219,32 @@ halted and the BIOS tick count next to the host time and MIPS.
 `tests/timing/check_time.py build/fadors_emu` runs end-to-end checks
 (RDTSC against the PIT, HLT, DOS clock, reproducibility).
 
+### Serial and parallel ports
+
+| Port | I/O | IRQ | Default |
+|------|-----|-----|---------|
+| COM1 | 3F8h | 4 | present, nothing attached |
+| COM2 | 2F8h | 3 | present, nothing attached |
+| COM3 / COM4 | 3E8h / 2E8h | none | off |
+| LPT1 | 378h | 7 (control bit 4) | present, nothing attached |
+| LPT2 / LPT3 | 278h / 3BCh | none | off |
+
+Serial devices (`--comN=`):
+
+- `none`: the UART exists (programs and `INT 14h` see it) but CTS/DSR/DCD are low and nothing is received.
+- `mouse`: Microsoft 2-button serial mouse driven by the host mouse (the same input `INT 33h` uses). It identifies itself with `M` when a driver raises DTR and RTS and sends 3-byte packets at 1200 baud, so serial mouse drivers (CTMOUSE, MOUSE.COM /C1) and games with their own serial mouse code work.
+- `file:PATH`: everything transmitted is written to `PATH` (serial printer, debug logs); CTS/DSR/DCD are active.
+- `tcp:HOST:PORT` / `listen:PORT`: a null modem cable over TCP, connecting to a peer or accepting one client; raw bytes, CTS/DSR/DCD active while connected. Two emulator instances can talk to each other with `listen:5000` and `tcp:127.0.0.1:5000`.
+
+Parallel devices (`--lptN=`):
+
+- `none`: the inputs float high (status 7Fh), the BIOS reports "not ready".
+- `file:PATH`: a printer that writes every strobed byte (`INT 17h`, DOS printing, direct port I/O) to `PATH`.
+- `covox`: Covox Speech Thing, an 8-bit DAC on the data port.
+- `disney`: Disney Sound Source: samples are latched into a 16-byte FIFO by pulsing SELECT IN (control bit 3) and played at 7 kHz; status bit 6 reports a full FIFO, which is what the games' detection routines check.
+
+`INT 14h`/`INT 17h` wait for the port as the ROM BIOS does, with the time-outs at 40:7Ch (COM, 1 by default) and 40:78h (LPT, 20) counted in units of 0.25 s of emulated time.
+
 ### Examples
 ```bash
 # Run a COM file
@@ -242,6 +271,12 @@ halted and the BIOS tick count next to the host time and MIPS.
 # Reproducible headless run: same screenshot and recording every time
 ./fadors_emu --headless --deterministic --max-seconds=20 --keys=5:ENTER \
     --screenshot=shot.png --audio-wav=out.wav game.exe
+
+# Serial mouse on COM1, Disney Sound Source on LPT1
+./fadors_emu --com1=mouse --lpt1=disney game.exe
+
+# Print to a file; connect COM2 to another emulator listening on port 5000
+./fadors_emu --lpt1=file:printout.txt --com2=tcp:127.0.0.1:5000 term.exe
 
 # Use the SDL frontend when it is available in the build
 ./fadors_emu --sdl program.exe

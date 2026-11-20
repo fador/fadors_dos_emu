@@ -18,6 +18,8 @@
 #include "hw/KeyboardController.hpp"
 #include "hw/PIT8254.hpp"
 #include "hw/DPMI.hpp"
+#include "hw/ParallelPort.hpp"
+#include "hw/Uart16550.hpp"
 #include "memory/himem/HIMEM.hpp"
 
 using namespace fador;
@@ -411,15 +413,14 @@ TEST_CASE("INT 13h AH=15h Get Disk Type via asm", "[int][asm][disk]") {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-//  INT 14h / INT 15h / INT 17h – Stubs
+//  INT 14h / INT 15h / INT 17h – Without devices
 // ════════════════════════════════════════════════════════════════════════════
 
-TEST_CASE("INT 14h Serial Stub via asm", "[int][asm]") {
+TEST_CASE("INT 14h without serial ports leaves AX unchanged via asm", "[int][asm]") {
     IntTestEnv e;
-    e.assemble("MOV AH, 0FFh\nINT 14h");
-    e.run(2);
-    REQUIRE(e.cpu.getReg8(cpu::AH) == 0);
-    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    e.assemble("MOV AX, 0341h\nMOV DX, 0\nINT 14h");
+    e.run(3);
+    REQUIRE(e.cpu.getReg16(cpu::AX) == 0x0341);
 }
 
 TEST_CASE("INT 15h System Services Stub via asm", "[int][asm]") {
@@ -430,12 +431,11 @@ TEST_CASE("INT 15h System Services Stub via asm", "[int][asm]") {
     REQUIRE(e.cpu.getEFLAGS() & cpu::FLAG_CARRY);
 }
 
-TEST_CASE("INT 17h Printer Stub via asm", "[int][asm]") {
+TEST_CASE("INT 17h without printer ports leaves AX unchanged via asm", "[int][asm]") {
     IntTestEnv e;
-    e.assemble("MOV AH, 0FFh\nINT 17h");
-    e.run(2);
-    REQUIRE(e.cpu.getReg8(cpu::AH) == 0);
-    REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    e.assemble("MOV AX, 0241h\nMOV DX, 0\nINT 17h");
+    e.run(3);
+    REQUIRE(e.cpu.getReg16(cpu::AX) == 0x0241);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -2122,4 +2122,192 @@ TEST_CASE("INT 31h AX=0900h/0901h/0902h Virtual Interrupt State via asm in PM", 
     REQUIRE(!(e.cpu.getEFLAGS() & cpu::FLAG_CARRY));
     REQUIRE(e.cpu.getReg8(cpu::BL) == 0); // was disabled
     REQUIRE(e.cpu.getReg8(cpu::BH) == 1); // was enabled
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  INT 14h – Serial port / INT 17h – Printer (on emulated UART / LPT)
+// ════════════════════════════════════════════════════════════════════════════
+
+namespace {
+
+// Serial "cable" for the INT 14h tests: records transmitted bytes, offers
+// bytes to receive and drives CTS/DSR/DCD when `ready`.
+struct ScriptedSerial : hw::SerialBackend {
+    std::vector<uint8_t>* sent;
+    std::vector<uint8_t> incoming;
+    bool ready = true;
+    explicit ScriptedSerial(std::vector<uint8_t>* s) : sent(s) {}
+    void transmit(uint8_t b, uint64_t) override { sent->push_back(b); }
+    uint8_t modemStatus() const override { return ready ? (kCTS | kDSR | kDCD) : 0; }
+    bool hasData() const override { return !incoming.empty(); }
+    uint8_t take() override {
+        const uint8_t b = incoming.front();
+        incoming.erase(incoming.begin());
+        return b;
+    }
+    std::string describe() const override { return "scripted"; }
+};
+
+// IntTestEnv plus COM1 (3F8h), COM2 (2F8h) and LPT1 (378h) on the I/O bus,
+// a fake emulated clock and an idle callback that lets 1 ms pass.
+struct PortTestEnv : IntTestEnv {
+    uint64_t now = 0;
+    hw::Uart16550 com1{0x3F8};
+    hw::Uart16550 com2{0x2F8};
+    hw::ParallelPort lpt1{0x378};
+    std::vector<uint8_t> sent;
+    ScriptedSerial* cable = nullptr;
+    int idleCalls = 0;
+
+    PortTestEnv() {
+        for (auto* u : {&com1, &com2}) {
+            u->setTimeSource([this] { return now; });
+            iobus.registerDevice(u->basePort(), u->basePort() + 7, u);
+        }
+        auto backend = std::make_unique<ScriptedSerial>(&sent);
+        cable = backend.get();
+        com1.setBackend(std::move(backend));
+        lpt1.setTimeSource([this] { return now; });
+        iobus.registerDevice(0x378, 0x37A, &lpt1);
+        bios.setIOBus(&iobus);
+        bios.setPortTimeSource([this] { return now; });
+        bios.setPortAddresses({0x3F8, 0x2F8, 0, 0}, {0x378, 0, 0});
+        bios.setIdleCallback([this] {
+            ++idleCalls;
+            now += 1'000'000;
+            com1.pollBackend(now);
+            com2.pollBackend(now);
+        });
+    }
+
+    // Executes until IP reaches the end of the assembled code.
+    void runCode(uint32_t length, int maxSteps = 100000) {
+        for (int i = 0; i < maxSteps && cpu.getEIP() < CODE_OFF + length; ++i)
+            decoder.step();
+        REQUIRE(cpu.getEIP() == CODE_OFF + length);
+    }
+};
+
+} // namespace
+
+TEST_CASE("INT 14h AH=00h initializes the UART via asm", "[int][asm][serial]") {
+    PortTestEnv e;
+    // 9600 baud, no parity, 1 stop bit, 8 data bits on COM1
+    const uint32_t len = e.assemble("MOV AX, 00E3h\nMOV DX, 0\nINT 14h");
+    e.runCode(len);
+    REQUIRE(e.cpu.getReg8(cpu::AH) == 0x60); // THRE | TEMT
+    REQUIRE(e.cpu.getReg8(cpu::AL) == 0xBB); // CTS, DSR, DCD (+ their deltas)
+    REQUIRE(e.com1.baudRate() == 9600.0);
+    REQUIRE(e.com1.read8(0x3FB) == 0x03);
+    REQUIRE(e.com1.read8(0x3F9) == 0x00); // interrupts off
+}
+
+TEST_CASE("INT 14h AH=01h sends and AH=02h receives via asm", "[int][asm][serial]") {
+    PortTestEnv e;
+    e.cable->incoming = {'r'};
+    const uint32_t len = e.assemble(
+        "MOV AX, 00E3h\nMOV DX, 0\nINT 14h\n"
+        "MOV AX, 0141h\nINT 14h\nMOV BX, AX\n"  // send 'A'
+        "MOV AH, 02h\nINT 14h");                 // receive
+    e.runCode(len);
+    REQUIRE(e.cpu.getReg16(cpu::BX) == 0x6041); // LSR, no time-out, AL kept
+    REQUIRE(e.cpu.getReg8(cpu::AH) == 0x00);     // no line errors
+    REQUIRE(e.cpu.getReg8(cpu::AL) == 'r');
+    REQUIRE(e.idleCalls > 0); // waited for the character to arrive
+    e.now += 2'000'000;
+    e.com1.advanceTo(e.now);
+    REQUIRE(e.sent == std::vector<uint8_t>{'A'});
+}
+
+TEST_CASE("INT 14h times out after the BDA time-out", "[int][asm][serial]") {
+    PortTestEnv e;
+    e.cable->ready = false; // no DSR / CTS: nothing attached
+    const uint32_t len = e.assemble(
+        "MOV AX, 00E3h\nMOV DX, 0\nINT 14h\n"
+        "MOV AX, 0141h\nINT 14h\nMOV BX, AX\n"
+        "MOV AH, 02h\nINT 14h");
+    const uint64_t start = e.now;
+    e.runCode(len);
+    REQUIRE((e.cpu.getReg8(cpu::BH) & 0x80) != 0); // send timed out
+    REQUIRE(e.cpu.getReg8(cpu::BL) == 0x41);
+    REQUIRE((e.cpu.getReg8(cpu::AH) & 0x80) != 0); // receive timed out
+    // BDA 40:7C = 1 unit for COM1, for each of the two calls
+    REQUIRE(e.now - start >= 2 * hw::BIOS::PORT_TIMEOUT_UNIT_NS);
+    REQUIRE(e.now - start < 3 * hw::BIOS::PORT_TIMEOUT_UNIT_NS);
+    REQUIRE(e.sent.empty());
+}
+
+TEST_CASE("INT 14h AH=03h/04h/05h status and extended control via asm", "[int][asm][serial]") {
+    PortTestEnv e;
+    const uint32_t len = e.assemble(
+        // 19200 baud, even parity, 1 stop bit, 7 bits on COM2
+        "MOV AX, 0400h\nMOV BX, 0200h\nMOV CX, 0208h\nMOV DX, 1\nINT 14h\n"
+        "MOV AX, 0501h\nMOV BL, 13h\nINT 14h\n"   // write MCR (loopback)
+        "MOV AX, 0500h\nMOV BL, 0\nINT 14h\n"     // read MCR into BL
+        "MOV AH, 03h\nINT 14h");
+    e.runCode(len);
+    REQUIRE(e.com2.baudRate() == 19200.0);
+    REQUIRE(e.com2.read8(0x2FB) == 0x1A);
+    REQUIRE(e.cpu.getReg8(cpu::BL) == 0x13);
+    REQUIRE(e.cpu.getReg8(cpu::AH) == 0x60);
+    REQUIRE((e.cpu.getReg8(cpu::AL) & 0xF0) == 0x30); // loopback: CTS, DSR
+    // Port 2 does not exist: registers unchanged.
+    const uint32_t len2 = e.assemble("MOV AX, 0300h\nMOV DX, 2\nINT 14h");
+    e.cpu.setEIP(IntTestEnv::CODE_OFF);
+    e.runCode(len2);
+    REQUIRE(e.cpu.getReg16(cpu::AX) == 0x0300);
+}
+
+TEST_CASE("UART loopback detection via IN/OUT", "[int][asm][serial]") {
+    PortTestEnv e;
+    // The classic test: loopback with OUT2+RTS -> MSR shows DCD+CTS only.
+    const uint32_t len = e.assemble(
+        "MOV DX, 3FCh\nMOV AL, 10h\nOUT DX, AL\n"
+        "MOV DX, 3FEh\nIN AL, DX\n"
+        "MOV DX, 3FCh\nMOV AL, 1Ah\nOUT DX, AL\n"
+        "MOV DX, 3FEh\nIN AL, DX\nMOV BL, AL\n"
+        "MOV DX, 3FAh\nMOV AL, 0C7h\nOUT DX, AL\nIN AL, DX");
+    e.runCode(len);
+    REQUIRE((e.cpu.getReg8(cpu::BL) & 0xF0) == 0x90);
+    REQUIRE((e.cpu.getReg8(cpu::AL) & 0xC0) == 0xC0); // 16550A FIFOs
+}
+
+TEST_CASE("INT 17h prints to the printer file via asm", "[int][asm][printer]") {
+    const std::string path = "T_INT17_OUT.TMP";
+    {
+        PortTestEnv e;
+        e.lpt1.setDevice(std::make_unique<hw::FilePrinter>(path));
+        const uint32_t len = e.assemble(
+            "MOV AH, 01h\nMOV DX, 0\nINT 17h\nMOV CH, AH\n"
+            "MOV AX, 0050h\nINT 17h\nMOV BH, AH\n"
+            "MOV AX, 0043h\nINT 17h\nMOV BL, AH\n"
+            "MOV AH, 02h\nINT 17h");
+        e.runCode(len);
+        REQUIRE(e.cpu.getReg8(cpu::CH) == 0x90); // not busy, selected
+        // After a character the ACK pulse is still running (40h).
+        REQUIRE(e.cpu.getReg8(cpu::BH) == 0xD0);
+        REQUIRE(e.cpu.getReg8(cpu::BL) == 0xD0);
+        REQUIRE(e.cpu.getReg8(cpu::AH) == 0xD0); // no emulated time passed
+        e.now += hw::ParallelPort::kAckPulseNs;
+        REQUIRE(e.lpt1.read8(0x379) == 0xDF);
+        e.lpt1.poll(e.now);
+    }
+    std::FILE* f = std::fopen(path.c_str(), "rb");
+    REQUIRE(f != nullptr);
+    char buf[4] = {};
+    const size_t n = std::fread(buf, 1, sizeof buf, f);
+    std::fclose(f);
+    std::remove(path.c_str());
+    REQUIRE(std::string(buf, n) == "PC");
+}
+
+TEST_CASE("INT 17h without a printer reports not ready and times out", "[int][asm][printer]") {
+    PortTestEnv e;
+    const uint32_t len = e.assemble(
+        "MOV AH, 02h\nMOV DX, 0\nINT 17h\nMOV BH, AH\n"
+        "MOV AX, 0041h\nINT 17h");
+    e.runCode(len);
+    REQUIRE(e.cpu.getReg8(cpu::BH) == 0x30); // busy, paper out, selected
+    REQUIRE(e.cpu.getReg8(cpu::AH) == 0x31); // ... and time-out
+    REQUIRE(e.now >= 20 * hw::BIOS::PORT_TIMEOUT_UNIT_NS); // BDA 40:78 = 20
 }

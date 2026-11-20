@@ -10,6 +10,9 @@
 #include "hw/KeyboardController.hpp"
 #include "hw/PIC8259.hpp"
 #include "hw/PIT8254.hpp"
+#include "hw/ParallelPort.hpp"
+#include "hw/SerialBackends.hpp"
+#include "hw/Uart16550.hpp"
 #include "hw/ProgramLoader.hpp"
 #include "hw/DriveManager.hpp"
 #include "hw/DosShell.hpp"
@@ -449,6 +452,15 @@ void printHelp(const char *programName) {
     "  --host-simd=LEVEL         Host SIMD kernels for rendering, audio and memory fills:\n"
     "                            auto (default), avx2, sse4, sse2, neon or scalar.  Also\n"
     "                            settable with the FADOR_HOST_SIMD environment variable.\n"
+    "  --com1=DEV .. --com4=DEV  Serial port (16550A UART at 3F8h IRQ4, 2F8h IRQ3, 3E8h,\n"
+    "                            2E8h): none (port, nothing attached; COM1/COM2 default),\n"
+    "                            off (no port; COM3/COM4 default), mouse (Microsoft serial\n"
+    "                            mouse), file:PATH (write output to a file),\n"
+    "                            tcp:HOST:PORT or listen:PORT (null modem over TCP).\n"
+    "  --lpt1=DEV .. --lpt3=DEV  Parallel port (378h IRQ7, 278h, 3BCh): none (LPT1\n"
+    "                            default), off (LPT2/LPT3 default), file:PATH (printer\n"
+    "                            output to a file), covox (Covox Speech Thing DAC) or\n"
+    "                            disney (Disney Sound Source).\n"
     "\n"
     "Emulator flags must appear before the program path. Everything after the program\n"
     "path is forwarded verbatim to the DOS program.\n"
@@ -832,6 +844,9 @@ int main(int argc, char *argv[]) {
     std::string audioWavPath;       // --audio-wav=FILE.wav: record output
     double screenshotAt = -1.0;     // --screenshot-at=T: capture at T s instead
     ScriptedKeys scriptedKeys;      // --keys=T:KEY,...
+    // --comN= / --lptN=: what is attached to the serial / parallel ports
+    std::array<std::string, 4> comSpecs{"none", "none", "off", "off"};
+    std::array<std::string, 3> lptSpecs{"none", "off", "off"};
     struct MountEntry { char letter; std::string hostPath; std::string label; bool cdrom = false; };
     std::vector<MountEntry> cliMounts;
     std::string path;
@@ -962,6 +977,12 @@ int main(int argc, char *argv[]) {
                         cpu.getSegReg(fador::cpu::CS), cpu.getEIP());
           return std::string(buf);
         });
+      } else if (arg.size() >= 7 && arg.rfind("--com", 0) == 0 &&
+                 arg[5] >= '1' && arg[5] <= '4' && arg[6] == '=') {
+        comSpecs[arg[5] - '1'] = arg.substr(7);
+      } else if (arg.size() >= 7 && arg.rfind("--lpt", 0) == 0 &&
+                 arg[5] >= '1' && arg[5] <= '3' && arg[6] == '=') {
+        lptSpecs[arg[5] - '1'] = arg.substr(7);
       } else if (arg.find("--env=") == 0) {
         const std::string spec = arg.substr(6);
         const auto eq = spec.find('=');
@@ -1033,6 +1054,78 @@ int main(int argc, char *argv[]) {
 
     if (!headless)
       audio.init(44100, 2, 1024);
+
+    // Serial and parallel ports.  COM1/COM3 share IRQ 4 and COM2/COM4 IRQ 3
+    // on real machines; only COM1/COM2 (and LPT1 on IRQ 7) are wired here.
+    static constexpr std::array<uint16_t, 4> kComBase{0x3F8, 0x2F8, 0x3E8, 0x2E8};
+    static constexpr std::array<int, 4> kComIrq{4, 3, -1, -1};
+    static constexpr std::array<uint16_t, 3> kLptBase{0x378, 0x278, 0x3BC};
+    static constexpr std::array<int, 3> kLptIrq{7, -1, -1};
+    std::vector<std::unique_ptr<fador::hw::Uart16550>> uarts;
+    std::vector<std::unique_ptr<fador::hw::ParallelPort>> lpts;
+    {
+      std::array<uint16_t, 4> comAddr{};
+      std::array<uint16_t, 3> lptAddr{};
+      const fador::hw::SerialMouse::InputSource mouseInput = [&bios]() {
+        const auto &ms = bios.mouseState();
+        return fador::hw::SerialMouse::Input{
+            ms.hostMotionX, ms.hostMotionY,
+            static_cast<uint8_t>(ms.buttons & 3)};
+      };
+      for (size_t i = 0; i < comSpecs.size(); ++i) {
+        bool present = false;
+        std::unique_ptr<fador::hw::SerialBackend> backend;
+        std::string error;
+        if (!fador::hw::makeSerialBackend(comSpecs[i], mouseInput, present,
+                                          backend, error)) {
+          LOG_ERROR("--com", i + 1, "=", comSpecs[i], ": ", error);
+          return 1;
+        }
+        if (!present)
+          continue;
+        auto uart = std::make_unique<fador::hw::Uart16550>(kComBase[i]);
+        uart->setTimeSource(clock.timeSource());
+        if (kComIrq[i] >= 0)
+          uart->setIrqCallback([&pic, irq = static_cast<uint8_t>(kComIrq[i])] {
+            pic.raiseIRQ(irq);
+          });
+        if (backend)
+          LOG_INFO("COM", i + 1, " (", std::hex, kComBase[i], std::dec,
+                   "h): ", backend->describe());
+        uart->setBackend(std::move(backend));
+        iobus.registerDevice(kComBase[i], kComBase[i] + 7, uart.get());
+        comAddr[i] = kComBase[i];
+        uarts.push_back(std::move(uart));
+      }
+      for (size_t i = 0; i < lptSpecs.size(); ++i) {
+        bool present = false;
+        std::unique_ptr<fador::hw::ParallelDevice> device;
+        std::string error;
+        if (!fador::hw::makeParallelDevice(lptSpecs[i], present, device,
+                                           error)) {
+          LOG_ERROR("--lpt", i + 1, "=", lptSpecs[i], ": ", error);
+          return 1;
+        }
+        if (!present)
+          continue;
+        auto lpt = std::make_unique<fador::hw::ParallelPort>(kLptBase[i]);
+        lpt->setTimeSource(clock.timeSource());
+        if (kLptIrq[i] >= 0)
+          lpt->setIrqCallback([&pic, irq = static_cast<uint8_t>(kLptIrq[i])] {
+            pic.raiseIRQ(irq);
+          });
+        if (device)
+          LOG_INFO("LPT", i + 1, " (", std::hex, kLptBase[i], std::dec,
+                   "h): ", device->describe());
+        lpt->setDevice(std::move(device));
+        iobus.registerDevice(kLptBase[i], kLptBase[i] + 2, lpt.get());
+        lptAddr[i] = kLptBase[i];
+        lpts.push_back(std::move(lpt));
+      }
+      bios.setIOBus(&iobus);
+      bios.setPortTimeSource(clock.timeSource());
+      bios.setPortAddresses(comAddr, lptAddr);
+    }
 
     speedOptions.deterministic = deterministic;
     const fador::hw::SpeedPlan speedPlan = fador::hw::planSpeed(speedOptions);
@@ -1454,6 +1547,10 @@ int main(int argc, char *argv[]) {
       cmos.advanceTo(now);
       while (cmos.checkPendingIRQ8())
         picSlave.raiseIRQ(0);
+      for (auto &uart : uarts)
+        uart->advanceTo(now); // raises IRQ 3/4 through its callback
+      for (auto &lpt : lpts)
+        lpt->advanceTo(now);
     };
     auto maybeRender = [&](std::chrono::steady_clock::time_point now) {
       if (now - lastRender > std::chrono::milliseconds(33)) {
@@ -1488,6 +1585,8 @@ int main(int argc, char *argv[]) {
       adlib.generateSamples(audioBuf.data(), frames);
       sb.generateSamples(audioBuf.data(), frames);
       pcSpeaker.generateSamples(audioBuf.data(), frames);
+      for (auto &lpt : lpts) // Covox / Disney Sound Source
+        lpt->generateSamples(audioBuf.data(), frames);
       adlib.updateTimers(static_cast<double>(frames) / kSampleRate);
       if (wav.isOpen())
         wav.write(audioBuf.data(), frames * 2);
@@ -1552,6 +1651,14 @@ int main(int argc, char *argv[]) {
     // Host services that also run while the shell waits for input.
     auto servicePeriodic = [&](std::chrono::steady_clock::time_point now) {
       pollHostInput();
+      {
+        // Serial mouse, sockets and printer files (host I/O).
+        const uint64_t nowNs = clock.nowNs();
+        for (auto &uart : uarts)
+          uart->pollBackend(nowNs);
+        for (auto &lpt : lpts)
+          lpt->poll(nowNs);
+      }
       const double elapsed = runSeconds(now);
       scriptedKeys.service(elapsed, kbd);
       if (screenshotAt >= 0 && !screenshotPath.empty() &&
@@ -1589,6 +1696,9 @@ int main(int argc, char *argv[]) {
       return s < 0.0 ? fador::hw::MachineTime::kNever
                      : lastHardwareNs + static_cast<uint64_t>(s * 1e9);
     });
+    for (const auto &uart : uarts) // character timing, FIFO timeouts
+      machineTime.addWakeSource(
+          [u = uart.get()] { return u->nextEventNs(); });
     bios.setDelayCallback([&](uint64_t ns) { machineTime.delay(ns); });
     machineTime.setHooks({serviceHardware, dispatchPendingHardwareInterrupt,
                           [&]() {

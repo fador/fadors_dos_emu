@@ -91,6 +91,9 @@ add_library(fadors_core STATIC ${SRC_FILES}
     src/hw/CMOSRTC.hpp)
 target_include_directories(fadors_core PUBLIC ${SRC_DIR})
 target_link_libraries(fadors_core PUBLIC ymfm fzip)
+if(WIN32)
+    target_link_libraries(fadors_core PUBLIC ws2_32) # serial null modem over TCP
+endif()
 target_compile_definitions(fadors_core PUBLIC
     FADOR_ENABLE_DEBUG_DIAGNOSTICS=$<BOOL:${FADOR_ENABLE_DEBUG_DIAGNOSTICS}>
     FADOR_X87_FORCE_SOFT=$<BOOL:${FADOR_SOFT_X87}>)
@@ -130,6 +133,8 @@ set(TEST_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_hw_devices.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_dma8237.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cmos_rtc.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_serial.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_parallel.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_timing.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_bios.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_dos.cpp"

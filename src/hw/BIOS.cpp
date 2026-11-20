@@ -73,6 +73,11 @@ bool BIOS::handleInterrupt(uint8_t vector) {
     sendEOI(0x0A);
     return true;
   }
+  case 0x0B:   // IRQ3 — COM2/COM4 (no handler installed: acknowledge)
+  case 0x0C: { // IRQ4 — COM1/COM3
+    sendEOI(vector);
+    return true;
+  }
   case 0x0F: { // IRQ7 — Parallel Printer / Spurious IRQ
     if (!m_pic.isIRQInService(7)) {
       LOG_DEBUG("BIOS INT 0Fh: Spurious IRQ7 ignored");
@@ -97,26 +102,21 @@ bool BIOS::handleInterrupt(uint8_t vector) {
     handleTimeService();
     return true;
   // HLE stubs for common BIOS/system interrupts
-  case 0x11:                         // Equipment List
-    m_cpu.setReg16(cpu::AX, 0x002F); // Typical: FDD, video, RAM, etc.
-    LOG_DEBUG("BIOS INT 11h: Equipment List (stubbed)");
+  case 0x11: // Equipment List: the BDA word (40:10) set up at POST
+    m_cpu.setReg16(cpu::AX, m_memory.read16(0x410));
     return true;
   case 0x12:                      // Memory Size
     m_cpu.setReg16(cpu::AX, 640); // 640KB conventional
     LOG_DEBUG("BIOS INT 12h: Memory Size (stubbed)");
     return true;
-  case 0x14:                   // Serial Port
-    m_cpu.setReg8(cpu::AH, 0); // No error
-    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-    LOG_DEBUG("BIOS INT 14h: Serial Port (stubbed)");
+  case 0x14: // Serial Port
+    handleSerialService();
     return true;
   case 0x15: // System Services
     handleSystemService();
     return true;
-  case 0x17:                   // Printer
-    m_cpu.setReg8(cpu::AH, 0); // No error
-    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-    LOG_DEBUG("BIOS INT 17h: Printer (stubbed)");
+  case 0x17: // Printer
+    handlePrinterService();
     return true;
   case 0x2F: { // Multiplex
     uint16_t ax = m_cpu.getReg16(cpu::AX);
@@ -1263,6 +1263,14 @@ void BIOS::initialize() {
 
   // Memory size at 0x40:0x13
   m_memory.write16(0x413, 640); // 640KB conventional memory
+
+  // Serial / parallel port addresses, equipment word and the INT 14h /
+  // 17h time-outs (IBM AT defaults: 20 for printers, 1 for COM ports).
+  writePortTables();
+  for (uint32_t i = 0; i < 3; ++i)
+    m_memory.write8(0x478 + i, 20);
+  for (uint32_t i = 0; i < 4; ++i)
+    m_memory.write8(0x47C + i, 1);
 
   // Initialize VRAM to spaces with default attribute
   for (uint32_t i = 0; i < 80 * 25 * 2; i += 2) {

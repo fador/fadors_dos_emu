@@ -307,8 +307,12 @@ void InputManager::handleMouseEvent(int button, int col, int row, bool pressed) 
     auto& ms = m_bios->mouseState();
     // Terminal coordinates are 1-based; convert to DOS virtual pixel coords
     // In text mode, each cell = 8x8 pixels for INT 33h
-    ms.x = static_cast<int16_t>((col - 1) * 8);
-    ms.y = static_cast<int16_t>((row - 1) * 8);
+    const int16_t newX = static_cast<int16_t>((col - 1) * 8);
+    const int16_t newY = static_cast<int16_t>((row - 1) * 8);
+    ms.hostMotionX += newX - ms.x;
+    ms.hostMotionY += newY - ms.y;
+    ms.x = newX;
+    ms.y = newY;
 
     if (button >= 0 && button <= 2) {
         // Map terminal button: 0=left, 1=middle, 2=right
