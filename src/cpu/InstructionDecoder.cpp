@@ -209,6 +209,28 @@ bool InstructionDecoder::tryFastRepStos(uint32_t elementSize) {
   return true;
 }
 
+// Bulk REP MOVS / REP STOS fast paths (kept out of line so the hot
+// stepInstruction() stays small).
+#if defined(_MSC_VER) && !defined(__clang__)
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
+bool InstructionDecoder::tryFastRepString(uint8_t opcode) {
+  switch (opcode) {
+  case 0xA4:
+    return tryFastRepMovs(1);
+  case 0xA5:
+    return tryFastRepMovs(m_hasPrefix66 ? 4u : 2u);
+  case 0xAA:
+    return tryFastRepStos(1);
+  case 0xAB:
+    return tryFastRepStos(m_hasPrefix66 ? 4u : 2u);
+  default:
+    return false;
+  }
+}
+
 bool InstructionDecoder::currentOperandSize32() const {
   // m_hasPrefix66 already holds the *effective* operand size for the
   // current instruction (CS default size XOR the 0x66 prefix), so it must
@@ -1595,20 +1617,8 @@ void InstructionDecoder::stepInstruction() {
         // needs to run periodically for SDL event polling, rendering,
         // and audio generation.
         constexpr int MAX_REP_BATCH = 4096;
-        uint32_t movsElementSize = 0;
-        if (opcode == 0xA4) {
-          movsElementSize = 1;
-        } else if (opcode == 0xA5) {
-          movsElementSize = m_hasPrefix66 ? 4u : 2u;
-        }
-        if (movsElementSize != 0 && tryFastRepMovs(movsElementSize)) {
+        if (tryFastRepString(opcode)) {
           return;
-        }
-        if (opcode == 0xAA || opcode == 0xAB) {
-          const uint32_t stosElementSize =
-              opcode == 0xAA ? 1u : (m_hasPrefix66 ? 4u : 2u);
-          if (tryFastRepStos(stosElementSize))
-            return;
         }
 
         int batchCount = 0;
