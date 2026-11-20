@@ -17,6 +17,7 @@ class PIC8259;
 class PIT8254;
 class CMOSRTC;
 class VGAController;
+struct VbeTextSurface;
 
 class BIOS {
 public:
@@ -181,6 +182,8 @@ private:
     uint16_t m_mouseCallbackOff = 0;
 
     void handleVideoService();      // INT 10h
+    // The VBE mode as a VideoText target (nullptr in VGA modes)
+    const VbeTextSurface *vbeTextSurface(VbeTextSurface &out) const;
     void handleVbeService();        // INT 10h AH=4Fh (VESA BIOS Extensions)
     void handleVbeProtectedMode(uint8_t vector); // 4F0Ah PM entry points
     void initializeVbeRom();        // VBE info strings / mode list in ROM
