@@ -36,6 +36,13 @@
 - [x] **Interrupt Pipeline**
   - [x] CPU exception handling
   - [x] Hardware interrupt pin routing
+- [x] **CPU Models** (`--cpu=386|486|486dx2|486dx4|pentium|pentiumpro`, `src/cpu/CpuModel.*`)
+  - [x] Reset signature in EDX, CPUID leaves per model (#UD without CPUID)
+  - [x] EFLAGS write rules for POPF/IRET (reserved bits, AC/ID per model, IOPL/IF privilege, V86 #GP)
+  - [x] Model-gated instructions (#UD), CR0 bits per model, CR4 on the Pentium
+  - [x] RDTSC, RDMSR/WRMSR (MSR 10h) and a cycle-weighted guest clock (`CPU::cycles()`)
+  - [ ] VME/PVI (CR4, VIF/VIP semantics), debug extensions, task switches through IRET/NT
+  - [ ] Protected-mode timings (far calls, interrupts and segment loads use real-mode costs)
 
 ## Phase 3: Hardware Devices
 - [x] Port I/O dispatching (IOBus)

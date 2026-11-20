@@ -7,6 +7,7 @@ Fador's DOS Emulator is a multiplatform MS-DOS emulator written in modern C++20.
 
 ## Features
 - **CPU Emulation:** 16-bit Real Mode and 32-bit Protected Mode execution, descriptor-table and control-register instructions, string operations, and REP fast paths. The emulator now also includes a substantial x87 implementation covering stack management, 32/64/80-bit loads and stores, integer conversion, arithmetic, comparisons, rounding, transcendental helpers (`FSIN`, `FCOS`, `FSINCOS`, `FPTAN`, `FPATAN`, `FYL2X`, `F2XM1`, etc.), and x87 environment/state save-restore (`FLDENV`, `FNSTENV`, `FNSAVE`, `FRSTOR`).
+- **Selectable CPU Models:** `--cpu=386|486|486dx2|486dx4|pentium|pentiumpro` (default `486dx2`) sets the reset signature, `CPUID` (none on the 386 and early 486; `GenuineIntel` leaves advertising only emulated features), which `EFLAGS`/`CR0`/`CR4` bits exist, the model-gated instructions (`BSWAP`/`CMPXCHG`/`XADD`/`INVD`/`WBINVD`/`INVLPG` from the 486, `RDTSC`/`RDMSR`/`WRMSR`/`CMPXCHG8B` from the Pentium, `CMOVcc`/`FCMOVcc`/`FCOMI` on the Pentium Pro raise `#UD` elsewhere) and per-instruction clock costs. `POPF`/`IRET` follow the 386 privilege rules (reserved bits, `IOPL` only at CPL 0, `IF` only when CPL <= IOPL, V86 IOPL-sensitive instructions fault), so CPU-detection routines see the selected model. A guest cycle counter (`CPU::cycles()`) backs `RDTSC` and MSR 10h.
 - **Protected Mode & DOS Extenders:** DPMI 0.9 host for protected-mode DOS extenders, including GDT/IDT handling, mode-switch entry points, segment reload callbacks, and app/host interrupt plumbing. DOS/4GW (bound or loaded through `DOS4GW.EXE`), PMODE/W, DOS/32A, CauseWay and DJGPP programs run; `tests/compat` checks each of them. 386 paging (CR0.PG, CR3, INVLPG, 4 MB pages) is available to raw-mode software.
 - **Memory Model:** 128 MB of physical memory: conventional memory managed through a DOS-compatible MCB chain, an XMS/DPMI pool from 1 MB to 112 MB, 8 MB of SVGA video memory at `0x07000000` (the VBE linear frame buffer), and host tables (DPMI LDT/IDT/GDT) above it so programs can never allocate over them.
 - **Expanded and Extended Memory:** EMS services via `INT 67h` with an `EMMXXXX0` device, page-frame mappings, and private API stubs, plus optional HIMEM/XMS 3.0 support (32-bit sizes beyond 64 MB) wired through `INT 2Fh` and far-call dispatch stubs.
@@ -59,6 +60,7 @@ run exactly like that too, with interrupts, sound and the headless options.
 |------|-------------|
 | `--help`, `-h`, `-?` | Print usage information and exit |
 | `--himem` | Enable HIMEM/XMS support |
+| `--cpu=MODEL` | Emulated CPU: `386` (386DX-33 + 387), `486` (early 486DX-33, no CPUID), `486dx2` (default, 486DX2-66 with CPUID), `486dx4` (DX4-100), `pentium` (P54C-100: TSC, MSRs, CMPXCHG8B, CR4) or `pentiumpro` (adds CMOVcc/FCMOVcc/FCOMI) |
 | `--mount=L:/path` | Mount a host directory as drive `L` (repeatable) |
 | `--env=NAME=VALUE` | Add or replace a DOS environment variable (repeatable). Defaults: `BLASTER=A220 I5 D1 H5 P330 T6`, `CAUSEWAY=DPMI` |
 | `--headless` | No window, terminal output or host input. Exit status is 124 when `--max-seconds` expires |
