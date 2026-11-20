@@ -28,7 +28,7 @@
 namespace fador::cpu {
 
 void InstructionDecoder::flushDecodedCache() {
-  for (uint32_t i = 0; i < kDecodedCacheSize; ++i)
+  for (uint32_t i = 0; i < kDecodedSets * 2; ++i)
     m_decoded[i] = DecodedInsn{};
 }
 
@@ -308,6 +308,25 @@ struct FastOps {
       setR<S>(c, d.reg, v);
   }
 
+  // ── x87 (D8-DF) ───────────────────────────────────────────────────
+  // d.op = opcode, d.aux = ModRM byte, d.imm = the memory-operand cycles
+  // the legacy decoder charges (none for its inline [reg+disp32] form).
+  // Entries carry DecodedInsn::kX87: they only run with no x87 error
+  // pending, so the waiting check (#MF / FERR#) never fires here.
+  template <bool Op32, bool Mem> static void x87(ID &c, const D &d) {
+    c.m_hasPrefix66 = Op32; // operand size of FSTENV/FLDENV/FSAVE/FRSTOR
+    uint32_t addr = 0;
+    if constexpr (Mem) {
+      const uint32_t off = offset(c, d);
+      c.m_currentOffset = off;
+      c.m_currentEASegment = d.seg;
+      c.m_currentEA = addr = c.m_segBase[d.seg] + off;
+      c.m_eaResolved = true;
+      c.m_cpu.addGuestCycles(d.imm);
+    }
+    c.executeFPUOperands(d.op, d.aux, Mem, addr);
+  }
+
   // ── flags ─────────────────────────────────────────────────────────
   static void cmc(ID &c, const D &) {
     c.m_cpu.setArithFlags(FLAG_CARRY, c.m_cpu.carryFlag() ? 0u : FLAG_CARRY);
@@ -500,6 +519,8 @@ FADOR_FAMILY(HRet, (&F::retNear<S>))
 FADOR_FAMILY(HRetImm, (&F::retNearImm<S>))
 FADOR_FAMILY(HMoffsLoad, (&F::movMoffs<S, false>))
 FADOR_FAMILY(HMoffsStore, (&F::movMoffs<S, true>))
+// x87: S = operand size (16/32) of the environment/state images
+FADOR_FAMILY(HX87, (S == 32 ? &F::x87<true, M> : &F::x87<false, M>))
 #undef FADOR_FAMILY
 
 uint32_t le(const uint8_t *p, int n) {
@@ -812,6 +833,34 @@ void InstructionDecoder::decodeFast(DecodedInsn &d, uint32_t linear,
       if (d.reg >= 4)
         cycles += m_cpu.mulExtraCycles();
       h = pickSM<HGroup3>(size, mem);
+    } else if (op == 0x9B) {
+      // FWAIT: with no x87 error pending (kX87) it does nothing.
+      d.flags = DecodedInsn::kX87;
+      h = &F::nop;
+    } else if (op >= 0xD8 && op <= 0xDF) {
+      if (pos >= kWindow)
+        return;
+      const uint8_t m = code[pos];
+      // FCMOVcc and F(U)COMI(P) raise #UD before the P6: legacy decoder.
+      if ((op == 0xDA || op == 0xDB || op == 0xDF) &&
+          !m_cpu.hasFeature(feature::kCmov)) {
+        const bool fcmov = op != 0xDF && m >= 0xC0 && m <= 0xDF;
+        const bool fcomi = op != 0xDA && m >= 0xE8 && m <= 0xF7;
+        if (fcmov || fcomi)
+          return;
+      }
+      const uint32_t before = cycles;
+      if (!modrm())
+        return;
+      // The legacy decoder resolves a 32-bit [reg+disp] operand inline
+      // without the memory-operand charge, other forms through
+      // getEffectiveAddress*() with it; it is added after the x87 error
+      // check, so it is not part of d.cycles.
+      d.imm = (mem && !(addr32 && d.rm != 4)) ? m_cpu.memOperandCycles() : 0;
+      cycles = before;
+      d.aux = m;
+      d.flags = DecodedInsn::kX87;
+      h = pickSM<HX87>(osize, mem);
     } else if (op == 0xFE || op == 0xFF) {
       if (!modrm())
         return;
@@ -879,14 +928,9 @@ void InstructionDecoder::decodeFast(DecodedInsn &d, uint32_t linear,
   d.op = op;
   d.len = static_cast<uint8_t>(pos);
   d.cycles = static_cast<uint16_t>(cycles);
-  d.maxEip = code32 ? 0xFFFFFFFFu : 0x10000u - pos;
   std::memcpy(d.bytes, code, kWindow);
-  for (unsigned i = 0; i < kWindow; ++i) {
-    const uint64_t m = i < pos ? 0xFFull : 0;
-    d.byteMask[i / 8] |= m << (8 * (i % 8));
-  }
-  d.bytes[0] &= d.byteMask[0];
-  d.bytes[1] &= d.byteMask[1];
+  for (unsigned i = pos; i < kWindow; ++i) // zero-pad past the instruction
+    d.bytes[i / 8] &= ~(0xFFull << (8 * (i % 8)));
   d.handler = h;
 }
 

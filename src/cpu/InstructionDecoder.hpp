@@ -31,15 +31,16 @@ struct SIB {
 class InstructionDecoder;
 
 // One predecoded instruction of the fast path (see FastPath.cpp).  Entries
-// live in a direct-mapped cache indexed by the linear address of the first
-// byte.  An entry is used only while the bytes in memory still equal
-// `bytes` (checked before every execution, so self-modifying code, code
-// loaded over old code and remapped pages need no invalidation) and the
-// code segment's default size matches `code32`.  A null handler marks an
-// instruction the legacy decoder executes.
+// live in a two-way set-associative cache indexed by the linear address of
+// the first byte.  An entry is used only while the bytes in memory still
+// equal `bytes` (checked before every execution, so self-modifying code,
+// code loaded over old code and remapped pages need no invalidation) and
+// the code segment's default size matches `code32`.  A null handler marks
+// an instruction the legacy decoder executes.
 struct DecodedInsn {
   using Handler = void (*)(InstructionDecoder &, const DecodedInsn &);
   static constexpr uint32_t kNoEntry = 0xFFFFFFFFu;
+  static constexpr uint8_t kX87 = 1;
 
   uint32_t linear = kNoEntry; // tag: CS base + EIP of the first byte
   uint8_t code32 = 0;         // CS.D the entry was decoded for
@@ -48,8 +49,8 @@ struct DecodedInsn {
   uint8_t rm = 0;             // ModRM.rm (register operand)
   Handler handler = nullptr;
   uint64_t bytes[2] = {0, 0}; // instruction bytes, zero-padded
-  uint64_t byteMask[2] = {0, 0};
-  uint32_t maxEip = 0;        // 16-bit code: IP + len must not wrap
+  uint8_t flags = 0;          // kX87: run only without a pending x87 error
+  uint8_t spare[3] = {0, 0, 0};
   uint32_t disp = 0;          // memory operand displacement / branch offset
   uint32_t imm = 0;           // immediate operand
   uint32_t baseMask = 0;      // memory operand: offset = disp
@@ -62,7 +63,30 @@ struct DecodedInsn {
   uint16_t cycles = 0;        // guest cycles charged (opcode + operand)
   uint8_t op = 0;             // opcode (second byte after 0F)
   uint8_t aux = 0;            // handler-specific (condition, group op)
+
+  // 16-bit code: an instruction whose bytes run past IP FFFF is left to
+  // the legacy decoder.
+  bool wraps(uint32_t eip) const { return !code32 && eip + len > 0x10000u; }
+  // True when the 16 bytes at `p` start with this instruction's bytes.
+  bool matches(const uint8_t *p) const {
+    struct Masks {
+      uint64_t m[17][2];
+      constexpr Masks() : m() {
+        for (unsigned len = 0; len <= 16; ++len)
+          for (unsigned i = 0; i < len; ++i)
+            m[len][i / 8] |= 0xFFull << (8 * (i % 8));
+      }
+    };
+    static constexpr Masks kMasks{};
+    uint64_t w0, w1;
+    std::memcpy(&w0, p, 8);
+    std::memcpy(&w1, p + 8, 8);
+    return (((w0 ^ bytes[0]) & kMasks.m[len][0]) |
+            ((w1 ^ bytes[1]) & kMasks.m[len][1])) == 0;
+  }
 };
+
+static_assert(sizeof(DecodedInsn) <= 64, "keep a decoded instruction in one cache line");
 
 // Provides helper functions for fetching CPU instructions and processing
 // prefixes
@@ -109,9 +133,25 @@ private:
   hw::DOS &m_dos;
 
   friend struct FastOps;
-  static constexpr uint32_t kDecodedCacheSize = 4096; // power of two
+  // Two-way set-associative: set = low bits of the linear address, so
+  // sequential code uses consecutive sets.
+  static constexpr uint32_t kDecodedSets = 8192; // power of two
   std::unique_ptr<DecodedInsn[]> m_decoded =
-      std::make_unique<DecodedInsn[]>(kDecodedCacheSize);
+      std::make_unique<DecodedInsn[]>(kDecodedSets * 2);
+  DecodedInsn *findDecoded(uint32_t lin, uint8_t code32) {
+    DecodedInsn *set = &m_decoded[(lin & (kDecodedSets - 1)) * 2];
+    if (set[0].linear == lin && set[0].code32 == code32) [[likely]]
+      return set;
+    if (set[1].linear == lin && set[1].code32 == code32)
+      return set + 1;
+    return nullptr;
+  }
+  // Slot for a new entry: the set's older entry is evicted.
+  DecodedInsn &newDecoded(uint32_t lin) {
+    DecodedInsn *set = &m_decoded[(lin & (kDecodedSets - 1)) * 2];
+    set[1] = set[0];
+    return set[0];
+  }
   bool m_fastPathEnabled = true;
   bool tryFastPath(uint32_t startEIP);
   uint64_t runFastBurst(uint64_t maxInstructions);
@@ -196,6 +236,8 @@ private:
                              uint32_t addr);
   void executeFPUPaged(uint8_t opcode, uint8_t modrmByte, ModRM modrm,
                        uint32_t addr);
+  void executeFPUOperands(uint8_t opcode, uint8_t modrmByte, bool hasMem,
+                          uint32_t addr);
   void fpuEnvironment(uint8_t opcode, uint8_t reg, uint32_t addr);
   void fpuTenByte(uint8_t opcode, uint8_t reg, uint32_t addr);
   bool fpuCheckPendingError();
@@ -279,33 +321,33 @@ inline bool InstructionDecoder::tryFastPath(uint32_t startEIP) {
     [[unlikely]]
     return false;
   const uint32_t lin = m_segBase[CS] + startEIP;
-  DecodedInsn &d = m_decoded[(lin ^ (lin >> 12)) & (kDecodedCacheSize - 1)];
   const uint8_t code32 = m_cpu.is32BitCode() ? 1 : 0;
+  DecodedInsn *e = findDecoded(lin, code32);
   const uint8_t *p;
-  if (d.linear == lin && d.code32 == code32) [[likely]] {
-    if (d.handler == nullptr)
+  if (e != nullptr) [[likely]] {
+    if (e->handler == nullptr)
       return false;
     p = m_memory.codeWindow(lin);
     if (p == nullptr) [[unlikely]]
       return false;
-    uint64_t w0, w1;
-    std::memcpy(&w0, p, 8);
-    std::memcpy(&w1, p + 8, 8);
-    if ((((w0 ^ d.bytes[0]) & d.byteMask[0]) |
-         ((w1 ^ d.bytes[1]) & d.byteMask[1])) != 0) [[unlikely]] {
-      decodeFast(d, lin, p, code32 != 0);
-      if (d.handler == nullptr)
+    if (!e->matches(p)) [[unlikely]] {
+      decodeFast(*e, lin, p, code32 != 0);
+      if (e->handler == nullptr)
         return false;
     }
   } else {
     p = m_memory.codeWindow(lin);
     if (p == nullptr)
       return false;
-    decodeFast(d, lin, p, code32 != 0);
-    if (d.handler == nullptr)
+    e = &newDecoded(lin);
+    decodeFast(*e, lin, p, code32 != 0);
+    if (e->handler == nullptr)
       return false;
   }
-  if (startEIP > d.maxEip) [[unlikely]]
+  const DecodedInsn &d = *e;
+  if (d.wraps(startEIP) ||
+      ((d.flags & DecodedInsn::kX87) && m_cpu.fpu().errorPending()))
+    [[unlikely]]
     return false;
   m_cpu.setEIP(startEIP + d.len);
   m_cpu.addGuestCycles(d.cycles);

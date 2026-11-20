@@ -555,6 +555,21 @@ FADOR_FPU_HOT void InstructionDecoder::executeFPUOpcode(uint8_t opcode) {
     }
   }
 
+  executeFPUOperands(opcode, modrmByte, hasMem, addr);
+}
+
+// The part of an x87 instruction after the operand is known (shared with
+// the predecoded fast path, which resolves the operand itself and sets
+// m_currentOffset / m_currentEASegment like the code above).
+FADOR_FPU_HOT void InstructionDecoder::executeFPUOperands(uint8_t opcode,
+                                                          uint8_t modrmByte,
+                                                          bool hasMem,
+                                                          uint32_t addr) {
+  const ModRM modrm{static_cast<uint8_t>(modrmByte >> 6),
+                    static_cast<uint8_t>((modrmByte >> 3) & 7),
+                    static_cast<uint8_t>(modrmByte & 7)};
+  x87::FPU &fpu = m_cpu.fpu();
+  const uint8_t cls = kFpuClass[((opcode & 7u) << 8) | modrmByte];
   if (!(cls & 2)) [[likely]] {
     fpu.fip = m_instrStartEIP;
     fpu.fcs = m_cpu.getSegReg(CS);

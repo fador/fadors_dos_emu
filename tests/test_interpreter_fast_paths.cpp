@@ -543,7 +543,7 @@ struct StreamGen {
     }
   }
   void one() {
-    const uint32_t kind = r(40);
+    const uint32_t kind = r(43);
     if (kind == 37) { // CALL to an inline subroutine ending in RET / RET imm
       const int rel = code32 ? 4 : 2;
       std::vector<uint8_t> body;
@@ -632,6 +632,8 @@ struct StreamGen {
       }
       break;
     case 38: b(0xE9); b(r(5)); b(0); if (op32) { b(0); b(0); } break;
+    case 40: case 41: b(0xD8 + r(8)); modrm(addr32); break; // x87, any ModRM
+    case 42: b(0x9B); break;                                // FWAIT
     default: b(0xEB); b(r(5)); break;
     }
   }
@@ -722,6 +724,16 @@ void runDifferential(bool code32, bool paging, int sequences, uint32_t seed) {
       for (int i = 0; i < 6; ++i)
         same = same && fast.cpu.getSegReg(static_cast<uint8_t>(i)) ==
                            legacy.cpu.getSegReg(static_cast<uint8_t>(i));
+      // x87 state, including the last instruction/operand pointers.
+      const auto &ff = fast.cpu.fpu(), &lf = legacy.cpu.fpu();
+      same = same && ff.statusWord() == lf.statusWord() &&
+             ff.controlWord() == lf.controlWord() && ff.tagWord() == lf.tagWord() &&
+             ff.fip == lf.fip && ff.fdp == lf.fdp && ff.fop == lf.fop &&
+             ff.fcs == lf.fcs && ff.fds == lf.fds;
+      for (uint8_t i = 0; i < 8; ++i) {
+        const auto a = fast.cpu.getFPURegister80(i), c = legacy.cpu.getFPURegister80(i);
+        same = same && a.mant == c.mant && a.signExp == c.signExp;
+      }
       if (same && (step % 16 < static_cast<int>(k) || step >= 119)) {
         for (uint32_t a = DiffMachine::kCode; a < DiffMachine::kStack + 0x10000; a += 4)
           if (fast.mem.read32(a) != legacy.mem.read32(a)) {

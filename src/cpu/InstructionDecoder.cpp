@@ -523,19 +523,14 @@ uint64_t InstructionDecoder::runFastBurst(uint64_t maxInstructions) {
   while (n < maxInstructions) {
     const uint32_t eip = m_cpu.getEIP();
     const uint32_t lin = csBase + eip;
-    const DecodedInsn &d =
-        m_decoded[(lin ^ (lin >> 12)) & (kDecodedCacheSize - 1)];
-    if (d.linear != lin || d.code32 != code32 || d.handler == nullptr)
+    const DecodedInsn *e = findDecoded(lin, code32);
+    if (e == nullptr || e->handler == nullptr)
       break; // not decoded yet or not a fast-path instruction
+    const DecodedInsn &d = *e;
     const uint8_t *p = m_memory.codeWindow(lin);
-    if (p == nullptr) [[unlikely]]
-      break;
-    uint64_t w0, w1;
-    std::memcpy(&w0, p, 8);
-    std::memcpy(&w1, p + 8, 8);
-    if ((((w0 ^ d.bytes[0]) & d.byteMask[0]) |
-         ((w1 ^ d.bytes[1]) & d.byteMask[1])) != 0 ||
-        eip > d.maxEip) [[unlikely]]
+    if (p == nullptr || !d.matches(p) || d.wraps(eip) ||
+        ((d.flags & DecodedInsn::kX87) && m_cpu.fpu().errorPending()))
+      [[unlikely]]
       break;
     // Same bookkeeping as stepInstruction().
     m_instrStartEIP = eip;
