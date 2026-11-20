@@ -8,6 +8,9 @@ set(CMAKE_CXX_EXTENSIONS OFF) # Ensure strict standard C++
 option(FADOR_ENABLE_DEBUG_DIAGNOSTICS
     "Enable temporary investigation diagnostics"
     OFF)
+option(FADOR_SOFT_X87
+    "Use the portable software x87 back end even where the host has a native x87"
+    OFF)
 
 # Optional SDL2 graphics backend
 find_package(SDL2 QUIET)
@@ -89,7 +92,8 @@ add_library(fadors_core STATIC ${SRC_FILES}
 target_include_directories(fadors_core PUBLIC ${SRC_DIR})
 target_link_libraries(fadors_core PUBLIC ymfm fzip)
 target_compile_definitions(fadors_core PUBLIC
-    FADOR_ENABLE_DEBUG_DIAGNOSTICS=$<BOOL:${FADOR_ENABLE_DEBUG_DIAGNOSTICS}>)
+    FADOR_ENABLE_DEBUG_DIAGNOSTICS=$<BOOL:${FADOR_ENABLE_DEBUG_DIAGNOSTICS}>
+    FADOR_X87_FORCE_SOFT=$<BOOL:${FADOR_SOFT_X87}>)
 
 if(SDL2_FOUND)
     target_compile_definitions(fadors_core PUBLIC HAVE_SDL2=1)
@@ -164,4 +168,10 @@ if(UNIX AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
     add_executable(cpu_fuzz tools/cpu_fuzz.cpp)
     target_link_libraries(cpu_fuzz PRIVATE fadors_core)
     add_test(NAME cpu_fuzz COMMAND cpu_fuzz 200000 1)
+    # Differential x87 tester (host x87 vs. emulator); see tools/fpu_fuzz.cpp
+    add_executable(fpu_fuzz tools/fpu_fuzz.cpp)
+    target_link_libraries(fpu_fuzz PRIVATE fadors_core)
+    target_include_directories(fpu_fuzz PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools)
+    add_test(NAME fpu_fuzz COMMAND fpu_fuzz 20000 1)
+    add_test(NAME fpu_fuzz_backend COMMAND fpu_fuzz --backend 200000 1)
 endif()
