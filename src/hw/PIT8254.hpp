@@ -21,8 +21,9 @@ namespace fador::hw {
 /// binary and BCD counting, LSB/MSB/word access with separate read and
 /// write flip-flops, the counter-latch command, the read-back command with
 /// status bytes (OUT, NULL COUNT, RW, mode, BCD) and the "count is loaded
-/// on the next CLK pulse" behaviour.  Channel 1 drives the DRAM refresh
-/// toggle visible in port 61h bit 4 (every 18 ticks, ~15.1 us).
+/// on the next CLK pulse" behaviour.  Port 61h bit 4 (DRAM refresh
+/// toggle) flips every 18 ticks (~15.1 us), the PC's refresh period, and
+/// bit 5 shows OUT2.
 class PIT8254 : public IODevice {
 public:
   static constexpr uint64_t kNever = std::numeric_limits<uint64_t>::max();
