@@ -42,26 +42,28 @@ inline bool fastReady(uint16_t cw, uint16_t known) {
 #define FADOR_X87_CLOBBERS                                                     \
   "st", "st(1)", "st(2)", "st(3)", "st(4)", "st(5)", "st(6)", "st(7)"
 
-// *dst = *dst op *src (both in the register file).
+// *dst = *dst op *src (both in the register file).  ST1 = dst, ST0 = src,
+// then the popping form DE xx leaves the result alone in ST0:
+// DE C1 FADDP, DE C9 FMULP, DE E9 FSUBP (ST1-ST0), DE E1 FSUBRP (ST0-ST1),
+// DE F9 FDIVP (ST1/ST0), DE F1 FDIVRP (ST0/ST1).
 inline void fastArith(Arith op, Float80 *dst, const Float80 *src, uint16_t &sw) {
   uint16_t s;
 #define FADOR_X87_FAST_ARITH(byte)                                             \
-  asm volatile("fldt %2\n\t"                                                   \
-               "fldt %0\n\t"                                                   \
-               ".byte 0xD8, " #byte "\n\t"                                     \
+  asm volatile("fldt %0\n\t"                                                   \
+               "fldt %2\n\t"                                                   \
+               ".byte 0xDE, " #byte "\n\t"                                     \
                "fnstsw %%ax\n\t"                                               \
-               "fstpt %0\n\t"                                                  \
-               "fstp %%st(0)"                                                  \
+               "fstpt %0"                                                      \
                : "+m"(*dst), "=a"(s)                                           \
                : "m"(*src)                                                     \
                : FADOR_X87_CLOBBERS)
   switch (op) {
   case Arith::Add: FADOR_X87_FAST_ARITH(0xC1); break;
   case Arith::Mul: FADOR_X87_FAST_ARITH(0xC9); break;
-  case Arith::Sub: FADOR_X87_FAST_ARITH(0xE1); break;
-  case Arith::SubR: FADOR_X87_FAST_ARITH(0xE9); break;
-  case Arith::Div: FADOR_X87_FAST_ARITH(0xF1); break;
-  default: FADOR_X87_FAST_ARITH(0xF9); break;
+  case Arith::Sub: FADOR_X87_FAST_ARITH(0xE9); break;
+  case Arith::SubR: FADOR_X87_FAST_ARITH(0xE1); break;
+  case Arith::Div: FADOR_X87_FAST_ARITH(0xF9); break;
+  default: FADOR_X87_FAST_ARITH(0xF1); break;
   }
 #undef FADOR_X87_FAST_ARITH
   t_hostFlags = static_cast<uint16_t>(s & SW_EXC);

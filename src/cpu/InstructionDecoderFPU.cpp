@@ -10,8 +10,19 @@
 
 #if defined(_MSC_VER)
 #define FADOR_FPU_COLD __declspec(noinline)
+#define FADOR_FPU_INLINE __forceinline
+#define FADOR_FPU_HOT
 #else
 #define FADOR_FPU_COLD __attribute__((noinline, cold))
+#define FADOR_FPU_INLINE inline __attribute__((always_inline))
+// The hot dispatcher passes small locals to inline asm by address, which
+// would otherwise make -fstack-protector-strong instrument every x87
+// instruction.
+#if defined(__clang__) || (defined(__GNUC__) && __GNUC__ >= 11)
+#define FADOR_FPU_HOT __attribute__((no_stack_protector))
+#else
+#define FADOR_FPU_HOT
+#endif
 #endif
 
 namespace fador::cpu {
@@ -27,11 +38,11 @@ namespace {
 constexpr uint32_t kCR0_NE = 0x20;
 
 // Instructions that do not check for pending unmasked exceptions.
-bool isNonWaiting(uint8_t opcode, uint8_t modrmByte, const ModRM &m) {
-  if (m.mod != 3) {
+constexpr bool nonWaiting(uint8_t opcode, uint8_t modrmByte) {
+  if (modrmByte < 0xC0) {
+    const uint8_t reg = (modrmByte >> 3) & 7;
     // FNSTENV, FNSTCW, FNSAVE, FNSTSW m16
-    return (opcode == 0xD9 && (m.reg == 6 || m.reg == 7)) ||
-           (opcode == 0xDD && (m.reg == 6 || m.reg == 7));
+    return (opcode == 0xD9 || opcode == 0xDD) && (reg == 6 || reg == 7);
   }
   // FNENI, FNDISI, FNCLEX, FNINIT, FNSETPM, FNSTSW AX
   return (opcode == 0xDB && modrmByte >= 0xE0 && modrmByte <= 0xE4) ||
@@ -39,12 +50,23 @@ bool isNonWaiting(uint8_t opcode, uint8_t modrmByte, const ModRM &m) {
 }
 
 // Control instructions leave FIP/FCS/FOP/FDP/FDS alone.
-bool isControl(uint8_t opcode, uint8_t modrmByte, const ModRM &m) {
-  if (m.mod != 3)
-    return (opcode == 0xD9 && m.reg >= 4) || (opcode == 0xDD && m.reg >= 4);
+constexpr bool control(uint8_t opcode, uint8_t modrmByte) {
+  if (modrmByte < 0xC0)
+    return (opcode == 0xD9 || opcode == 0xDD) && ((modrmByte >> 3) & 7) >= 4;
   return (opcode == 0xDB && modrmByte >= 0xE0 && modrmByte <= 0xE4) ||
          (opcode == 0xDF && modrmByte == 0xE0);
 }
+
+// Bit 0 = non-waiting, bit 1 = control, indexed by (opcode & 7) << 8 | ModRM.
+constexpr std::array<uint8_t, 2048> kFpuClass = [] {
+  std::array<uint8_t, 2048> t{};
+  for (int op = 0; op < 8; ++op)
+    for (int m = 0; m < 256; ++m)
+      t[(op << 8) | m] = static_cast<uint8_t>(
+          (nonWaiting(static_cast<uint8_t>(0xD8 + op), static_cast<uint8_t>(m)) ? 1 : 0) |
+          (control(static_cast<uint8_t>(0xD8 + op), static_cast<uint8_t>(m)) ? 2 : 0));
+  return t;
+}();
 
 constexpr Arith kArith[8] = {Arith::Add, Arith::Mul, Arith::Add, Arith::Add,
                              Arith::Sub, Arith::SubR, Arith::Div, Arith::DivR};
@@ -106,77 +128,6 @@ void InstructionDecoder::fpuWriteBytes(uint32_t address, const uint8_t *in, size
     m_memory.lwrite8(address + static_cast<uint32_t>(i), in[i]);
 }
 
-void InstructionDecoder::executeFPUOpcode(uint8_t opcode) {
-  const uint8_t modrmByte = fetch8();
-  const ModRM modrm{static_cast<uint8_t>(modrmByte >> 6),
-                    static_cast<uint8_t>((modrmByte >> 3) & 7),
-                    static_cast<uint8_t>(modrmByte & 7)};
-  x87::FPU &fpu = m_cpu.fpu();
-
-  if (fpu.errorPending() | m_cpu.fpuErrorSignalled()) [[unlikely]] {
-    if (!fpu.errorPending())
-      m_cpu.setFPUErrorSignalled(false); // FERR# re-arms once the error is cleared
-    else if (!isNonWaiting(opcode, modrmByte, modrm) && fpuCheckPendingError())
-      return;
-  }
-
-  const bool hasMem = modrm.mod != 3;
-  uint32_t addr = 0;
-  if (hasMem)
-    addr = m_hasPrefix67 ? getEffectiveAddress32(modrm) : getEffectiveAddress16(modrm);
-
-  if (!isControl(opcode, modrmByte, modrm)) [[likely]] {
-    fpu.fip = m_instrStartEIP;
-    fpu.fcs = m_cpu.getSegReg(CS);
-    fpu.fop = static_cast<uint16_t>(((opcode & 0x07u) << 8) | modrmByte);
-    if (hasMem) {
-      fpu.fdp = m_currentOffset;
-      fpu.fds = m_cpu.getSegReg(static_cast<SegRegIndex>(m_currentEASegment));
-    }
-  }
-
-  if (hasMem && m_memory.pagingEnabled()) [[unlikely]] {
-    executeFPUPaged(opcode, modrmByte, modrm, addr);
-    return;
-  }
-  executeFPUInstruction(opcode, modrmByte, modrm, addr);
-}
-
-// With paging, a memory access to a not-present page is undone and
-// restarted after #PF: keep the FPU state so it can be rolled back too.
-FADOR_FPU_COLD void InstructionDecoder::executeFPUPaged(uint8_t opcode, uint8_t modrmByte,
-                                         ModRM modrm, uint32_t addr) {
-  x87::FPU &fpu = m_cpu.fpu();
-  const x87::FPU saved = fpu;
-  executeFPUInstruction(opcode, modrmByte, modrm, addr);
-  if (m_memory.pageFaultPending())
-    fpu = saved;
-}
-
-FADOR_FPU_COLD void InstructionDecoder::fpuEnvironment(uint8_t opcode, uint8_t reg, uint32_t addr) {
-  x87::FPU &fpu = m_cpu.fpu();
-  std::array<uint8_t, 108> image{};
-  const ImageMode mode = fpuImageMode();
-  const size_t envSize = x87::envImageSize(mode);
-  if (opcode == 0xD9 && reg == 4) { // FLDENV
-    fpuReadBytes(addr, image.data(), envSize);
-    fpu.loadEnv(image.data(), mode);
-  } else if (opcode == 0xD9) { // FNSTENV: store, then mask all exceptions
-    fpu.storeEnv(image.data(), mode);
-    fpuWriteBytes(addr, image.data(), envSize);
-    fpu.setControlWord(static_cast<uint16_t>(fpu.controlWord() | x87::SW_EXC));
-  } else if (reg == 4) { // FRSTOR
-    fpuReadBytes(addr, image.data(), envSize + 80);
-    fpu.loadEnv(image.data(), mode);
-    fpu.loadRegs(image.data() + envSize);
-  } else { // FNSAVE: store, then FNINIT
-    fpu.storeEnv(image.data(), mode);
-    fpu.storeRegs(image.data() + envSize);
-    fpuWriteBytes(addr, image.data(), envSize + 80);
-    fpu.reset();
-  }
-}
-
 // 10-byte memory operands: FLD/FSTP m80 (DB /5, /7), FBLD/FBSTP (DF /4, /6).
 FADOR_FPU_COLD void InstructionDecoder::fpuTenByte(uint8_t opcode, uint8_t reg,
                                                    uint32_t addr) {
@@ -199,8 +150,9 @@ FADOR_FPU_COLD void InstructionDecoder::fpuTenByte(uint8_t opcode, uint8_t reg,
   }
 }
 
-void InstructionDecoder::executeFPUInstruction(uint8_t opcode, uint8_t modrmByte,
-                                               ModRM modrm, uint32_t addr) {
+FADOR_FPU_INLINE void InstructionDecoder::executeFPUInstruction(uint8_t opcode,
+                                                               uint8_t modrmByte,
+                                                               ModRM modrm, uint32_t addr) {
   x87::FPU &fpu = m_cpu.fpu();
   const int i = modrm.rm;
   auto read64 = [&](uint32_t a) {
@@ -558,6 +510,78 @@ void InstructionDecoder::executeFPUInstruction(uint8_t opcode, uint8_t modrmByte
   default:
     LOG_WARN("Unhandled x87 opcode 0x", std::hex, static_cast<int>(opcode));
     return;
+  }
+}
+
+FADOR_FPU_HOT void InstructionDecoder::executeFPUOpcode(uint8_t opcode) {
+  const uint8_t modrmByte = fetch8();
+  const ModRM modrm{static_cast<uint8_t>(modrmByte >> 6),
+                    static_cast<uint8_t>((modrmByte >> 3) & 7),
+                    static_cast<uint8_t>(modrmByte & 7)};
+  x87::FPU &fpu = m_cpu.fpu();
+  const uint8_t cls = kFpuClass[((opcode & 7u) << 8) | modrmByte];
+
+  if (fpu.errorPending() | m_cpu.fpuErrorSignalled()) [[unlikely]] {
+    if (!fpu.errorPending())
+      m_cpu.setFPUErrorSignalled(false); // FERR# re-arms once the error is cleared
+    else if (!(cls & 1) && fpuCheckPendingError())
+      return;
+  }
+
+  const bool hasMem = modrm.mod != 3;
+  uint32_t addr = 0;
+  if (hasMem)
+    addr = m_hasPrefix67 ? getEffectiveAddress32(modrm) : getEffectiveAddress16(modrm);
+
+  if (!(cls & 2)) [[likely]] {
+    fpu.fip = m_instrStartEIP;
+    fpu.fcs = m_cpu.getSegReg(CS);
+    fpu.fop = static_cast<uint16_t>(((opcode & 0x07u) << 8) | modrmByte);
+    if (hasMem) {
+      fpu.fdp = m_currentOffset;
+      fpu.fds = m_cpu.getSegReg(static_cast<SegRegIndex>(m_currentEASegment));
+    }
+  }
+
+  if (hasMem && m_memory.pagingEnabled()) [[unlikely]] {
+    executeFPUPaged(opcode, modrmByte, modrm, addr);
+    return;
+  }
+  executeFPUInstruction(opcode, modrmByte, modrm, addr);
+}
+
+// With paging, a memory access to a not-present page is undone and
+// restarted after #PF: keep the FPU state so it can be rolled back too.
+FADOR_FPU_COLD void InstructionDecoder::executeFPUPaged(uint8_t opcode, uint8_t modrmByte,
+                                         ModRM modrm, uint32_t addr) {
+  x87::FPU &fpu = m_cpu.fpu();
+  const x87::FPU saved = fpu;
+  executeFPUInstruction(opcode, modrmByte, modrm, addr);
+  if (m_memory.pageFaultPending())
+    fpu = saved;
+}
+
+FADOR_FPU_COLD void InstructionDecoder::fpuEnvironment(uint8_t opcode, uint8_t reg, uint32_t addr) {
+  x87::FPU &fpu = m_cpu.fpu();
+  std::array<uint8_t, 108> image{};
+  const ImageMode mode = fpuImageMode();
+  const size_t envSize = x87::envImageSize(mode);
+  if (opcode == 0xD9 && reg == 4) { // FLDENV
+    fpuReadBytes(addr, image.data(), envSize);
+    fpu.loadEnv(image.data(), mode);
+  } else if (opcode == 0xD9) { // FNSTENV: store, then mask all exceptions
+    fpu.storeEnv(image.data(), mode);
+    fpuWriteBytes(addr, image.data(), envSize);
+    fpu.setControlWord(static_cast<uint16_t>(fpu.controlWord() | x87::SW_EXC));
+  } else if (reg == 4) { // FRSTOR
+    fpuReadBytes(addr, image.data(), envSize + 80);
+    fpu.loadEnv(image.data(), mode);
+    fpu.loadRegs(image.data() + envSize);
+  } else { // FNSAVE: store, then FNINIT
+    fpu.storeEnv(image.data(), mode);
+    fpu.storeRegs(image.data() + envSize);
+    fpuWriteBytes(addr, image.data(), envSize + 80);
+    fpu.reset();
   }
 }
 
