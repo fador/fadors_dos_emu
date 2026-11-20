@@ -15,28 +15,34 @@ namespace {
 
 // CPI values are rough averages for typical DOS code: an 8088 needs ~15
 // clocks per instruction (with its 8-bit bus), a 286 ~10 including wait
-// states, a 386 ~4.5, a 486 ~2 and a Pentium ~1.2.
-constexpr std::array<MachineSpeed, 13> kPresets{{
-    {"8088", 4.77, 14.5},
-    {"286-12", 12.0, 10.0},
-    {"386sx-16", 16.0, 5.0},
-    {"386dx-25", 25.0, 4.5},
-    {"386dx-33", 33.0, 4.5},
-    {"486sx-25", 25.0, 2.0},
-    {"486dx-33", 33.0, 2.0},
-    {"486dx2-66", 66.0, 2.0},
-    {"486dx4-100", 100.0, 2.0},
-    {"pentium-60", 60.0, 1.2},
-    {"pentium-90", 90.0, 1.2},
-    {"pentium-100", 100.0, 1.2},
-    {"pentium-133", 133.0, 1.2},
+// states, a 386 ~4.5, a 486 ~2 and a Pentium ~1.2.  They only matter for
+// --throttle-ips style instruction pacing; the emulated time of a preset
+// comes from the CPU model's per-opcode cycle table.  Parts older than the
+// 386 (and the 16-bit-bus 386SX) use the 386 table, slowed down by the
+// ratio of the CPI estimates (see MachineSpeed::cycleScale).
+constexpr std::array<MachineSpeed, 15> kPresets{{
+    {"8088", 4.77, 14.5, "386", 3.2},
+    {"286-12", 12.0, 10.0, "386", 2.2},
+    {"386sx-16", 16.0, 5.0, "386", 1.1},
+    {"386dx-25", 25.0, 4.5, "386", 1.0},
+    {"386dx-33", 33.0, 4.5, "386", 1.0},
+    {"486sx-25", 25.0, 2.0, "486", 1.0},
+    {"486dx-33", 33.0, 2.0, "486", 1.0},
+    {"486dx2-66", 66.0, 2.0, "486dx2", 1.0},
+    {"486dx4-100", 100.0, 2.0, "486dx4", 1.0},
+    {"pentium-60", 60.0, 1.2, "pentium", 1.0},
+    {"pentium-90", 90.0, 1.2, "pentium", 1.0},
+    {"pentium-100", 100.0, 1.2, "pentium", 1.0},
+    {"pentium-133", 133.0, 1.2, "pentium", 1.0},
+    {"pentiumpro-150", 150.0, 1.0, "pentiumpro", 1.0},
+    {"pentiumpro-200", 200.0, 1.0, "pentiumpro", 1.0},
 }};
 
 struct Alias {
   std::string_view alias;
   std::string_view preset;
 };
-constexpr std::array<Alias, 11> kAliases{{
+constexpr std::array<Alias, 14> kAliases{{
     {"xt", "8088"},
     {"pc-xt", "8088"},
     {"286", "286-12"},
@@ -46,8 +52,11 @@ constexpr std::array<Alias, 11> kAliases{{
     {"386dx", "386dx-33"},
     {"486", "486dx2-66"},
     {"486dx2", "486dx2-66"},
+    {"486dx4", "486dx4-100"},
     {"pentium", "pentium-90"},
     {"p90", "pentium-90"},
+    {"pentiumpro", "pentiumpro-200"},
+    {"ppro", "pentiumpro-200"},
 }};
 
 } // namespace
@@ -285,10 +294,60 @@ void VirtualClock::sync() {
   }
 }
 
-void VirtualClock::idle() {
+bool VirtualClock::noteIdle() {
   const uint64_t count = m_counter ? *m_counter : 0;
-  const bool waiting = count - m_lastIdleCount < kIdleWorkThreshold;
+  const bool waiting = count - m_lastIdleCount < m_idleWorkThreshold;
   m_lastIdleCount = count;
+  if (m_pacing == Pacing::Auto)
+    m_idleSinceSync = true; // host-side waits are not instruction work
+  return waiting;
+}
+
+void VirtualClock::waitUntil(uint64_t deadlineNs) {
+  rebase();
+  switch (m_pacing) {
+  case Pacing::Deterministic:
+    if (deadlineNs > m_baseNs) {
+      m_baseNs = deadlineNs;
+      m_baseFrac = 0;
+    }
+    return;
+  case Pacing::Fixed: {
+    if (deadlineNs > m_baseNs) {
+      m_baseNs = deadlineNs;
+      m_baseFrac = 0;
+    }
+    if (!m_started)
+      return;
+    const int64_t wall = wallTargetNs(hostNow() - m_hostOrigin);
+    const int64_t now = static_cast<int64_t>(m_baseNs);
+    if (now > wall)
+      m_hostSleep(std::min<uint64_t>(static_cast<uint64_t>(now - wall),
+                                     kMaxCatchUpNs));
+    return;
+  }
+  case Pacing::Auto: {
+    m_idleSinceSync = true;
+    if (!m_started) { // no wall-clock reference yet: just move on
+      if (deadlineNs > m_baseNs) {
+        m_baseNs = deadlineNs;
+        m_baseFrac = 0;
+      }
+      return;
+    }
+    const int64_t wall = wallTargetNs(hostNow() - m_hostOrigin);
+    const auto deadline = static_cast<int64_t>(deadlineNs);
+    if (deadlineNs > m_baseNs && deadline > wall)
+      m_hostSleep(std::min<uint64_t>(static_cast<uint64_t>(deadline - wall),
+                                     kMaxIdleSleepNs));
+    sync();
+    return;
+  }
+  }
+}
+
+void VirtualClock::idle() {
+  const bool waiting = noteIdle();
   switch (m_pacing) {
   case Pacing::Auto:
     m_idleSinceSync = true;
