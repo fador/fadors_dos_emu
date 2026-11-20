@@ -18,12 +18,119 @@ constexpr uint32_t kFlagIOPL = 0x00003000;
 constexpr uint32_t kFlagNT = 0x00004000;
 constexpr uint32_t kFlagRF = 0x00010000;
 constexpr uint32_t kFlagVM = 0x00020000;
+constexpr uint32_t kFlagVIF = 0x00080000;
+constexpr uint32_t kFlagVIP = 0x00100000;
 
 // Exceptions that push an error code in protected mode.
 bool hasErrorCode(uint8_t vector) {
   return vector == 8 || (vector >= 10 && vector <= 14) || vector == 17;
 }
 } // namespace
+
+bool InstructionDecoder::requireFeature(uint32_t featureBits) {
+  if (m_cpu.hasFeature(featureBits))
+    return true;
+  raiseException(6); // #UD: the instruction does not exist on this model
+  return false;
+}
+
+// POPF/IRET privilege rules (386 SDM): IOPL changes only at CPL 0, IF only
+// when CPL <= IOPL, VM never through POPF and through IRET only on the
+// CPL-0 return to V86 (handled by the callers), VIF/VIP only by a CPL-0
+// protected-mode IRET.  RF is loaded by IRET and cleared by POPF.  Bits a
+// model lacks (AC on the 386, ID without CPUID, VIF/VIP before the
+// Pentium) are excluded by the model's EFLAGS mask.
+//
+// Under the emulator's own DPMI host (no native protection) clients keep
+// full control of IOPL and IF, as before.
+uint32_t InstructionDecoder::flagsWriteMask(bool iret) const {
+  uint32_t mask = m_cpu.eflagsMask() & ~kFlagVM;
+  const bool pm = (m_cpu.getCR(0) & 1) != 0;
+  if (!iret)
+    mask &= ~(kFlagRF | kFlagVIF | kFlagVIP);
+  else if (!pm)
+    mask &= ~(kFlagVIF | kFlagVIP);
+  if (!pm || !m_cpu.nativeProtection())
+    return mask;
+  const uint8_t cpl = currentCPL();
+  if (cpl > 0)
+    mask &= ~(kFlagIOPL | kFlagVIF | kFlagVIP);
+  if (cpl > ((m_cpu.getEFLAGS() & kFlagIOPL) >> 12))
+    mask &= ~kFlagIF;
+  return mask;
+}
+
+void InstructionDecoder::writeFlags(uint32_t value, uint32_t mask, bool op32) {
+  if (!op32)
+    mask &= 0xFFFFu;
+  const uint32_t merged = (m_cpu.getEFLAGS() & ~mask) | (value & mask);
+  m_cpu.setEFLAGS((merged & m_cpu.eflagsMask()) | 0x2u);
+}
+
+bool InstructionDecoder::checkIOPL() {
+  if (!m_cpu.nativeProtection() ||
+      currentCPL() <= ((m_cpu.getEFLAGS() & kFlagIOPL) >> 12))
+    return true;
+  raiseException(13, 0);
+  return false;
+}
+
+void InstructionDecoder::executeCPUID() {
+  const CpuModel &model = m_cpu.model();
+  uint32_t leaf = m_cpu.getReg32(EAX);
+  // Intel parts of this era answer any leaf above the maximum (including
+  // the 8000_0000h range, which they do not implement) with the data of
+  // the highest basic leaf.
+  if (leaf > model.cpuidMaxLeaf)
+    leaf = model.cpuidMaxLeaf;
+  uint32_t a = 0, b = 0, c = 0, d = 0;
+  switch (leaf) {
+  case 0:
+    a = model.cpuidMaxLeaf;
+    b = 0x756E6547; // "Genu"
+    d = 0x49656E69; // "ineI"
+    c = 0x6C65746E; // "ntel"
+    break;
+  case 1:
+    a = model.signature;
+    d = model.cpuidFeatureEdx;
+    break;
+  case 2: // P6 cache/TLB descriptors: one iteration; ITLB 4K/4M, DTLB 4K,
+          // L1I 8K, DTLB 4M, L1D 8K, L2 256K
+    a = 0x03020101;
+    d = 0x06040A42;
+    break;
+  default:
+    break;
+  }
+  m_cpu.setReg32(EAX, a);
+  m_cpu.setReg32(EBX, b);
+  m_cpu.setReg32(ECX, c);
+  m_cpu.setReg32(EDX, d);
+}
+
+bool InstructionDecoder::readMSR(uint32_t index, uint64_t &value) const {
+  switch (index) {
+  case 0x10: // time-stamp counter
+    value = m_cpu.readTSC();
+    return true;
+  default:
+    return false;
+  }
+}
+
+bool InstructionDecoder::writeMSR(uint32_t index, uint64_t value) {
+  switch (index) {
+  case 0x10:
+    // The P6 writes only the low 32 bits and clears the high half.
+    if (m_cpu.hasFeature(feature::kCmov))
+      value &= 0xFFFFFFFFu;
+    m_cpu.writeTSC(value);
+    return true;
+  default:
+    return false;
+  }
+}
 
 uint8_t InstructionDecoder::currentCPL() const {
   if (!(m_cpu.getCR(0) & 1))
@@ -205,12 +312,13 @@ void InstructionDecoder::nativeIret(bool op32) {
       raiseException(13, 0);
       return;
     }
-    // IOPL 3 V86 IRET behaves like real mode; VM and IOPL stay.
+    // IOPL 3 V86 IRET behaves like real mode; VM, IOPL, VIF and VIP stay
+    // (CPL 3 rules of flagsWriteMask()).
+    const uint32_t mask = flagsWriteMask(true);
     const uint32_t eip = popSized(op32);
     const uint16_t cs = static_cast<uint16_t>(popSized(op32));
     const uint32_t newFlags = popSized(op32);
-    const uint32_t keep = kFlagVM | kFlagIOPL | (op32 ? 0 : 0xFFFF0000u);
-    m_cpu.setEFLAGS((flags & keep) | (newFlags & ~keep) | 2);
+    writeFlags(newFlags, mask, op32);
     loadSegment(CS, cs);
     m_cpu.setEIP(eip & 0xFFFF);
     return;
@@ -231,7 +339,7 @@ void InstructionDecoder::nativeIret(bool op32) {
     const uint16_t ds = static_cast<uint16_t>(m_cpu.pop32());
     const uint16_t fs = static_cast<uint16_t>(m_cpu.pop32());
     const uint16_t gs = static_cast<uint16_t>(m_cpu.pop32());
-    m_cpu.setEFLAGS(newFlags | 2);
+    m_cpu.setEFLAGS((newFlags & m_cpu.eflagsMask()) | 2);
     loadSegment(CS, cs);
     loadSegment(SS, ss);
     loadSegment(ES, es);
@@ -244,21 +352,13 @@ void InstructionDecoder::nativeIret(bool op32) {
   }
 
   // Which flags this privilege level may change.
-  uint32_t changeable = 0x00247FD5u & ~kFlagVM; // CF..OF, NT, AC, ID, ...
-  changeable |= kFlagRF;
-  if (cpl > 0)
-    changeable &= ~kFlagIOPL;
-  if (cpl > ((flags & kFlagIOPL) >> 12))
-    changeable &= ~kFlagIF;
-  if (!op32)
-    changeable &= 0xFFFF;
-  const uint32_t merged = (flags & ~changeable) | (newFlags & changeable) | 2;
+  const uint32_t changeable = flagsWriteMask(true);
 
   const uint8_t rpl = cs & 3;
   if (rpl > cpl) {
     const uint32_t esp = popSized(op32);
     const uint16_t ss = static_cast<uint16_t>(popSized(op32));
-    m_cpu.setEFLAGS(merged);
+    writeFlags(newFlags, changeable, op32);
     loadSegment(CS, cs);
     m_cpu.setEIP(op32 ? eip : (eip & 0xFFFF));
     loadSegment(SS, ss);
@@ -268,7 +368,7 @@ void InstructionDecoder::nativeIret(bool op32) {
       setStackPointer(esp & 0xFFFF);
     return;
   }
-  m_cpu.setEFLAGS(merged);
+  writeFlags(newFlags, changeable, op32);
   loadSegment(CS, cs);
   m_cpu.setEIP(op32 ? eip : (eip & 0xFFFF));
 }

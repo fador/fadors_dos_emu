@@ -20,7 +20,9 @@ TEST_CASE("CPU Reset Logic", "[CPU]") {
 
         REQUIRE(cpu.getReg32(cpu::Reg32Index::EAX) == 0);
         REQUIRE(cpu.getReg32(cpu::Reg32Index::ECX) == 0);
-        REQUIRE(cpu.getReg32(cpu::Reg32Index::EDX) == 0);
+        // EDX holds the model's component/revision signature after reset.
+        REQUIRE(cpu.getReg32(cpu::Reg32Index::EDX) ==
+                cpu::cpuModel(cpu::kDefaultCpuModel).signature);
         REQUIRE(cpu.getReg32(cpu::Reg32Index::EBX) == 0);
         REQUIRE(cpu.getReg32(cpu::Reg32Index::ESP) == 0);
         REQUIRE(cpu.getReg32(cpu::Reg32Index::EBP) == 0);
@@ -30,7 +32,7 @@ TEST_CASE("CPU Reset Logic", "[CPU]") {
         REQUIRE(cpu.is32BitCode() == false);
         REQUIRE(cpu.is32BitStack() == false);
 
-        REQUIRE(cpu.getCR(0) == 0);
+        REQUIRE(cpu.getCR(0) == 0x00000010); // ET: FPU present
         REQUIRE(cpu.getDR(0) == 0);
     }
 }

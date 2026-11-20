@@ -55,7 +55,6 @@ private:
   hw::IOBus &m_iobus;
   hw::BIOS &m_bios;
   hw::DOS &m_dos;
-  uint64_t m_stepCount;
 
   // Prefixes state for current instruction
   uint32_t m_instrStartEIP;
@@ -84,6 +83,11 @@ private:
   uint32_t m_currentOffset; // Holds isolated offset (critical for 0x8D LEA)
   uint8_t m_currentEASegment;
   bool m_eaResolved;
+
+  // Copy of the CPU model's cycle-cost table (see CpuModel.hpp), refreshed
+  // by syncSegments() when CPU::setModel() changes the model.
+  CycleTable m_cycleTable{};
+  const CpuModel *m_cycleTableModel{nullptr};
 
   // Fetches next byte(s) from memory through CS:EIP (inline: hot path)
   uint8_t fetch8() {
@@ -172,6 +176,22 @@ private:
                          bool op32);
   void nativeRetf(uint16_t release, bool op32);
   void stepInstruction();
+
+  // CPU model rules (Protection.cpp).
+  // Raises #UD and returns false when the model lacks the feature bits.
+  bool requireFeature(uint32_t featureBits);
+  // EFLAGS bits that POPF (iret=false) or IRET (iret=true) may change at
+  // the current privilege level, before operand-size masking.
+  uint32_t flagsWriteMask(bool iret) const;
+  // Merges `value` into EFLAGS under `mask` (low word only for 16-bit
+  // operands), keeping bit 1 set and nonexistent bits clear.
+  void writeFlags(uint32_t value, uint32_t mask, bool op32);
+  // IOPL-sensitive instructions (CLI/STI/PUSHF/POPF in V86) under guest-owned
+  // protection: raises #GP(0) and returns false when CPL > IOPL.
+  bool checkIOPL();
+  void executeCPUID();
+  bool readMSR(uint32_t index, uint64_t &value) const;
+  bool writeMSR(uint32_t index, uint64_t value);
 
   struct Descriptor {
     uint32_t base;

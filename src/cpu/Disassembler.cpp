@@ -696,6 +696,7 @@ std::string Disassembler::disasmOpcode0F(Cursor& c, uint8_t op, bool p66, bool p
         ModRM m = decodeModRM(c.read8());
         std::string rm = formatRM(c, m, 16, p67, segOvr);
         if (m.reg == 4) return "SMSW " + rm;
+        if (m.reg == 7 && m.mod != 3) return "INVLPG " + rm;
         return "GRP7/" + std::to_string(m.reg) + " " + rm;
     }
     if (op == 0x02) { ModRM m = decodeModRM(c.read8()); return "LAR " + std::string(regW(m.reg)) + ", " + formatRM(c, m, 16, p67, segOvr); }
@@ -704,6 +705,10 @@ std::string Disassembler::disasmOpcode0F(Cursor& c, uint8_t op, bool p66, bool p
     if (op == 0x08) return "INVD";
     if (op == 0x09) return "WBINVD";
     if (op == 0x0B) return "UD2";
+    if (op == 0x30) return "WRMSR";
+    if (op == 0x31) return "RDTSC";
+    if (op == 0x32) return "RDMSR";
+    if (op == 0xA2) return "CPUID";
     if (op == 0x20) {
         ModRM m = decodeModRM(c.read8());
         return "MOV " + std::string(reg32Name(m.rm)) + ", " + controlReg(m.reg);
@@ -782,6 +787,21 @@ std::string Disassembler::disasmOpcode0F(Cursor& c, uint8_t op, bool p66, bool p
     // ── BSWAP ──
     if (op >= 0xC8 && op <= 0xCF) {
         return "BSWAP " + std::string(reg32Name(op & 0x7));
+    }
+
+    // ── CMPXCHG / XADD / CMPXCHG8B (486 / Pentium) ──
+    if (op == 0xB0 || op == 0xB1 || op == 0xC0 || op == 0xC1) {
+        ModRM m = decodeModRM(c.read8());
+        const bool byteOp = (op & 1) == 0;
+        std::string rm = formatRM(c, m, byteOp ? 8 : opSize16, p67, segOvr);
+        const char* r = byteOp ? reg8Name(m.reg) : regW(m.reg);
+        return std::string(op >= 0xC0 ? "XADD " : "CMPXCHG ") + rm + ", " + r;
+    }
+    if (op == 0xC7) {
+        ModRM m = decodeModRM(c.read8());
+        std::string rm = formatRM(c, m, 32, p67, segOvr);
+        if (m.reg == 1 && m.mod != 3) return "CMPXCHG8B " + rm;
+        return "GRP9/" + std::to_string(m.reg) + " " + rm;
     }
 
     // ── LSS/LFS/LGS ──

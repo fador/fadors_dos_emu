@@ -978,6 +978,12 @@ AsmResult Assembler::assembleLine(const std::string& line, uint32_t origin) cons
             {"OUTSW",{0x6F}},
             {"FWAIT",{0x9B}},
             {"WAIT", {0x9B}},
+            {"INVD",  {0x0F, 0x08}},
+            {"WBINVD",{0x0F, 0x09}},
+            {"WRMSR", {0x0F, 0x30}},
+            {"RDTSC", {0x0F, 0x31}},
+            {"RDMSR", {0x0F, 0x32}},
+            {"CPUID", {0x0F, 0xA2}},
         };
         if (auto it = noOpInstrs.find(mnem); it != noOpInstrs.end()) {
             r.bytes = it->second;

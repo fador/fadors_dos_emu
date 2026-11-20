@@ -509,7 +509,9 @@ Insn generate(State &st) {
 }
 
 struct Emulator {
-  cpu::CPU cpu;
+  // The host is at least a P6, so every generated instruction (CMOVcc
+  // included) exists on the emulated Pentium Pro.
+  cpu::CPU cpu{cpu::CpuModelId::PentiumPro};
   memory::MemoryBus mem;
   hw::IOBus iobus;
   hw::KeyboardController kbd;

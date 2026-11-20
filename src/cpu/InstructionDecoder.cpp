@@ -15,7 +15,7 @@ InstructionDecoder::InstructionDecoder(CPU &cpu, memory::MemoryBus &memory,
                                        hw::IOBus &iobus, hw::BIOS &bios,
                                        hw::DOS &dos)
     : m_cpu(cpu), m_memory(memory), m_iobus(iobus), m_bios(bios), m_dos(dos),
-  m_stepCount(0), m_hasPrefix66(false), m_hasPrefix67(false),
+  m_hasPrefix66(false), m_hasPrefix67(false),
       m_hasRepnz(false), m_hasRepz(false), m_segmentOverride(0xFF),
       m_cachedSegStateVersion(0),
       m_currentEA(0), m_currentOffset(0), m_currentEASegment(DS),
@@ -91,6 +91,7 @@ bool InstructionDecoder::tryFastRepMovs(uint32_t elementSize) {
   }
 
   std::memmove(dstPtr, srcPtr, byteCount);
+  m_cpu.addGuestCycles(iterations * m_cycleTable[512 + 0xA4]);
 
   uint32_t remaining = count - iterations;
   if (m_hasPrefix67) {
@@ -176,6 +177,7 @@ uint32_t InstructionDecoder::getEffectiveAddress16(const ModRM &modrm) {
   m_currentEASegment = seg;
   m_currentEA = m_segBase[seg] + m_currentOffset;
   m_eaResolved = true;
+  m_cpu.addGuestCycles(m_cpu.memOperandCycles());
   return m_currentEA;
 }
 
@@ -225,6 +227,7 @@ uint32_t InstructionDecoder::getEffectiveAddress32(const ModRM &modrm) {
   m_currentEASegment = seg;
   m_currentEA = m_segBase[seg] + m_currentOffset;
   m_eaResolved = true;
+  m_cpu.addGuestCycles(m_cpu.memOperandCycles());
   return m_currentEA;
 }
 
@@ -440,7 +443,6 @@ void InstructionDecoder::step() {
 }
 
 void InstructionDecoder::stepInstruction() {
-  m_stepCount++;
   // The instruction after STI / MOV SS runs; interrupts are allowed again
   // once it has finished (unless it starts a new shadow itself).
   if (m_cpu.interruptShadowActive()) [[unlikely]]
@@ -528,8 +530,11 @@ void InstructionDecoder::stepInstruction() {
   }
 
   if (opcode == 0x0F) {
-    executeOpcode0F(fetch8());
+    const uint8_t opcode2 = fetch8();
+    m_cpu.addGuestCycles(m_cycleTable[256 + opcode2]);
+    executeOpcode0F(opcode2);
   } else {
+    m_cpu.addGuestCycles(m_cycleTable[opcode]);
     // String operations repeat handling
     if (m_hasRepz || m_hasRepnz) {
       // String instructions: A4-A7, AA-AF, 6C-6F (no local table: a stack
@@ -556,6 +561,7 @@ void InstructionDecoder::stepInstruction() {
         }
 
         int batchCount = 0;
+        uint32_t iterations = 0;
         while (true) {
           uint32_t cx =
               m_hasPrefix67 ? m_cpu.getReg32(ECX) : m_cpu.getReg16(CX);
@@ -563,6 +569,7 @@ void InstructionDecoder::stepInstruction() {
             break;
 
           executeOpcode(opcode);
+          ++iterations;
 
           cx--;
           if (m_hasPrefix67)
@@ -591,6 +598,7 @@ void InstructionDecoder::stepInstruction() {
             break;
           }
         }
+        m_cpu.addGuestCycles(iterations * m_cycleTable[512 + opcode]);
         return;
       }
     }
@@ -785,7 +793,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
         uint16_t newFs = m_memory.lread32(ssBaseLocal + esp + 28) & 0xFFFF;
         uint16_t newGs = m_memory.lread32(ssBaseLocal + esp + 32) & 0xFFFF;
 
-        m_cpu.setEFLAGS(newEflags);
+        writeFlags(newEflags, flagsWriteMask(true) | eflags::kVM, true);
         loadSegment(CS, newCs);
         m_cpu.setEIP(newEip);
         m_cpu.setReg32(ESP, newEsp);
@@ -795,7 +803,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
         loadSegment(FS, newFs);
         loadSegment(GS, newGs);
       } else {
-        m_cpu.setEFLAGS(newEflags);
+        writeFlags(newEflags, flagsWriteMask(true), true);
         loadSegment(CS, newCs);
         m_cpu.setEIP(newEip);
         if (newCpl > oldCpl && (m_cpu.getCR(0) & 1)) {
@@ -824,8 +832,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
               " newFlags=0x", newFlags, " newCS=0x", newCs,
               " newIP=0x", newIp);
 
-      uint32_t merged = (m_cpu.getEFLAGS() & 0xFFFF0000) | newFlags;
-      m_cpu.setEFLAGS(merged);
+      writeFlags(newFlags, flagsWriteMask(true), false);
       loadSegment(CS, newCs);
       m_cpu.setEIP(newIp);
 
@@ -1177,17 +1184,23 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
 
   // PUSHF / POPF
   case 0x9C:
+    // V86 with IOPL < 3: #GP to the monitor.  PUSHFD stores VM and RF as 0.
+    if ((m_cpu.getEFLAGS() & eflags::kVM) && !checkIOPL())
+      break;
     if (m_hasPrefix66)
-      m_cpu.push32(m_cpu.getEFLAGS());
+      m_cpu.push32(m_cpu.getEFLAGS() & ~(eflags::kVM | eflags::kRF));
     else
       m_cpu.push16(static_cast<uint16_t>(m_cpu.getEFLAGS()));
     break;
-  case 0x9D:
-    if (m_hasPrefix66)
-      m_cpu.setEFLAGS(m_cpu.pop32());
-    else
-      m_cpu.setEFLAGS((m_cpu.getEFLAGS() & 0xFFFF0000) | m_cpu.pop16());
+  case 0x9D: {
+    if ((m_cpu.getEFLAGS() & eflags::kVM) && !checkIOPL())
+      break;
+    const uint32_t value = m_hasPrefix66 ? m_cpu.pop32() : m_cpu.pop16();
+    // Reserved bits, VM and (per model) AC/ID are not loaded; RF is cleared.
+    writeFlags(value & ~eflags::kRF, flagsWriteMask(false) | eflags::kRF,
+               m_hasPrefix66);
     break;
+  }
 
   // SAHF / LAHF
   case 0x9E: { // SAHF — Store AH into Flags (SF,ZF,AF,PF,CF)
@@ -1785,6 +1798,9 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
   case 0xF6:
   case 0xF7: {
     ModRM modrm = decodeModRM(fetch8());
+    if (modrm.reg >= 4) // MUL/IMUL/DIV/IDIV cost more than TEST/NOT/NEG
+      m_cpu.addGuestCycles(modrm.reg >= 6 ? m_cpu.divExtraCycles()
+                                          : m_cpu.mulExtraCycles());
     if (opcode == 0xF6) {
       uint8_t rmVal = readModRM8(modrm);
       switch (modrm.reg) {
@@ -2053,6 +2069,18 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
   case 0xDD:
   case 0xDE:
   case 0xDF:
+    // FCMOVcc (DA/DB C0-DF) and F(U)COMI(P) (DB/DF E8-F7) are P6
+    // instructions.
+    if ((opcode == 0xDA || opcode == 0xDB || opcode == 0xDF) &&
+        !m_cpu.hasFeature(feature::kCmov)) {
+      const uint8_t modrm = m_memory.lread8(m_segBase[CS] + m_cpu.getEIP());
+      const bool fcmov = opcode != 0xDF && modrm >= 0xC0 && modrm <= 0xDF;
+      const bool fcomi = opcode != 0xDA && modrm >= 0xE8 && modrm <= 0xF7;
+      if (fcmov || fcomi) {
+        raiseException(6);
+        break;
+      }
+    }
     executeFPUOpcode(opcode);
     break;
   case 0xA4: { // MOVSB
@@ -2473,13 +2501,17 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
   case 0xF9:
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() | 0x0001);
     break; // STC
-  case 0xFA:
+  case 0xFA: // CLI
+    if (m_cpu.nativeProtection() && !checkIOPL())
+      break;
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~0x0200);
-    break; // CLI
-  case 0xFB:
+    break;
+  case 0xFB: // STI
+    if (m_cpu.nativeProtection() && !checkIOPL())
+      break;
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() | 0x0200);
     m_cpu.beginInterruptShadow();
-    break; // STI
+    break;
   case 0xFC:
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~0x0400);
     break; // CLD
@@ -3041,11 +3073,10 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
       writeModRM16(modrm, m_cpu.getCR(0) & 0xFFFF);
       break;
     case 6: { // LMSW
-      uint16_t cur_msw = m_cpu.getCR(0) & 0xFFFF;
-      uint16_t new_msw = readModRM16(modrm);
-      // PE bit (bit 0) cannot be cleared by LMSW once set
-      new_msw = (new_msw & ~1) | (cur_msw & 1) | (new_msw & 1);
-      uint32_t newVal = (m_cpu.getCR(0) & 0xFFFF0000) | new_msw;
+      // LMSW loads PE, MP, EM and TS only, and cannot clear PE.
+      const uint32_t cur = m_cpu.getCR(0);
+      const uint16_t new_msw = readModRM16(modrm);
+      const uint32_t newVal = (cur & ~0xFu) | (new_msw & 0xFu) | (cur & 1u);
       LOG_DEBUG("[CPU] LMSW = ", std::hex, new_msw);
       const bool enteringPM = (newVal & 1) && !(m_cpu.getCR(0) & 1);
       m_cpu.setCR(0, newVal);
@@ -3054,6 +3085,12 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
       break;
     }
     case 7: { // INVLPG m
+      if (!requireFeature(feature::k486))
+        break;
+      if (modrm.mod == 3) {
+        raiseException(6);
+        break;
+      }
       uint32_t addr = m_hasPrefix67 ? getEffectiveAddress32(modrm)
                                     : getEffectiveAddress16(modrm);
       m_memory.invalidatePage(addr);
@@ -3157,9 +3194,9 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
     }
     break;
   }
-  case 0x08: // INVD  – Invalidate Cache (no-op)
-    break;
-  case 0x09: // WBINVD – Write Back & Invalidate Cache (no-op)
+  case 0x08: // INVD   – invalidate caches (no-op)
+  case 0x09: // WBINVD – write back and invalidate caches (no-op)
+    requireFeature(feature::k486);
     break;
   case 0x0B: // UD2  – intentional #UD
     m_cpu.setEIP(m_instrStartEIP); // #UD reports the faulting instruction
@@ -3169,21 +3206,20 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
     LOG_CPU("CLTS - stubbed (no task switching)");
     break;
   }
-  case 0x10: { // MOVUPS / MOVSS xmm, xmm/m  – SSE stub, just consume ModRM
+  case 0x20: { // MOV rd, CRn
     ModRM modrm = decodeModRM(fetch8());
-    if (modrm.mod != 3) {
-      if (m_hasPrefix67)
-        getEffectiveAddress32(modrm);
-      else
-        getEffectiveAddress16(modrm);
-    }
-    break;
-  }
-    case 0x20: { // MOV rd, CRn
-      ModRM modrm = decodeModRM(fetch8());
-      m_cpu.setReg32(modrm.rm, m_cpu.getCR(modrm.reg));
+    const uint8_t cr = modrm.reg;
+    if (cr == 1 || cr > 4 || (cr == 4 && !m_cpu.hasFeature(feature::kCr4))) {
+      raiseException(6);
       break;
     }
+    if (m_cpu.nativeProtection() && currentCPL() > 0) {
+      raiseException(13, 0);
+      break;
+    }
+    m_cpu.setReg32(modrm.rm, m_cpu.getCR(cr));
+    break;
+  }
   case 0x21: { // MOV rd, DRn
     ModRM modrm = decodeModRM(fetch8());
     m_cpu.setReg32(modrm.rm, m_cpu.getDR(modrm.reg));
@@ -3193,6 +3229,30 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
     ModRM modrm = decodeModRM(fetch8());
     uint32_t val = m_cpu.getReg32(modrm.rm);
     LOG_DEBUG("[CPU] MOV CR", (int)modrm.reg, " = ", std::hex, val);
+    const CpuModel &model = m_cpu.model();
+    if (modrm.reg == 1 || modrm.reg > 4 ||
+        (modrm.reg == 4 && !m_cpu.hasFeature(feature::kCr4))) {
+      raiseException(6);
+      break;
+    }
+    if (m_cpu.nativeProtection() && currentCPL() > 0) {
+      raiseException(13, 0);
+      break;
+    }
+    if (modrm.reg == 0) {
+      // Bits the model lacks are ignored; ET is hardwired on the 486+.
+      // PG without PE and NW without CD are invalid combinations.
+      constexpr uint32_t kPE = 1u, kPG = 0x80000000u, kNW = 0x20000000u,
+                         kCD = 0x40000000u;
+      val = (val & model.cr0Mask) | model.cr0Fixed;
+      if (((val & kPG) && !(val & kPE)) || ((val & kNW) && !(val & kCD))) {
+        raiseException(13, 0);
+        break;
+      }
+    } else if (modrm.reg == 4 && (val & ~model.cr4Mask)) {
+      raiseException(13, 0); // reserved or unemulated (VME/PVI) CR4 bit
+      break;
+    }
     const bool enteringPM = modrm.reg == 0 && (val & 1) && !(m_cpu.getCR(0) & 1);
     m_cpu.setCR(modrm.reg, val);
     if (enteringPM)
@@ -3204,12 +3264,48 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
     m_cpu.setDR(modrm.reg, m_cpu.getReg32(modrm.rm));
     break;
   }
-  case 0x35: // SYSEXIT  – no-op in real mode
+  case 0x30: { // WRMSR
+    if (!requireFeature(feature::kMsr))
+      break;
+    if (m_cpu.nativeProtection() && currentCPL() > 0) {
+      raiseException(13, 0);
+      break;
+    }
+    const uint64_t value =
+        (static_cast<uint64_t>(m_cpu.getReg32(EDX)) << 32) |
+        m_cpu.getReg32(EAX);
+    if (!writeMSR(m_cpu.getReg32(ECX), value))
+      raiseException(13, 0);
     break;
-  case 0x77: // EMMS – Empty MMX state (no-op)
+  }
+  case 0x31: { // RDTSC
+    if (!requireFeature(feature::kTsc))
+      break;
+    if ((m_cpu.getCR(4) & 0x4u) && currentCPL() > 0) { // CR4.TSD
+      raiseException(13, 0);
+      break;
+    }
+    const uint64_t tsc = m_cpu.readTSC();
+    m_cpu.setReg32(EAX, static_cast<uint32_t>(tsc));
+    m_cpu.setReg32(EDX, static_cast<uint32_t>(tsc >> 32));
     break;
-  case 0xEE: // FEMMS – AMD 3DNow! fast EMMS (no-op, no ModRM)
+  }
+  case 0x32: { // RDMSR
+    if (!requireFeature(feature::kMsr))
+      break;
+    if (m_cpu.nativeProtection() && currentCPL() > 0) {
+      raiseException(13, 0);
+      break;
+    }
+    uint64_t value = 0;
+    if (!readMSR(m_cpu.getReg32(ECX), value)) {
+      raiseException(13, 0);
+      break;
+    }
+    m_cpu.setReg32(EAX, static_cast<uint32_t>(value));
+    m_cpu.setReg32(EDX, static_cast<uint32_t>(value >> 32));
     break;
+  }
   case 0x80:
   case 0x81:
   case 0x82:
@@ -3252,6 +3348,8 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
   case 0x4D:
   case 0x4E:
   case 0x4F: { // CMOVcc r16/32, r/m16/32
+    if (!requireFeature(feature::kCmov))
+      break;
     ModRM modrm = decodeModRM(fetch8());
     if (checkCondition(opcode)) {
       if (m_hasPrefix66)
@@ -3525,6 +3623,8 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
   }
   case 0xC0:   // XADD r/m8, r8
   case 0xC1: { // XADD r/m16/32, r16/32
+    if (!requireFeature(feature::k486))
+      break;
     ModRM modrm = decodeModRM(fetch8());
     const int size = (opcode == 0xC0) ? 8 : (m_hasPrefix66 ? 32 : 16);
     uint32_t dest = size == 8    ? readModRM8(modrm)
@@ -3548,6 +3648,8 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
   }
   case 0xB0:   // CMPXCHG r/m8, r8
   case 0xB1: { // CMPXCHG r/m16/32, r16/32
+    if (!requireFeature(feature::k486))
+      break;
     ModRM modrm = decodeModRM(fetch8());
     const int size = (opcode == 0xB0) ? 8 : (m_hasPrefix66 ? 32 : 16);
     uint32_t dest = size == 8    ? readModRM8(modrm)
@@ -3577,6 +3679,8 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
     break;
   }
   case 0xC7: { // Group 9: CMPXCHG8B m64 (/1)
+    if (!requireFeature(feature::kCx8))
+      break;
     ModRM modrm = decodeModRM(fetch8());
     if (modrm.reg != 1 || modrm.mod == 3) {
       m_cpu.setEIP(m_instrStartEIP); // #UD reports the faulting instruction
@@ -3627,6 +3731,8 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
   case 0xCD:
   case 0xCE:
   case 0xCF: { // BSWAP r32
+    if (!requireFeature(feature::k486))
+      break;
     const uint8_t reg = opcode & 0x07;
     const uint32_t value = m_cpu.getReg32(reg);
     const uint32_t swapped = ((value & 0x000000FFu) << 24) |
@@ -4013,31 +4119,10 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
     break;
   }
 
-  case 0xA2: { // CPUID
-    uint32_t leaf = m_cpu.getReg32(EAX);
-    switch (leaf) {
-    case 0: // Highest function + vendor ID
-      m_cpu.setReg32(EAX, 1);          // Max supported leaf
-      m_cpu.setReg32(EBX, 0x756E6547); // "Genu"
-      m_cpu.setReg32(EDX, 0x49656E69); // "ineI"
-      m_cpu.setReg32(ECX, 0x6C65746E); // "ntel"
-      break;
-    case 1: // Processor info + features
-      // Family 4 (486), Model 0, Stepping 0
-      m_cpu.setReg32(EAX, 0x00000400);
-      m_cpu.setReg32(EBX, 0);
-      m_cpu.setReg32(ECX, 0);
-      m_cpu.setReg32(EDX, 0x00000001); // FPU on-chip
-      break;
-    default:
-      m_cpu.setReg32(EAX, 0);
-      m_cpu.setReg32(EBX, 0);
-      m_cpu.setReg32(ECX, 0);
-      m_cpu.setReg32(EDX, 0);
-      break;
-    }
+  case 0xA2: // CPUID
+    if (requireFeature(feature::kCpuid))
+      executeCPUID();
     break;
-  }
 
   default:
     LOG_WARN("0x0F 0x", std::hex, static_cast<int>(opcode),
@@ -4812,6 +4897,10 @@ void InstructionDecoder::syncSegments() {
     m_segBase[i] = m_cpu.getSegBase(static_cast<uint8_t>(i));
   }
   m_cachedSegStateVersion = m_cpu.getSegmentStateVersion();
+  if (m_cycleTableModel != &m_cpu.model()) [[unlikely]] {
+    m_cycleTableModel = &m_cpu.model();
+    std::memcpy(m_cycleTable.data(), m_cpu.cycleTable(), m_cycleTable.size());
+  }
 }
 
 InstructionDecoder::Descriptor

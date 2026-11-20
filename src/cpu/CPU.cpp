@@ -19,10 +19,34 @@ bool decodeSegmentIs32Bit(uint32_t high) {
 
 } // namespace
 
-CPU::CPU() { reset(); }
+CPU::CPU(CpuModelId model) {
+  setModel(model);
+  reset();
+}
+
+void CPU::setModel(CpuModelId id) {
+  m_model = &cpuModel(id);
+  m_features = m_model->features;
+  buildCycleTable(*m_model, m_cycleTable);
+  const auto cost = [&](CycleClass c) {
+    return static_cast<uint32_t>(m_model->cycles[static_cast<size_t>(c)]);
+  };
+  m_memOperandCycles = m_model->memOperandCycles;
+  // MUL/DIV share opcodes F6/F7 with TEST/NOT/NEG, which the table charges
+  // as ALU operations; the handlers add the difference.
+  m_mulExtraCycles = cost(CycleClass::Mul) - cost(CycleClass::Alu);
+  m_divExtraCycles = cost(CycleClass::Div) - cost(CycleClass::Alu);
+  ++m_segmentStateVersion; // decoders re-read the cycle table
+  m_eflags = (m_eflags & m_model->eflagsMask) | 0x2u;
+  setCR(0, (m_cr[0] & (m_model->cr0Mask | m_model->cr0Fixed)) |
+               m_model->cr0Fixed);
+  setCR(4, m_cr[4] & m_model->cr4Mask);
+}
 
 void CPU::reset() {
   m_regs.fill(0);
+  // EDX holds the component/revision signature after reset.
+  m_regs[EDX] = m_model->signature;
   // Real mode startup values
   m_segRegs.fill(0);
   m_segRegs[CS] = 0xF000;
@@ -36,7 +60,10 @@ void CPU::reset() {
   m_eflags = 0x00000002;
 
   m_cr.fill(0);
+  // ET: a 387-compatible FPU is present (hardwired on the 486 and later).
+  m_cr[0] = 0x00000010u;
   m_nativeProtection = false;
+  m_tscOffset = 0 - m_guestCycles; // the time-stamp counter restarts at 0
   if (m_memory)
     m_memory->setPaging(false, 0, false);
   m_dr.fill(0);
@@ -46,7 +73,7 @@ void CPU::reset() {
   for (int i = 0; i < 6; i++) {
     m_segBase[i] = static_cast<uint32_t>(m_segRegs[i]) << 4;
   }
-  m_segmentStateVersion = 1;
+  ++m_segmentStateVersion;
   m_dirtySegmentMask = 0;
   m_interruptShadow = 0;
 
