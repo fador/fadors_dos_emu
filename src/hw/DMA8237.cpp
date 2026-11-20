@@ -65,14 +65,18 @@ void DMA8237::write8(uint16_t port, uint8_t value) {
     }
     m_flipflop = !m_flipflop;
   } else if (port == 0x0A) { // Single Mask
-    m_channels[value & 0x03].mask = (value & 0x04) != 0;
+    setMask(value & 0x03, (value & 0x04) != 0);
   } else if (port == 0x0B) { // Mode
     m_channels[value & 0x03].mode = value;
   } else if (port == 0x0C) { // Clear Flip-Flop
     m_flipflop = false;
   } else if (port == 0x0D) { // Master Clear
     m_flipflop = false; m_status = 0;
-    for (int i=0; i<4; i++) m_channels[i].mask = true;
+    for (int i=0; i<4; i++) setMask(i, true);
+  } else if (port == 0x0E) { // Clear Mask Register (unmask all)
+    for (int i=0; i<4; i++) setMask(i, false);
+  } else if (port == 0x0F) { // Write All Mask Register Bits
+    for (int i=0; i<4; i++) setMask(i, (value >> i) & 1);
   }
   // Master (Ch 4-7)
   else if (port >= 0xC0 && port <= 0xCE && (port % 2 == 0)) {
@@ -87,14 +91,18 @@ void DMA8237::write8(uint16_t port, uint8_t value) {
     }
     m_flipflopMaster = !m_flipflopMaster;
   } else if (port == 0xD4) { // Single Mask Master
-    m_channels[4 + (value & 0x03)].mask = (value & 0x04) != 0;
+    setMask(4 + (value & 0x03), (value & 0x04) != 0);
   } else if (port == 0xD6) { // Mode Master
     m_channels[4 + (value & 0x03)].mode = value;
   } else if (port == 0xD8) { // Clear Flip-Flop Master
     m_flipflopMaster = false;
   } else if (port == 0xDA) { // Master Clear Master
     m_flipflopMaster = false; m_statusMaster = 0;
-    for (int i=4; i<8; i++) m_channels[i].mask = true;
+    for (int i=4; i<8; i++) setMask(i, true);
+  } else if (port == 0xDC) { // Clear Mask Register Master
+    for (int i=4; i<8; i++) setMask(i, false);
+  } else if (port == 0xDE) { // Write All Mask Register Bits Master
+    for (int i=4; i<8; i++) setMask(i, (value >> (i - 4)) & 1);
   }
   // Page registers
   else if (port >= 0x81 && port <= 0x8F) {
@@ -153,6 +161,26 @@ bool DMA8237::acknowledgeTransfer(int channel, uint16_t bytes) {
     return true;
   }
   return false;
+}
+
+void DMA8237::setMask(int channel, bool masked) {
+  if (m_channels[channel].mask == masked) {
+    return;
+  }
+  m_channels[channel].mask = masked;
+  for (const auto &[id, listener] : m_maskListeners) {
+    listener(channel, masked);
+  }
+}
+
+int DMA8237::addMaskListener(MaskListener listener) {
+  const int id = m_nextListenerId++;
+  m_maskListeners.emplace_back(id, std::move(listener));
+  return id;
+}
+
+void DMA8237::removeMaskListener(int id) {
+  std::erase_if(m_maskListeners, [id](const auto &e) { return e.first == id; });
 }
 
 bool DMA8237::isAutoInit(int channel) {

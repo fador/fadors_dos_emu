@@ -57,7 +57,7 @@ public:
 
   GravisUltrasound(memory::MemoryBus &memory, DMA8237 &dma,
                    const GusConfig &config = {}, float outputRate = 44100.0f);
-  ~GravisUltrasound() override = default;
+  ~GravisUltrasound() override;
 
   uint8_t read8(uint16_t port) override;
   void write8(uint16_t port, uint8_t value) override;
@@ -134,6 +134,9 @@ private:
   void writeLatch(uint8_t value);
   void writeTimerControl(uint8_t value);
   void writeDmaControl(uint8_t value);
+  void dmaMaskChanged(int channel, bool masked);
+  void startDma();
+  bool dma16() const { return (m_dmaCtrl & 0x04) && m_dmaChannel >= 4; }
   uint8_t dramPeek(uint32_t address) const;
   void dramPoke(uint32_t address, uint8_t value);
   void resetGf1();
@@ -185,6 +188,7 @@ private:
   uint8_t m_regCtrl = 0;     // 2XF
   uint8_t m_adlibIndex = 0;  // 2X8 (read back at 2XA)
   uint8_t m_irqLatch = 0, m_dmaLatch = 0;
+  bool m_latchArmed = false; // 2XB is only written right after 2X0
   int m_irqLine;
   int m_dmaChannel;
   uint8_t m_voiceSel = 0;    // 3X2
@@ -195,7 +199,8 @@ private:
   // GF1 global registers
   uint8_t m_reset = 0;       // 4Ch
   uint8_t m_dmaCtrl = 0;     // 41h as written (bit 6 = 16-bit data)
-  uint16_t m_dmaAddr = 0;    // 42h
+  uint16_t m_dmaAddr = 0;    // 42h (advances with the transfer)
+  bool m_dmaTcPending = false; // 41h read bit 6
   uint8_t m_timerCtrl = 0;   // 45h
   uint8_t m_sampleFreq = 0;  // 48h
   uint8_t m_sampleCtrl = 0;  // 49h
@@ -208,13 +213,18 @@ private:
   uint8_t m_lastIrqVoice = 0;
   std::array<Timer, 2> m_timers{};
 
-  // DMA engine
-  enum class DmaState { Idle, WaitUnmask, Running };
+  // DMA engine.  Waiting: 41h bit 0 is set but the 8237 channel is masked
+  // (or reached terminal count); the transfer (re)starts when the channel
+  // is unmasked (DMA8237 mask listener) or 41h is written again.
+  enum class DmaState { Idle, Waiting, Running };
   DmaState m_dmaState = DmaState::Idle;
   uint64_t m_dmaStartNs = 0;
   uint64_t m_dmaUnits = 0;   // transfers since m_dmaStartNs
   uint32_t m_dmaOffset = 0;  // bytes transferred since the start
   uint32_t m_dmaBase = 0;    // DRAM byte address of the transfer
+  uint32_t m_dmaPos = 0;     // DRAM byte address of the next transfer
+  bool m_dmaPosValid = false; // false: derive it from 42h
+  int m_maskListener = 0;
 
   // Time base: GF1 tick t ends at m_epochNs + (t - m_epochTick) periods.
   uint64_t m_epochNs = 0;

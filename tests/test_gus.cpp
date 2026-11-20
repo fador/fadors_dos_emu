@@ -180,7 +180,13 @@ TEST_CASE("GUS: IRQ/DMA latches and register control", "[gus]") {
   e.out(0x00B, 0x00);
   e.out(0x00F, 0x00);
   REQUIRE(e.gus->irqLine() == 5);
+  // 2XB is locked unless the previous write went to 2X0.
+  e.out(0x000, 0x49);
+  e.out(0x102, 0x00);
+  e.out(0x00B, 0x03);
+  REQUIRE(e.gus->irqLine() == 5);
   // IRQ 2 is delivered as IRQ 9.
+  e.out(0x000, 0x49);
   e.out(0x00B, 0x01);
   REQUIRE(e.gus->irqLine() == 2);
   e.out(0x000, 0x09);
@@ -283,12 +289,34 @@ TEST_CASE("GUS: timers 1 and 2 raise IRQs at 80/320 us steps", "[gus]") {
   e.advance(800'000);
   REQUIRE(e.irqs.size() == 3);
   REQUIRE((e.in(0x008) & 0x40) == 0x00);
-  // No IRQs with the GF1 master IRQ enable (4Ch bit 2) off.
-  e.reg8(0x4C, 0x03);
+  // No IRQs with the latches disabled (2X0 bit 3).
+  e.out(0x000, 0x00);
+  e.reg8(0x45, 0x00);
   e.reg8(0x45, 0x04);
-  e.out(0x009, 0x01);
   e.advance(2'000'000);
   REQUIRE(e.irqs.size() == 3);
+  REQUIRE((e.in(0x006) & 0x04) == 0x04);
+  e.out(0x000, 0x08); // enabling them raises the pending IRQ
+  REQUIRE(e.irqs.size() == 4);
+}
+
+TEST_CASE("GUS: voice IRQs need 4Ch bit 2, timer IRQs do not", "[gus]") {
+  GusEnv e;
+  e.reg8(0x4C, 0x00);
+  e.reg8(0x4C, 0x03);
+  e.startVoice(0, 0, 0x10, 0x20);
+  e.advance(e.ticksNs(20));
+  REQUIRE((e.in(0x006) & 0x20) == 0x20);
+  REQUIRE(e.irqs.empty());
+  e.reg8(0x46, 0xFF);
+  e.reg8(0x45, 0x04);
+  e.out(0x008, 0x04);
+  e.out(0x009, 0x01);
+  e.advance(80'000);
+  REQUIRE(e.irqs.size() == 1);
+  e.reg8(0x45, 0x00);
+  e.reg8(0x4C, 0x07); // the wavetable IRQ is still pending
+  REQUIRE(e.irqs.size() == 2);
 }
 
 TEST_CASE("GUS: looped 8-bit voice repeats with the loop length", "[gus]") {
@@ -303,7 +331,8 @@ TEST_CASE("GUS: looped 8-bit voice repeats with the loop length", "[gus]") {
   e.in(0x006);
   const size_t n = cap.size() / 2;
   REQUIRE(n >= 199);
-  const float g = GravisUltrasound::volumeGain(4095) * 0.5f / 32768.0f;
+  const float g = GravisUltrasound::volumeGain(4095) * 0.5f / 32768.0f *
+                  static_cast<float>(std::cos(3.14159265358979 / 4));
   for (size_t t = 0; t < 16; ++t) {
     const float expected = static_cast<float>((t * 7) * 256) * g;
     REQUIRE(std::fabs(cap[2 * t] - expected) < 1e-6f);
@@ -383,7 +412,8 @@ TEST_CASE("GUS: 16-bit voices use the bank address translation", "[gus]") {
   e.advance(e.ticksNs(12));
   e.in(0x006);
   REQUIRE(cap.size() / 2 >= 8);
-  const float g = GravisUltrasound::volumeGain(4095) * 0.5f / 32768.0f;
+  const float g = GravisUltrasound::volumeGain(4095) * 0.5f / 32768.0f *
+                  static_cast<float>(std::cos(3.14159265358979 / 4));
   for (size_t t = 0; t < 8; ++t)
     REQUIRE(std::fabs(cap[2 * t] - values[t % 4] * g) < 1e-6f);
 }
@@ -550,9 +580,10 @@ TEST_CASE("GUS: 8-bit DMA upload with invert MSB and TC IRQ", "[gus]") {
   for (int i = 0; i < 6; ++i)
     REQUIRE(e.peek(0x10000 + i) == static_cast<uint8_t>(data[i] ^ 0x80));
   REQUIRE((e.in(0x006) & 0x80) == 0x80);
-  REQUIRE(e.rreg8(0x41) == (0x40 | 0x20 | 0x80)); // TC pending, go cleared
+  REQUIRE(e.rreg8(0x41) == (0x40 | 0x20 | 0x80 | 0x01)); // TC pending
   REQUIRE((e.in(0x006) & 0x80) == 0x00);
-  REQUIRE(e.rreg8(0x41) == (0x20 | 0x80));
+  REQUIRE(e.rreg8(0x41) == (0x20 | 0x80 | 0x01));
+  REQUIRE(e.rreg16(0x42) == 0x1000); // 42h advanced by 6 bytes: 10006h >> 4
   REQUIRE(e.dma.isMasked(3)); // single-cycle 8237 masks itself at TC
 
   // Rate divisor 4: four times slower.
@@ -580,7 +611,17 @@ TEST_CASE("GUS: 16-bit data DMA inverts only the high bytes", "[gus]") {
   REQUIRE(e.peek(0x101) == 0x92);
   REQUIRE(e.peek(0x102) == 0x78);
   REQUIRE(e.peek(0x103) == 0xD6);
-  REQUIRE(e.irqs.empty()); // TC IRQ not enabled
+  REQUIRE(e.irqs.empty()); // TC IRQ not enabled...
+  REQUIRE((e.in(0x006) & 0x80) == 0x00);
+  REQUIRE((e.rreg8(0x41) & 0x40) == 0x40); // ...but the TC flag is set
+  REQUIRE(e.rreg16(0x42) == 0x0010);
+  // Go stays set: reprogramming and unmasking the 8237 continues at the
+  // DRAM address where the last transfer ended (104h).
+  programDma(e.dma, 3, 0x24000, 4);
+  unmaskDma(e.dma, 3);
+  e.advance(100'000);
+  REQUIRE(e.peek(0x104) == 0x34);
+  REQUIRE(e.peek(0x107) == 0xD6);
 
   // 16-bit channel 5: 42h is translated (bits 15-14 = 256K bank).
   GusConfig c;
@@ -637,7 +678,8 @@ TEST_CASE("GUS: resampled output has the voice frequency and level", "[gus]") {
   REQUIRE(std::fabs(crossings / seconds - freq) < 3.0);
   const double rms = std::sqrt(sumSq / (out.size() / 2 - 4410));
   const double expected = 127.0 * 256.0 * 0.5 / 32768.0 *
-                          GravisUltrasound::volumeGain(4095) / std::sqrt(2.0);
+                          GravisUltrasound::volumeGain(4095) / std::sqrt(2.0) *
+                          std::cos(3.14159265358979 / 4); // centre pan
   REQUIRE(std::fabs(rms / expected - 1.0) < 0.03);
 
   // Pan 0: left only.  DAC disabled (4Ch bit 1): silence.

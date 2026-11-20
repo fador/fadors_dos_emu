@@ -34,7 +34,7 @@ constexpr std::array<int, 8> kLatchDma{0, 1, 3, 5, 6, 7, 0, 0};
 
 constexpr uint32_t kChunk = 512;          // GF1 ticks rendered at a time
 constexpr size_t kMaxFifoFrames = 65536;  // > 1 s at any GF1 rate
-// One full-scale voice at maximum volume, centred: -6 dBFS per channel.
+// One full-scale voice at maximum volume panned to one side: -6 dBFS.
 constexpr float kOutputGain = 0.5f / 32768.0f;
 constexpr uint64_t kDmaClockHz = 650'000; // DMA request rate, divisor 1
 
@@ -49,10 +49,25 @@ double besselI0(double x) {
   return sum;
 }
 
-// Pan: the near channel keeps the full level, the far one falls off
-// linearly in 7 steps (0 = full left, 7/8 = centre, 15 = full right).
-float panLeft(uint8_t pan) { return pan <= 8 ? 1.0f : (15 - pan) / 7.0f; }
-float panRight(uint8_t pan) { return pan >= 7 ? 1.0f : pan / 7.0f; }
+// Pan: 16 positions at constant power, 0 = full left, 7 = centre (-3 dB
+// per side), 15 = full right.
+struct PanGains {
+  std::array<float, 16> left{}, right{};
+};
+const PanGains &panGains() {
+  static const PanGains gains = [] {
+    PanGains g;
+    for (int p = 0; p < 16; ++p) {
+      const double norm = (p - 7.0) / (p < 7 ? 7.0 : 8.0);
+      const double angle = (norm + 1.0) * std::numbers::pi / 4.0;
+      g.left[static_cast<size_t>(p)] = static_cast<float>(std::cos(angle));
+      g.right[static_cast<size_t>(p)] = static_cast<float>(std::sin(angle));
+    }
+    g.left[15] = 0.0f; // cos(pi/2) is not exactly 0
+    return g;
+  }();
+  return gains;
+}
 
 const std::array<float, 4096> &volumeTable() {
   static const std::array<float, 4096> table = [] {
@@ -165,11 +180,15 @@ GravisUltrasound::GravisUltrasound(memory::MemoryBus &memory, DMA8237 &dma,
       m_dmaLatch = static_cast<uint8_t>(i);
   m_timers[0].unitNs = 80'000;
   m_timers[1].unitNs = 320'000;
+  m_maskListener = m_dma.addMaskListener(
+      [this](int channel, bool masked) { dmaMaskChanged(channel, masked); });
   resetGf1();
   LOG_INFO("Gravis Ultrasound at ", std::hex, m_config.basePort, std::dec,
            "h IRQ=", m_config.irq, " DMA=", m_config.dma, " DRAM=",
            m_dramSize / 1024, " KB");
 }
+
+GravisUltrasound::~GravisUltrasound() { m_dma.removeMaskListener(m_maskListener); }
 
 void GravisUltrasound::setTimeSource(std::function<uint64_t()> nowNs) {
   m_nowNs = std::move(nowNs);
@@ -188,6 +207,7 @@ void GravisUltrasound::resetGf1() {
   m_queueLen = 0;
   m_irqFlags = 0;
   m_dmaCtrl = 0;
+  m_dmaTcPending = false;
   m_dmaState = DmaState::Idle;
   m_timerCtrl = 0;
   m_sampleCtrl = 0;
@@ -238,7 +258,7 @@ void GravisUltrasound::sync(uint64_t nowNs) {
   const uint64_t due = ticksDue(nowNs);
   if (due > m_ticksDone)
     runTicks(due - m_ticksDone);
-  if (m_dmaState != DmaState::Idle)
+  if (m_dmaState == DmaState::Running)
     runDma(nowNs);
   if (m_timers[0].running || m_timers[1].running)
     runTimers(nowNs);
@@ -270,8 +290,7 @@ void GravisUltrasound::computeNextEvent() {
   if (m_dmaState == DmaState::Running)
     best = std::min(best, dmaCompletionNs());
   m_wakeNs = best;
-  // Waiting for the program to unmask the DMA channel: look every batch.
-  m_nextEventNs = m_dmaState == DmaState::WaitUnmask ? 0 : best;
+  m_nextEventNs = best;
   m_eventsDirty = false;
 }
 
@@ -327,9 +346,14 @@ uint16_t GravisUltrasound::read16(uint16_t port) {
 void GravisUltrasound::write8(uint16_t port, uint8_t value) {
   sync(now());
   const uint16_t off = static_cast<uint16_t>(port - m_config.basePort);
+  // The latches take a write to 2XB only as the I/O write right after
+  // 2X0 (SDK 2.13), so probing other cards cannot change them.
+  const bool latchArmed = m_latchArmed;
+  m_latchArmed = false;
   switch (off) {
   case 0x000:
     m_mixCtrl = value;
+    m_latchArmed = true;
     checkIrq();
     break;
   case 0x008:
@@ -339,7 +363,8 @@ void GravisUltrasound::write8(uint16_t port, uint8_t value) {
     writeTimerControl(value);
     break;
   case 0x00B:
-    writeLatch(value);
+    if (latchArmed)
+      writeLatch(value);
     break;
   case 0x00F:
     m_regCtrl = value;
@@ -377,14 +402,19 @@ void GravisUltrasound::write16(uint16_t port, uint16_t value) {
 void GravisUltrasound::writeLatch(uint8_t value) {
   if (m_regCtrl != 0)
     return; // 2XF selects a rev 3.7+ register: not the latches
+  // Selector 0 ("none") keeps the current line, as the SDK's power-up
+  // sequence writes 0 before the real values.
   if (m_mixCtrl & 0x40) {
     m_irqLatch = value;
-    const int irq = kLatchIrq[value & 7];
-    m_irqLine = irq ? irq : -1;
+    if (const int irq = kLatchIrq[value & 7])
+      m_irqLine = irq;
   } else {
     m_dmaLatch = value;
-    const int ch = kLatchDma[value & 7];
-    m_dmaChannel = ch ? ch : -1;
+    if (const int ch = kLatchDma[value & 7]; ch && ch != m_dmaChannel) {
+      m_dmaChannel = ch;
+      if (m_dmaState == DmaState::Running)
+        m_dmaState = DmaState::Waiting;
+    }
   }
 }
 
@@ -427,9 +457,10 @@ uint16_t GravisUltrasound::readRegister() {
   const uint32_t bit = 1u << (m_voiceSel & 0x1F);
   auto hi = [](uint32_t x) { return static_cast<uint16_t>((x & 0xFF) << 8); };
   switch (m_regSel) {
-  case 0x41: { // DMA control; reading acknowledges the TC IRQ
+  case 0x41: { // DMA control; bit 6 = terminal count, reading clears it
     const uint8_t r = static_cast<uint8_t>((m_dmaCtrl & 0xBF) |
-                                           ((m_irqFlags & kIrqDmaTc) ? 0x40 : 0));
+                                           (m_dmaTcPending ? 0x40 : 0));
+    m_dmaTcPending = false;
     m_irqFlags &= static_cast<uint8_t>(~kIrqDmaTc);
     checkIrq();
     return hi(r);
@@ -499,6 +530,7 @@ void GravisUltrasound::writeRegister(uint16_t value) {
     break;
   case 0x42:
     m_dmaAddr = value;
+    m_dmaPosValid = false;
     break;
   case 0x43:
     m_dramAddr = (m_dramAddr & 0xF0000) | value;
@@ -657,9 +689,11 @@ bool GravisUltrasound::irqPending() const {
 void GravisUltrasound::checkIrq() {
   if (!m_irqCallback || m_irqLine <= 0)
     return;
-  if (!(m_mixCtrl & 0x08) || !(m_reset & 0x04))
-    return; // latches disabled or GF1 IRQs off
-  if (irqPending())
+  if (!(m_mixCtrl & 0x08))
+    return; // latches disabled: the IRQ line is not driven
+  // 4Ch bit 2 enables the voice IRQs; timer and DMA IRQs pass anyway.
+  const uint8_t mask = (m_reset & 0x04) ? 0xEC : 0x8C;
+  if (irqStatus() & mask)
     m_irqCallback(m_irqLine == 2 ? 9 : m_irqLine);
 }
 
@@ -692,21 +726,42 @@ uint32_t GravisUltrasound::dmaRate() const {
 
 void GravisUltrasound::writeDmaControl(uint8_t value) {
   m_dmaCtrl = value;
-  if (!(value & 0x01)) {
+  if (!(value & 0x01))
     m_dmaState = DmaState::Idle;
-  } else if (m_dmaState == DmaState::Idle) {
-    // 42h holds the DRAM address >> 4; for a 16-bit channel the GF1
-    // translates it like a 16-bit voice address (bits 15-14 = bank).
-    const uint32_t a = m_dmaAddr;
-    m_dmaBase = (value & 0x04) ? (((a & 0x1FFF) << 1) | (a & 0xC000)) << 4
-                               : a << 4;
-    m_dmaBase &= 0xFFFFF;
-    m_dmaOffset = 0;
-    m_dmaUnits = 0;
-    m_dmaStartNs = m_lastNs;
-    m_dmaState = DmaState::WaitUnmask;
-    runDma(m_lastNs);
+  else if (m_dmaState != DmaState::Running)
+    startDma();
+  invalidateEvents();
+}
+
+void GravisUltrasound::startDma() {
+  if (m_dmaChannel < 0 || m_dma.isMasked(m_dmaChannel)) {
+    m_dmaState = DmaState::Waiting;
+    return;
   }
+  if (!m_dmaPosValid) {
+    // 42h holds the DRAM address >> 4; for 16-bit transfers on a 16-bit
+    // channel the GF1 translates it like a 16-bit voice address (bits
+    // 15-14 = 256 KB bank, bits 12-0 = word address >> 4).
+    const uint32_t a = m_dmaAddr;
+    m_dmaPos = (dma16() ? (((a & 0x1FFF) << 1) | (a & 0xC000)) : a) << 4;
+    m_dmaPos &= 0xFFFFF;
+    m_dmaPosValid = true;
+  }
+  m_dmaBase = m_dmaPos;
+  m_dmaOffset = 0;
+  m_dmaUnits = 0;
+  m_dmaStartNs = m_lastNs;
+  m_dmaState = DmaState::Running;
+}
+
+void GravisUltrasound::dmaMaskChanged(int channel, bool masked) {
+  if (channel != m_dmaChannel || m_dmaState == DmaState::Idle)
+    return;
+  sync(now()); // transfers up to the change
+  if (masked && m_dmaState == DmaState::Running)
+    m_dmaState = DmaState::Waiting;
+  else if (!masked && m_dmaState == DmaState::Waiting)
+    startDma();
   invalidateEvents();
 }
 
@@ -720,30 +775,24 @@ uint64_t GravisUltrasound::dmaCompletionNs() const {
 void GravisUltrasound::runDma(uint64_t nowNs) {
   const int ch = m_dmaChannel;
   if (ch < 0 || m_dma.isMasked(ch)) {
-    if (m_dmaState == DmaState::Running) {
-      m_dmaState = DmaState::WaitUnmask; // the program paused the channel
-      invalidateEvents();
-    }
+    m_dmaState = DmaState::Waiting;
     return;
-  }
-  if (m_dmaState == DmaState::WaitUnmask) {
-    m_dmaState = DmaState::Running;
-    m_dmaStartNs = nowNs;
-    m_dmaUnits = 0;
-    invalidateEvents();
   }
   const uint64_t due = (nowNs - m_dmaStartNs) * dmaRate() / 1'000'000'000;
   const uint32_t unitBytes = ch >= 4 ? 2 : 1;
   const bool toDram = !(m_dmaCtrl & 0x02);
   const bool invert = (m_dmaCtrl & 0x80) != 0;
   const bool data16 = (m_dmaCtrl & 0x40) != 0;
-  const bool bank16 = (m_dmaCtrl & 0x04) != 0;
-  while (m_dmaUnits < due) {
+  const bool bank16 = dma16();
+  auto dramAt = [&](uint32_t offset) {
+    return bank16 ? (m_dmaBase & 0xC0000) | ((m_dmaBase + offset) & 0x3FFFF)
+                  : (m_dmaBase + offset) & 0xFFFFF;
+  };
+  bool tc = false;
+  while (m_dmaUnits < due && !tc) {
     const uint32_t host = m_dma.getChannelAddress(ch);
     for (uint32_t b = 0; b < unitBytes; ++b) {
-      const uint32_t dram =
-          bank16 ? (m_dmaBase & 0xC0000) | ((m_dmaBase + m_dmaOffset) & 0x3FFFF)
-                 : (m_dmaBase + m_dmaOffset) & 0xFFFFF;
+      const uint32_t dram = dramAt(m_dmaOffset);
       if (toDram) {
         uint8_t byte = m_memory.read8(host + b);
         if (invert && (!data16 || (m_dmaOffset & 1)))
@@ -755,15 +804,22 @@ void GravisUltrasound::runDma(uint64_t nowNs) {
       ++m_dmaOffset;
     }
     ++m_dmaUnits;
-    if (m_dma.acknowledgeTransfer(ch, static_cast<uint16_t>(unitBytes))) {
-      m_dmaState = DmaState::Idle;
-      m_dmaCtrl &= static_cast<uint8_t>(~0x01);
-      invalidateEvents();
-      if (m_dmaCtrl & 0x20) {
-        m_irqFlags |= kIrqDmaTc;
-        checkIrq();
-      }
-      break;
+    tc = m_dma.acknowledgeTransfer(ch, static_cast<uint16_t>(unitBytes));
+  }
+  // 42h follows the transfer, so the next one continues from here.
+  m_dmaPos = dramAt(m_dmaOffset);
+  m_dmaAddr = static_cast<uint16_t>(
+      bank16 ? ((m_dmaPos & 0xC0000) | ((m_dmaPos & 0x3FFFE) >> 1)) >> 4
+             : m_dmaPos >> 4);
+  if (tc) {
+    // The GF1 stops at terminal count; 41h keeps its bits and the next
+    // unmask of the channel (or a 41h write) starts another transfer.
+    m_dmaState = DmaState::Waiting;
+    m_dmaTcPending = true;
+    invalidateEvents();
+    if (m_dmaCtrl & 0x20) {
+      m_irqFlags |= kIrqDmaTc;
+      checkIrq();
     }
   }
 }
@@ -776,8 +832,8 @@ float GravisUltrasound::volumeGain(uint32_t volume12) {
 
 void GravisUltrasound::updateGain(Voice &v) {
   const float g = volumeTable()[static_cast<uint32_t>(v.vol) & 0xFFF] * kOutputGain;
-  v.gainL = g * panLeft(v.pan);
-  v.gainR = g * panRight(v.pan);
+  v.gainL = g * panGains().left[v.pan & 15];
+  v.gainR = g * panGains().right[v.pan & 15];
 }
 
 float GravisUltrasound::sampleAt(const Voice &v) const {
