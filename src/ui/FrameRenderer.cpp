@@ -229,7 +229,7 @@ bool FrameRenderer::renderGraphics(uint8_t mode) {
         for (int x = 0; x < w; ++x) {
           uint32_t off = displayStart * 4 + y * rowBytes + x;
           m_pixels[static_cast<size_t>(y) * w + x] =
-              pal[m_vga.readPlane(off & 3, (off >> 2) & 0xFFFF)];
+              pal[m_vga.readPlane(off & 3, off & 0xFFFC)];
         }
     }
     return true;

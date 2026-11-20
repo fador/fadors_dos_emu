@@ -126,7 +126,7 @@ TEST_CASE("Hardware: VGA Controller", "[HW][VGA]") {
             // Write 0xCC at offset 5
             vga.planeWrite8(0x0005, 0xCC);
             REQUIRE(vga.planeRead8(0x0005) == 0xCC);
-            REQUIRE(vga.readPlane(1, 1) == 0xCC); // plane 1, offset 1
+            REQUIRE(vga.readPlane(1, 4) == 0xCC); // plane 1, offset 4 (A & ~3)
         }
 
         SECTION("Mode-X / unchained mode") {

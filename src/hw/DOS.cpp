@@ -6,6 +6,7 @@
 #include "DPMI.hpp"
 #include "KeyboardController.hpp"
 #include "ProgramLoader.hpp"
+#include "VGAController.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cctype>
@@ -2205,6 +2206,7 @@ void DOS::writeCharToVRAM(uint8_t c) {
 
   m_memory.write8(0x450, col);
   m_memory.write8(0x451, row);
+  syncCursorFromBDA(m_memory);
 }
 
 DOS::MCB DOS::readMCB(uint16_t segment) {
