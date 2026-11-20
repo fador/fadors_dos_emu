@@ -55,7 +55,6 @@ private:
   hw::IOBus &m_iobus;
   hw::BIOS &m_bios;
   hw::DOS &m_dos;
-  uint64_t m_stepCount;
 
   // Prefixes state for current instruction
   uint32_t m_instrStartEIP;
@@ -84,6 +83,11 @@ private:
   uint32_t m_currentOffset; // Holds isolated offset (critical for 0x8D LEA)
   uint8_t m_currentEASegment;
   bool m_eaResolved;
+
+  // Copy of the CPU model's cycle-cost table (see CpuModel.hpp), refreshed
+  // by syncSegments() when CPU::setModel() changes the model.
+  CycleTable m_cycleTable{};
+  const CpuModel *m_cycleTableModel{nullptr};
 
   // Fetches next byte(s) from memory through CS:EIP (inline: hot path)
   uint8_t fetch8() {

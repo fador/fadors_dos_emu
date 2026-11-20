@@ -66,7 +66,7 @@ InstructionDecoder::InstructionDecoder(CPU &cpu, memory::MemoryBus &memory,
                                        hw::IOBus &iobus, hw::BIOS &bios,
                                        hw::DOS &dos)
     : m_cpu(cpu), m_memory(memory), m_iobus(iobus), m_bios(bios), m_dos(dos),
-  m_stepCount(0), m_hasPrefix66(false), m_hasPrefix67(false),
+  m_hasPrefix66(false), m_hasPrefix67(false),
       m_hasRepnz(false), m_hasRepz(false), m_segmentOverride(0xFF),
       m_cachedSegStateVersion(0),
       m_currentEA(0), m_currentOffset(0), m_currentEASegment(DS),
@@ -142,6 +142,7 @@ bool InstructionDecoder::tryFastRepMovs(uint32_t elementSize) {
   }
 
   std::memmove(dstPtr, srcPtr, byteCount);
+  m_cpu.addGuestCycles(iterations * m_cycleTable[512 + 0xA4]);
 
   uint32_t remaining = count - iterations;
   if (m_hasPrefix67) {
@@ -227,6 +228,7 @@ uint32_t InstructionDecoder::getEffectiveAddress16(const ModRM &modrm) {
   m_currentEASegment = seg;
   m_currentEA = m_segBase[seg] + m_currentOffset;
   m_eaResolved = true;
+  m_cpu.addGuestCycles(m_cpu.memOperandCycles());
   return m_currentEA;
 }
 
@@ -276,6 +278,7 @@ uint32_t InstructionDecoder::getEffectiveAddress32(const ModRM &modrm) {
   m_currentEASegment = seg;
   m_currentEA = m_segBase[seg] + m_currentOffset;
   m_eaResolved = true;
+  m_cpu.addGuestCycles(m_cpu.memOperandCycles());
   return m_currentEA;
 }
 
@@ -1443,7 +1446,6 @@ void InstructionDecoder::step() {
 }
 
 void InstructionDecoder::stepInstruction() {
-  m_stepCount++;
   // The instruction after STI / MOV SS runs; interrupts are allowed again
   // once it has finished (unless it starts a new shadow itself).
   if (m_cpu.interruptShadowActive()) [[unlikely]]
@@ -1531,8 +1533,11 @@ void InstructionDecoder::stepInstruction() {
   }
 
   if (opcode == 0x0F) {
-    executeOpcode0F(fetch8());
+    const uint8_t opcode2 = fetch8();
+    m_cpu.addGuestCycles(m_cycleTable[256 + opcode2]);
+    executeOpcode0F(opcode2);
   } else {
+    m_cpu.addGuestCycles(m_cycleTable[opcode]);
     // String operations repeat handling
     if (m_hasRepz || m_hasRepnz) {
       // String instructions: A4-A7, AA-AF, 6C-6F (no local table: a stack
@@ -1559,6 +1564,7 @@ void InstructionDecoder::stepInstruction() {
         }
 
         int batchCount = 0;
+        uint32_t iterations = 0;
         while (true) {
           uint32_t cx =
               m_hasPrefix67 ? m_cpu.getReg32(ECX) : m_cpu.getReg16(CX);
@@ -1566,6 +1572,7 @@ void InstructionDecoder::stepInstruction() {
             break;
 
           executeOpcode(opcode);
+          ++iterations;
 
           cx--;
           if (m_hasPrefix67)
@@ -1594,6 +1601,7 @@ void InstructionDecoder::stepInstruction() {
             break;
           }
         }
+        m_cpu.addGuestCycles(iterations * m_cycleTable[512 + opcode]);
         return;
       }
     }
@@ -2795,6 +2803,9 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
   case 0xF6:
   case 0xF7: {
     ModRM modrm = decodeModRM(fetch8());
+    if (modrm.reg >= 4) // MUL/IMUL/DIV/IDIV cost more than TEST/NOT/NEG
+      m_cpu.addGuestCycles(modrm.reg >= 6 ? m_cpu.divExtraCycles()
+                                          : m_cpu.mulExtraCycles());
     if (opcode == 0xF6) {
       uint8_t rmVal = readModRM8(modrm);
       switch (modrm.reg) {
@@ -5891,6 +5902,10 @@ void InstructionDecoder::syncSegments() {
     m_segBase[i] = m_cpu.getSegBase(static_cast<uint8_t>(i));
   }
   m_cachedSegStateVersion = m_cpu.getSegmentStateVersion();
+  if (m_cycleTableModel != &m_cpu.model()) [[unlikely]] {
+    m_cycleTableModel = &m_cpu.model();
+    std::memcpy(m_cycleTable.data(), m_cpu.cycleTable(), m_cycleTable.size());
+  }
 }
 
 InstructionDecoder::Descriptor
