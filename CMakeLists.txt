@@ -134,6 +134,7 @@ set(TEST_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_dma8237.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cmos_rtc.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_serial.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_parallel.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_timing.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_bios.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_dos.cpp"
