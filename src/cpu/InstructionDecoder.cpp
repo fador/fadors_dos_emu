@@ -162,6 +162,53 @@ bool InstructionDecoder::tryFastRepMovs(uint32_t elementSize) {
   return true;
 }
 
+// REP STOSB/W/D into plain RAM with DF=0: one batch (same size as the
+// element-wise loop, so instruction counts are unchanged) becomes a single
+// pattern fill.  Falls back to the element-wise loop for VGA memory, write
+// tracing, page-crossing ranges with paging on, and offset wrap-around.
+bool InstructionDecoder::tryFastRepStos(uint32_t elementSize) {
+  const uint32_t count =
+      m_hasPrefix67 ? m_cpu.getReg32(ECX) : m_cpu.getReg16(CX);
+  if (count == 0)
+    return true;
+  if ((m_cpu.getEFLAGS() & FLAG_DIRECTION) != 0)
+    return false;
+
+  constexpr uint32_t MAX_REP_BATCH = 4096;
+  const uint32_t iterations = count > MAX_REP_BATCH ? MAX_REP_BATCH : count;
+  const uint32_t dstOff =
+      m_hasPrefix67 ? m_cpu.getReg32(EDI) : m_cpu.getReg16(DI);
+  const uint64_t startSpan =
+      static_cast<uint64_t>(elementSize) * static_cast<uint64_t>(iterations - 1);
+  const uint64_t addressLimit = m_hasPrefix67 ? 0xFFFFFFFFull : 0xFFFFull;
+  if (static_cast<uint64_t>(dstOff) + startSpan > addressLimit)
+    return false;
+
+  uint32_t pattern;
+  if (elementSize == 1)
+    pattern = m_cpu.getReg8(AL) * 0x01010101u;
+  else if (elementSize == 2)
+    pattern = m_cpu.getReg16(AX) * 0x00010001u;
+  else
+    pattern = m_cpu.getReg32(EAX);
+
+  const uint32_t byteCount = iterations * elementSize;
+  if (!m_memory.lfillPattern(m_segBase[ES] + dstOff, byteCount, pattern))
+    return false;
+
+  const uint32_t remaining = count - iterations;
+  if (m_hasPrefix67) {
+    m_cpu.setReg32(ECX, remaining);
+    m_cpu.setReg32(EDI, dstOff + byteCount);
+  } else {
+    m_cpu.setReg16(CX, static_cast<uint16_t>(remaining));
+    m_cpu.setReg16(DI, static_cast<uint16_t>(dstOff + byteCount));
+  }
+  if (remaining != 0)
+    m_cpu.setEIP(m_instrStartEIP);
+  return true;
+}
+
 bool InstructionDecoder::currentOperandSize32() const {
   // m_hasPrefix66 already holds the *effective* operand size for the
   // current instruction (CS default size XOR the 0x66 prefix), so it must
@@ -1556,6 +1603,12 @@ void InstructionDecoder::stepInstruction() {
         }
         if (movsElementSize != 0 && tryFastRepMovs(movsElementSize)) {
           return;
+        }
+        if (opcode == 0xAA || opcode == 0xAB) {
+          const uint32_t stosElementSize =
+              opcode == 0xAA ? 1u : (m_hasPrefix66 ? 4u : 2u);
+          if (tryFastRepStos(stosElementSize))
+            return;
         }
 
         int batchCount = 0;

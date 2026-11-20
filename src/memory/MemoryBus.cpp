@@ -1,5 +1,6 @@
 #include "MemoryBus.hpp"
 #include "../hw/VGAController.hpp"
+#include "../utils/simd/Simd.hpp"
 #include <algorithm>
 #include <iostream>
 #include <new>
@@ -160,6 +161,16 @@ uint8_t *MemoryBus::contiguousAccess(uint32_t address, uint32_t size) {
   }
 
   return &m_ram[effectiveAddress];
+}
+
+bool MemoryBus::lfillPattern(uint32_t a, uint32_t bytes, uint32_t pattern) {
+  if (m_traceWrites)
+    return false;
+  uint8_t *p = lcontiguousAccess(a, bytes);
+  if (p == nullptr)
+    return false;
+  utils::simd::kernels().fillPattern32(p, bytes, pattern);
+  return true;
 }
 
 const uint8_t *MemoryBus::contiguousAccess(uint32_t address,

@@ -106,6 +106,7 @@ private:
   }
   void syncSegmentCacheIfNeeded();
   bool tryFastRepMovs(uint32_t elementSize);
+  bool tryFastRepStos(uint32_t elementSize);
   bool currentOperandSize32() const;
   bool dos4gwReflectionStack(uint32_t &hostSP) const;
 
