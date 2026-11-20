@@ -65,6 +65,10 @@ bool isTranscendental(uint8_t modrm) {
   }
 }
 
+// Soft back end: transcendental results must be within this many units in
+// the last place (of the 64-bit significand) of the host x87's.
+constexpr uint64_t kTranscendentalUlps = 16;
+
 std::string swStr(uint16_t sw) {
   char buf[16];
   std::snprintf(buf, sizeof(buf), "%04X", sw);
@@ -266,13 +270,13 @@ int runBackend(uint64_t iterations, uint64_t seed, const std::string &filter) {
       const bool skipValues =
           trans && ((hs & (x87::SW_OE | x87::SW_UE)) ||
                     ((modrm == 0xF2 || modrm == 0xFB || modrm == 0xFE || modrm == 0xFF) &&
-                     in[0].exp() >= 16383 + 4));
+                     in[0].exp() >= 16383 + 63));
       bool resultsOk = noResult || skipValues;
       if (!resultsOk) {
         resultsOk = ns == nh;
         for (int i = 0; resultsOk && i < nh && i < 3; ++i) {
           if (trans)
-            resultsOk = closeEnough(os[i], oh[i], 1ull << 16);
+            resultsOk = closeEnough(os[i], oh[i], kTranscendentalUlps);
           else
             resultsOk = os[i] == oh[i];
         }
@@ -355,6 +359,7 @@ struct Sequence {
   std::vector<std::string> names;
   std::vector<uint32_t> offsets; // code offset of each instruction
   bool usesTranscendental = false;
+  int transcendentalIndex = -1; // index in names of the first one
   bool hasEnvImage = false;
 };
 
@@ -510,8 +515,10 @@ public:
       static const uint8_t ops[] = {0xE0, 0xE1, 0xE4, 0xE5, 0xF0, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5,
                                     0xF6, 0xF7, 0xF8, 0xF9, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF};
       const uint8_t m = ops[g.below(sizeof(ops))];
-      if (isTranscendental(m))
+      if (isTranscendental(m)) {
         s.usesTranscendental = true;
+        s.transcendentalIndex = static_cast<int>(s.names.size());
+      }
       s.offsets.push_back(static_cast<uint32_t>(s.code.size()));
       reg(s, 0xD9, m);
       char buf[16];
@@ -620,8 +627,13 @@ public:
       fillSlot(data, kSlotOff + 16 * k, static_cast<int>(g.below(7)));
     mem(s, 0xDD, 4, kImageOff); // FRSTOR initial image
     const int n = 1 + static_cast<int>(g.below(8));
-    for (int k = 0; k < n; ++k)
+    for (int k = 0; k < n; ++k) {
       instruction(s, data);
+      // Soft back end: transcendental results are approximations, so one
+      // ends the sequence (nothing downstream depends on its last bits).
+      if (FADOR_X87_FORCE_SOFT && s.usesTranscendental)
+        break;
+    }
     mem(s, 0xDD, 6, kFinalOff); // FNSAVE final state
     return s;
   }
@@ -702,17 +714,37 @@ bool ignoredByte(uint32_t off, bool envImage) {
   return false;
 }
 
-// Soft builds: transcendental results are approximate.  Compare register
-// contents with a tolerance and ignore PE/UE/C1.
-bool softTolerant(const uint8_t *host, const uint8_t *emu, const Sequence &s) {
-  (void)s;
-  // Status words in the log
+// Soft builds: a sequence ending in a transcendental instruction is compared
+// exactly except for that instruction's PE/UE/C1 (and the ES/B summary) and
+// the register values, which must be within kTranscendentalUlps.
+bool transcendentalTolerant(const uint8_t *host, const uint8_t *emu, const Sequence &s) {
+  const uint16_t loose = x87::SW_PE | x87::SW_UE | x87::SW_C1 | x87::SW_ES | x87::SW_B;
+  auto sw16 = [](const uint8_t *p) {
+    uint16_t v;
+    std::memcpy(&v, p, 2);
+    return v;
+  };
+  const uint32_t lastLog = kSwLogOff + 2 * static_cast<uint32_t>(s.names.size() - 1);
   for (uint32_t k = 0; k < kDataSize; ++k) {
-    if (ignoredByte(k, true))
+    if (ignoredByte(k, s.hasEnvImage))
       continue;
-    if (host[k] == emu[k])
+    if (k == lastLog || k == lastLog + 1 || (k >= kFinalOff && k < kFinalOff + 108))
       continue;
+    if (host[k] != emu[k])
+      return false;
+  }
+  if ((sw16(host + lastLog) ^ sw16(emu + lastLog)) & ~loose)
     return false;
+  const uint8_t *hf = host + kFinalOff, *ef = emu + kFinalOff;
+  if (std::memcmp(hf, ef, 4) != 0 || std::memcmp(hf + 8, ef + 8, 4) != 0)
+    return false; // control word, tag word
+  if ((sw16(hf + 4) ^ sw16(ef + 4)) & ~loose)
+    return false;
+  for (int r = 0; r < 8; ++r) {
+    const Float80 a = x87::loadFloat80(hf + 28 + 10 * r);
+    const Float80 b = x87::loadFloat80(ef + 28 + 10 * r);
+    if (!closeEnough(a, b, kTranscendentalUlps))
+      return false;
   }
   return true;
 }
@@ -775,8 +807,10 @@ int runInstructions(uint64_t iterations, uint64_t seed, const std::string &filte
     }
     if ((hs.eax & 0xFFFF) != (es.eax & 0xFFFF) || ((hs.flags ^ es.flags) & 0x45))
       ok = false;
-    if (!ok && FADOR_X87_FORCE_SOFT && s.usesTranscendental && completed) {
-      ++skippedTrans; // approximations: not a mismatch in soft builds
+    if (!ok && FADOR_X87_FORCE_SOFT && s.usesTranscendental && completed &&
+        (hs.eax & 0xFFFF) == (es.eax & 0xFFFF) && !((hs.flags ^ es.flags) & 0x45) &&
+        transcendentalTolerant(hostData, emuData, s)) {
+      ++skippedTrans; // within tolerance
       ok = true;
     }
     // Attribute the result to every instruction in the sequence.
@@ -827,8 +861,9 @@ int runInstructions(uint64_t iterations, uint64_t seed, const std::string &filte
   std::printf("fpu_fuzz: %" PRIu64 " sequences, %" PRIu64 " mismatches (seed %" PRIu64 ", %s back end)\n",
               executed, failures, seed, FADOR_X87_HOST ? "host x87" : "soft");
   if (skippedTrans)
-    std::printf("  %" PRIu64 " sequences with transcendental results outside bit-exactness (soft back end)\n",
-                skippedTrans);
+    std::printf("  %" PRIu64 " sequences ending in a transcendental matched within %" PRIu64
+                " ulps, not bit-exactly (soft back end)\n",
+                skippedTrans, kTranscendentalUlps);
   for (const auto &[name, st] : stats) {
     if (st.second)
       std::printf("FAIL %-16s %6" PRIu64 "/%" PRIu64 "\n%s", name.c_str(), st.second, st.first,

@@ -890,6 +890,39 @@ bool trigOutOfRange(const Float80 &a) {
   return !isZero(a) && !isDenormal(a) && a.exp() >= kBias + 63;
 }
 
+// Argument reduction as the x87 does it: modulo pi/2 with the internal
+// 66-bit approximation of pi (0x3243F6A8885A308D3 * 2^-64), exactly.
+// Returns r = |x| - k * pi66/2 and k mod 4.  Requires 0.5 <= |x| < 2^63.
+struct Reduced {
+  LD r;
+  int quadrant;
+};
+
+Reduced reducePi66(const Float80 &a) {
+  const U128 m{0x3, 0x243F6A8885A308D3ull};
+  const Unpacked u = unpack(a);
+  const int sh = u.exp - kBias + 2; // X = |x| * 2^65 = sig << sh, sh in [1, 64]
+  U128 x = shl128(U128{0, u.sig}, sh);
+  uint64_t k = 0;
+  for (int i = 62; i >= 0; --i) {
+    const U128 d = shl128(m, i);
+    if (x >= d) {
+      x = sub128(x, d);
+      k |= 1ull << i;
+    }
+  }
+  bool negative = false;
+  if (shl128(x, 1) >= m) { // round the quotient to nearest
+    x = sub128(m, x);
+    negative = true;
+    ++k;
+  }
+  const LD two64 = std::ldexp(static_cast<LD>(1), 64);
+  LD r = (static_cast<LD>(x.hi) * two64 + static_cast<LD>(x.lo));
+  r = std::ldexp(r, -65);
+  return {negative ? -r : r, static_cast<int>(k & 3)};
+}
+
 int trigOp(uint8_t modrm, const Float80 &a, Float80 *out, uint16_t cw,
            uint16_t &sw) {
   const bool pushes = modrm == 0xF2 || modrm == 0xFB;
@@ -931,13 +964,29 @@ int trigOp(uint8_t modrm, const Float80 &a, Float80 *out, uint16_t cw,
   // Tiny arguments: sin(x) = tan(x) = x, cos(x) = 1, rounded.
   const bool tiny = a.exp() < kBias - 40;
   const Split sa = split(a);
-  const LD x = tiny ? 0.0L : toLD(a);
+  LD sinV = 0, cosV = 1, tanV = 0;
+  if (!tiny) {
+    const LD sign = a.sign() ? -1.0L : 1.0L;
+    LD r = std::fabs(toLD(a));
+    int q = 0;
+    if (a.exp() >= kBias - 1) {
+      const Reduced red = reducePi66(a);
+      r = red.r;
+      q = red.quadrant;
+    }
+    const LD sr = std::sin(r), cr = std::cos(r);
+    static constexpr int sinSel[4] = {0, 1, 2, 3}; // sin, cos, -sin, -cos
+    const LD vals[4] = {sr, cr, -sr, -cr};
+    sinV = sign * vals[sinSel[q]];
+    cosV = vals[(q + 1) & 3];
+    tanV = sign * ((q & 1) ? -cr / sr : sr / cr);
+  }
   auto sinOf = [&]() {
-    return tiny ? fromLD(sa.m, sa.e, cw, sw) : fromLD(std::sin(x), 0, cw, sw);
+    return tiny ? fromLD(sa.m, sa.e, cw, sw) : fromLD(sinV, 0, cw, sw);
   };
-  auto cosOf = [&]() { return tiny ? fromLD(1.0L, 0, cw, sw) : fromLD(std::cos(x), 0, cw, sw); };
+  auto cosOf = [&]() { return fromLD(cosV, 0, cw, sw); };
   auto tanOf = [&]() {
-    return tiny ? fromLD(sa.m, sa.e, cw, sw) : fromLD(std::tan(x), 0, cw, sw);
+    return tiny ? fromLD(sa.m, sa.e, cw, sw) : fromLD(tanV, 0, cw, sw);
   };
   switch (modrm) {
   case 0xFE:
