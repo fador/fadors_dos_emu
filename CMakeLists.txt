@@ -159,6 +159,7 @@ set(TEST_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/memory/test_paging.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_audio_backend.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_midi.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_gus.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/hw/test_vga_controller.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/hw/test_vga_registers.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_frame_renderer.cpp"

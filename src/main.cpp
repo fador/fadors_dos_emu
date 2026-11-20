@@ -25,6 +25,7 @@
 #include "hw/audio/MidiDevice.hpp"
 #include "hw/audio/MidiSynth.hpp"
 #include "hw/audio/SoundBlaster.hpp"
+#include "hw/audio/GravisUltrasound.hpp"
 #include "hw/audio/WavWriter.hpp"
 #include "hw/audio/PcSpeaker.hpp"
 #include "ui/Debugger.hpp"
@@ -408,7 +409,11 @@ void printHelp(const char *programName) {
     "                            --deterministic).\n"
     "  --screenshot=FILE.png     Save the screen (text or graphics) as PNG at exit, or at\n"
     "  --screenshot-at=S         S seconds after start (virtual with --deterministic).\n"
-    "  --audio-wav=FILE.wav      Record the sound output (AdLib, Sound Blaster, MIDI).\n"
+    "  --audio-wav=FILE.wav      Record the sound output (AdLib, Sound Blaster, GUS, MIDI).\n"
+    "  --gus[=PORT][,irq=N][,dma=N][,mem=KB]\n"
+    "                            Gravis Ultrasound (GF1) at PORT (hex, default 240),\n"
+    "                            IRQ 11, DMA 3, 1024 KB DRAM (256/512/768); also sets\n"
+    "                            ULTRASND=240,3,3,11,11 and ULTRADIR=C:\\ULTRASND.\n"
     "  --keys=T:KEY,...          Type KEY at T seconds (letters, digits, ESC, ENTER, SPACE,\n"
     "                            TAB, BKSP, arrows, F1-F10, LCTRL, LALT, LSHIFT, ...);\n"
     "                            virtual seconds with --deterministic.\n"
@@ -847,6 +852,7 @@ int main(int argc, char *argv[]) {
     // --comN= / --lptN=: what is attached to the serial / parallel ports
     std::array<std::string, 4> comSpecs{"none", "none", "off", "off"};
     std::array<std::string, 3> lptSpecs{"none", "off", "off"};
+    std::optional<fador::hw::audio::GusConfig> gusConfig; // --gus[=...]
     struct MountEntry { char letter; std::string hostPath; std::string label; bool cdrom = false; };
     std::vector<MountEntry> cliMounts;
     std::string path;
@@ -983,6 +989,16 @@ int main(int argc, char *argv[]) {
       } else if (arg.size() >= 7 && arg.rfind("--lpt", 0) == 0 &&
                  arg[5] >= '1' && arg[5] <= '3' && arg[6] == '=') {
         lptSpecs[arg[5] - '1'] = arg.substr(7);
+      } else if (arg == "--gus" || arg.rfind("--gus=", 0) == 0) {
+        fador::hw::audio::GusConfig config;
+        std::string error;
+        if (arg.size() > 6 &&
+            !fador::hw::audio::parseGusSpec(arg.substr(6), config, error)) {
+          LOG_ERROR("--gus: ", error,
+                    ". Use --gus[=PORT][,irq=N][,dma=N][,mem=KB]");
+          return 1;
+        }
+        gusConfig = config;
       } else if (arg.find("--env=") == 0) {
         const std::string spec = arg.substr(6);
         const auto eq = spec.find('=');
@@ -1125,6 +1141,35 @@ int main(int argc, char *argv[]) {
       bios.setIOBus(&iobus);
       bios.setPortTimeSource(clock.timeSource());
       bios.setPortAddresses(comAddr, lptAddr);
+    }
+
+    // Gravis Ultrasound (--gus): ports 2X0-2XF and 3X0-3X7.
+    std::unique_ptr<fador::hw::audio::GravisUltrasound> gus;
+    if (gusConfig) {
+      gus = std::make_unique<fador::hw::audio::GravisUltrasound>(
+          memory, dma, *gusConfig, 44100.0f);
+      gus->setTimeSource(clock.timeSource());
+      gus->setIrqCallback([&pic, &picSlave](int line) {
+        if (line < 8)
+          pic.raiseIRQ(static_cast<uint8_t>(line));
+        else
+          picSlave.raiseIRQ(static_cast<uint8_t>(line - 8));
+      });
+      const uint16_t base = gusConfig->basePort;
+      iobus.registerDevice(base, base + 0x0F, gus.get());
+      iobus.registerDevice(base + 0x100, base + 0x107, gus.get());
+      auto hasEnv = [](const char *name) {
+        for (const auto &entry : fador::hw::ProgramLoader::defaultEnvironment())
+          if (entry.first == name)
+            return true;
+        return false;
+      };
+      if (!hasEnv("ULTRASND")) // --env=ULTRASND=... wins
+        fador::hw::ProgramLoader::setEnvironmentVariable(
+            "ULTRASND", fador::hw::audio::ultrasndVariable(*gusConfig));
+      if (!hasEnv("ULTRADIR"))
+        fador::hw::ProgramLoader::setEnvironmentVariable("ULTRADIR",
+                                                         "C:\\ULTRASND");
     }
 
     speedOptions.deterministic = deterministic;
@@ -1551,6 +1596,8 @@ int main(int argc, char *argv[]) {
         uart->advanceTo(now); // raises IRQ 3/4 through its callback
       for (auto &lpt : lpts)
         lpt->advanceTo(now);
+      if (gus)
+        gus->advanceTo(now); // voice, timer and DMA IRQs
     };
     auto maybeRender = [&](std::chrono::steady_clock::time_point now) {
       if (now - lastRender > std::chrono::milliseconds(33)) {
@@ -1585,6 +1632,8 @@ int main(int argc, char *argv[]) {
       adlib.generateSamples(audioBuf.data(), frames);
       sb.generateSamples(audioBuf.data(), frames);
       pcSpeaker.generateSamples(audioBuf.data(), frames);
+      if (gus)
+        gus->generateSamples(audioBuf.data(), frames);
       for (auto &lpt : lpts) // Covox / Disney Sound Source
         lpt->generateSamples(audioBuf.data(), frames);
       adlib.updateTimers(static_cast<double>(frames) / kSampleRate);
@@ -1696,6 +1745,8 @@ int main(int argc, char *argv[]) {
       return s < 0.0 ? fador::hw::MachineTime::kNever
                      : lastHardwareNs + static_cast<uint64_t>(s * 1e9);
     });
+    if (gus)
+      machineTime.addWakeSource([g = gus.get()] { return g->nextEventNs(); });
     for (const auto &uart : uarts) // character timing, FIFO timeouts
       machineTime.addWakeSource(
           [u = uart.get()] { return u->nextEventNs(); });

@@ -126,7 +126,7 @@ uint32_t DMA8237::getChannelAddress(int channel) {
   return ((uint32_t)m_channels[channel].page << 16) | m_channels[channel].currentAddress;
 }
 
-uint16_t DMA8237::getChannelCount(int channel) {
+uint16_t DMA8237::getChannelCount(int channel) const {
   if (channel < 0 || channel > 7) return 0;
   return m_channels[channel].currentCount;
 }

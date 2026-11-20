@@ -20,7 +20,12 @@ public:
   uint32_t getChannelAddress(int channel);
 
   // Returns the current remaining count for the specified channel.
-  uint16_t getChannelCount(int channel);
+  uint16_t getChannelCount(int channel) const;
+
+  // True while the channel is masked (no transfers).
+  bool isMasked(int channel) const {
+    return channel < 0 || channel > 7 || m_channels[channel].mask;
+  }
 
   // Advances the channel state by 'bytes'. Returns true if the channel reached
   // Terminal Count (TC).
