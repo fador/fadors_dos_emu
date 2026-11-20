@@ -1788,7 +1788,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
         uint16_t newFs = m_memory.lread32(ssBaseLocal + esp + 28) & 0xFFFF;
         uint16_t newGs = m_memory.lread32(ssBaseLocal + esp + 32) & 0xFFFF;
 
-        m_cpu.setEFLAGS(newEflags);
+        writeFlags(newEflags, flagsWriteMask(true) | eflags::kVM, true);
         loadSegment(CS, newCs);
         m_cpu.setEIP(newEip);
         m_cpu.setReg32(ESP, newEsp);
@@ -1798,7 +1798,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
         loadSegment(FS, newFs);
         loadSegment(GS, newGs);
       } else {
-        m_cpu.setEFLAGS(newEflags);
+        writeFlags(newEflags, flagsWriteMask(true), true);
         loadSegment(CS, newCs);
         m_cpu.setEIP(newEip);
         if (newCpl > oldCpl && (m_cpu.getCR(0) & 1)) {
@@ -1827,8 +1827,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
               " newFlags=0x", newFlags, " newCS=0x", newCs,
               " newIP=0x", newIp);
 
-      uint32_t merged = (m_cpu.getEFLAGS() & 0xFFFF0000) | newFlags;
-      m_cpu.setEFLAGS(merged);
+      writeFlags(newFlags, flagsWriteMask(true), false);
       loadSegment(CS, newCs);
       m_cpu.setEIP(newIp);
 
@@ -2182,17 +2181,23 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
 
   // PUSHF / POPF
   case 0x9C:
+    // V86 with IOPL < 3: #GP to the monitor.  PUSHFD stores VM and RF as 0.
+    if ((m_cpu.getEFLAGS() & eflags::kVM) && !checkIOPL())
+      break;
     if (m_hasPrefix66)
-      m_cpu.push32(m_cpu.getEFLAGS());
+      m_cpu.push32(m_cpu.getEFLAGS() & ~(eflags::kVM | eflags::kRF));
     else
       m_cpu.push16(static_cast<uint16_t>(m_cpu.getEFLAGS()));
     break;
-  case 0x9D:
-    if (m_hasPrefix66)
-      m_cpu.setEFLAGS(m_cpu.pop32());
-    else
-      m_cpu.setEFLAGS((m_cpu.getEFLAGS() & 0xFFFF0000) | m_cpu.pop16());
+  case 0x9D: {
+    if ((m_cpu.getEFLAGS() & eflags::kVM) && !checkIOPL())
+      break;
+    const uint32_t value = m_hasPrefix66 ? m_cpu.pop32() : m_cpu.pop16();
+    // Reserved bits, VM and (per model) AC/ID are not loaded; RF is cleared.
+    writeFlags(value & ~eflags::kRF, flagsWriteMask(false) | eflags::kRF,
+               m_hasPrefix66);
     break;
+  }
 
   // SAHF / LAHF
   case 0x9E: { // SAHF — Store AH into Flags (SF,ZF,AF,PF,CF)
@@ -3490,13 +3495,17 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
   case 0xF9:
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() | 0x0001);
     break; // STC
-  case 0xFA:
+  case 0xFA: // CLI
+    if (m_cpu.nativeProtection() && !checkIOPL())
+      break;
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~0x0200);
-    break; // CLI
-  case 0xFB:
+    break;
+  case 0xFB: // STI
+    if (m_cpu.nativeProtection() && !checkIOPL())
+      break;
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() | 0x0200);
     m_cpu.beginInterruptShadow();
-    break; // STI
+    break;
   case 0xFC:
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~0x0400);
     break; // CLD

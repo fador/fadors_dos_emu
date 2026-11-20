@@ -312,12 +312,13 @@ void InstructionDecoder::nativeIret(bool op32) {
       raiseException(13, 0);
       return;
     }
-    // IOPL 3 V86 IRET behaves like real mode; VM and IOPL stay.
+    // IOPL 3 V86 IRET behaves like real mode; VM, IOPL, VIF and VIP stay
+    // (CPL 3 rules of flagsWriteMask()).
+    const uint32_t mask = flagsWriteMask(true);
     const uint32_t eip = popSized(op32);
     const uint16_t cs = static_cast<uint16_t>(popSized(op32));
     const uint32_t newFlags = popSized(op32);
-    const uint32_t keep = kFlagVM | kFlagIOPL | (op32 ? 0 : 0xFFFF0000u);
-    m_cpu.setEFLAGS((flags & keep) | (newFlags & ~keep) | 2);
+    writeFlags(newFlags, mask, op32);
     loadSegment(CS, cs);
     m_cpu.setEIP(eip & 0xFFFF);
     return;
@@ -338,7 +339,7 @@ void InstructionDecoder::nativeIret(bool op32) {
     const uint16_t ds = static_cast<uint16_t>(m_cpu.pop32());
     const uint16_t fs = static_cast<uint16_t>(m_cpu.pop32());
     const uint16_t gs = static_cast<uint16_t>(m_cpu.pop32());
-    m_cpu.setEFLAGS(newFlags | 2);
+    m_cpu.setEFLAGS((newFlags & m_cpu.eflagsMask()) | 2);
     loadSegment(CS, cs);
     loadSegment(SS, ss);
     loadSegment(ES, es);
@@ -351,21 +352,13 @@ void InstructionDecoder::nativeIret(bool op32) {
   }
 
   // Which flags this privilege level may change.
-  uint32_t changeable = 0x00247FD5u & ~kFlagVM; // CF..OF, NT, AC, ID, ...
-  changeable |= kFlagRF;
-  if (cpl > 0)
-    changeable &= ~kFlagIOPL;
-  if (cpl > ((flags & kFlagIOPL) >> 12))
-    changeable &= ~kFlagIF;
-  if (!op32)
-    changeable &= 0xFFFF;
-  const uint32_t merged = (flags & ~changeable) | (newFlags & changeable) | 2;
+  const uint32_t changeable = flagsWriteMask(true);
 
   const uint8_t rpl = cs & 3;
   if (rpl > cpl) {
     const uint32_t esp = popSized(op32);
     const uint16_t ss = static_cast<uint16_t>(popSized(op32));
-    m_cpu.setEFLAGS(merged);
+    writeFlags(newFlags, changeable, op32);
     loadSegment(CS, cs);
     m_cpu.setEIP(op32 ? eip : (eip & 0xFFFF));
     loadSegment(SS, ss);
@@ -375,7 +368,7 @@ void InstructionDecoder::nativeIret(bool op32) {
       setStackPointer(esp & 0xFFFF);
     return;
   }
-  m_cpu.setEFLAGS(merged);
+  writeFlags(newFlags, changeable, op32);
   loadSegment(CS, cs);
   m_cpu.setEIP(op32 ? eip : (eip & 0xFFFF));
 }
