@@ -2,6 +2,7 @@
 
 #include "../hw/VGAController.hpp"
 #include "../memory/MemoryBus.hpp"
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -45,8 +46,42 @@ public:
 
   uint32_t paletteToARGB(uint8_t index) const;
 
+  // Display geometry decoded from the CRTC, sequencer, graphics and
+  // attribute controller registers (public for tests and diagnostics).
+  struct CrtLayout {
+    enum class Kind : uint8_t { Text, Planar16, Packed256, Cga } kind = Kind::Text;
+    int width = 0;          // output pixels
+    int height = 0;         // output lines
+    int charClocks = 0;     // displayed character clocks (CRTC 01h + 1)
+    int dotsPerChar = 8;    // text: 8 or 9 (sequencer 01h bit 0)
+    int charHeight = 1;     // CRTC 09h maximum scan line + 1
+    int scanDivider = 1;    // 2 with double scanning (CRTC 09h bit 7)
+    int lineRepeat = 1;     // physical scanlines per output line
+    int addrShift = 0;      // 0 byte, 1 word, 2 doubleword addressing
+    int pan = 0;            // horizontal pel panning in output pixels
+    int presetRowScan = 0;  // CRTC 08h bits 0-4
+    bool countBy2 = false;  // CRTC 17h bit 3
+    bool panInSplit = true; // attribute 10h bit 5 clear
+    uint32_t start = 0;     // CRTC 0Ch/0Dh + byte panning
+    uint32_t rowStride = 0; // CRTC 13h * 2 (address counter units)
+    uint32_t lineCompare = 0x3FF;
+    uint32_t textBase = 0xB8000; // text / CGA memory (GC 06h memory map)
+  };
+  // Returns false when the registers do not describe a displayable mode
+  // (e.g. before the BIOS programmed them); the renderer then falls back
+  // to the BIOS mode number.
+  bool decodeLayout(CrtLayout &layout) const;
+
 private:
   void resize(int w, int h);
+  void buildPalette();
+  void buildAttributeLut();
+  uint32_t mapAddress(const CrtLayout &l, uint32_t counter, int rowScan) const;
+  void renderRegisters(const CrtLayout &l, bool drawCursor);
+  void renderTextLine(const CrtLayout &l, uint32_t rowAddr, int rowScan,
+                      bool cursorOn, bool blinkOn);
+  void renderGraphicsLine(const CrtLayout &l, uint32_t rowAddr, int rowScan);
+  // Fallbacks keyed on the BIOS mode number
   void renderText(bool drawCursor);
   bool renderGraphics(uint8_t mode);
   bool renderVbe();
@@ -58,6 +93,9 @@ private:
   int m_height = 0;
   uint32_t m_modeKey = 0xFFFFFFFFu;
   std::vector<uint32_t> m_pixels;
+  std::vector<uint8_t> m_line;          // one scanline of DAC indices
+  std::array<uint32_t, 256> m_palette{}; // DAC index -> ARGB (PEL mask applied)
+  std::array<uint8_t, 16> m_attrLut{};  // 4-bit pixel -> DAC index
 };
 
 // Encode an ARGB image as a PNG file.

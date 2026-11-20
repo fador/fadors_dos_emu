@@ -94,7 +94,8 @@ void SDLRenderer::render(bool /*force*/) {
     // For higher-res modes, reduce scale so window isn't enormous
     if (m_texWidth > 400 || m_texHeight > 400)
       scale = 2;
-    if (m_texWidth > 640 || m_texHeight > 480)
+    // (720x400 text with 9-dot characters still gets scale 2)
+    if (m_texWidth > 720 || m_texHeight > 480)
       scale = 1;
     int targetW = m_texWidth * scale;
     int targetH = m_texHeight * scale;
