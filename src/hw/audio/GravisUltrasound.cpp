@@ -225,9 +225,10 @@ uint64_t GravisUltrasound::ticksDue(uint64_t nowNs) {
   // In `voices` seconds there are exactly 617400 ticks: rebase the epoch
   // by that span so the products below stay far from overflow.
   const uint64_t span = static_cast<uint64_t>(m_activeVoices) * 1'000'000'000;
-  while (nowNs - m_epochNs >= span) {
-    m_epochNs += span;
-    m_epochTick += kGf1Clock;
+  if (nowNs - m_epochNs >= span) {
+    const uint64_t spans = (nowNs - m_epochNs) / span;
+    m_epochNs += spans * span;
+    m_epochTick += spans * kGf1Clock;
   }
   return m_epochTick + (nowNs - m_epochNs) * kGf1Clock / span;
 }
