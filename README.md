@@ -16,7 +16,7 @@ Fador's DOS Emulator is a multiplatform MS-DOS emulator written in modern C++20.
 - **Serial and Parallel Ports:** 16550A UARTs (COM1 3F8h IRQ 4, COM2 2F8h IRQ 3; COM3/COM4 optional) with 16-byte FIFOs, trigger levels, the character timeout interrupt, exact loopback mode, modem status deltas and character timing from the baud rate on emulated time; a Microsoft serial mouse, file output and a TCP null modem can be attached (`--com1=...`). Standard parallel ports (LPT1 378h IRQ 7) with the PC's status polarity, a printer-to-file device, a Covox Speech Thing and a Disney Sound Source (16-byte FIFO played at 7 kHz) mixed into the audio output (`--lpt1=...`). `INT 14h` (AH=00h-05h) and `INT 17h` drive them through their registers with the BDA time-outs; the BDA port tables and equipment word list the configured ports. See [Serial and parallel ports](#serial-and-parallel-ports).
 - **VGA:** Register-accurate IBM VGA: attribute controller (index/data flip-flop, palette, colour select, pel panning, blink/intensity), DAC with PEL mask and read/write auto-increment, sequencer, graphics controller (write modes 0-3, read modes 0-1, latches, odd/even and chain-4 with the hardware plane layout), CRTC with protect bit and overflow registers, misc output (3Bxh/3Dxh addressing). Port 3DAh retrace timing follows the programmed CRTC timings (70 Hz for 400/350-line modes, 60 Hz for 480-line modes) from an injectable clock. The renderer derives the picture from the registers, so tweaked modes (Mode X, 320x400, 360x480, split screen, smooth scrolling, 80x50/90x30 text, custom fonts in plane 2) display like on hardware; INT 10h mode sets load the IBM VGA parameter tables, default palettes and ROM fonts.
 - **SVGA / VESA:** VBE 2.0 (`INT 10h` AX=4F00h-4F0Ah) with 8/15/16/32-bit modes from 320x200 to 1024x768, a banked A000h window, a linear frame buffer, and the protected-mode interface.
-- **Audio:** AdLib OPL2 (YM3812) FM synthesis with 9 channels, 2 operators per channel, ADSR envelopes, and waveform selection. Sound Blaster DSP emulation for 8/16-bit mono/stereo DMA playback (single-cycle, auto-init, high-speed). MPU-401 MIDI UART at port 0x330–0x331 with an OPL2-based General MIDI synthesizer supporting 128 instruments across 16 MIDI channels with velocity, pitch bend, sustain, and 9-voice polyphonic note allocation.
+- **Audio:** AdLib OPL2 (YM3812) FM synthesis with 9 channels, 2 operators per channel, ADSR envelopes, and waveform selection. Sound Blaster DSP emulation for 8/16-bit mono/stereo DMA playback (single-cycle, auto-init, high-speed). MPU-401 MIDI UART at port 0x330–0x331 with an OPL2-based General MIDI synthesizer supporting 128 instruments across 16 MIDI channels with velocity, pitch bend, sustain, and 9-voice polyphonic note allocation. Optional Gravis Ultrasound (`--gus`): GF1 wavetable synthesizer with 14–32 voices at 617400/voices Hz, DRAM uploads by DMA, voice/ramp/timer/DMA interrupts (see [Gravis Ultrasound](#gravis-ultrasound)).
 - **Program Loading and Overlays:** `.COM` and MZ `.EXE` loading with relocation support, PSP/environment block creation, MCB-backed program memory, embedded 32-bit payload launching, and VROOMM/FBOV overlay loading for segmented applications.
 - **Built-in Disassembler:** Read-only x86 real-mode disassembler that produces human-readable assembly from memory without modifying CPU state. Supports prefixes, ModR/M and SIB decoding, and one-byte plus `0F` opcode forms.
 - **Built-in Assembler:** x86 real-mode assembler (`src/cpu/Assembler.{hpp,cpp}`) used by the interactive debugger and `--exec` CLI mode. Supports ALU ops, MOV, shifts, jumps, Jcc, CALL/RET, PUSH/POP, INC/DEC, NOT/NEG, MUL/DIV, IN/OUT, string ops, segment overrides, MOVZX/MOVSX, BT family, LEA, LES/LDS, ENTER/LEAVE, INT, XCHG, TEST, and more.
@@ -51,6 +51,8 @@ so it can be tested on Linux too, e.g. in a second build directory:
 ./build/fpu_fuzz [count] [seed] [filter]   # differential x87 fuzzer: emulator vs. the host x87 (x86-64 hosts)
 ./build/fpu_fuzz --backend [count] [seed]  # soft 80-bit back end vs. the host x87, operation by operation
 python3 tests/perf/run_profiles.py build/fadors_emu tests/perf   # performance profiles, MIPS table
+python3 tests/timing/check_time.py build/fadors_emu   # emulated time end to end
+python3 tests/gus/check_gus.py build/fadors_emu       # Gravis Ultrasound end to end (DMA upload, voice, --audio-wav)
 tests/compat/build.sh /tmp/compat && tests/compat/run.sh build/fadors_emu /tmp/compat
 ```
 See `tests/perf/README.md` and `tests/compat/README.md` for details and reference numbers.
@@ -136,7 +138,8 @@ run exactly like that too, with interrupts, sound and the headless options.
 | `--instruction-trace-from=ADDR[#N]` | Delay `--instruction-trace` until CS:EIP reaches the given hex linear address (the `N`-th time with `#N`) |
 | `--instruction-trace-step` | Pause between each instruction trace line (ENTER to step, `sN` to skip N, `q` to quit, `d` for debugger) |
 | `--io-trace=LO[-HI]` | Log every port read and write in the hex range, with the CS:EIP that made it, to stderr |
-| `--audio-wav=FILE.wav` | Record the sound output (AdLib/OPL3, Sound Blaster, PC speaker, MIDI); the log reports its peak level |
+| `--audio-wav=FILE.wav` | Record the sound output (AdLib/OPL3, Sound Blaster, Gravis Ultrasound, PC speaker, MIDI); the log reports its peak level |
+| `--gus[=PORT][,irq=N][,dma=N][,rdma=N][,midiirq=N][,mem=KB]` | Add a Gravis Ultrasound (off by default): base port in hex (210–260, default `240`), GF1 IRQ (2/9, 3, 5, 7, 11, 12, 15; default 11), DMA (1, 3, 5, 6, 7; default 3, so it does not collide with the Sound Blaster's DMA 1/5), DRAM 256/512/768/1024 KB (default 1024). Sets `ULTRASND=240,3,3,11,11` and `ULTRADIR=C:\ULTRASND` unless given with `--env` |
 | `--trace=<cats>` | Enable trace-level logging for category `cpu`, `video`, `dos` (comma-separated) |
 | `--debug=<cats>` | Enable debug logging for categories: `cpu`, `video`, `dos` (comma-separated) |
 | `--bench=decoder-loop\|rep-movsb\|rep-movsd\|rep-stosd` | Run an in-process interpreter benchmark without loading a program |
@@ -245,6 +248,38 @@ Parallel devices (`--lptN=`):
 
 `INT 14h`/`INT 17h` wait for the port as the ROM BIOS does, with the time-outs at 40:7Ch (COM, 1 by default) and 40:78h (LPT, 20) counted in units of 0.25 s of emulated time.
 
+### Gravis Ultrasound
+
+`--gus` adds a classic GF1-based Gravis Ultrasound next to the Sound
+Blaster (ports 2X0h–2XFh and 3X0h–3X7h; X = 4 by default). The card is in
+the state ULTRINIT leaves it in: IRQ/DMA latches programmed from the
+command line (programs may reprogram them through 2XBh), line out on.
+
+- Registers: mix control (2X0), IRQ status (2X6), AdLib-style timers 1/2
+  (2X8/2X9 with GF1 registers 45h–47h; 80 us / 320 us steps), IRQ/DMA
+  latches (2XB, with 2XF register control), voice select (3X2), register
+  select (3X3), data (3X4/3X5, 16-bit writes to 3X4), DRAM peek/poke (3X7
+  with 43h/44h), MIDI status (3X0, nothing attached). Global registers
+  0Eh (active voices), 41h–49h, 4Ch (reset, DAC enable, IRQ enable) and
+  8Fh (voice IRQ source queue); every per-voice register 00h–0Dh and its
+  80h+ read-back.
+- Synthesis runs on emulated time at 617400 / active voices Hz (44100 Hz
+  at 14 voices, 19293.75 Hz at 32): per-voice linear interpolation with the
+  next sample in DRAM (as the GF1 does, so players' loop-end guard samples
+  matter), 8- and 16-bit data (16-bit addresses translated within 256 KB
+  banks), loops, bidirectional loops, rollover, 12-bit logarithmic volumes,
+  volume ramps stepped every 1/8/64/512 voice cycles, 16 pan positions.
+  Wavetable and ramp interrupts are queued in the order they happen and
+  read back through 8Fh. The GF1 stream is resampled to 44.1 kHz with a
+  16-tap Kaiser-windowed sinc filter.
+- DMA uploads (and downloads) go through the 8237 at 650 kHz / (rate
+  divisor + 1) transfers per second, with 8/16-bit data, invert-MSB and the
+  terminal-count IRQ (2X6 bit 7, acknowledged by reading 41h).
+- Not emulated: sampling/recording (48h/49h are stored only), the MIDI
+  port, the SB emulation (SBOS/MEGA-EM), the GUS MAX codec and the ICS
+  mixer of rev 3.7+ boards. Programs that load MIDI patches from
+  `ULTRADIR` (e.g. DMX games) need the patch files in that directory.
+
 ### Examples
 ```bash
 # Run a COM file
@@ -271,6 +306,9 @@ Parallel devices (`--lptN=`):
 # Reproducible headless run: same screenshot and recording every time
 ./fadors_emu --headless --deterministic --max-seconds=20 --keys=5:ENTER \
     --screenshot=shot.png --audio-wav=out.wav game.exe
+
+# Gravis Ultrasound at 240h IRQ 11 DMA 3 (ULTRASND=240,3,3,11,11) with 512 KB
+./fadors_emu --gus=240,irq=11,dma=3,mem=512 player.exe
 
 # Serial mouse on COM1, Disney Sound Source on LPT1
 ./fadors_emu --com1=mouse --lpt1=disney game.exe
