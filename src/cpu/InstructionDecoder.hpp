@@ -124,8 +124,12 @@ private:
   void writeModRM8(const ModRM &modrm, uint8_t value);
   // x87 (InstructionDecoderFPU.cpp)
   void executeFPUOpcode(uint8_t opcode);
-  void executeFPUInstruction(uint8_t opcode, uint8_t modrmByte,
-                             const ModRM &modrm, uint32_t addr);
+  void executeFPUInstruction(uint8_t opcode, uint8_t modrmByte, ModRM modrm,
+                             uint32_t addr);
+  void executeFPUPaged(uint8_t opcode, uint8_t modrmByte, ModRM modrm,
+                       uint32_t addr);
+  void fpuEnvironment(uint8_t opcode, uint8_t reg, uint32_t addr);
+  void fpuTenByte(uint8_t opcode, uint8_t reg, uint32_t addr);
   bool fpuCheckPendingError();
   void fpuWait();
   x87::ImageMode fpuImageMode() const;

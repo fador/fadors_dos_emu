@@ -10,6 +10,9 @@
 
 #include <cstdint>
 #include <cstring>
+#if defined(__SSE2__) || defined(_M_X64)
+#include <emmintrin.h>
+#endif
 
 namespace fador::cpu::x87 {
 
@@ -103,6 +106,25 @@ constexpr uint8_t tagFor(const Float80 &v) {
     return 2;
   return 0;
 }
+
+// Writes a value with a single 16-byte store where possible, so that a
+// following 10-byte FLD (host back end) or the 8/2-byte field loads can be
+// forwarded from the store buffer (piecewise stores followed by a wider load
+// stall for ~15 cycles).  Readers should load the fields, not all 16 bytes.
+inline void storeWhole(Float80 &dst, uint64_t mant, uint16_t signExp) {
+#if defined(__SSE2__) || defined(_M_X64)
+  _mm_storeu_si128(reinterpret_cast<__m128i *>(&dst),
+                   _mm_set_epi64x(static_cast<long long>(signExp),
+                                  static_cast<long long>(mant)));
+#else
+  dst.mant = mant;
+  dst.signExp = signExp;
+#endif
+}
+inline void storeWhole(Float80 &dst, const Float80 &v) {
+  storeWhole(dst, v.mant, v.signExp);
+}
+inline Float80 loadFields(const Float80 &src) { return Float80(src.mant, src.signExp); }
 
 inline Float80 loadFloat80(const uint8_t *bytes) {
   Float80 v;

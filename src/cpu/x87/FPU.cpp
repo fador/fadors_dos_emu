@@ -83,6 +83,11 @@ bool FPU::pop() {
 }
 
 void FPU::pushChecked(const Float80 &v, uint16_t flags) {
+  if (flags == 0 && !pushBlocked()) [[likely]] {
+    pushRaw(v);
+    m_sw = static_cast<uint16_t>(m_sw & ~SW_C1);
+    return;
+  }
   if (pushBlocked()) {
     if (stackOverflow())
       pushRaw(kIndefinite);
@@ -102,7 +107,7 @@ void FPU::pushChecked(const Float80 &v, uint16_t flags) {
 
 void FPU::fldValue(const Float80 &v) { pushChecked(v, 0); }
 
-void FPU::fldReg(int i) {
+void FPU::fldRegSlow(int i) {
   // An empty source is reported (as underflow) before a full stack.
   if (isEmpty(i)) {
     if (stackUnderflow())
@@ -119,7 +124,7 @@ void FPU::fldReg(int i) {
   update(0, SW_C1);
 }
 
-void FPU::fldF32(uint32_t raw) {
+void FPU::fldF32Slow(uint32_t raw) {
   const uint32_t e = (raw >> 23) & 0xFF;
   if (e != 0 && e != 0xFF) [[likely]] { // normal: exact, no exceptions
     const Float80 v = Float80::make((raw >> 31) != 0, static_cast<uint16_t>(e - 127 + 16383),
@@ -127,12 +132,12 @@ void FPU::fldF32(uint32_t raw) {
     pushChecked(v, 0);
     return;
   }
-  uint16_t flags = 0;
+  uint16_t flags = knownFlags();
   const Float80 v = active::loadF32(raw, m_cw, flags);
   pushChecked(v, flags);
 }
 
-void FPU::fldF64(uint64_t raw) {
+void FPU::fldF64Slow(uint64_t raw) {
   const uint32_t e = static_cast<uint32_t>((raw >> 52) & 0x7FF);
   if (e != 0 && e != 0x7FF) [[likely]] {
     const Float80 v = Float80::make((raw >> 63) != 0, static_cast<uint16_t>(e - 1023 + 16383),
@@ -140,7 +145,7 @@ void FPU::fldF64(uint64_t raw) {
     pushChecked(v, 0);
     return;
   }
-  uint16_t flags = 0;
+  uint16_t flags = knownFlags();
   const Float80 v = active::loadF64(raw, m_cw, flags);
   pushChecked(v, flags);
 }
@@ -156,7 +161,7 @@ void FPU::fbld(const uint8_t *bcd10) {
   pushChecked(active::loadBCD(bcd10), 0);
 }
 
-void FPU::fldConst(Const c) { pushChecked(soft::loadConst(c, m_cw), 0); }
+void FPU::fldConstSlow(Const c) { pushChecked(soft::loadConst(c, m_cw), 0); }
 
 // ---------------------------------------------------------------------------
 // Stores
@@ -175,7 +180,16 @@ bool FPU::fstF32(uint32_t &out, bool pop) {
       popRaw();
     return true;
   }
-  uint16_t flags = 0;
+  uint16_t flags = knownFlags();
+#if FADOR_X87_HOST
+  if (host::fastReady(m_cw, flags)) [[likely]] {
+    host::fastStoreF32(&m_regs[phys(0)], out, flags);
+    update(flags, SW_C1);
+    if (pop)
+      popRaw();
+    return true;
+  }
+#endif
   out = active::storeF32(st(0), m_cw, flags);
   if (flags & ~m_cw & kNoStore) {
     update(flags & SW_EXC, SW_C1);
@@ -187,7 +201,7 @@ bool FPU::fstF32(uint32_t &out, bool pop) {
   return true;
 }
 
-bool FPU::fstF64(uint64_t &out, bool pop) {
+bool FPU::fstF64Slow(uint64_t &out, bool pop) {
   if (isEmpty(0)) {
     if (!stackUnderflow())
       return false;
@@ -208,7 +222,16 @@ bool FPU::fstF64(uint64_t &out, bool pop) {
       popRaw();
     return true;
   }
-  uint16_t flags = 0;
+  uint16_t flags = knownFlags();
+#if FADOR_X87_HOST
+  if (host::fastReady(m_cw, flags)) [[likely]] {
+    host::fastStoreF64(&m_regs[phys(0)], out, flags);
+    update(flags, SW_C1);
+    if (pop)
+      popRaw();
+    return true;
+  }
+#endif
   out = active::storeF64(v, m_cw, flags);
   if (flags & ~m_cw & kNoStore) {
     update(flags & SW_EXC, SW_C1);
@@ -243,7 +266,16 @@ bool FPU::fist(int bits, int64_t &out, bool pop) {
       popRaw();
     return true;
   }
-  uint16_t flags = 0;
+  uint16_t flags = knownFlags();
+#if FADOR_X87_HOST
+  if (host::fastReady(m_cw, flags)) [[likely]] {
+    host::fastStoreInt(&m_regs[phys(0)], bits, out, flags);
+    update(flags, SW_C1);
+    if (pop)
+      popRaw();
+    return true;
+  }
+#endif
   out = active::storeInt(st(0), bits, m_cw, flags);
   if (flags & ~m_cw & SW_IE) {
     update(flags & SW_EXC, SW_C1);
@@ -266,7 +298,7 @@ bool FPU::fbstp(uint8_t *bcd10) {
     popRaw();
     return true;
   }
-  uint16_t flags = 0;
+  uint16_t flags = knownFlags();
   active::storeBCD(st(0), bcd10, m_cw, flags);
   if (flags & ~m_cw & SW_IE) {
     update(flags & SW_EXC, SW_C1);
@@ -284,7 +316,7 @@ void FPU::fstp1(int i) {
   popRaw();
 }
 
-void FPU::fstReg(int i, bool pop) {
+void FPU::fstRegSlow(int i, bool pop) {
   if (isEmpty(0)) {
     if (!stackUnderflow())
       return;
@@ -300,7 +332,7 @@ void FPU::fstReg(int i, bool pop) {
 // ---------------------------------------------------------------------------
 // Arithmetic
 
-void FPU::arithReg(Arith op, int dst, int src, bool pop) {
+void FPU::arithRegSlow(Arith op, int dst, int src, bool pop) {
   if (isEmpty(dst) || isEmpty(src)) {
     if (!stackUnderflow())
       return;
@@ -309,31 +341,45 @@ void FPU::arithReg(Arith op, int dst, int src, bool pop) {
       popRaw();
     return;
   }
-  uint16_t flags = 0;
-  const Float80 r = active::arith(op, st(dst), st(src), m_cw, flags);
+  uint16_t flags = knownFlags();
+#if FADOR_X87_HOST
+  if (host::fastReady(m_cw, flags)) [[likely]] {
+    host::fastArith(op, &m_regs[phys(dst)], &m_regs[phys(src)], flags);
+    update(flags, SW_C1);
+    if (pop)
+      popRaw();
+    return;
+  }
+#endif
+  active::arithTo(op, &m_regs[phys(dst)], m_regs[phys(src)], m_cw, flags);
   if (suppressed(flags)) {
     update(flags & SW_EXC, SW_C1);
     return;
   }
-  setSt(dst, r);
   update(flags, SW_C1);
   if (pop)
     popRaw();
 }
 
-void FPU::arithMem(Arith op, MemFmt fmt, uint64_t raw) {
+void FPU::arithMemSlow(Arith op, MemFmt fmt, uint64_t raw) {
   if (isEmpty(0)) {
     if (stackUnderflow())
       setSt(0, kIndefinite);
     return;
   }
-  uint16_t flags = 0;
-  const Float80 r = active::arithMem(op, st(0), fmt, raw, m_cw, flags);
+  uint16_t flags = knownFlags();
+#if FADOR_X87_HOST
+  if (host::fastReady(m_cw, flags)) [[likely]] {
+    host::fastArithMem(op, &m_regs[phys(0)], fmt, &raw, flags);
+    update(flags, SW_C1);
+    return;
+  }
+#endif
+  active::arithMemTo(op, &m_regs[phys(0)], fmt, raw, m_cw, flags);
   if (suppressed(flags)) {
     update(flags & SW_EXC, SW_C1);
     return;
   }
-  setSt(0, r);
   update(flags, SW_C1);
 }
 
@@ -348,7 +394,16 @@ void FPU::fcomReg(int i, bool unordered, int pops) {
     if (!ieMasked())
       return;
   } else {
-    uint16_t flags = 0;
+    uint16_t flags = knownFlags();
+#if FADOR_X87_HOST
+    if (host::fastReady(m_cw, flags)) [[likely]] {
+      host::fastCompare(&m_regs[phys(0)], &m_regs[phys(i)], unordered, flags);
+      update(flags, SW_CC);
+      for (int k = 0; k < pops; ++k)
+        popRaw();
+      return;
+    }
+#endif
     active::compare(st(0), st(i), unordered, flags);
     update(flags, SW_CC);
     if (suppressed(flags))
@@ -364,7 +419,7 @@ void FPU::fcomMem(MemFmt fmt, uint64_t raw, bool pop) {
     if (!ieMasked())
       return;
   } else {
-    uint16_t flags = 0;
+    uint16_t flags = knownFlags();
     active::compareMem(st(0), fmt, raw, flags);
     update(flags, SW_CC);
     if (suppressed(flags))
@@ -383,7 +438,7 @@ uint32_t FPU::fcomi(int i, bool unordered, bool pop, uint32_t eflags) {
     cc = kUnordered;
     doPop = pop && ieMasked();
   } else {
-    uint16_t flags = 0;
+    uint16_t flags = knownFlags();
     active::compare(st(0), st(i), unordered, flags);
     update(flags & SW_EXC, 0);
     cc = flags & kUnordered;
@@ -406,7 +461,7 @@ void FPU::ftst() {
     update(SW_IE | SW_SF | kUnordered, SW_CC);
     return;
   }
-  uint16_t flags = 0;
+  uint16_t flags = knownFlags();
   active::compare(st(0), kPosZero, false, flags);
   update(flags, SW_CC);
 }
@@ -465,7 +520,7 @@ void FPU::fabs() {
   update(0, SW_C1);
 }
 
-void FPU::fxch(int i) {
+void FPU::fxchSlow(int i) {
   if (isEmpty(0) || isEmpty(i)) {
     if (!stackUnderflow())
       return;
@@ -530,9 +585,19 @@ void FPU::stackOp(uint8_t modrm) {
     }
     return;
   }
+#if FADOR_X87_HOST
+  if ((modrm == 0xFA || modrm == 0xFC)) {
+    uint16_t flags = knownFlags();
+    if (host::fastReady(m_cw, flags)) [[likely]] {
+      host::fastUnary(modrm, &m_regs[phys(0)], flags);
+      update(flags, SW_C1);
+      return;
+    }
+  }
+#endif
   Float80 in[2] = {st(0), nIn > 1 ? st(1) : Float80{}};
   Float80 out[3];
-  uint16_t flags = 0;
+  uint16_t flags = knownFlags();
   const int nOut = active::stackOp(modrm, nIn, in, out, m_cw, flags);
   if (suppressed(flags)) {
     update(flags & SW_EXC, nanCC);
@@ -669,7 +734,7 @@ void FPU::storeRegs(uint8_t *out80) const {
 
 void FPU::loadRegs(const uint8_t *in80) {
   for (int i = 0; i < 8; ++i)
-    m_regs[phys(i)] = loadFloat80(in80 + 10 * i);
+    storeWhole(m_regs[phys(i)], loadFloat80(in80 + 10 * i));
 }
 
 } // namespace fador::cpu::x87

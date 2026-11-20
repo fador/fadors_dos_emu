@@ -17,7 +17,8 @@
 //        Masks only matter for the rebiased results of unmasked overflow /
 //        underflow; the caller (FPU) applies the "no result" rule for
 //        unmasked IE/DE/ZE itself.
-//   sw   receives exception flags (IE DE ZE OE UE PE) and the condition
+//   sw   in: the guest's masked sticky exception flags (may be 0); out: ORed
+//        with the exception flags (IE DE ZE OE UE PE) and the condition
 //        bits the operation defines (C1 = "rounded up" for rounding
 //        operations, C0..C3 for compares / FPREM, C2 for out-of-range trig).
 //        Only bits the operation defines are meaningful; the caller masks.
@@ -78,6 +79,12 @@ enum class Const : uint8_t { One = 0, L2T, L2E, Pi, LG2, LN2, Zero };
   /* a = ST0, the memory operand is the second operand */                      \
   Float80 arithMem(Arith op, const Float80 &a, MemFmt fmt, uint64_t raw,       \
                    uint16_t cw, uint16_t &sw);                                 \
+  /* In place: *dst = *dst op src, left unchanged on an unmasked IE/DE/ZE      \
+     (the FPU's hot path; dst points into the register file). */               \
+  void arithTo(Arith op, Float80 *dst, const Float80 &src, uint16_t cw,        \
+               uint16_t &sw);                                                  \
+  void arithMemTo(Arith op, Float80 *dst, MemFmt fmt, uint64_t raw,            \
+                  uint16_t cw, uint16_t &sw);                                  \
   /* sets C0/C2/C3; unordered = FUCOM rules (IE only for SNaN) */              \
   void compare(const Float80 &a, const Float80 &b, bool unordered,             \
                uint16_t &sw);                                                  \

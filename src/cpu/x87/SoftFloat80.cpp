@@ -1183,6 +1183,20 @@ Float80 arithMem(Arith op, const Float80 &a, MemFmt fmt, uint64_t raw,
   }
 }
 
+void arithTo(Arith op, Float80 *dst, const Float80 &src, uint16_t cw,
+             uint16_t &sw) {
+  const Float80 r = arith(op, *dst, src, cw, sw);
+  if (!(sw & ~cw & (SW_IE | SW_DE | SW_ZE)))
+    storeWhole(*dst, r);
+}
+
+void arithMemTo(Arith op, Float80 *dst, MemFmt fmt, uint64_t raw, uint16_t cw,
+                uint16_t &sw) {
+  const Float80 r = arithMem(op, *dst, fmt, raw, cw, sw);
+  if (!(sw & ~cw & (SW_IE | SW_DE | SW_ZE)))
+    storeWhole(*dst, r);
+}
+
 void compare(const Float80 &a, const Float80 &b, bool unordered, uint16_t &sw) {
   constexpr uint16_t kUnordered = SW_C0 | SW_C2 | SW_C3;
   if (isUnsupported(a) || isUnsupported(b)) {

@@ -8,6 +8,12 @@
 #include <array>
 #include <cstring>
 
+#if defined(_MSC_VER)
+#define FADOR_FPU_COLD __declspec(noinline)
+#else
+#define FADOR_FPU_COLD __attribute__((noinline, cold))
+#endif
+
 namespace fador::cpu {
 
 using x87::Arith;
@@ -102,18 +108,24 @@ void InstructionDecoder::fpuWriteBytes(uint32_t address, const uint8_t *in, size
 
 void InstructionDecoder::executeFPUOpcode(uint8_t opcode) {
   const uint8_t modrmByte = fetch8();
-  const ModRM modrm = decodeModRM(modrmByte);
+  const ModRM modrm{static_cast<uint8_t>(modrmByte >> 6),
+                    static_cast<uint8_t>((modrmByte >> 3) & 7),
+                    static_cast<uint8_t>(modrmByte & 7)};
   x87::FPU &fpu = m_cpu.fpu();
 
-  if (!isNonWaiting(opcode, modrmByte, modrm) && fpuCheckPendingError())
-    return;
+  if (fpu.errorPending() | m_cpu.fpuErrorSignalled()) [[unlikely]] {
+    if (!fpu.errorPending())
+      m_cpu.setFPUErrorSignalled(false); // FERR# re-arms once the error is cleared
+    else if (!isNonWaiting(opcode, modrmByte, modrm) && fpuCheckPendingError())
+      return;
+  }
 
   const bool hasMem = modrm.mod != 3;
   uint32_t addr = 0;
   if (hasMem)
     addr = m_hasPrefix67 ? getEffectiveAddress32(modrm) : getEffectiveAddress16(modrm);
 
-  if (!isControl(opcode, modrmByte, modrm)) {
+  if (!isControl(opcode, modrmByte, modrm)) [[likely]] {
     fpu.fip = m_instrStartEIP;
     fpu.fcs = m_cpu.getSegReg(CS);
     fpu.fop = static_cast<uint16_t>(((opcode & 0x07u) << 8) | modrmByte);
@@ -123,20 +135,72 @@ void InstructionDecoder::executeFPUOpcode(uint8_t opcode) {
     }
   }
 
-  // With paging, a memory access to a not-present page is undone and
-  // restarted after #PF: keep the FPU state so it can be rolled back too.
   if (hasMem && m_memory.pagingEnabled()) [[unlikely]] {
-    const x87::FPU saved = fpu;
-    executeFPUInstruction(opcode, modrmByte, modrm, addr);
-    if (m_memory.pageFaultPending())
-      fpu = saved;
+    executeFPUPaged(opcode, modrmByte, modrm, addr);
     return;
   }
   executeFPUInstruction(opcode, modrmByte, modrm, addr);
 }
 
+// With paging, a memory access to a not-present page is undone and
+// restarted after #PF: keep the FPU state so it can be rolled back too.
+FADOR_FPU_COLD void InstructionDecoder::executeFPUPaged(uint8_t opcode, uint8_t modrmByte,
+                                         ModRM modrm, uint32_t addr) {
+  x87::FPU &fpu = m_cpu.fpu();
+  const x87::FPU saved = fpu;
+  executeFPUInstruction(opcode, modrmByte, modrm, addr);
+  if (m_memory.pageFaultPending())
+    fpu = saved;
+}
+
+FADOR_FPU_COLD void InstructionDecoder::fpuEnvironment(uint8_t opcode, uint8_t reg, uint32_t addr) {
+  x87::FPU &fpu = m_cpu.fpu();
+  std::array<uint8_t, 108> image{};
+  const ImageMode mode = fpuImageMode();
+  const size_t envSize = x87::envImageSize(mode);
+  if (opcode == 0xD9 && reg == 4) { // FLDENV
+    fpuReadBytes(addr, image.data(), envSize);
+    fpu.loadEnv(image.data(), mode);
+  } else if (opcode == 0xD9) { // FNSTENV: store, then mask all exceptions
+    fpu.storeEnv(image.data(), mode);
+    fpuWriteBytes(addr, image.data(), envSize);
+    fpu.setControlWord(static_cast<uint16_t>(fpu.controlWord() | x87::SW_EXC));
+  } else if (reg == 4) { // FRSTOR
+    fpuReadBytes(addr, image.data(), envSize + 80);
+    fpu.loadEnv(image.data(), mode);
+    fpu.loadRegs(image.data() + envSize);
+  } else { // FNSAVE: store, then FNINIT
+    fpu.storeEnv(image.data(), mode);
+    fpu.storeRegs(image.data() + envSize);
+    fpuWriteBytes(addr, image.data(), envSize + 80);
+    fpu.reset();
+  }
+}
+
+// 10-byte memory operands: FLD/FSTP m80 (DB /5, /7), FBLD/FBSTP (DF /4, /6).
+FADOR_FPU_COLD void InstructionDecoder::fpuTenByte(uint8_t opcode, uint8_t reg,
+                                                   uint32_t addr) {
+  x87::FPU &fpu = m_cpu.fpu();
+  uint8_t b[10];
+  if (opcode == 0xDB && reg == 5) {
+    fpuReadBytes(addr, b, 10);
+    fpu.fldValue(x87::loadFloat80(b));
+  } else if (opcode == 0xDB) {
+    Float80 v;
+    if (fpu.fst80(v, true)) {
+      x87::storeFloat80(b, v);
+      fpuWriteBytes(addr, b, 10);
+    }
+  } else if (reg == 4) {
+    fpuReadBytes(addr, b, 10);
+    fpu.fbld(b);
+  } else if (fpu.fbstp(b)) {
+    fpuWriteBytes(addr, b, 10);
+  }
+}
+
 void InstructionDecoder::executeFPUInstruction(uint8_t opcode, uint8_t modrmByte,
-                                               const ModRM &modrm, uint32_t addr) {
+                                               ModRM modrm, uint32_t addr) {
   x87::FPU &fpu = m_cpu.fpu();
   const int i = modrm.rm;
   auto read64 = [&](uint32_t a) {
@@ -244,24 +308,15 @@ void InstructionDecoder::executeFPUInstruction(uint8_t opcode, uint8_t modrmByte
           m_memory.lwrite32(addr, v);
         return;
       }
-      case 4: { // FLDENV
-        std::array<uint8_t, 28> env{};
-        const ImageMode mode = fpuImageMode();
-        fpuReadBytes(addr, env.data(), x87::envImageSize(mode));
-        fpu.loadEnv(env.data(), mode);
+      case 4: // FLDENV
+        fpuEnvironment(opcode, modrm.reg, addr);
         return;
-      }
       case 5: // FLDCW
         fpu.setControlWord(m_memory.lread16(addr));
         return;
-      case 6: { // FNSTENV: store, then mask all exceptions
-        std::array<uint8_t, 28> env{};
-        const ImageMode mode = fpuImageMode();
-        fpu.storeEnv(env.data(), mode);
-        fpuWriteBytes(addr, env.data(), x87::envImageSize(mode));
-        fpu.setControlWord(static_cast<uint16_t>(fpu.controlWord() | x87::SW_EXC));
+      case 6: // FNSTENV
+        fpuEnvironment(opcode, modrm.reg, addr);
         return;
-      }
       case 7: // FNSTCW
         m_memory.lwrite16(addr, fpu.controlWord());
         return;
@@ -339,21 +394,10 @@ void InstructionDecoder::executeFPUInstruction(uint8_t opcode, uint8_t modrmByte
           m_memory.lwrite32(addr, static_cast<uint32_t>(v));
         return;
       }
-      case 5: {
-        uint8_t b[10];
-        fpuReadBytes(addr, b, 10);
-        fpu.fldValue(x87::loadFloat80(b));
+      case 5: // FLD m80
+      case 7: // FSTP m80
+        fpuTenByte(opcode, modrm.reg, addr);
         return;
-      }
-      case 7: {
-        Float80 v;
-        if (fpu.fst80(v, true)) {
-          uint8_t b[10];
-          x87::storeFloat80(b, v);
-          fpuWriteBytes(addr, b, 10);
-        }
-        return;
-      }
       default:
         unimplemented();
         return;
@@ -412,25 +456,10 @@ void InstructionDecoder::executeFPUInstruction(uint8_t opcode, uint8_t modrmByte
           write64(addr, v);
         return;
       }
-      case 4: { // FRSTOR
-        std::array<uint8_t, 108> image{};
-        const ImageMode mode = fpuImageMode();
-        const size_t envSize = x87::envImageSize(mode);
-        fpuReadBytes(addr, image.data(), envSize + 80);
-        fpu.loadEnv(image.data(), mode);
-        fpu.loadRegs(image.data() + envSize);
+      case 4: // FRSTOR
+      case 6: // FNSAVE
+        fpuEnvironment(opcode, modrm.reg, addr);
         return;
-      }
-      case 6: { // FNSAVE: store, then FNINIT
-        std::array<uint8_t, 108> image{};
-        const ImageMode mode = fpuImageMode();
-        const size_t envSize = x87::envImageSize(mode);
-        fpu.storeEnv(image.data(), mode);
-        fpu.storeRegs(image.data() + envSize);
-        fpuWriteBytes(addr, image.data(), envSize + 80);
-        fpu.reset();
-        return;
-      }
       case 7: // FNSTSW m16
         m_memory.lwrite16(addr, fpu.statusWord());
         return;
@@ -477,21 +506,15 @@ void InstructionDecoder::executeFPUInstruction(uint8_t opcode, uint8_t modrmByte
           m_memory.lwrite16(addr, static_cast<uint16_t>(v));
         return;
       }
-      case 4: {
-        uint8_t b[10];
-        fpuReadBytes(addr, b, 10);
-        fpu.fbld(b);
+      case 4: // FBLD
+        fpuTenByte(opcode, modrm.reg, addr);
         return;
-      }
       case 5:
         fpu.fildValue(static_cast<int64_t>(read64(addr)));
         return;
-      case 6: {
-        uint8_t b[10];
-        if (fpu.fbstp(b))
-          fpuWriteBytes(addr, b, 10);
+      case 6: // FBSTP
+        fpuTenByte(opcode, modrm.reg, addr);
         return;
-      }
       case 7: {
         int64_t v = 0;
         if (fpu.fist(64, v, true))
