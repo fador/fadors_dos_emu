@@ -398,6 +398,8 @@ void SDLRenderer::handleSDLMouse(const SDL_Event &ev) {
 
     ms.mickeysX += scaledXRel;
     ms.mickeysY += scaledYRel;
+    ms.hostMotionX += ev.motion.xrel;
+    ms.hostMotionY += ev.motion.yrel;
 
     if (m_mouseCaptured) {
       // Apply bounds-checked relative deltas directly to absolute position to
