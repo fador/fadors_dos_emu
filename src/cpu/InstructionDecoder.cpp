@@ -1617,7 +1617,9 @@ void InstructionDecoder::stepInstruction() {
         // needs to run periodically for SDL event polling, rendering,
         // and audio generation.
         constexpr int MAX_REP_BATCH = 4096;
-        if (tryFastRepString(opcode)) {
+        // MOVS (A4/A5) and STOS (AA/AB) have bulk fast paths
+        const uint8_t pair = opcode & 0xFE;
+        if ((pair == 0xA4 || pair == 0xAA) && tryFastRepString(opcode)) {
           return;
         }
 
