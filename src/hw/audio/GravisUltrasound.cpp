@@ -242,9 +242,8 @@ uint64_t GravisUltrasound::tickTimeNs(uint64_t tick) const {
 
 void GravisUltrasound::setActiveVoices(int voices, uint64_t nowNs) {
   voices = std::clamp(voices, kMinVoices, kMaxVoices);
-  if (voices == m_activeVoices && m_epochTick == m_ticksDone &&
-      m_epochNs == nowNs)
-    return;
+  if (voices == m_activeVoices)
+    return; // keep the tick phase
   m_activeVoices = voices;
   m_epochNs = nowNs;
   m_epochTick = m_ticksDone;
@@ -1005,8 +1004,9 @@ void GravisUltrasound::runTicks(uint64_t count) {
           queueVoiceIrq(e.voice, e.bits);
       }
     }
-    // Output FIFO for the resampler (m_fifoTick + frames == m_ticksDone);
-    // silence longer than the filter is not stored.
+    // Output FIFO for the resampler (m_fifoTick + frames == m_ticksDone).
+    // Silence is stored only while generateSamples() still needs frames
+    // with sound before it.
     if (sound) {
       const size_t at = m_fifo.size();
       m_fifo.resize(at + 2 * n);
@@ -1015,11 +1015,11 @@ void GravisUltrasound::runTicks(uint64_t count) {
         m_fifo[at + 2 * t + 1] = m_mixR[t];
       }
       m_soundEndTick = m_ticksDone + n;
-    } else if (!m_fifo.empty() && m_ticksDone < m_soundEndTick + 2 * kTaps) {
-      m_fifo.resize(m_fifo.size() + 2 * n, 0.0f);
-    } else {
+    } else if (m_fifo.empty() || m_fifoTick >= m_soundEndTick) {
       m_fifo.clear();
       m_fifoTick = m_ticksDone + n;
+    } else {
+      m_fifo.resize(m_fifo.size() + 2 * n, 0.0f);
     }
     if (m_capture) {
       for (uint32_t t = 0; t < n; ++t) {
@@ -1092,12 +1092,25 @@ void GravisUltrasound::generateSamples(float *buffer, size_t frames) {
        static_cast<double>(m_epochNs)) * rate * 1e-9 - kDelayTicks;
   const double step = rate / static_cast<double>(outRate);
   const double endPos = startPos + step * static_cast<double>(frames);
+  const int64_t fifoFrames = static_cast<int64_t>(m_fifo.size() / 2);
+  // Frames before the next window's first tap are no longer needed.
+  auto trim = [&] {
+    const int64_t keep = static_cast<int64_t>(std::floor(endPos)) - kTaps -
+                         static_cast<int64_t>(m_fifoTick);
+    if (keep > 0) {
+      const size_t drop = static_cast<size_t>(std::min(keep, fifoFrames));
+      m_fifo.erase(m_fifo.begin(),
+                   m_fifo.begin() + static_cast<std::ptrdiff_t>(2 * drop));
+      m_fifoTick += drop;
+    }
+  };
   if (m_fifo.empty() || startPos - kTaps >= static_cast<double>(m_soundEndTick) ||
-      endPos + kTaps < static_cast<double>(m_fifoTick))
+      endPos + kTaps < static_cast<double>(m_fifoTick)) {
+    trim();
     return; // silent window
+  }
 
   m_stage.assign(frames * 2, 0.0f);
-  const int64_t fifoFrames = static_cast<int64_t>(m_fifo.size() / 2);
   const float *fifo = m_fifo.data();
   for (size_t i = 0; i < frames; ++i) {
     const double p = startPos + step * static_cast<double>(i);
@@ -1126,15 +1139,7 @@ void GravisUltrasound::generateSamples(float *buffer, size_t frames) {
     m_stage[2 * i + 1] = r;
   }
   utils::simd::kernels().mixAddF32(buffer, m_stage.data(), frames * 2, 1.0f);
-
-  // Frames before the next window's first tap are no longer needed.
-  const int64_t keep = static_cast<int64_t>(std::floor(endPos)) - kTaps -
-                       static_cast<int64_t>(m_fifoTick);
-  if (keep > 0) {
-    const size_t drop = static_cast<size_t>(std::min(keep, fifoFrames));
-    m_fifo.erase(m_fifo.begin(), m_fifo.begin() + static_cast<std::ptrdiff_t>(2 * drop));
-    m_fifoTick += drop;
-  }
+  trim();
 }
 
 } // namespace fador::hw::audio

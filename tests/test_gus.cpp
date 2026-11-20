@@ -757,3 +757,33 @@ TEST_CASE("GUS: rollover raises the IRQ and plays on unless looping", "[gus]") {
   }
   REQUIRE(e.irqs.size() == 4); // at ticks 32, 64 and 96
 }
+
+TEST_CASE("GUS: the end of a sound survives frequent syncs", "[gus]") {
+  GusEnv e;
+  e.run(); // 14 voices: GF1 rate = output rate
+  for (uint32_t i = 0; i < 1100; ++i)
+    e.poke(0x3000 + i, 0x40);
+  uint64_t frame = 44100 * (e.now / 1'000'000'000) + 100;
+  e.now = (frame * 1'000'000'000 + 44099) / 44100;
+  std::vector<float> buf(441 * 2);
+  e.gus->generateSamples(buf.data(), 0);
+  e.startVoice(0, 0x3000, 0x3000 + 1000, 0x00); // 1000 samples, one-shot
+  double sum = 0.0;
+  for (int block = 0; block < 20; ++block) {
+    // A port access every ~10 ticks between the 10 ms output blocks.
+    for (int k = 1; k <= 44; ++k) {
+      e.now = ((frame * 1'000'000'000 + 44099) / 44100) + k * 226'757;
+      e.in(0x006);
+    }
+    frame += 441;
+    e.now = (frame * 1'000'000'000 + 44099) / 44100;
+    std::fill(buf.begin(), buf.end(), 0.0f);
+    e.gus->generateSamples(buf.data(), 441);
+    for (size_t i = 0; i < 441; ++i)
+      sum += buf[2 * i];
+  }
+  const double g = GravisUltrasound::volumeGain(4095) * 0.5 / 32768.0 *
+                   std::cos(3.14159265358979 / 4);
+  const double expected = 1000.0 * 0x40 * 256 * g;
+  REQUIRE(std::fabs(sum / expected - 1.0) < 0.01);
+}
