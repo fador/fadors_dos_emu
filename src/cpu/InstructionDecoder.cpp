@@ -519,6 +519,13 @@ uint64_t InstructionDecoder::runFastBurst(uint64_t maxInstructions) {
   const uint8_t code32 = m_cpu.is32BitCode() ? 1 : 0;
   const uint16_t cs = m_cpu.getSegReg(CS);
   uint16_t prevCS = m_cpu.getInstructionStartCS();
+  // Host address of the current code page.  Paging is off during a burst
+  // and nothing in it can change A20 or the memory map, so a page that
+  // MemoryBus::codeWindow() accepted stays valid until the burst ends.
+  uint32_t pageLin = (csBase + m_cpu.getEIP()) & ~0xFFFu;
+  const uint8_t *pageHost = m_memory.codeWindow(pageLin);
+  if (pageHost == nullptr)
+    return 0;
   uint64_t n = 0, cycles = 0;
   while (n < maxInstructions) {
     const uint32_t eip = m_cpu.getEIP();
@@ -527,8 +534,17 @@ uint64_t InstructionDecoder::runFastBurst(uint64_t maxInstructions) {
     if (e == nullptr || e->handler == nullptr)
       break; // not decoded yet or not a fast-path instruction
     const DecodedInsn &d = *e;
-    const uint8_t *p = m_memory.codeWindow(lin);
-    if (p == nullptr || !d.matches(p) || d.wraps(eip) ||
+    const uint8_t *p;
+    if (lin - pageLin <= 0xFF0) [[likely]] {
+      p = pageHost + (lin - pageLin);
+    } else {
+      p = m_memory.codeWindow(lin);
+      if (p == nullptr)
+        break;
+      pageLin = lin & ~0xFFFu;
+      pageHost = p - (lin & 0xFFFu);
+    }
+    if (!d.matches(p) || d.wraps(eip) ||
         ((d.flags & DecodedInsn::kX87) && m_cpu.fpu().errorPending()))
       [[unlikely]]
       break;

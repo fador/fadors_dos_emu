@@ -226,6 +226,34 @@ struct FastOps {
     setR<S>(c, d.reg, v);
   }
 
+  // ── segment registers (never CS or SS: those end a burst or start an
+  //    interrupt shadow and stay on the legacy path) ─────────────────
+  template <bool Mem> static void movSregRM(ID &c, const D &d) { // 8E
+    const uint16_t v = static_cast<uint16_t>(Mem ? rd<16>(c, ea(c, d)) : getR<16>(c, d.rm));
+    c.loadSegment(static_cast<SegRegIndex>(d.reg), v);
+  }
+  template <bool Mem> static void movRMSreg(ID &c, const D &d) { // 8C
+    const uint16_t v = c.m_cpu.getSegReg(d.reg);
+    if constexpr (Mem)
+      wr<16>(c, ea(c, d), v);
+    else
+      setR<16>(c, d.rm, v);
+  }
+  template <int S> static void pushSreg(ID &c, const D &d) {
+    push<S>(c, c.m_cpu.getSegReg(d.reg));
+  }
+  template <int S> static void popSreg(ID &c, const D &d) {
+    const uint16_t v = static_cast<uint16_t>(pop<S>(c) & 0xFFFF);
+    c.loadSegment(static_cast<SegRegIndex>(d.reg), v);
+  }
+  // LES/LDS (C4/C5): d.aux = segment register
+  template <int S> static void loadFarPointer(ID &c, const D &d) {
+    const uint32_t a = ea(c, d);
+    setR<S>(c, d.reg, rd<S>(c, a));
+    c.loadSegment(static_cast<SegRegIndex>(d.aux),
+                  static_cast<uint16_t>(rd<16>(c, a + S / 8)));
+  }
+
   // ── stack ─────────────────────────────────────────────────────────
   template <int S> static void pushReg(ID &c, const D &d) { push<S>(c, getR<S>(c, d.reg)); }
   template <int S> static void popReg(ID &c, const D &d) { setR<S>(c, d.reg, pop<S>(c)); }
@@ -519,6 +547,11 @@ FADOR_FAMILY(HRet, (&F::retNear<S>))
 FADOR_FAMILY(HRetImm, (&F::retNearImm<S>))
 FADOR_FAMILY(HMoffsLoad, (&F::movMoffs<S, false>))
 FADOR_FAMILY(HMoffsStore, (&F::movMoffs<S, true>))
+FADOR_FAMILY(HMovSregRM, (&F::movSregRM<M>))
+FADOR_FAMILY(HMovRMSreg, (&F::movRMSreg<M>))
+FADOR_FAMILY(HPushSreg, (&F::pushSreg<S>))
+FADOR_FAMILY(HPopSreg, (&F::popSreg<S>))
+FADOR_FAMILY(HLoadFar, (&F::loadFarPointer<S>))
 // x87: S = operand size (16/32) of the environment/state images
 FADOR_FAMILY(HX87, (S == 32 ? &F::x87<true, M> : &F::x87<false, M>))
 #undef FADOR_FAMILY
@@ -697,6 +730,11 @@ void InstructionDecoder::decodeFast(DecodedInsn &d, uint32_t linear,
           return;
         h = pickOpSM<HAluAcc>(aop, size, false);
       }
+    } else if (op < 0x20 && (op & 7) >= 6 && op != 0x0F && op != 0x17) {
+      // PUSH ES/CS/SS/DS (06 0E 16 1E), POP ES/DS (07 1F); POP SS (17)
+      // starts an interrupt shadow: legacy.
+      d.reg = op >> 3;
+      h = (op & 1) ? pickS<HPopSreg>(osize) : pickS<HPushSreg>(osize);
     } else if (op >= 0x40 && op <= 0x4F) {
       d.reg = op & 7;
       h = op < 0x48 ? pickS<HIncReg>(osize) : pickS<HDecReg>(osize);
@@ -744,6 +782,17 @@ void InstructionDecoder::decodeFast(DecodedInsn &d, uint32_t linear,
         return;
       const int size = (op & 1) ? osize : 8;
       h = (op & 2) ? pickSM<HMovRegRM>(size, mem) : pickSM<HMovRMReg>(size, mem);
+    } else if (op == 0x8C || op == 0x8E) {
+      if (!modrm() || d.reg > 5)
+        return; // #UD
+      if (op == 0x8E && (d.reg == CS || d.reg == SS))
+        return; // CS changes the code segment, SS starts a shadow
+      h = op == 0x8C ? pickSM<HMovRMSreg>(16, mem) : pickSM<HMovSregRM>(16, mem);
+    } else if (op == 0xC4 || op == 0xC5) {
+      if (!modrm() || !mem)
+        return;
+      d.aux = op == 0xC4 ? ES : DS;
+      h = pickS<HLoadFar>(osize);
     } else if (op == 0x8D) {
       if (!modrm() || !mem)
         return;
@@ -905,6 +954,12 @@ void InstructionDecoder::decodeFast(DecodedInsn &d, uint32_t linear,
         return; // #UD on models without CMOV: legacy
       d.aux = op & 0x0F;
       h = pickSM<HCmov>(osize, mem);
+    } else if (op == 0xA0 || op == 0xA8) { // PUSH FS / GS
+      d.reg = op == 0xA0 ? FS : GS;
+      h = pickS<HPushSreg>(osize);
+    } else if (op == 0xA1 || op == 0xA9) { // POP FS / GS
+      d.reg = op == 0xA1 ? FS : GS;
+      h = pickS<HPopSreg>(osize);
     } else if (op == 0xAF) {
       if (!modrm())
         return;

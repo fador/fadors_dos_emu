@@ -543,7 +543,7 @@ struct StreamGen {
     }
   }
   void one() {
-    const uint32_t kind = r(43);
+    const uint32_t kind = r(46);
     if (kind == 37) { // CALL to an inline subroutine ending in RET / RET imm
       const int rel = code32 ? 4 : 2;
       std::vector<uint8_t> body;
@@ -634,6 +634,23 @@ struct StreamGen {
     case 38: b(0xE9); b(r(5)); b(0); if (op32) { b(0); b(0); } break;
     case 40: case 41: b(0xD8 + r(8)); modrm(addr32); break; // x87, any ModRM
     case 42: b(0x9B); break;                                // FWAIT
+    case 43: // segment registers: MOV Sreg (not CS/SS) / MOV r/m,Sreg
+      if (r(2)) {
+        b(0x8E);
+        modrm(addr32, static_cast<int>(r(2) ? 0 : 3 + r(3)));
+      } else {
+        b(0x8C);
+        modrm(addr32, static_cast<int>(r(6)));
+      }
+      break;
+    case 44: // PUSH/POP ES DS, PUSH CS SS, PUSH/POP FS GS
+      switch (r(4)) {
+      case 0: b(0x06 + 8 * r(4)); break;
+      case 1: b(r(2) ? 0x07 : 0x1F); break;
+      default: b(0x0F); b(0xA0 + 8 * r(2) + r(2)); break;
+      }
+      break;
+    case 45: b(0xC4 + r(2)); modrm(addr32); break; // LES/LDS (mod 3: legacy)
     default: b(0xEB); b(r(5)); break;
     }
   }
