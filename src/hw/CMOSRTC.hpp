@@ -1,5 +1,6 @@
 #pragma once
 
+#include "CivilTime.hpp"
 #include "IODevice.hpp"
 #include <array>
 #include <chrono>
@@ -41,8 +42,18 @@ public:
   /// use the overflow registers 0x30-0x31.
   void setExtendedMemoryKB(uint32_t kb);
 
-  /// Load the RTC date/time registers from the host's local time.
+  /// Load the RTC date/time registers from the host's local time (done
+  /// at construction; --deterministic runs then set a fixed time).
   void syncTime();
+  /// Current date and time, brought up to virtual time first.
+  CivilDateTime dateTime();
+  /// Set the date and time registers (in the format register B selects;
+  /// the day of week is derived).  The divider phase is kept, as when the
+  /// BIOS writes the registers with SET.
+  void setDateTime(const CivilDateTime &dt);
+  /// Register B bit 0 (daylight saving enable), INT 1Ah AH=02h/03h DL.
+  bool daylightSaving() const { return (m_cmosRAM[0x0B] & 0x01) != 0; }
+  void setDaylightSaving(bool enabled);
 
   /// Set slave PIC for IRQ8 delivery
   void setPIC(PIC8259* pic) { m_pic = pic; }

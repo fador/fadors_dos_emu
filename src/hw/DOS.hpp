@@ -2,6 +2,7 @@
 #include "../cpu/CPU.hpp"
 #include "../memory/MemoryBus.hpp"
 #include "../memory/himem/HIMEM.hpp"
+#include "CivilTime.hpp"
 #include "DriveManager.hpp"
 #include "cdrom/Mscdex.hpp"
 #include <cstdint>
@@ -16,6 +17,7 @@ namespace fador::hw {
 
 class KeyboardController;
 class DPMI;
+class CMOSRTC;
 
 class DOS {
 public:
@@ -36,6 +38,21 @@ public:
 
   // DPMI host wiring
   void setDPMI(DPMI *dpmi) { m_dpmi = dpmi; }
+
+  // ── DOS clock ──
+  // Like MS-DOS's CLOCK$ driver, the time of day is the BIOS tick count at
+  // 0040:006Ch and DOS keeps the date itself, advancing it when the BIOS
+  // midnight flag (0040:0070h) is set.  AH=2Bh/2Dh set the date / tick
+  // count and, as DOS 3.3+ does, also the RTC.
+  struct ClockReading {
+    CivilDateTime dateTime;
+    int hundredths = 0;
+    int weekday = 0; // 0 = Sunday
+  };
+  ClockReading readClock();
+  // Date at start-up (the host's local date until main sets the start time).
+  void setDate(int year, int month, int day);
+  void setRTC(CMOSRTC *rtc) { m_rtc = rtc; }
 
   // Drive manager wiring
   void setDriveManager(DriveManager *dm);
@@ -193,6 +210,10 @@ private:
   uint8_t m_lastErrorLocus = 0;
   void setExtendedError(uint16_t code, uint8_t errorClass = 0x01, uint8_t action = 0x01, uint8_t locus = 0x01);
   void syncJFT(uint16_t handle, uint8_t sftIndex);
+
+  CMOSRTC *m_rtc = nullptr;
+  int64_t m_dateDays = 0; // DOS date, days since 1970-01-01
+  void stampNow(uint16_t &fileDate, uint16_t &fileTime);
 
   KeyboardController *m_kbd = nullptr;
   std::function<void()> m_pollInput;

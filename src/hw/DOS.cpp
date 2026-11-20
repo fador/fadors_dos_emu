@@ -3,6 +3,8 @@
 
 #include "../utils/Logger.hpp"
 #include "DOS.hpp"
+#include "CMOSRTC.hpp"
+#include "MachineTime.hpp"
 #include "DPMI.hpp"
 #include "KeyboardController.hpp"
 #include "ProgramLoader.hpp"
@@ -112,6 +114,41 @@ void initializeDOSListOfLists(memory::MemoryBus &memory, uint16_t firstMCBSegmen
 DOS::DOS(cpu::CPU &cpu, memory::MemoryBus &memory)
     : m_cpu(cpu), m_memory(memory) {
   m_himem = std::make_unique<memory::HIMEM>();
+  const CivilDateTime host = hostLocalTime(); // main may set a fixed date
+  setDate(host.year, host.month, host.day);
+}
+
+void DOS::setDate(int year, int month, int day) {
+  m_dateDays = daysFromCivil(year, month, day);
+}
+
+DOS::ClockReading DOS::readClock() {
+  // Midnight passed since the last read (the flag is a count on some
+  // BIOSes; like MS-DOS, advance one day per set flag).
+  if (m_memory.read8(0x470) != 0) {
+    m_memory.write8(0x470, 0);
+    ++m_dateDays;
+  }
+  const uint64_t ticks = m_memory.read32(0x46C) % kBiosTicksPerDay;
+  const uint64_t cs = ticks * 8'640'000 / kBiosTicksPerDay; // 1/100 s of day
+  ClockReading r;
+  civilFromDays(m_dateDays, r.dateTime.year, r.dateTime.month,
+                r.dateTime.day);
+  r.dateTime.hour = static_cast<int>(cs / 360'000);
+  r.dateTime.minute = static_cast<int>(cs / 6'000 % 60);
+  r.dateTime.second = static_cast<int>(cs / 100 % 60);
+  r.hundredths = static_cast<int>(cs % 100);
+  r.weekday = weekdayFromDays(m_dateDays);
+  return r;
+}
+
+void DOS::stampNow(uint16_t &fileDate, uint16_t &fileTime) {
+  const CivilDateTime now = readClock().dateTime;
+  fileTime = static_cast<uint16_t>(((now.hour & 0x1F) << 11) |
+                                   ((now.minute & 0x3F) << 5) |
+                                   ((now.second / 2) & 0x1F));
+  fileDate = static_cast<uint16_t>((((now.year - 1980) & 0x7F) << 9) |
+                                   (now.month << 5) | (now.day & 0x1F));
 }
 
 void DOS::setDriveManager(DriveManager *dm) {
@@ -192,6 +229,7 @@ bool DOS::handleInterrupt(uint8_t vector) {
     terminateProcess(0);
     return true;
   case 0x21: // DOS API
+    m_cpu.addGuestCycles(hle_cost::kDos);
     handleDOSService();
     return true;
   case 0x25: { // Absolute Disk Read
@@ -463,10 +501,10 @@ void DOS::handleDOSService() {
       if (!m_kbd || !m_kbd->hasKey()) {
         // Rewind EIP before m_idleCallback() so an injected IRQ saves/enters cleanly.
         m_cpu.setEIP(m_cpu.getInstructionStartEIP());
-        if (m_idleCallback) {
-          m_idleCallback();
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (m_idleCallback)
+          m_idleCallback(); // waits for the next event (host or virtual)
+        else
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
         return;
       }
     }
@@ -555,10 +593,10 @@ void DOS::handleDOSService() {
       if (!m_kbd || !m_kbd->hasKey()) {
         // Rewind EIP before m_idleCallback() so an injected IRQ saves/enters cleanly.
         m_cpu.setEIP(m_cpu.getInstructionStartEIP());
-        if (m_idleCallback) {
-          m_idleCallback();
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (m_idleCallback)
+          m_idleCallback(); // waits for the next event (host or virtual)
+        else
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
         return;
       }
     }
@@ -593,10 +631,10 @@ void DOS::handleDOSService() {
       // Wait for a key
       while (!m_kbd || !m_kbd->hasKey()) {
         if (m_pollInput) m_pollInput();
-        if (m_idleCallback) m_idleCallback();
-        if (!m_kbd || !m_kbd->hasKey()) {
+        if (m_idleCallback)
+          m_idleCallback();
+        else if (!m_kbd || !m_kbd->hasKey())
           std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
       }
 
       auto [ascii, scancode] = m_kbd->popKey();
@@ -671,26 +709,32 @@ void DOS::handleDOSService() {
     break;
   }
   case 0x2A: { // Get System Date
-    // Return current date
-    std::time_t t = std::time(nullptr);
-    std::tm *now = std::localtime(&t);
-    if (now) {
-      m_cpu.setReg16(cpu::CX, now->tm_year + 1900); // Year
-      m_cpu.setReg8(cpu::DH, now->tm_mon + 1);      // Month
-      m_cpu.setReg8(cpu::DL, now->tm_mday);         // Day
-      m_cpu.setReg8(cpu::AL, now->tm_wday);         // Day of week (0=Sun, 1=Mon, ..., 6=Sat)
-    } else {
-      m_cpu.setReg16(cpu::CX, 1980);
-      m_cpu.setReg8(cpu::DH, 1);
-      m_cpu.setReg8(cpu::DL, 1);
-      m_cpu.setReg8(cpu::AL, 2); // Tuesday
-    }
+    const ClockReading now = readClock();
+    m_cpu.setReg16(cpu::CX, static_cast<uint16_t>(now.dateTime.year));
+    m_cpu.setReg8(cpu::DH, static_cast<uint8_t>(now.dateTime.month));
+    m_cpu.setReg8(cpu::DL, static_cast<uint8_t>(now.dateTime.day));
+    m_cpu.setReg8(cpu::AL, static_cast<uint8_t>(now.weekday)); // 0 = Sunday
     break;
   }
-  case 0x2B: { // Set System Date
-    // Accept but ignore
-    m_cpu.setReg8(cpu::AL, 0); // Success
-    LOG_DOS("DOS: Set Date (ignored)");
+  case 0x2B: { // Set System Date: CX=year, DH=month, DL=day
+    const int year = m_cpu.getReg16(cpu::CX);
+    const int month = m_cpu.getReg8(cpu::DH);
+    const int day = m_cpu.getReg8(cpu::DL);
+    if (year < 1980 || year > 2099 || !isValidDate(year, month, day)) {
+      m_cpu.setReg8(cpu::AL, 0xFF);
+      break;
+    }
+    readClock(); // consume a pending midnight flag first
+    setDate(year, month, day);
+    if (m_rtc) {
+      CivilDateTime rtc = m_rtc->dateTime();
+      rtc.year = year;
+      rtc.month = month;
+      rtc.day = day;
+      m_rtc->setDateTime(rtc);
+    }
+    m_cpu.setReg8(cpu::AL, 0);
+    LOG_DOS("DOS: Set Date ", year, "-", month, "-", day);
     break;
   }
   case 0x50: { // Set Current PSP
@@ -1519,28 +1563,41 @@ void DOS::handleDOSService() {
     break;
   }
   case 0x2C: { // Get System Time
-    std::time_t t = std::time(nullptr);
-    std::tm *now = std::localtime(&t);
-    if (now) {
-      m_cpu.setReg8(cpu::CH, now->tm_hour); // Hour
-      m_cpu.setReg8(cpu::CL, now->tm_min);  // Minute
-      m_cpu.setReg8(cpu::DH, now->tm_sec);  // Second
-    } else {
-      m_cpu.setReg8(cpu::CH, 12); // Hour
-      m_cpu.setReg8(cpu::CL, 0);  // Minute
-      m_cpu.setReg8(cpu::DH, 0);  // Second
-    }
-    auto timeNow = std::chrono::system_clock::now();
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                  timeNow.time_since_epoch()) % 1000;
-    m_cpu.setReg8(cpu::DL, static_cast<uint8_t>(ms.count() / 10)); // 1/100 second
+    const ClockReading now = readClock();
+    m_cpu.setReg8(cpu::CH, static_cast<uint8_t>(now.dateTime.hour));
+    m_cpu.setReg8(cpu::CL, static_cast<uint8_t>(now.dateTime.minute));
+    m_cpu.setReg8(cpu::DH, static_cast<uint8_t>(now.dateTime.second));
+    m_cpu.setReg8(cpu::DL, static_cast<uint8_t>(now.hundredths));
     break;
   }
-  case 0x2D: { // Set System Time
-    // CH=hour, CL=minute, DH=second, DL=1/100 sec
-    // Can't modify the host clock; acknowledge success.
+  case 0x2D: { // Set System Time: CH=hour, CL=minute, DH=second, DL=1/100
+    const int hour = m_cpu.getReg8(cpu::CH);
+    const int minute = m_cpu.getReg8(cpu::CL);
+    const int second = m_cpu.getReg8(cpu::DH);
+    const int hundredths = m_cpu.getReg8(cpu::DL);
+    if (!isValidTime(hour, minute, second) || hundredths > 99) {
+      m_cpu.setReg8(cpu::AL, 0xFF);
+      break;
+    }
+    readClock(); // a pending midnight still advances the date
+    const uint64_t cs = static_cast<uint64_t>(hour) * 360'000 +
+                        static_cast<uint64_t>(minute) * 6'000 +
+                        static_cast<uint64_t>(second) * 100 +
+                        static_cast<uint64_t>(hundredths);
+    // A tick is ~5.5/100 s: round up so the time read back is never
+    // earlier than the time just set.
+    m_memory.write32(0x46C, static_cast<uint32_t>(
+                                (cs * kBiosTicksPerDay + 8'639'999) / 8'640'000));
+    m_memory.write8(0x470, 0);
+    if (m_rtc) {
+      CivilDateTime rtc = m_rtc->dateTime();
+      rtc.hour = hour;
+      rtc.minute = minute;
+      rtc.second = second;
+      m_rtc->setDateTime(rtc);
+    }
     m_cpu.setReg8(cpu::AL, 0);
-    LOG_DOS("DOS: Set Time (acknowledged)");
+    LOG_DOS("DOS: Set Time ", hour, ":", minute, ":", second, ".", hundredths);
     break;
   }
   case 0x67: { // Set Handle Count
@@ -3525,11 +3582,7 @@ void DOS::handleFileService() {
                                   std::ios::trunc | std::ios::in);
 
     if (fh->stream.is_open()) {
-      std::time_t t = std::time(nullptr);
-      if (std::tm *now = std::localtime(&t)) {
-        fh->fileTime = ((now->tm_hour & 0x1F) << 11) | ((now->tm_min & 0x3F) << 5) | ((now->tm_sec / 2) & 0x1F);
-        fh->fileDate = (((now->tm_year + 1900 - 1980) & 0x7F) << 9) | ((now->tm_mon + 1) << 5) | (now->tm_mday & 0x1F);
-      }
+      stampNow(fh->fileDate, fh->fileTime);
       uint16_t handle = storeHandle(std::move(fh));
       m_cpu.setReg16(cpu::AX, handle); // DOS handles start at 5
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
@@ -3650,11 +3703,7 @@ void DOS::handleFileService() {
     fh->stream.open(hostPath, mode);
 
     if (fh->stream.is_open()) {
-      std::time_t t = std::time(nullptr);
-      if (std::tm *now = std::localtime(&t)) {
-        fh->fileTime = ((now->tm_hour & 0x1F) << 11) | ((now->tm_min & 0x3F) << 5) | ((now->tm_sec / 2) & 0x1F);
-        fh->fileDate = (((now->tm_year + 1900 - 1980) & 0x7F) << 9) | ((now->tm_mon + 1) << 5) | (now->tm_mday & 0x1F);
-      }
+      stampNow(fh->fileDate, fh->fileTime);
       uint16_t handle = storeHandle(std::move(fh));
       m_cpu.setReg16(cpu::AX, handle);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
@@ -4157,11 +4206,7 @@ void DOS::handleFileService() {
     fh->path = hostPath;
     fh->stream.open(hostPath, std::ios::out | std::ios::binary | std::ios::trunc | std::ios::in);
     if (fh->stream.is_open()) {
-      std::time_t t = std::time(nullptr);
-      if (std::tm *now = std::localtime(&t)) {
-        fh->fileTime = ((now->tm_hour & 0x1F) << 11) | ((now->tm_min & 0x3F) << 5) | ((now->tm_sec / 2) & 0x1F);
-        fh->fileDate = (((now->tm_year + 1900 - 1980) & 0x7F) << 9) | ((now->tm_mon + 1) << 5) | (now->tm_mday & 0x1F);
-      }
+      stampNow(fh->fileDate, fh->fileTime);
       uint16_t handle = storeHandle(std::move(fh));
       m_cpu.setReg16(cpu::AX, handle);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
@@ -4197,11 +4242,7 @@ void DOS::handleFileService() {
     fh->path = hostPath;
     fh->stream.open(hostPath, std::ios::out | std::ios::binary | std::ios::trunc | std::ios::in);
     if (fh->stream.is_open()) {
-      std::time_t t = std::time(nullptr);
-      if (std::tm *now = std::localtime(&t)) {
-        fh->fileTime = ((now->tm_hour & 0x1F) << 11) | ((now->tm_min & 0x3F) << 5) | ((now->tm_sec / 2) & 0x1F);
-        fh->fileDate = (((now->tm_year + 1900 - 1980) & 0x7F) << 9) | ((now->tm_mon + 1) << 5) | (now->tm_mday & 0x1F);
-      }
+      stampNow(fh->fileDate, fh->fileTime);
       uint16_t handle = storeHandle(std::move(fh));
       m_cpu.setReg16(cpu::AX, handle);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);

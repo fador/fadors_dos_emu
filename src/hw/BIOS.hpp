@@ -37,6 +37,12 @@ public:
     void setSlavePIC(PIC8259* slave) { m_slavePic = slave; }
     // RTC whose register C the IRQ 8 handler reads (re-arms the interrupt).
     void setCMOS(CMOSRTC* cmos) { m_cmos = cmos; }
+    // Timer tick as the INT 8 handler counts it: increments the BIOS tick
+    // count at 0040:006Ch and wraps it at midnight (0x1800B0 ticks),
+    // setting the midnight flag at 0040:0070h.
+    void advanceTickCount();
+    // POST: the tick count is the RTC's time of day (midnight flag clear).
+    void loadTickCountFromRTC();
 
     // Ctrl+Alt+Del reset flag
     bool shouldReset() const { return m_resetRequested; }
@@ -45,6 +51,9 @@ public:
     // Set a callback that polls host input; called by INT 16h when blocking.
     void setInputPollCallback(std::function<void()> cb) { m_pollInput = std::move(cb); }
     void setIdleCallback(std::function<void()> cb) { m_idleCallback = std::move(cb); }
+    // INT 15h AH=86h: let this many ns of emulated time pass (interrupts
+    // that become due are raised and delivered after the call).
+    void setDelayCallback(std::function<void(uint64_t)> cb) { m_delayCallback = std::move(cb); }
 
     // Mouse state (updated by InputManager, read by INT 33h)
     struct MouseState {
@@ -145,6 +154,7 @@ private:
 
     std::function<void()> m_pollInput;
     std::function<void()> m_idleCallback;
+    std::function<void(uint64_t)> m_delayCallback;
     MouseState m_mouse;
     bool m_e0Flag = false;
 

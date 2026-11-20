@@ -480,6 +480,24 @@ void SoundBlaster::dropOutFrames(size_t frames) {
   }
 }
 
+double SoundBlaster::secondsUntilIrq() const {
+  double best = -1.0;
+  if (m_dmaRunning && !m_dmaPaused && m_rate > 0.0f) {
+    const double frameRate = m_halfRate ? m_rate / 2.0 : m_rate;
+    const uint32_t channels = m_stereo ? 2 : 1;
+    const double frames = static_cast<double>((m_blockLeft + channels - 1) /
+                                              channels);
+    best = std::max(0.0, frames - 1.0 - m_frameAcc) / frameRate;
+  }
+  if (m_silenceLeft > 0 && m_rate > 0.0f) {
+    const double s =
+        std::max(0.0, static_cast<double>(m_silenceLeft) - 1.0 - m_silenceAcc) /
+        m_rate;
+    best = best < 0.0 ? s : std::min(best, s);
+  }
+  return best;
+}
+
 void SoundBlaster::advance(double seconds) {
   m_timeDriven = true;
   if (seconds <= 0)

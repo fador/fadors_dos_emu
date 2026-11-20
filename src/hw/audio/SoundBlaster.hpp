@@ -34,6 +34,10 @@ public:
 
   // Run the DSP for `seconds` of emulated time.
   void advance(double seconds);
+  // Emulated seconds from the last advance() until the DSP may raise its
+  // next IRQ (block end or 0x80 silence end; a lower bound), or a negative
+  // value when none is pending.  Lets a halted CPU skip ahead to it.
+  double secondsUntilIrq() const;
   // Mix `numSamples` stereo frames of output into `buffer` (runs the DSP
   // further if advance() has not produced enough yet).
   void generateSamples(float *buffer, size_t numSamples);
