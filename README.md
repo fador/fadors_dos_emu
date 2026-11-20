@@ -18,7 +18,8 @@ Fador's DOS Emulator is a multiplatform MS-DOS emulator written in modern C++20.
 - **Built-in Disassembler:** Read-only x86 real-mode disassembler that produces human-readable assembly from memory without modifying CPU state. Supports prefixes, ModR/M and SIB decoding, and one-byte plus `0F` opcode forms.
 - **Built-in Assembler:** x86 real-mode assembler (`src/cpu/Assembler.{hpp,cpp}`) used by the interactive debugger and `--exec` CLI mode. Supports ALU ops, MOV, shifts, jumps, Jcc, CALL/RET, PUSH/POP, INC/DEC, NOT/NEG, MUL/DIV, IN/OUT, string ops, segment overrides, MOVZX/MOVSX, BT family, LEA, LES/LDS, ENTER/LEAVE, INT, XCHG, TEST, and more.
 - **Interactive Debugger and CLI Tooling:** Single-step execution, one-line instruction tracing with raw bytes and register snapshots, register and memory inspection, disassembly, inline assembly, `--exec` for one-shot assembly execution, and `--stop-after`, `--stop-after-debugger`, `--instruction-trace`, and `--dump-on-exit` state dumps.
-- **Benchmark Modes and Profiles:** Built-in `decoder-loop`, `rep-movsb`, and `rep-movsd` benchmarks for interpreter hot paths, plus fixed-workload DOS programs (`tests/perf`) that report guest MIPS for integer, memory, x87, call, string, VGA and 16-bit real-mode code.
+- **Host SIMD:** Frame conversion (mode 13h, Mode X, 16-colour planar, VBE 8/15/16/24/32bpp), audio mixing/conversion and REP STOS fills use kernels chosen at startup from the host CPU's features (CPUID/XGETBV: SSE2, SSE4, AVX2; NEON on ARM64), with a portable scalar fallback. The build itself stays at the baseline ISA. See [Host SIMD](#host-simd).
+- **Benchmark Modes and Profiles:** Built-in `decoder-loop`, `rep-movsb`, `rep-movsd` and `rep-stosd` benchmarks for interpreter hot paths, host-SIMD kernel benchmarks (`render-*`, `audio-mix`, `mem-fill`), plus fixed-workload DOS programs (`tests/perf`) that report guest MIPS for integer, memory, x87, call, string, VGA and 16-bit real-mode code.
 - **Headless Mode:** `--headless` runs without a window or terminal, with a time limit, PNG screenshots and scripted key presses, for automated testing of DOS programs.
 - **Frontends:** Text-mode terminal rendering by default, with optional SDL rendering when the project is built with SDL2.
 - **Test Coverage:** Custom unit tests cover CPU execution, instruction decoding, assembler/disassembler behavior, BIOS/DOS/DPMI services, memory managers, paging, interrupts, and hardware devices. A differential fuzzer (`cpu_fuzz`) compares integer instructions against the host CPU.
@@ -42,6 +43,49 @@ python3 tests/perf/run_profiles.py build/fadors_emu tests/perf   # performance p
 tests/compat/build.sh /tmp/compat && tests/compat/run.sh build/fadors_emu /tmp/compat
 ```
 See `tests/perf/README.md` and `tests/compat/README.md` for details and reference numbers.
+
+## Host SIMD
+
+`src/utils/HostCpu.*` detects the host's instruction-set extensions once
+(CPUID and XGETBV on x86, the architecture on ARM64) and the startup log
+lists them with the chosen level, e.g.
+`Host CPU: GenuineIntel (...) features: sse2 ... avx2 ... erms fsrm; SIMD kernels: avx2 (auto)`.
+`src/utils/simd` holds the kernels: a scalar reference for each, and SSE2,
+SSE4 (SSSE3 + SSE4.1), AVX2 and NEON variants where they are faster. The
+variants are compiled per function with target attributes (no global
+`-mavx2`), so one binary runs on every x86-64 CPU and picks the best level
+at startup. `--host-simd=LEVEL` or `FADOR_HOST_SIMD=LEVEL` forces a level
+(an unsupported one falls back to the best supported level below it). All
+levels produce bit-identical output (`tests/test_host_simd*.cpp`).
+
+Kernel timings on the development VM (Xeon Sapphire Rapids, 2.1 GHz,
+`--bench=...`, best of 15 rounds; "before" is the per-pixel code the
+renderer used previously; for VBE the scalar kernel is the previous loop;
+the host is shared, so expect some noise):
+
+| Benchmark | Before | Scalar | SSE2 | SSE4 | AVX2 |
+|-----------|-------:|-------:|-----:|-----:|-----:|
+| `render-13h` (320x200 frame) | 42.6 us | 19.9 us | 19.1 us | 20.0 us | 19.1 us |
+| `render-modex` (320x200) | 45.3 us | 19.4 us | 19.4 us | 19.4 us | 19.1 us |
+| `render-planar` (mode 12h, 640x480) | 1804 us | 149 us | 144 us | 115 us | 95 us |
+| `render-vbe` 15bpp (640x480) | 166 us | 166 us | 80 us | 80 us | 47 us |
+| `render-vbe` 16bpp | 164 us | 164 us | 82 us | 80 us | 50 us |
+| `render-vbe` 24bpp | 217 us | 217 us | 233 us | 49 us | 50 us |
+| `render-vbe` 32bpp | 188 us | 188 us | 72 us | 72 us | 70 us |
+| `audio-mix` float to int16 (8192 samples) | 27.8 us | 27.8 us | 2.5 us | 2.5 us | 1.3 us |
+| `audio-mix` int16 to float | 1.5 us | 1.5 us | 0.9 us | 0.9 us | 0.6 us |
+| `mem-fill` 16 KiB dword pattern | 346 ns | 346 ns | 84 ns | 84 ns | 84 ns |
+
+The 8bpp palette lookup (mode 13h, VBE 8bpp) stays scalar at every level:
+an AVX2 gather was only ~1.2x faster here and is much slower on CPUs with
+the Gather Data Sampling microcode mitigation. Bulk copies (the REP MOVS
+fast path) keep using `std::memmove`, which already matched or beat
+hand-written AVX2 and `REP MOVSB` copies at every size measured. Fills of
+1 KiB and more use `REP STOSD` on CPUs with ERMS (about 3x faster than
+vector stores for L1/L2-sized blocks). REP STOSB/W/D into plain RAM now
+fills each 4096-element batch at once: `--bench=rep-stosd` (16 KiB per
+REP STOSD) went from 8.1 us to 0.034 us per step, and the `mem32` profile
+from 5.99 s to 5.57 s.
 
 ## Running
 ```bash
@@ -80,7 +124,9 @@ run exactly like that too, with interrupts, sound and the headless options.
 | `--audio-wav=FILE.wav` | Record the sound output (AdLib/OPL3, Sound Blaster, PC speaker, MIDI); the log reports its peak level |
 | `--trace=<cats>` | Enable trace-level logging for category `cpu`, `video`, `dos` (comma-separated) |
 | `--debug=<cats>` | Enable debug logging for categories: `cpu`, `video`, `dos` (comma-separated) |
-| `--bench=decoder-loop\|rep-movsb\|rep-movsd` | Run an in-process benchmark without loading a program |
+| `--bench=decoder-loop\|rep-movsb\|rep-movsd\|rep-stosd` | Run an in-process interpreter benchmark without loading a program |
+| `--bench=render-13h\|render-modex\|render-planar\|render-vbe\|audio-mix\|mem-fill` | Time the host-SIMD kernels at every SIMD level the host supports |
+| `--host-simd=auto\|avx2\|sse4\|sse2\|neon\|scalar` | Force the host-SIMD kernel level (default `auto`; also `FADOR_HOST_SIMD=...`) |
 | `--bench-steps=N` | Number of measured instruction steps for `--bench` |
 | `--bench-warmup=N` | Number of warmup instruction steps before `--bench` timing |
 | `--exec="asm"` | Assemble and execute instructions without loading a program (semicolons separate lines) |
@@ -142,6 +188,12 @@ run exactly like that too, with interrupts, sound and the headless options.
 
 # Benchmark REP MOVSD throughput with the width-aware MOVS fast path
 ./fadors_emu --no-sdl --bench=rep-movsd --bench-warmup=500000 --bench-steps=5000000
+
+# Compare the frame conversion of mode 12h at every host SIMD level
+./fadors_emu --no-sdl --bench=render-planar
+
+# Run with the portable scalar kernels only
+./fadors_emu --host-simd=scalar game.exe
 
 # Launch interactive debugger (no program)
 ./fadors_emu
