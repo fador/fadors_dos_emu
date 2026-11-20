@@ -23,10 +23,12 @@
 #include "hw/audio/PcSpeaker.hpp"
 #include "ui/Debugger.hpp"
 #include "ui/FrameRenderer.hpp"
+#include "ui/HostSimdBench.hpp"
 #include "ui/InputManager.hpp"
 #include "ui/TerminalRenderer.hpp"
 #include "utils/CrashHandler.hpp"
 #include "utils/Logger.hpp"
+#include "utils/simd/Simd.hpp"
 #include <array>
 #include <iostream>
 #ifdef _WIN32
@@ -210,6 +212,7 @@ enum class BenchmarkKind {
   DecoderLoop,
   RepMovsb,
   RepMovsd,
+  RepStosd,
 };
 
 BenchmarkKind parseBenchmarkKind(const std::string &name) {
@@ -219,6 +222,8 @@ BenchmarkKind parseBenchmarkKind(const std::string &name) {
     return BenchmarkKind::RepMovsb;
   if (name == "rep-movsd")
     return BenchmarkKind::RepMovsd;
+  if (name == "rep-stosd")
+    return BenchmarkKind::RepStosd;
   return BenchmarkKind::None;
 }
 
@@ -230,6 +235,8 @@ const char *benchmarkName(BenchmarkKind kind) {
     return "rep-movsb";
   case BenchmarkKind::RepMovsd:
     return "rep-movsd";
+  case BenchmarkKind::RepStosd:
+    return "rep-stosd";
   case BenchmarkKind::None:
     break;
   }
@@ -491,9 +498,15 @@ void printHelp(const char *programName) {
     "  --debug=<cats>            Enable debug logging for categories: cpu, video, dos.\n"
     "  --exec=\"asm\"              Assemble and execute instructions without loading a program.\n"
     "                            Semicolons separate multiple instructions.\n"
-    "  --bench=name              Run in-process benchmark (decoder-loop, rep-movsb, rep-movsd).\n"
+    "  --bench=name              Run in-process benchmark: decoder-loop, rep-movsb, rep-movsd,\n"
+    "                            rep-stosd (instruction loops) or render-13h, render-modex,\n"
+    "                            render-planar, render-vbe, audio-mix, mem-fill (host-SIMD\n"
+    "                            kernels, timed at every SIMD level the host supports).\n"
     "  --bench-steps=N           Number of measured instruction steps for --bench.\n"
     "  --bench-warmup=N          Number of warmup steps before --bench timing.\n"
+    "  --host-simd=LEVEL         Host SIMD kernels for rendering, audio and memory fills:\n"
+    "                            auto (default), avx2, sse4, sse2, neon or scalar.  Also\n"
+    "                            settable with the FADOR_HOST_SIMD environment variable.\n"
     "\n"
     "Emulator flags must appear before the program path. Everything after the program\n"
     "path is forwarded verbatim to the DOS program.\n"
@@ -810,6 +823,7 @@ int main(int argc, char *argv[]) {
     std::string throttleLabel;
     std::string execAsm;          // --exec="asm instructions"
     std::string benchmarkArg;
+    std::string hostSimdArg;      // --host-simd=auto|avx2|sse4|sse2|scalar
     BenchmarkKind benchmark = BenchmarkKind::None;
     uint64_t benchmarkSteps = 5000000;
     uint64_t benchmarkWarmup = 500000;
@@ -892,6 +906,8 @@ int main(int argc, char *argv[]) {
       } else if (arg.find("--bench=") == 0) {
         benchmarkArg = arg.substr(8);
         benchmark = parseBenchmarkKind(benchmarkArg);
+      } else if (arg.find("--host-simd=") == 0) {
+        hostSimdArg = arg.substr(12);
       } else if (arg.find("--bench-steps=") == 0) {
         benchmarkSteps = std::stoull(arg.substr(14));
       } else if (arg.find("--bench-warmup=") == 0) {
@@ -1003,6 +1019,14 @@ int main(int argc, char *argv[]) {
         path = arg;
       }
     }
+
+    if (!fador::utils::simd::initHostSimd(hostSimdArg.c_str())) {
+      LOG_ERROR("Unknown --host-simd level: ", hostSimdArg,
+                ". Use auto, avx2, sse4, sse2, neon or scalar");
+      return 1;
+    }
+    if (fador::ui::isHostSimdBenchmark(benchmarkArg))
+      return fador::ui::runHostSimdBenchmark(benchmarkArg) ? 0 : 1;
 
     if (!headless)
       audio.init(44100, 2, 1024);
@@ -1181,8 +1205,8 @@ int main(int argc, char *argv[]) {
       if (!benchmarkArg.empty()) {
         if (benchmark == BenchmarkKind::None) {
           LOG_ERROR("Unknown benchmark: ", benchmarkArg,
-                    ". Use --bench=decoder-loop, --bench=rep-movsb, or "
-                    "--bench=rep-movsd");
+                    ". Use --bench=decoder-loop, rep-movsb, rep-movsd, "
+                    "rep-stosd, ", fador::ui::hostSimdBenchmarkList());
           return 1;
         }
 
@@ -1246,6 +1270,27 @@ int main(int argc, char *argv[]) {
           prepareBenchmark = [&]() {
             cpu.loadSegment(fador::cpu::DS, kBenchSeg);
             cpu.loadSegment(fador::cpu::ES, kBenchSeg);
+            cpu.setEIP(origin - cpu.getSegBase(fador::cpu::CS));
+            syncSegmentsAndCaches();
+          };
+          break;
+        }
+        case BenchmarkKind::RepStosd: {
+          // memset()-style fill: 4096 dwords per REP STOSD (one batch).
+          // (EAX is set by prepareBenchmark: the loop must fit in 16 bytes)
+          static constexpr uint8_t kRepStosdLoop[] = {
+              0xBF, 0x00, 0x00, // MOV DI,0000h
+              0xB9, 0x00, 0x10, // MOV CX,1000h
+              0xF3, 0x66, 0xAB, // REP STOSD
+              0xEB, 0xF5        // JMP short loop start
+          };
+          constexpr uint16_t kBenchSeg = 0x2000;
+          for (size_t i = 0; i < sizeof(kRepStosdLoop); ++i) {
+            memory.write8(origin + static_cast<uint32_t>(i), kRepStosdLoop[i]);
+          }
+          prepareBenchmark = [&]() {
+            cpu.loadSegment(fador::cpu::ES, kBenchSeg);
+            cpu.setReg32(fador::cpu::EAX, 0x12345678u);
             cpu.setEIP(origin - cpu.getSegBase(fador::cpu::CS));
             syncSegmentsAndCaches();
           };
