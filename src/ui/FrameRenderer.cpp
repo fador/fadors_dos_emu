@@ -2,6 +2,7 @@
 #include "../hw/BIOS.hpp"
 #include "../hw/VideoMode.hpp"
 #include "VGAFont.hpp"
+#include "../utils/simd/Simd.hpp"
 
 #include <array>
 #include <cstdio>
@@ -212,45 +213,49 @@ bool FrameRenderer::renderGraphics(uint8_t mode) {
   for (int i = 0; i < 256; ++i)
     pal[i] = paletteToARGB(static_cast<uint8_t>(i));
 
+  // Scanlines are converted to colour indices (plane interleave / bit
+  // planes → bytes) and then through the palette by the host-SIMD kernels.
+  const auto &simdK = utils::simd::kernels();
+  const uint8_t *planes[4] = {m_vga.planeData(0), m_vga.planeData(1),
+                              m_vga.planeData(2), m_vga.planeData(3)};
+  std::vector<uint8_t> line(static_cast<size_t>(w));
+
   switch (mi->layout) {
   case hw::VMemLayout::Linear256:
     if (!m_vga.isChain4()) {
       // Mode-X: unchained planar 256-colour.  CRTC offset counts
       // character clocks = 2 bytes per plane.
       const int rowBytes = crtcOff ? crtcOff * 2 : w / 4;
-      for (int y = 0; y < h; ++y)
-        for (int x = 0; x < w; ++x)
-          m_pixels[static_cast<size_t>(y) * w + x] = pal[m_vga.readPlane(
-              x & 3, displayStart + y * rowBytes + (x >> 2))];
+      for (int y = 0; y < h; ++y) {
+        utils::simd::vgaUnchainedRow(line.data(), planes,
+                                     displayStart + y * rowBytes, 0, w);
+        simdK.paletteToArgb(&m_pixels[static_cast<size_t>(y) * w],
+                            line.data(), w, pal.data());
+      }
     } else {
-      // Mode 13h (chain-4): CRTC offset counts 8 bytes per unit.
+      // Mode 13h (chain-4): CRTC offset counts 8 bytes per unit.  Byte
+      // address a lives in plane a & 3 at offset a >> 2.
       const int rowBytes = crtcOff ? crtcOff * 8 : w;
-      for (int y = 0; y < h; ++y)
-        for (int x = 0; x < w; ++x) {
-          uint32_t off = displayStart * 4 + y * rowBytes + x;
-          m_pixels[static_cast<size_t>(y) * w + x] =
-              pal[m_vga.readPlane(off & 3, (off >> 2) & 0xFFFF)];
-        }
+      for (int y = 0; y < h; ++y) {
+        const uint32_t off = displayStart * 4 + y * rowBytes;
+        utils::simd::vgaUnchainedRow(line.data(), planes, off >> 2, off & 3, w);
+        simdK.paletteToArgb(&m_pixels[static_cast<size_t>(y) * w],
+                            line.data(), w, pal.data());
+      }
     }
     return true;
   case hw::VMemLayout::Planar: {
     // EGA/VGA 16-colour planar modes (and the 2/4-colour variants)
     const int rowBytes = crtcOff ? crtcOff * 2 : w / 8;
     const bool mono = (mode == 0x11 || mode == 0x0F);
+    // Monochrome modes only use plane 0: reading it as all four planes
+    // yields colour 15 for set bits and 0 otherwise.
+    const uint8_t *monoPlanes[4] = {planes[0], planes[0], planes[0], planes[0]};
     for (int y = 0; y < h; ++y) {
-      for (int x = 0; x < w; ++x) {
-        uint32_t off = displayStart + y * rowBytes + (x >> 3);
-        uint8_t bit = static_cast<uint8_t>(0x80 >> (x & 7));
-        uint8_t idx = 0;
-        if (mono) {
-          idx = (m_vga.readPlane(0, off) & bit) ? 15 : 0;
-        } else {
-          for (int p = 0; p < 4; ++p)
-            if (m_vga.readPlane(p, off) & bit)
-              idx |= static_cast<uint8_t>(1 << p);
-        }
-        m_pixels[static_cast<size_t>(y) * w + x] = pal[idx];
-      }
+      utils::simd::vgaPlanarRow(line.data(), mono ? monoPlanes : planes,
+                                displayStart + y * rowBytes, w);
+      simdK.paletteToArgb(&m_pixels[static_cast<size_t>(y) * w], line.data(),
+                          w, pal.data());
     }
     return true;
   }
@@ -295,39 +300,25 @@ bool FrameRenderer::renderVbe() {
     for (int i = 0; i < 256; ++i)
       pal[i] = paletteToARGB(static_cast<uint8_t>(i));
 
+  const auto &simdK = utils::simd::kernels();
   for (int y = 0; y < v.height; ++y) {
     const uint8_t *src = fb + static_cast<size_t>(y) * v.pitch;
     uint32_t *dst = &m_pixels[static_cast<size_t>(y) * v.width];
     switch (v.bpp) {
     case 8:
-      for (int x = 0; x < v.width; ++x)
-        dst[x] = pal[src[x]];
+      simdK.paletteToArgb(dst, src, v.width, pal.data());
       break;
     case 15:
-      for (int x = 0; x < v.width; ++x) {
-        uint16_t p = static_cast<uint16_t>(src[x * 2] | (src[x * 2 + 1] << 8));
-        uint32_t r = (p >> 10) & 0x1F, g = (p >> 5) & 0x1F, b = p & 0x1F;
-        dst[x] = 0xFF000000u | (((r << 3) | (r >> 2)) << 16) |
-                 (((g << 3) | (g >> 2)) << 8) | ((b << 3) | (b >> 2));
-      }
+      simdK.rgb555ToArgb(dst, src, v.width);
       break;
     case 16:
-      for (int x = 0; x < v.width; ++x) {
-        uint16_t p = static_cast<uint16_t>(src[x * 2] | (src[x * 2 + 1] << 8));
-        uint32_t r = (p >> 11) & 0x1F, g = (p >> 5) & 0x3F, b = p & 0x1F;
-        dst[x] = 0xFF000000u | (((r << 3) | (r >> 2)) << 16) |
-                 (((g << 2) | (g >> 4)) << 8) | ((b << 3) | (b >> 2));
-      }
+      simdK.rgb565ToArgb(dst, src, v.width);
       break;
     case 24:
-      for (int x = 0; x < v.width; ++x)
-        dst[x] = 0xFF000000u | (uint32_t(src[x * 3 + 2]) << 16) |
-                 (uint32_t(src[x * 3 + 1]) << 8) | src[x * 3];
+      simdK.rgb24ToArgb(dst, src, v.width);
       break;
     default: // 32
-      for (int x = 0; x < v.width; ++x)
-        dst[x] = 0xFF000000u | (uint32_t(src[x * 4 + 2]) << 16) |
-                 (uint32_t(src[x * 4 + 1]) << 8) | src[x * 4];
+      simdK.rgb32ToArgb(dst, src, v.width);
       break;
     }
   }

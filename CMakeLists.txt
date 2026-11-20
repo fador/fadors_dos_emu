@@ -151,6 +151,7 @@ set(TEST_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_batch.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cdrom.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_host_simd.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_host_simd_render.cpp"
 )
 
 add_executable(fadors_tests ${TEST_FILES})

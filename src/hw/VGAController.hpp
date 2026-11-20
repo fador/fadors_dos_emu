@@ -38,6 +38,8 @@ public:
     uint8_t readPlane(int plane, uint32_t offset) const {
         return m_planes[plane & 3][offset & 0xFFFF];
     }
+    // Start of one 64 KiB plane, for renderers that convert whole scanlines
+    const uint8_t* planeData(int plane) const { return m_planes[plane & 3].data(); }
 
     // Clear all four 64KB planes (used on video mode change)
     void clearPlanes() {
