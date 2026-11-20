@@ -122,24 +122,15 @@ private:
   void writeModRM32(const ModRM &modrm, uint32_t value);
   void writeModRM16(const ModRM &modrm, uint16_t value);
   void writeModRM8(const ModRM &modrm, uint8_t value);
+  // x87 (InstructionDecoderFPU.cpp)
   void executeFPUOpcode(uint8_t opcode);
-  float readFloat32(uint32_t address) const;
-  double readFloat64(uint32_t address) const;
-  double readFloat80(uint32_t address) const;
-  void writeFloat32(uint32_t address, double value);
-  void writeFloat64(uint32_t address, double value);
-  void writeFloat80(uint32_t address, double value);
-  int64_t readInt64(uint32_t address) const;
-  void writeInt64(uint32_t address, int64_t value);
-  void storeFPUEnvironment(uint32_t address, bool operandSize32,
-                           bool maskExceptions);
-  void loadFPUEnvironment(uint32_t address, bool operandSize32);
-  void storeFPUState(uint32_t address, bool operandSize32);
-  void loadFPUState(uint32_t address, bool operandSize32);
-  double roundFPUValue(double value) const;
-  int64_t convertFPUToInt(double value, int bits, bool &invalid) const;
-  void setFPUCompareStatus(double lhs, double rhs);
-  void setFPUCompareFlags(double lhs, double rhs);
+  void executeFPUInstruction(uint8_t opcode, uint8_t modrmByte,
+                             const ModRM &modrm, uint32_t addr);
+  bool fpuCheckPendingError();
+  void fpuWait();
+  x87::ImageMode fpuImageMode() const;
+  void fpuReadBytes(uint32_t address, uint8_t *out, size_t n);
+  void fpuWriteBytes(uint32_t address, const uint8_t *in, size_t n);
 
   // General ALU operation evaluator covering Math and Logic EFLAGS
   uint32_t aluOp(uint8_t op, uint32_t dest, uint32_t src, int size);

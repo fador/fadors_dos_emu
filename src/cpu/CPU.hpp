@@ -1,7 +1,9 @@
 #pragma once
 #include "../memory/MemoryBus.hpp"
+#include "x87/FPU.hpp"
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 namespace fador::memory {
@@ -441,76 +443,69 @@ public:
   uint16_t getTRSelector() const { return m_trSelector; }
   void setTRSelector(uint16_t val) { m_trSelector = val; }
 
-  void resetFPU();
-  uint16_t getFPUControlWord() const { return m_fpuControlWord; }
-  void setFPUControlWord(uint16_t val) {
-    m_fpuControlWord = val;
-    refreshFPUSummaryStatus();
-  }
-  uint16_t getFPUStatusWord() const { return m_fpuStatusWord; }
-  void setFPUStatusWord(uint16_t val) {
-    m_fpuStatusWord = val;
-    refreshFPUSummaryStatus();
-  }
-  void setFPUStatusBits(uint16_t mask) {
-    m_fpuStatusWord = static_cast<uint16_t>(m_fpuStatusWord | mask);
-    refreshFPUSummaryStatus();
-  }
-  void clearFPUStatusBits(uint16_t mask) {
-    m_fpuStatusWord = static_cast<uint16_t>(m_fpuStatusWord & ~mask);
-    refreshFPUSummaryStatus();
-  }
-  uint16_t getPendingFPUExceptionBits() const {
-    return static_cast<uint16_t>(m_fpuStatusWord &
-                                 static_cast<uint16_t>(~m_fpuControlWord) &
-                                 FPU_EXCEPTION_STATUS_MASK);
-  }
-  bool hasPendingFPUException() const {
-    return getPendingFPUExceptionBits() != 0;
-  }
-  uint16_t getFPUTagWord() const;
-  void setFPUTagWord(uint16_t val);
-  uint8_t getFPUTop() const {
-    return static_cast<uint8_t>((m_fpuStatusWord >> 11) & 0x7);
-  }
-  void setFPUTop(uint8_t top) {
-    m_fpuStatusWord = static_cast<uint16_t>((m_fpuStatusWord & ~FPU_STATUS_TOP_MASK) |
-                                            ((top & 0x7) << 11));
-  }
-  uint32_t getFPUInstructionPointer() const { return m_fpuInstructionPointer; }
-  void setFPUInstructionPointer(uint32_t val) { m_fpuInstructionPointer = val; }
-  uint16_t getFPUInstructionSelector() const { return m_fpuInstructionSelector; }
-  void setFPUInstructionSelector(uint16_t val) { m_fpuInstructionSelector = val; }
-  uint16_t getFPULastOpcode() const { return m_fpuLastOpcode; }
+  // x87 FPU: state and semantics live in x87::FPU (src/cpu/x87).  The
+  // accessors below are kept for tests, the debugger and HLE code.
+  x87::FPU &fpu() { return m_fpu; }
+  const x87::FPU &fpu() const { return m_fpu; }
+  void resetFPU() { m_fpu.reset(); }
+  uint16_t getFPUControlWord() const { return m_fpu.controlWord(); }
+  void setFPUControlWord(uint16_t val) { m_fpu.setControlWord(val); }
+  uint16_t getFPUStatusWord() const { return m_fpu.statusWord(); }
+  void setFPUStatusWord(uint16_t val) { m_fpu.setStatusWord(val); }
+  void setFPUStatusBits(uint16_t mask) { m_fpu.setStatusBits(mask); }
+  void clearFPUStatusBits(uint16_t mask) { m_fpu.clearStatusBits(mask); }
+  uint16_t getPendingFPUExceptionBits() const { return m_fpu.pendingExceptions(); }
+  bool hasPendingFPUException() const { return m_fpu.pendingExceptions() != 0; }
+  uint16_t getFPUTagWord() const { return m_fpu.tagWord(); }
+  void setFPUTagWord(uint16_t val) { m_fpu.setTagWord(val); }
+  uint8_t getFPUTop() const { return m_fpu.top(); }
+  void setFPUTop(uint8_t top) { m_fpu.setTop(top); }
+  uint32_t getFPUInstructionPointer() const { return m_fpu.fip; }
+  void setFPUInstructionPointer(uint32_t val) { m_fpu.fip = val; }
+  uint16_t getFPUInstructionSelector() const { return m_fpu.fcs; }
+  void setFPUInstructionSelector(uint16_t val) { m_fpu.fcs = val; }
+  uint16_t getFPULastOpcode() const { return m_fpu.fop; }
   void setFPULastOpcode(uint16_t val) {
-    m_fpuLastOpcode = static_cast<uint16_t>(val & 0x07FF);
+    m_fpu.fop = static_cast<uint16_t>(val & 0x07FF);
   }
-  uint32_t getFPUDataPointer() const { return m_fpuDataPointer; }
-  void setFPUDataPointer(uint32_t val) { m_fpuDataPointer = val; }
-  uint16_t getFPUDataSelector() const { return m_fpuDataSelector; }
-  void setFPUDataSelector(uint16_t val) { m_fpuDataSelector = val; }
-  bool isFPURegisterEmpty(uint8_t logicalIndex) const;
-  double getFPURegister(uint8_t logicalIndex) const;
-  void setFPURegister(uint8_t logicalIndex, double value);
-  void freeFPURegister(uint8_t logicalIndex);
-  bool pushFPU(double value);
-  bool popFPU();
+  uint32_t getFPUDataPointer() const { return m_fpu.fdp; }
+  void setFPUDataPointer(uint32_t val) { m_fpu.fdp = val; }
+  uint16_t getFPUDataSelector() const { return m_fpu.fds; }
+  void setFPUDataSelector(uint16_t val) { m_fpu.fds = val; }
+  bool isFPURegisterEmpty(uint8_t logicalIndex) const {
+    return m_fpu.isEmpty(logicalIndex & 7);
+  }
+  // Double views of the 80-bit registers (rounded to nearest).
+  double getFPURegister(uint8_t logicalIndex) const {
+    return x87::toDouble(m_fpu.st(logicalIndex & 7));
+  }
+  void setFPURegister(uint8_t logicalIndex, double value) {
+    m_fpu.setSt(logicalIndex & 7, x87::fromDouble(value));
+  }
+  x87::Float80 getFPURegister80(uint8_t logicalIndex) const {
+    return m_fpu.st(logicalIndex & 7);
+  }
+  void setFPURegister80(uint8_t logicalIndex, const x87::Float80 &value) {
+    m_fpu.setSt(logicalIndex & 7, value);
+  }
+  void freeFPURegister(uint8_t logicalIndex) { m_fpu.freeReg(logicalIndex & 7); }
+  bool pushFPU(double value) { return m_fpu.push(x87::fromDouble(value)); }
+  bool popFPU() { return m_fpu.pop(); }
+  // FERR# output: called once per unmasked x87 error when CR0.NE = 0 (the
+  // PC wires it to IRQ13 on the slave PIC).  Keeps cpu/ free of hw/.
+  void setFPUErrorCallback(std::function<void()> callback) {
+    m_fpuErrorCallback = std::move(callback);
+  }
+  void signalFPUError() {
+    if (m_fpuErrorCallback)
+      m_fpuErrorCallback();
+  }
+  bool fpuErrorSignalled() const { return m_fpuErrorSignalled; }
+  void setFPUErrorSignalled(bool v) { m_fpuErrorSignalled = v; }
 
   void setMemoryBus(fador::memory::MemoryBus *memory) { m_memory = memory; }
 
 private:
-  void refreshFPUSummaryStatus() {
-    m_fpuStatusWord = static_cast<uint16_t>(m_fpuStatusWord & ~FPU_STATUS_ES);
-    if (getPendingFPUExceptionBits() != 0) {
-      m_fpuStatusWord = static_cast<uint16_t>(m_fpuStatusWord |
-                                              FPU_STATUS_ES);
-    }
-  }
-
-  uint8_t fpuPhysicalIndex(uint8_t logicalIndex) const {
-    return static_cast<uint8_t>((getFPUTop() + (logicalIndex & 0x7)) & 0x7);
-  }
-
   uint64_t m_cycles{0};
   fador::memory::MemoryBus *m_memory{nullptr};
   std::array<uint32_t, 8> m_regs{};    // EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI
@@ -537,15 +532,9 @@ private:
   DescriptorRegister m_tr{0xFFFF, 0};
   uint16_t m_ldtrSelector{0};
   uint16_t m_trSelector{0};
-  std::array<double, 8> m_fpuRegs{};
-  std::array<uint8_t, 8> m_fpuTags{};
-  uint16_t m_fpuControlWord{FPU_CONTROL_DEFAULT};
-  uint16_t m_fpuStatusWord{0};
-  uint32_t m_fpuInstructionPointer{0};
-  uint16_t m_fpuInstructionSelector{0};
-  uint16_t m_fpuLastOpcode{0};
-  uint32_t m_fpuDataPointer{0};
-  uint16_t m_fpuDataSelector{0};
+  x87::FPU m_fpu;
+  std::function<void()> m_fpuErrorCallback;
+  bool m_fpuErrorSignalled{false};
 
   std::vector<HLEFrame> m_hleStack;
 };

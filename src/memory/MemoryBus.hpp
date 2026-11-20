@@ -180,6 +180,7 @@ public:
     return m_paging ? translate(a, false) : a;
   }
   // Set when a CPU access hit a not-present page; the CPU raises #PF.
+  bool pageFaultPending() const { return m_pageFault; }
   bool takePageFault(uint32_t &linear, uint32_t &errorCode) {
     if (!m_pageFault)
       return false;

@@ -116,28 +116,59 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
         REQUIRE(cpu.getEIP() == 0x103);
     }
 
-    SECTION("x87: FWAIT dispatches INT 75 on unmasked pending exception") {
+    SECTION("x87: FWAIT with an unmasked pending exception raises FERR# once (CR0.NE=0)") {
+        int ferr = 0;
+        cpu.setFPUErrorCallback([&ferr]() { ++ferr; });
+        cpu.setEIP(0x0100);
+        cpu.setFPUControlWord(static_cast<uint16_t>(cpu::FPU_CONTROL_DEFAULT &
+                                                    ~cpu::FPU_STATUS_ZE));
+        cpu.setFPUStatusBits(cpu::FPU_STATUS_ZE);
+        REQUIRE((cpu.getFPUStatusWord() & cpu::FPU_STATUS_ES) != 0);
+        REQUIRE((cpu.getFPUStatusWord() & cpu::FPU_STATUS_BUSY) != 0);
+
+        mem.write8(0x0100, 0x9B); // FWAIT
+        mem.write8(0x0101, 0x9B); // FWAIT
+        mem.write8(0x0102, 0xDB); mem.write8(0x0103, 0xE2); // FNCLEX
+        mem.write8(0x0104, 0x9B); // FWAIT
+        decoder.step();
+        REQUIRE(ferr == 1);
+        REQUIRE(cpu.getEIP() == 0x0101); // the instruction proceeds (IGNNE#)
+        decoder.step();
+        REQUIRE(ferr == 1); // one IRQ13 per error
+        decoder.step();
+        REQUIRE((cpu.getFPUStatusWord() & (cpu::FPU_STATUS_ES | cpu::FPU_STATUS_ZE)) == 0);
+        decoder.step();
+        REQUIRE(ferr == 1);
+        REQUIRE(cpu.getEIP() == 0x0105);
+    }
+
+    SECTION("x87: CR0.NE=1 raises #MF (vector 16) at the waiting instruction") {
         cpu.setReg16(cpu::Reg16Index::SP, 0x0200);
         cpu.setSegReg(cpu::SegRegIndex::CS, 0x0000);
         cpu.setSegReg(cpu::SegRegIndex::SS, 0x0000);
         cpu.setEIP(0x0100);
+        cpu.setCR(0, cpu.getCR(0) | 0x20);
 
-        mem.write16(0x75 * 4, 0x3456);
-        mem.write16(0x75 * 4 + 2, 0x2222);
+        mem.write16(0x10 * 4, 0x3456);
+        mem.write16(0x10 * 4 + 2, 0x2222);
 
+        // FDIV by zero with ZE unmasked: no exception yet, the result is
+        // not written and the next waiting instruction faults.
         cpu.setFPUControlWord(static_cast<uint16_t>(cpu::FPU_CONTROL_DEFAULT &
                                                     ~cpu::FPU_STATUS_ZE));
-        cpu.setFPUStatusBits(cpu::FPU_STATUS_ZE);
-
-        mem.write8(0x0100, 0x9B);
+        cpu.pushFPU(0.0);
+        cpu.pushFPU(1.0);
+        mem.write8(0x0100, 0xD8); mem.write8(0x0101, 0xF1); // FDIV ST0, ST1
+        mem.write8(0x0102, 0xD9); mem.write8(0x0103, 0xE8); // FLD1 (waiting)
         decoder.step();
-
-        REQUIRE((cpu.getFPUStatusWord() & cpu::FPU_STATUS_ES) != 0);
+        REQUIRE(cpu.getEIP() == 0x0102);
+        REQUIRE((cpu.getFPUStatusWord() & cpu::FPU_STATUS_ZE) != 0);
+        REQUIRE(cpu.getFPURegister(0) == 1.0);
+        decoder.step();
         REQUIRE(cpu.getSegReg(cpu::SegRegIndex::CS) == 0x2222);
         REQUIRE(cpu.getEIP() == 0x3456);
-        REQUIRE(cpu.getReg16(cpu::Reg16Index::SP) == 0x01FA);
-        REQUIRE(mem.read16(0x01FA) == 0x0101);
-        REQUIRE(mem.read16(0x01FC) == 0x0000);
+        REQUIRE(mem.read16(0x01FA) == 0x0102); // return to the FLD1
+        REQUIRE(cpu.getFPUTop() == 6);         // FLD1 did not execute
     }
 
     SECTION("x87: FWAIT ignores masked pending exceptions") {
@@ -525,13 +556,15 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
 
         decoder.step();
 
-        REQUIRE(mem.read32(0x300C) == 0x00000100);
-        REQUIRE(mem.read32(0x3010) == 0x01060000u);
-        REQUIRE(mem.read32(0x3014) == 0x00002300);
-        REQUIRE(mem.read32(0x3018) == 0x00000000);
+        // 32-bit real-mode layout: linear addresses split into 16-bit
+        // halves, reserved bits set as on Intel hardware.
+        REQUIRE(mem.read32(0x300C) == 0xFFFF0100u);
+        REQUIRE(mem.read32(0x3010) == 0x00000106u);
+        REQUIRE(mem.read32(0x3014) == 0xFFFF2300u);
+        REQUIRE(mem.read32(0x3018) == 0x00000000u);
     }
 
-    SECTION("x87: real 32-bit FNSTENV stores offsets with real-mode selectors") {
+    SECTION("x87: real 32-bit FNSTENV stores linear instruction/operand addresses") {
         cpu.loadSegment(cpu::SegRegIndex::CS, 0x1234);
         cpu.loadSegment(cpu::SegRegIndex::DS, 0x4321);
         cpu.setEIP(0x100);
@@ -561,13 +594,13 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
 
         decoder.step();
 
-        REQUIRE(mem.read32(saveAddress + 12) == 0x00000100);
-        REQUIRE(mem.read32(saveAddress + 16) == 0x01061234u);
-        REQUIRE(mem.read32(saveAddress + 20) == 0x00002300);
-        REQUIRE(mem.read32(saveAddress + 24) == 0x00004321);
+        REQUIRE(mem.read32(saveAddress + 12) == 0xFFFF2440u); // 1234:0100
+        REQUIRE(mem.read32(saveAddress + 16) == 0x00001106u);
+        REQUIRE(mem.read32(saveAddress + 20) == 0xFFFF5510u); // 4321:2300
+        REQUIRE(mem.read32(saveAddress + 24) == 0x00004000u);
     }
 
-    SECTION("x87: real 32-bit FNSAVE stores offsets with real-mode selectors") {
+    SECTION("x87: real 32-bit FNSAVE stores linear instruction/operand addresses") {
         cpu.loadSegment(cpu::SegRegIndex::CS, 0x1357);
         cpu.loadSegment(cpu::SegRegIndex::DS, 0x2468);
         cpu.setEIP(0x100);
@@ -590,10 +623,10 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
         decoder.step();
         decoder.step();
 
-        REQUIRE(mem.read32(saveAddress + 12) == 0x00000100);
-        REQUIRE(mem.read32(saveAddress + 16) == 0x01061357u);
-        REQUIRE(mem.read32(saveAddress + 20) == 0x00002300);
-        REQUIRE(mem.read32(saveAddress + 24) == 0x00002468);
+        REQUIRE(mem.read32(saveAddress + 12) == 0xFFFF3670u); // 1357:0100
+        REQUIRE(mem.read32(saveAddress + 16) == 0x00001106u);
+        REQUIRE(mem.read32(saveAddress + 20) == 0xFFFF6980u); // 2468:2300
+        REQUIRE(mem.read32(saveAddress + 24) == 0x00002000u);
         REQUIRE(cpu.getFPUControlWord() == cpu::FPU_CONTROL_DEFAULT);
         REQUIRE(cpu.getFPUStatusWord() == 0);
         REQUIRE(cpu.isFPURegisterEmpty(0));
@@ -753,11 +786,11 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
 
         decoder.step();
 
-        REQUIRE(mem.read32(dataBase + 0x3000) == cpu.getFPUControlWord());
+        REQUIRE(mem.read32(dataBase + 0x3000) == (0xFFFF0000u | cpu.getFPUControlWord()));
         REQUIRE(mem.read32(dataBase + 0x300C) == 0x00000100);
         REQUIRE(mem.read32(dataBase + 0x3010) == 0x01050008u);
         REQUIRE(mem.read32(dataBase + 0x3014) == 0x00002300);
-        REQUIRE(mem.read32(dataBase + 0x3018) == 0x00000010u);
+        REQUIRE(mem.read32(dataBase + 0x3018) == 0xFFFF0010u);
 
         cpu.setFPUControlWord(cpu::FPU_CONTROL_DEFAULT);
         cpu.setFPUStatusWord(0);
@@ -814,7 +847,7 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
         REQUIRE(mem.read32(dataBase + 0x310C) == 0x00000100);
         REQUIRE(mem.read32(dataBase + 0x3110) == 0x01050008u);
         REQUIRE(mem.read32(dataBase + 0x3114) == 0x00002300);
-        REQUIRE(mem.read32(dataBase + 0x3118) == 0x00000010u);
+        REQUIRE(mem.read32(dataBase + 0x3118) == 0xFFFF0010u);
         REQUIRE(cpu.getFPUControlWord() == cpu::FPU_CONTROL_DEFAULT);
         REQUIRE(cpu.getFPUStatusWord() == 0);
         REQUIRE(cpu.isFPURegisterEmpty(0));
@@ -858,7 +891,9 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
         REQUIRE(mem.read16(0x3002) == static_cast<uint16_t>(cpu::FPU_STATUS_C0 |
                                                             cpu::FPU_STATUS_C3 |
                                                             (5u << 11)));
-        REQUIRE(mem.read16(0x3004) == 0xA55A);
+        // Only empty/non-empty is kept; FNSTENV computes the tags of
+        // non-empty registers from their contents (all +0.0 here: 01).
+        REQUIRE(mem.read16(0x3004) == 0x5555);
         REQUIRE(mem.read16(0x3006) == 0x79B4);
         REQUIRE(mem.read16(0x3008) == 0x5321);
         REQUIRE(mem.read16(0x300A) == 0x89BC);
@@ -880,7 +915,7 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
         REQUIRE(cpu.getFPUStatusWord() == static_cast<uint16_t>(cpu::FPU_STATUS_C0 |
                                                                 cpu::FPU_STATUS_C3 |
                                                                 (5u << 11)));
-        REQUIRE(cpu.getFPUTagWord() == 0xA55A);
+        REQUIRE(cpu.getFPUTagWord() == 0x5555);
         REQUIRE(cpu.getFPUInstructionPointer() == 0x579B4);
         REQUIRE(cpu.getFPUInstructionSelector() == 0);
         REQUIRE(cpu.getFPULastOpcode() == 0x0321);
@@ -970,13 +1005,15 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
 
         decoder.step();
 
-        REQUIRE(mem.read32(0x3100) == 0x027F);
-        REQUIRE(mem.read32(0x3104) == (cpu::FPU_STATUS_C2 | (6u << 11)));
-        REQUIRE(mem.read32(0x3108) == 0x0FFF);
-        REQUIRE(mem.read32(0x310C) == 0x12345678);
-        REQUIRE(mem.read32(0x3110) == ((static_cast<uint32_t>(0x0321) << 16) | 0x1357));
-        REQUIRE(mem.read32(0x3114) == 0x87654321);
-        REQUIRE(mem.read32(0x3118) == 0x2468);
+        // 32-bit real-mode layout: FIP = 1357h*16 + 12345678h = 12358BE8h,
+        // FDP = 2468h*16 + 87654321h = 876789A1h; reserved halves are 1s.
+        REQUIRE(mem.read32(0x3100) == 0xFFFF027Fu);
+        REQUIRE(mem.read32(0x3104) == (0xFFFF0000u | cpu::FPU_STATUS_C2 | (6u << 11)));
+        REQUIRE(mem.read32(0x3108) == 0xFFFF0FFFu);
+        REQUIRE(mem.read32(0x310C) == 0xFFFF8BE8u);
+        REQUIRE(mem.read32(0x3110) == ((0x1235u << 12) | 0x0321u));
+        REQUIRE(mem.read32(0x3114) == 0xFFFF89A1u);
+        REQUIRE(mem.read32(0x3118) == (0x8767u << 12));
         REQUIRE(cpu.getFPUControlWord() == cpu::FPU_CONTROL_DEFAULT);
         REQUIRE(cpu.getFPUStatusWord() == 0);
         REQUIRE(cpu.isFPURegisterEmpty(0));
@@ -987,11 +1024,11 @@ TEST_CASE("CPU Instruction Execution", "[Decoder]") {
         REQUIRE(cpu.getFPUStatusWord() == static_cast<uint16_t>(cpu::FPU_STATUS_C2 |
                                                                 (6u << 11)));
         REQUIRE(cpu.getFPUTagWord() == 0x0FFF);
-        REQUIRE(cpu.getFPUInstructionPointer() == 0x12345678);
-        REQUIRE(cpu.getFPUInstructionSelector() == 0x1357);
+        REQUIRE(cpu.getFPUInstructionPointer() == 0x12358BE8u);
+        REQUIRE(cpu.getFPUInstructionSelector() == 0);
         REQUIRE(cpu.getFPULastOpcode() == 0x0321);
-        REQUIRE(cpu.getFPUDataPointer() == 0x87654321);
-        REQUIRE(cpu.getFPUDataSelector() == 0x2468);
+        REQUIRE(cpu.getFPUDataPointer() == 0x876789A1u);
+        REQUIRE(cpu.getFPUDataSelector() == 0);
 
         decoder.step(); // FSTP qword [3200h]
         decoder.step(); // FSTP qword [3208h]

@@ -17,16 +17,6 @@ bool decodeSegmentIs32Bit(uint32_t high) {
   return (high & 0x00400000u) != 0;
 }
 
-uint8_t classifyFPUTag(double value) {
-  if (std::isnan(value) || std::isinf(value)) {
-    return FPU_TAG_SPECIAL;
-  }
-  if (value == 0.0) {
-    return FPU_TAG_ZERO;
-  }
-  return FPU_TAG_VALID;
-}
-
 } // namespace
 
 CPU::CPU() { reset(); }
@@ -118,84 +108,6 @@ void CPU::loadSegment(SegRegIndex segIndex, uint16_t value) {
   if (segIndex == CS && !m_is32BitCode) {
     m_eip &= 0xFFFF;
   }
-}
-
-void CPU::resetFPU() {
-  m_fpuRegs.fill(0.0);
-  m_fpuTags.fill(FPU_TAG_EMPTY);
-  m_fpuControlWord = FPU_CONTROL_DEFAULT;
-  m_fpuStatusWord = 0;
-  m_fpuInstructionPointer = 0;
-  m_fpuInstructionSelector = 0;
-  m_fpuLastOpcode = 0;
-  m_fpuDataPointer = 0;
-  m_fpuDataSelector = 0;
-}
-
-uint16_t CPU::getFPUTagWord() const {
-  uint16_t tagWord = 0;
-  for (int index = 0; index < 8; ++index) {
-    tagWord |= static_cast<uint16_t>((m_fpuTags[index] & 0x3) << (index * 2));
-  }
-  return tagWord;
-}
-
-void CPU::setFPUTagWord(uint16_t val) {
-  for (int index = 0; index < 8; ++index) {
-    m_fpuTags[index] = static_cast<uint8_t>((val >> (index * 2)) & 0x3);
-  }
-}
-
-bool CPU::isFPURegisterEmpty(uint8_t logicalIndex) const {
-  return m_fpuTags[fpuPhysicalIndex(logicalIndex)] == FPU_TAG_EMPTY;
-}
-
-double CPU::getFPURegister(uint8_t logicalIndex) const {
-  return m_fpuRegs[fpuPhysicalIndex(logicalIndex)];
-}
-
-void CPU::setFPURegister(uint8_t logicalIndex, double value) {
-  const uint8_t physicalIndex = fpuPhysicalIndex(logicalIndex);
-  m_fpuRegs[physicalIndex] = value;
-  m_fpuTags[physicalIndex] = classifyFPUTag(value);
-}
-
-void CPU::freeFPURegister(uint8_t logicalIndex) {
-  const uint8_t physicalIndex = fpuPhysicalIndex(logicalIndex);
-  m_fpuRegs[physicalIndex] = 0.0;
-  m_fpuTags[physicalIndex] = FPU_TAG_EMPTY;
-}
-
-bool CPU::pushFPU(double value) {
-  const uint8_t nextTop = static_cast<uint8_t>((getFPUTop() - 1) & 0x7);
-  if (m_fpuTags[nextTop] != FPU_TAG_EMPTY) {
-    m_fpuStatusWord = static_cast<uint16_t>(m_fpuStatusWord |
-                                            FPU_STATUS_IE |
-                                            FPU_STATUS_SF |
-                                            FPU_STATUS_C1);
-    return false;
-  }
-
-  setFPUTop(nextTop);
-  m_fpuRegs[nextTop] = value;
-  m_fpuTags[nextTop] = classifyFPUTag(value);
-  return true;
-}
-
-bool CPU::popFPU() {
-  const uint8_t top = getFPUTop();
-  if (m_fpuTags[top] == FPU_TAG_EMPTY) {
-    m_fpuStatusWord = static_cast<uint16_t>((m_fpuStatusWord |
-                                             FPU_STATUS_IE |
-                                             FPU_STATUS_SF) &
-                                            ~FPU_STATUS_C1);
-    return false;
-  }
-
-  m_fpuRegs[top] = 0.0;
-  m_fpuTags[top] = FPU_TAG_EMPTY;
-  setFPUTop(static_cast<uint8_t>((top + 1) & 0x7));
-  return true;
 }
 
 } // namespace fador::cpu
