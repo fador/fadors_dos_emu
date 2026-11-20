@@ -8,7 +8,7 @@ Fador's DOS Emulator is a multiplatform MS-DOS emulator written in modern C++20.
 ## Features
 - **CPU Emulation:** 16-bit Real Mode and 32-bit Protected Mode execution, descriptor-table and control-register instructions, string operations, and REP fast paths. The x87 FPU is bit-accurate: registers are 80-bit (64-bit significand), precision and rounding control, all exception flags (with stack faults, masked and unmasked responses, rebiased over/underflow results), condition codes, NaN propagation, BCD, the 16/32-bit real/protected `FSTENV`/`FSAVE` layouts and unmasked-exception delivery (`#MF` with `CR0.NE=1`, otherwise `FERR#` → IRQ13 → `INT 75h` → `INT 02h`) follow real hardware. On GCC/Clang x86/x86-64 builds the arithmetic runs on the host's x87; elsewhere (MSVC, ARM64) a portable software 80-bit implementation is used (transcendentals there are within 16 ulps of a real x87).
 - **Selectable CPU Models:** `--cpu=386|486|486dx2|486dx4|pentium|pentiumpro` (default `486dx2`) sets the reset signature, `CPUID` (none on the 386 and early 486; `GenuineIntel` leaves advertising only emulated features), which `EFLAGS`/`CR0`/`CR4` bits exist, the model-gated instructions (`BSWAP`/`CMPXCHG`/`XADD`/`INVD`/`WBINVD`/`INVLPG` from the 486, `RDTSC`/`RDMSR`/`WRMSR`/`CMPXCHG8B` from the Pentium, `CMOVcc`/`FCMOVcc`/`FCOMI` on the Pentium Pro raise `#UD` elsewhere) and per-instruction clock costs. `POPF`/`IRET` follow the 386 privilege rules (reserved bits, `IOPL` only at CPL 0, `IF` only when CPL <= IOPL, V86 IOPL-sensitive instructions fault), so CPU-detection routines see the selected model. A guest cycle counter (`CPU::cycles()`) drives emulated time; `RDTSC` and MSR 10h count emulated time at the model's clock.
-- **Protected Mode & DOS Extenders:** DPMI 0.9 host for protected-mode DOS extenders, including GDT/IDT handling, mode-switch entry points, segment reload callbacks, and app/host interrupt plumbing. DOS/4GW (bound or loaded through `DOS4GW.EXE`), PMODE/W, DOS/32A, CauseWay and DJGPP programs run; `tests/compat` checks each of them. 386 paging (CR0.PG, CR3, INVLPG, 4 MB pages) is available to raw-mode software.
+- **Protected Mode & DOS Extenders:** DPMI 0.9 host for protected-mode DOS extenders, including GDT/IDT handling, mode-switch entry points, segment reload callbacks, and app/host interrupt plumbing. DOS/4GW (bound or loaded through `DOS4GW.EXE`), PMODE/W, DOS/32A, CauseWay and DJGPP programs run; `tests/compat` checks each of them. A VCPI 1.0 server (INT 67h AX=DE00h-DE0Ch) sits on the EMS driver for extenders that use VCPI (`--dpmi=off` / `--vcpi=off` select the path). Software that owns protected mode itself (raw mode, VCPI clients, V86 monitors) gets the 386/486/Pentium protection model: 386 paging (CR0.PG, CR3, INVLPG, 4 MB pages) with #PF restart, privilege levels, call gates, TSS stack switches, hardware task switches (JMP/CALL to a TSS or task gate, IDT task gates, IRET with NT, busy bits and back links, 286 TSSs), the I/O permission bitmap for IN/OUT/INS/OUTS, virtual-8086 mode with the Pentium's VME/PVI virtual interrupt flag and interrupt redirection, `#GP` for privileged instructions at CPL > 0, `#NM` for x87 instructions under CR0.EM/TS (software FPU emulators), and the debug registers (instruction and data breakpoints, DR6/DR7, RF, general detect) plus TF single-stepping.
 - **Memory Model:** 128 MB of physical memory: conventional memory managed through a DOS-compatible MCB chain, an XMS/DPMI pool from 1 MB to 112 MB, 8 MB of SVGA video memory at `0x07000000` (the VBE linear frame buffer), and host tables (DPMI LDT/IDT/GDT) above it so programs can never allocate over them.
 - **Expanded and Extended Memory:** EMS services via `INT 67h` with an `EMMXXXX0` device, page-frame mappings, and private API stubs, plus optional HIMEM/XMS 3.0 support (32-bit sizes beyond 64 MB) wired through `INT 2Fh` and far-call dispatch stubs.
 - **BIOS & DOS APIs:** Support for core BIOS and DOS interrupts including `INT 10h`, `INT 13h`, `INT 15h`, `INT 16h`, `INT 1Ah`, `INT 21h`, `INT 2Fh`, `INT 31h`, `INT 33h`, and `INT 67h`. Refer to the `docs/` folder (Ralph Brown's interrupt list) for specifications.
@@ -114,7 +114,10 @@ run exactly like that too, with interrupts, sound and the headless options.
 |------|-------------|
 | `--help`, `-h`, `-?` | Print usage information and exit |
 | `--himem` | Enable HIMEM/XMS support |
-| `--cpu=MODEL` | Emulated CPU: `386` (386DX-33 + 387), `486` (early 486DX-33, no CPUID), `486dx2` (default, 486DX2-66 with CPUID), `486dx4` (DX4-100), `pentium` (P54C-100: TSC, MSRs, CMPXCHG8B, CR4) or `pentiumpro` (adds CMOVcc/FCMOVcc/FCOMI) |
+| `--cpu=MODEL` | Emulated CPU: `386` (386DX-33 + 387), `486` (early 486DX-33, no CPUID), `486dx2` (default, 486DX2-66 with CPUID), `486dx4` (DX4-100), `pentium` (P54C-100: TSC, MSRs, CMPXCHG8B, CR4 with VME/PVI/DE) or `pentiumpro` (adds CMOVcc/FCMOVcc/FCOMI) |
+| `--no-fpu` | No x87 coprocessor (a 386 without a 387, a 486SX): x87 instructions do nothing, so `FNINIT`/`FNSTSW` probes find no FPU; CR0.ET (386), CPUID and the INT 11h equipment word report it. With CR0.EM set, x87 instructions raise `#NM` (INT 7) for a software emulator instead |
+| `--dpmi=off` | No DPMI host: INT 2Fh AX=1687h reports none, so extenders fall back to VCPI or raw mode (`--dpmi=on` is the default) |
+| `--vcpi=off` | No VCPI server: INT 67h AX=DE00h fails (`--vcpi=on` is the default) |
 | `--mount=L:/path` | Mount a host directory as drive `L` (repeatable) |
 | `--env=NAME=VALUE` | Add or replace a DOS environment variable (repeatable). Defaults: `BLASTER=A220 I5 D1 H5 P330 T6`, `CAUSEWAY=DPMI` |
 | `--headless` | No window, terminal output or host input. Exit status is 124 when `--max-seconds` expires |
@@ -147,6 +150,34 @@ run exactly like that too, with interrupts, sound and the headless options.
 | `--exec="asm"` | Assemble and execute instructions without loading a program (semicolons separate lines) |
 | `--com1=DEV` ... `--com4=DEV` | What is attached to a serial port: `none` (port present, nothing attached; COM1/COM2 default), `off` (no port; COM3/COM4 default), `mouse`, `file:PATH`, `tcp:HOST:PORT`, `listen:PORT` |
 | `--lpt1=DEV` ... `--lpt3=DEV` | What is attached to a parallel port: `none` (LPT1 default), `off` (LPT2/LPT3 default), `file:PATH`, `covox`, `disney` |
+
+### DPMI and VCPI
+
+Both are present by default. Extenders that look for DPMI first (DOS/4GW,
+PMODE/W, DOS/32A, DJGPP) keep using the DPMI host; software that only
+uses VCPI when no DPMI host exists can be tested with `--dpmi=off`, and
+`--vcpi=off` hides the VCPI server.
+
+A real VCPI server (EMM386, QEMM) runs DOS in virtual-8086 mode. Here
+DOS runs in real mode, so the server (`src/hw/VCPI.*`) switches between
+real mode and the client's protected mode, and makes the difference
+invisible apart from CR0.PE reading 0 while DOS runs:
+
+- DE01h fills page table 0 with an identity map of the first megabyte
+  (EMS pages are copied in and out of the page frame, so DE06h returns
+  `page << 12`) and returns three descriptors for the client's GDT: the
+  server's 32-bit code segment (base F0000h; the entry point is
+  `0F FF E4; RETF`, an HLE trap) and two data segments.
+- DE0Ch from real mode loads the client's CR3, GDTR, IDTR, LDTR and TR
+  (marking the TSS busy), sets PE and PG, opens the A20 gate and jumps to
+  the client with interrupts disabled. DS, ES, FS and GS are null.
+- DE0Ch through the protected-mode entry (far CALL with the VCPI stack
+  frame) turns PE and PG off, reloads IDTR = 0:3FFh (the IVT), restores the
+  A20 gate and resumes the given CS:EIP, SS:ESP, DS, ES, FS, GS with
+  interrupts disabled, as a V86 server would enter V86 mode.
+- DE04h/DE05h hand out 4 KB pages from XMS (taken in 1 MB chunks),
+  DE03h counts them, DE02h reports the top of the XMS pool, DE07h-DE0Bh
+  read CR0, the debug registers and the 8259 vector bases.
 
 ### Emulated time
 

@@ -40,7 +40,8 @@
   - [x] Unmasked exception delivery: #MF (CR0.NE=1) or FERR# -> IRQ13
   - [x] FSTENV/FSAVE in 16/32-bit real/protected layouts, computed tag word
   - [x] P6 additions: FCOMI/FUCOMI(P), FCMOVcc; reserved aliases (FSTP1/8/9, FXCH4/7, FCOM2, FCOMP3/5, FFREEP)
-  - [ ] FISTTP (SSE3) and CR0.EM/TS/MP (#NM device-not-available)
+  - [ ] FISTTP (SSE3)
+  - [x] CR0.EM/TS/MP: #NM (INT 7) for x87 instructions and WAIT; `--no-fpu` (no coprocessor)
   - [ ] IRQ13 stalls the waiting instruction until port F0h (IGNNE#) like a
         real 486 board; FERR# currently acts as if IGNNE# were asserted
   - [ ] Soft back end: transcendentals are approximations (<= 16 ulps)
@@ -52,7 +53,11 @@
   - [x] EFLAGS write rules for POPF/IRET (reserved bits, AC/ID per model, IOPL/IF privilege, V86 #GP)
   - [x] Model-gated instructions (#UD), CR0 bits per model, CR4 on the Pentium
   - [x] RDTSC, RDMSR/WRMSR (MSR 10h) and a cycle-weighted guest clock (`CPU::cycles()`)
-  - [ ] VME/PVI (CR4, VIF/VIP semantics), debug extensions, task switches through IRET/NT
+  - [x] VME/PVI (CR4, VIF/VIP, V86 interrupt redirection bitmap), task switches (JMP/CALL/INT/IRET NT, 286 TSS)
+  - [x] Privileged instructions (#GP at CPL > 0 / in V86), I/O permission bitmap, INS/OUTS
+  - [x] Debug registers: instruction and data breakpoints (DR0-DR3, DR6, DR7, RF, GD), TF single-step, ICEBP
+  - [ ] Debug extensions: I/O breakpoints (R/W = 10b with CR4.DE)
+  - [ ] Segment limit and access-rights checks, page-level protection (U/S, R/W, CR0.WP), #DF/#TS on nested faults
   - [ ] Protected-mode timings (far calls, interrupts and segment loads use real-mode costs)
 
 ## Phase 3: Hardware Devices
@@ -243,7 +248,8 @@
 - [x] Privilege levels: call gates, inter-ring CALL/RET/IRET, TSS stack switch
       (for software that owns protected mode itself)
 - [ ] CauseWay in raw mode (CAUSEWAY=DPMI is the default; raw mode still fails)
-- [ ] VCPI (INT 67h DE00h) for extenders that prefer it over DPMI
+- [x] VCPI 1.0 (INT 67h DE00h-DE0Ch) over the EMS driver; DOS runs in real mode instead of V86 (see README); `--dpmi=off`, `--vcpi=off`
+  - [ ] Not yet verified with real VCPI clients (no extender binaries in the test setup): run `tests/compat` with `--dpmi=off`
 
 ## Missing Features / Compatibility Gaps
 - [ ] More complete INT 10h (Video) support:

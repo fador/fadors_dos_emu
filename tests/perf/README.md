@@ -64,6 +64,11 @@ MIPS) was inline register and memory accessors, a flat-RAM fast path in
 `MemoryBus`, inline instruction fetch, cheaper logging guards and avoiding
 store-forwarding stalls in `InstructionDecoder::step`.
 
+Guest cycle counts changed once since: REP STOS into RAM now charges the
+per-element cycles of the element-wise loop (like the VGA-window fill), so
+`mem32` reports about a third more guest cycles (and emulated time) than
+before; instruction counts are unchanged.
+
 To check that a change keeps the guest's behaviour, compare a
 `--deterministic` run with and without `--no-fast-path` (and with the
 previous build): the instruction count, the "Guest CPU: ... cycles" line,
