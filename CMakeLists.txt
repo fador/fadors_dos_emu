@@ -154,6 +154,7 @@ set(TEST_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/hw/test_vga_controller.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_batch.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cdrom.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_x87.cpp"
 )
 
 add_executable(fadors_tests ${TEST_FILES})
