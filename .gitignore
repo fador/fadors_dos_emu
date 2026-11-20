@@ -1,5 +1,6 @@
 /docs
 /build
+/build-*
 /.cache
 /.vscode
 /test_dos_dirs

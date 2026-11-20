@@ -6,7 +6,7 @@ Work in progress. The emulator surface is expanding quickly and some subsystems 
 Fador's DOS Emulator is a multiplatform MS-DOS emulator written in modern C++20. The project targets real-mode DOS software, 80386 protected-mode workloads, and DOS extenders while keeping CPU, memory, hardware devices, and UI frontends decoupled.
 
 ## Features
-- **CPU Emulation:** 16-bit Real Mode and 32-bit Protected Mode execution, descriptor-table and control-register instructions, string operations, and REP fast paths. The emulator now also includes a substantial x87 implementation covering stack management, 32/64/80-bit loads and stores, integer conversion, arithmetic, comparisons, rounding, transcendental helpers (`FSIN`, `FCOS`, `FSINCOS`, `FPTAN`, `FPATAN`, `FYL2X`, `F2XM1`, etc.), and x87 environment/state save-restore (`FLDENV`, `FNSTENV`, `FNSAVE`, `FRSTOR`).
+- **CPU Emulation:** 16-bit Real Mode and 32-bit Protected Mode execution, descriptor-table and control-register instructions, string operations, and REP fast paths. The x87 FPU is bit-accurate: registers are 80-bit (64-bit significand), precision and rounding control, all exception flags (with stack faults, masked and unmasked responses, rebiased over/underflow results), condition codes, NaN propagation, BCD, the 16/32-bit real/protected `FSTENV`/`FSAVE` layouts and unmasked-exception delivery (`#MF` with `CR0.NE=1`, otherwise `FERR#` → IRQ13 → `INT 75h` → `INT 02h`) follow real hardware. On GCC/Clang x86/x86-64 builds the arithmetic runs on the host's x87; elsewhere (MSVC, ARM64) a portable software 80-bit implementation is used (transcendentals there are within 16 ulps of a real x87).
 - **Protected Mode & DOS Extenders:** DPMI 0.9 host for protected-mode DOS extenders, including GDT/IDT handling, mode-switch entry points, segment reload callbacks, and app/host interrupt plumbing. DOS/4GW (bound or loaded through `DOS4GW.EXE`), PMODE/W, DOS/32A, CauseWay and DJGPP programs run; `tests/compat` checks each of them. 386 paging (CR0.PG, CR3, INVLPG, 4 MB pages) is available to raw-mode software.
 - **Memory Model:** 128 MB of physical memory: conventional memory managed through a DOS-compatible MCB chain, an XMS/DPMI pool from 1 MB to 112 MB, 8 MB of SVGA video memory at `0x07000000` (the VBE linear frame buffer), and host tables (DPMI LDT/IDT/GDT) above it so programs can never allocate over them.
 - **Expanded and Extended Memory:** EMS services via `INT 67h` with an `EMMXXXX0` device, page-frame mappings, and private API stubs, plus optional HIMEM/XMS 3.0 support (32-bit sizes beyond 64 MB) wired through `INT 2Fh` and far-call dispatch stubs.
@@ -21,7 +21,7 @@ Fador's DOS Emulator is a multiplatform MS-DOS emulator written in modern C++20.
 - **Benchmark Modes and Profiles:** Built-in `decoder-loop`, `rep-movsb`, and `rep-movsd` benchmarks for interpreter hot paths, plus fixed-workload DOS programs (`tests/perf`) that report guest MIPS for integer, memory, x87, call, string, VGA and 16-bit real-mode code.
 - **Headless Mode:** `--headless` runs without a window or terminal, with a time limit, PNG screenshots and scripted key presses, for automated testing of DOS programs.
 - **Frontends:** Text-mode terminal rendering by default, with optional SDL rendering when the project is built with SDL2.
-- **Test Coverage:** Custom unit tests cover CPU execution, instruction decoding, assembler/disassembler behavior, BIOS/DOS/DPMI services, memory managers, paging, interrupts, and hardware devices. A differential fuzzer (`cpu_fuzz`) compares integer instructions against the host CPU.
+- **Test Coverage:** Custom unit tests cover CPU execution, instruction decoding, assembler/disassembler behavior, BIOS/DOS/DPMI services, memory managers, paging, interrupts, and hardware devices. Differential fuzzers compare integer instructions (`cpu_fuzz`) and x87 instruction sequences (`fpu_fuzz`: 80-bit stack, status/tag words, memory results) against the host CPU.
 - **Decoupled Architecture:** CPU, memory, devices, and UI frontends remain separated so rendering backends can change without rewriting the emulation core.
 
 ## Build Instructions
@@ -34,10 +34,17 @@ cmake ..
 cmake --build .
 ```
 
+`-DFADOR_SOFT_X87=ON` uses the portable software x87 back end even on hosts
+with a native x87 (it is selected automatically for MSVC and non-x86 hosts),
+so it can be tested on Linux too, e.g. in a second build directory:
+`cmake -S . -B build-soft -DFADOR_SOFT_X87=ON`.
+
 ## Testing
 ```bash
 ./build/fadors_tests                       # unit tests (TEST_FILTER=substring to select)
 ./build/cpu_fuzz [count] [seed]            # differential integer-instruction fuzzer (x86-64 hosts)
+./build/fpu_fuzz [count] [seed] [filter]   # differential x87 fuzzer: emulator vs. the host x87 (x86-64 hosts)
+./build/fpu_fuzz --backend [count] [seed]  # soft 80-bit back end vs. the host x87, operation by operation
 python3 tests/perf/run_profiles.py build/fadors_emu tests/perf   # performance profiles, MIPS table
 tests/compat/build.sh /tmp/compat && tests/compat/run.sh build/fadors_emu /tmp/compat
 ```

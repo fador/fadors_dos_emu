@@ -33,6 +33,17 @@
   - [x] Transcendentals (FSIN, FCOS, FSINCOS, FPTAN, FPATAN, FYL2X, F2XM1, FSCALE)
   - [x] Environment save/restore (FLDENV, FNSTENV, FNSAVE, FRSTOR)
   - [x] D9 /3 FSTP ST(i) alias (Borland-compiled code)
+  - [x] 80-bit registers (`x87::FPU`, `Float80`), bit-exact arithmetic, PC/RC,
+        exception flags, stack faults, unmasked responses, NaN rules, BCD
+  - [x] Host x87 fast path (GCC/Clang x86) and portable soft back end
+        (`FADOR_SOFT_X87`), both checked by `fpu_fuzz`
+  - [x] Unmasked exception delivery: #MF (CR0.NE=1) or FERR# -> IRQ13
+  - [x] FSTENV/FSAVE in 16/32-bit real/protected layouts, computed tag word
+  - [x] P6 additions: FCOMI/FUCOMI(P), FCMOVcc; reserved aliases (FSTP1/8/9, FXCH4/7, FCOM2, FCOMP3/5, FFREEP)
+  - [ ] FISTTP (SSE3) and CR0.EM/TS/MP (#NM device-not-available)
+  - [ ] IRQ13 stalls the waiting instruction until port F0h (IGNNE#) like a
+        real 486 board; FERR# currently acts as if IGNNE# were asserted
+  - [ ] Soft back end: transcendentals are approximations (<= 16 ulps)
 - [x] **Interrupt Pipeline**
   - [x] CPU exception handling
   - [x] Hardware interrupt pin routing
@@ -153,6 +164,7 @@
 - [x] **Headless runs** (`--headless`, `--max-seconds`, `--screenshot[-at]`, `--keys`)
 - [x] **Performance profiles** (`tests/perf`: fixed-workload DOS programs, MIPS table)
 - [x] **Differential CPU fuzzer** (`cpu_fuzz`, integer instructions vs. the host CPU)
+- [x] **Differential x87 fuzzer** (`fpu_fuzz`, x87 sequences vs. the host FPU; `--backend` soft vs. host)
 - [ ] Cycle-weighted `--throttle-machine` presets (currently instructions/second)
 - [ ] Further interpreter speed-ups (decoded-instruction cache or a JIT)
 
