@@ -170,6 +170,8 @@ void FrameRenderer::beginFrame(uint64_t frameNumber) {
   m_capOpen = true;
   m_capNumber = frameNumber;
   m_capNextY = 0;
+  m_capPhys = 0;
+  m_capSplitAt = kNoSplit;
 }
 
 void FrameRenderer::scanTo(uint32_t line) {
@@ -185,6 +187,17 @@ void FrameRenderer::scanTo(uint32_t line) {
     m_modeKey = mode;
     m_capNextY = 0;
   }
+  // The start address is latched at the start of vertical retrace, so a
+  // frame shows the value it had at the previous retrace.
+  l.start = m_vga.displayStartForFrame(m_capNumber) +
+            ((m_vga.crtcReg(0x08) >> 5) & 3u);
+  // Line compare: the address counter restarts after the scanline whose
+  // number equals CRTC 18h when the beam reaches it, so a split point
+  // moved above the beam takes effect in the next frame.
+  if (l.lineCompare >= m_capPhys && l.lineCompare < line)
+    m_capSplitAt = l.lineCompare;
+  m_capPhys = std::max(m_capPhys, line);
+  l.lineCompare = m_capSplitAt;
   const uint32_t repeat = static_cast<uint32_t>(l.lineRepeat);
   const int endY = static_cast<int>(std::min<uint64_t>(
       static_cast<uint64_t>(l.height), (uint64_t{line} + repeat - 1) / repeat));

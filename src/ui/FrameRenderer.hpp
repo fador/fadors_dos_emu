@@ -132,6 +132,9 @@ private:
   bool m_captureCursor = true;
   uint64_t m_capNumber = 0;
   int m_capNextY = 0; // first output line not rasterised yet
+  static constexpr uint32_t kNoSplit = 0xFFFFFFFEu;
+  uint32_t m_capPhys = 0;           // scanlines compared with line compare
+  uint32_t m_capSplitAt = kNoSplit; // last line compare match this frame
   Frame m_completed;
 };
 

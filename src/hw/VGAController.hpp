@@ -204,6 +204,11 @@ public:
   uint32_t getDisplayStart() const {
     return (uint32_t(m_crtc[0x0C]) << 8) | m_crtc[0x0D];
   }
+  // Start address scanned out in emulated frame `frame`: the CRTC latches
+  // 0Ch/0Dh at the start of vertical retrace, so a value written during
+  // the display shows from the next frame, one written in the retrace from
+  // the frame after.
+  uint32_t displayStartForFrame(uint64_t frame) const;
   // CRTC cursor location (character address)
   uint32_t getCursorLocation() const {
     return (uint32_t(m_crtc[0x0E]) << 8) | m_crtc[0x0F];
@@ -236,6 +241,7 @@ private:
   void serviceEvents(uint64_t now);
   void rescheduleRetraceInterrupt(uint64_t now);
   void timingChanged();
+  uint64_t lastRetraceStartNs(uint64_t now) const;
   void updateNextEvent() {
     m_nextEventNs = std::min(m_rasterNextNs, m_vintNextNs);
   }
@@ -301,6 +307,11 @@ private:
   uint64_t m_requestNs = 0;
   uint64_t m_capFrame = 0;
   uint64_t m_rasterNextNs = UINT64_MAX;
+
+  // Start address latch: value at the retrace before the last write
+  bool m_startWritten = false;
+  uint32_t m_startLatchVal = 0;
+  uint64_t m_startLastWriteNs = 0;
 
   // Vertical retrace interrupt (CRTC 11h bits 4/5, input status 0 bit 7)
   bool m_vintPending = false;

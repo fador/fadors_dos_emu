@@ -173,6 +173,17 @@ void VGAController::rasterSync(uint64_t now) {
   };
   if (m_capturing && frame != m_capFrame)
     finishCapture();
+  if (!m_capturing && m_wantFrame && frame > 0 &&
+      (frame - 1) * t.frameNs >= m_requestNs) {
+    // Whole frames passed since the request without a display change:
+    // the last of them looked like the current state.
+    m_capturing = true;
+    m_capFrame = frame - 1;
+    if (!m_continuous)
+      m_wantFrame = false;
+    m_sink->beginFrame(m_capFrame);
+    finishCapture();
+  }
   if (!m_capturing) {
     const uint64_t start = frame * t.frameNs;
     if (!m_wantFrame) {
@@ -297,6 +308,14 @@ void VGAController::setCrtcReg(uint8_t index, uint8_t value) {
   if (m_crtc[index] == value)
     return;
   beforeDisplayChange();
+  if (index == 0x0C || index == 0x0D) {
+    // Remember the value the last retrace latched before this write
+    const uint64_t now = nowNs();
+    if (!m_startWritten || m_startLastWriteNs < lastRetraceStartNs(now))
+      m_startLatchVal = getDisplayStart();
+    m_startWritten = true;
+    m_startLastWriteNs = now;
+  }
   m_crtc[index] = value;
   if (index == 0x11 && !(m_crtc[0x11] & 0x10))
     rescheduleRetraceInterrupt(0); // Clear Vertical Interrupt
@@ -304,6 +323,23 @@ void VGAController::setCrtcReg(uint8_t index, uint8_t value) {
   if (index <= 0x07 || (index >= 0x10 && index <= 0x12) || index == 0x15 ||
       index == 0x16)
     timingChanged();
+}
+
+uint64_t VGAController::lastRetraceStartNs(uint64_t now) const {
+  const VgaTiming &t = timing();
+  uint64_t start = frameStartNs(now) + t.retraceStart * t.linePs / 1000u;
+  if (start > now)
+    start = start >= t.frameNs ? start - t.frameNs : 0;
+  return start;
+}
+
+uint32_t VGAController::displayStartForFrame(uint64_t frame) const {
+  if (!m_startWritten || frame == 0)
+    return getDisplayStart();
+  const VgaTiming &t = timing();
+  const uint64_t latchNs =
+      (frame - 1) * t.frameNs + t.retraceStart * t.linePs / 1000u;
+  return m_startLastWriteNs < latchNs ? getDisplayStart() : m_startLatchVal;
 }
 
 void VGAController::timingChanged() {
