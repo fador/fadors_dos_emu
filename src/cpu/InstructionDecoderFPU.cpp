@@ -87,10 +87,8 @@ ImageMode InstructionDecoder::fpuImageMode() const {
 // Called before a waiting x87 instruction (and FWAIT).  Returns true if the
 // instruction must not execute because #MF was raised.
 bool InstructionDecoder::fpuCheckPendingError() {
-  if (!m_cpu.fpu().errorPending()) {
-    m_cpu.setFPUErrorSignalled(false);
+  if (!m_cpu.fpu().errorPending())
     return false;
-  }
   if (m_cpu.getCR(0) & kCR0_NE) {
     raiseException(16); // #MF, a fault at the waiting instruction
     return true;
@@ -521,17 +519,41 @@ FADOR_FPU_HOT void InstructionDecoder::executeFPUOpcode(uint8_t opcode) {
   x87::FPU &fpu = m_cpu.fpu();
   const uint8_t cls = kFpuClass[((opcode & 7u) << 8) | modrmByte];
 
-  if (fpu.errorPending() | m_cpu.fpuErrorSignalled()) [[unlikely]] {
-    if (!fpu.errorPending())
-      m_cpu.setFPUErrorSignalled(false); // FERR# re-arms once the error is cleared
-    else if (!(cls & 1) && fpuCheckPendingError())
+  if (fpu.errorPending()) [[unlikely]] {
+    if (!(cls & 1) && fpuCheckPendingError())
       return;
   }
 
   const bool hasMem = modrm.mod != 3;
   uint32_t addr = 0;
-  if (hasMem)
-    addr = m_hasPrefix67 ? getEffectiveAddress32(modrm) : getEffectiveAddress16(modrm);
+  if (hasMem) {
+    if (m_hasPrefix67 && modrm.rm != 4 && !m_eaResolved) [[likely]] {
+      // 32-bit [reg + disp] without SIB (the common compiled-code form),
+      // inline; identical to getEffectiveAddress32().
+      uint32_t offset;
+      uint8_t seg = DS;
+      if (modrm.mod == 0 && modrm.rm == 5) {
+        offset = fetch32();
+      } else {
+        offset = m_cpu.getReg32(modrm.rm);
+        if (modrm.rm == EBP)
+          seg = SS;
+        if (modrm.mod == 1)
+          offset += static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(fetch8())));
+        else if (modrm.mod == 2)
+          offset += fetch32();
+      }
+      if (m_segmentOverride != 0xFF)
+        seg = m_segmentOverride;
+      m_currentOffset = offset;
+      m_currentEASegment = seg;
+      m_currentEA = m_segBase[seg] + offset;
+      m_eaResolved = true;
+      addr = m_currentEA;
+    } else {
+      addr = m_hasPrefix67 ? getEffectiveAddress32(modrm) : getEffectiveAddress16(modrm);
+    }
+  }
 
   if (!(cls & 2)) [[likely]] {
     fpu.fip = m_instrStartEIP;

@@ -14,6 +14,12 @@
 
 #if FADOR_X87_HOST
 
+#if defined(_MSC_VER)
+#define FADOR_X87_HOST_INLINE __forceinline
+#else
+#define FADOR_X87_HOST_INLINE inline __attribute__((always_inline))
+#endif
+
 namespace fador::cpu::x87::host {
 
 // Host x87 control word / sticky exception flags as last set or observed by
@@ -24,7 +30,7 @@ inline thread_local uint16_t t_hostFlags = 0;
 // Gets the host ready for a fast-path operation under guest control word
 // `cw`; `known` = the guest's masked sticky flags.  Returns false if the
 // generic (checked) kernels must be used.
-inline bool fastReady(uint16_t cw, uint16_t known) {
+FADOR_X87_HOST_INLINE bool fastReady(uint16_t cw, uint16_t known) {
   if ((cw & SW_EXC) != SW_EXC) [[unlikely]]
     return false;
   if (t_hostCW != cw) [[unlikely]] {
@@ -46,7 +52,7 @@ inline bool fastReady(uint16_t cw, uint16_t known) {
 // then the popping form DE xx leaves the result alone in ST0:
 // DE C1 FADDP, DE C9 FMULP, DE E9 FSUBP (ST1-ST0), DE E1 FSUBRP (ST0-ST1),
 // DE F9 FDIVP (ST1/ST0), DE F1 FDIVRP (ST0/ST1).
-inline void fastArith(Arith op, Float80 *dst, const Float80 *src, uint16_t &sw) {
+FADOR_X87_HOST_INLINE void fastArith(Arith op, Float80 *dst, const Float80 *src, uint16_t &sw) {
   uint16_t s;
 #define FADOR_X87_FAST_ARITH(byte)                                             \
   asm volatile("fldt %0\n\t"                                                   \
@@ -71,7 +77,7 @@ inline void fastArith(Arith op, Float80 *dst, const Float80 *src, uint16_t &sw) 
 }
 
 // *dst = *dst op memory operand.
-inline void fastArithMem(Arith op, Float80 *dst, MemFmt fmt, const uint64_t *raw,
+FADOR_X87_HOST_INLINE void fastArithMem(Arith op, Float80 *dst, MemFmt fmt, const uint64_t *raw,
                          uint16_t &sw) {
   uint16_t s;
 #define FADOR_X87_FAST_MEM(insn)                                               \
@@ -111,7 +117,7 @@ inline void fastArithMem(Arith op, Float80 *dst, MemFmt fmt, const uint64_t *raw
 }
 
 // Compare *a with *b (FCOM / FUCOM rules); sets C0/C2/C3 and IE/DE.
-inline void fastCompare(const Float80 *a, const Float80 *b, bool unordered,
+FADOR_X87_HOST_INLINE void fastCompare(const Float80 *a, const Float80 *b, bool unordered,
                         uint16_t &sw) {
   uint16_t s;
   if (unordered)
@@ -125,7 +131,7 @@ inline void fastCompare(const Float80 *a, const Float80 *b, bool unordered,
 }
 
 // FSQRT / FRNDINT in place.
-inline void fastUnary(uint8_t modrm, Float80 *v, uint16_t &sw) {
+FADOR_X87_HOST_INLINE void fastUnary(uint8_t modrm, Float80 *v, uint16_t &sw) {
   uint16_t s;
   if (modrm == 0xFA)
     asm volatile("fldt %0\n\tfsqrt\n\tfnstsw %%ax\n\tfstpt %0"
@@ -138,7 +144,7 @@ inline void fastUnary(uint8_t modrm, Float80 *v, uint16_t &sw) {
 }
 
 // FIST/FISTP (bits = 16/32/64), FST/FSTP m32/m64 to `out`.
-inline void fastStoreInt(const Float80 *v, int bits, int64_t &out, uint16_t &sw) {
+FADOR_X87_HOST_INLINE void fastStoreInt(const Float80 *v, int bits, int64_t &out, uint16_t &sw) {
   uint16_t s;
   if (bits == 16) {
     int16_t r;
@@ -160,7 +166,7 @@ inline void fastStoreInt(const Float80 *v, int bits, int64_t &out, uint16_t &sw)
   sw = static_cast<uint16_t>(sw | (s & (SW_EXC | SW_CC)));
 }
 
-inline void fastStoreF64(const Float80 *v, uint64_t &out, uint16_t &sw) {
+FADOR_X87_HOST_INLINE void fastStoreF64(const Float80 *v, uint64_t &out, uint16_t &sw) {
   uint16_t s;
   asm volatile("fldt %2\n\tfstpl %0\n\tfnstsw %%ax"
                : "=m"(out), "=a"(s) : "m"(*v) : FADOR_X87_CLOBBERS);
@@ -168,7 +174,7 @@ inline void fastStoreF64(const Float80 *v, uint64_t &out, uint16_t &sw) {
   sw = static_cast<uint16_t>(sw | (s & (SW_EXC | SW_CC)));
 }
 
-inline void fastStoreF32(const Float80 *v, uint32_t &out, uint16_t &sw) {
+FADOR_X87_HOST_INLINE void fastStoreF32(const Float80 *v, uint32_t &out, uint16_t &sw) {
   uint16_t s;
   asm volatile("fldt %2\n\tfstps %0\n\tfnstsw %%ax"
                : "=m"(out), "=a"(s) : "m"(*v) : FADOR_X87_CLOBBERS);

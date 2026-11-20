@@ -500,8 +500,8 @@ public:
     if (m_fpuErrorCallback)
       m_fpuErrorCallback();
   }
-  bool fpuErrorSignalled() const { return m_fpuErrorSignalled; }
-  void setFPUErrorSignalled(bool v) { m_fpuErrorSignalled = v; }
+  bool fpuErrorSignalled() const { return m_fpu.ferrSignalled(); }
+  void setFPUErrorSignalled(bool v) { m_fpu.setFerrSignalled(v); }
 
   void setMemoryBus(fador::memory::MemoryBus *memory) { m_memory = memory; }
 
@@ -534,7 +534,6 @@ private:
   uint16_t m_trSelector{0};
   x87::FPU m_fpu;
   std::function<void()> m_fpuErrorCallback;
-  bool m_fpuErrorSignalled{false};
 
   std::vector<HLEFrame> m_hleStack;
 };

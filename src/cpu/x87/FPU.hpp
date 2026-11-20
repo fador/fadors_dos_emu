@@ -19,6 +19,12 @@
 #include <cstddef>
 #include <cstdint>
 
+#if defined(_MSC_VER)
+#define FADOR_X87_ALWAYS_INLINE __forceinline
+#else
+#define FADOR_X87_ALWAYS_INLINE inline __attribute__((always_inline))
+#endif
+
 namespace fador::cpu::x87 {
 
 // Layout of FSTENV/FLDENV (and the first part of FSAVE/FRSTOR) images.
@@ -74,6 +80,10 @@ public:
     return static_cast<uint16_t>(m_sw & ~m_cw & SW_EXC);
   }
   bool errorPending() const { return (m_sw & SW_ES) != 0; }
+  // FERR# latch: set when the pending error has been signalled (IRQ13), so
+  // it is raised once per error; cleared whenever ES clears.
+  bool ferrSignalled() const { return m_ferrSignalled; }
+  void setFerrSignalled(bool v) { m_ferrSignalled = v; }
 
   // ---- registers (logical index i = ST(i)) --------------------------------
   bool isEmpty(int i) const { return (m_emptyMask >> phys(i)) & 1; }
@@ -207,7 +217,7 @@ public:
   void fstp1(int i);
 
   // ST(dst) = ST(dst) op ST(src) [, pop]
-  void arithReg(Arith op, int dst, int src, bool pop) {
+  FADOR_X87_ALWAYS_INLINE void arithReg(Arith op, int dst, int src, bool pop) {
 #if FADOR_X87_HOST
     if (!isEmpty(dst) && !isEmpty(src)) [[likely]] {
       uint16_t flags = knownFlags();
@@ -223,7 +233,7 @@ public:
     arithRegSlow(op, dst, src, pop);
   }
   // ST0 = ST0 op mem
-  void arithMem(Arith op, MemFmt fmt, uint64_t raw) {
+  FADOR_X87_ALWAYS_INLINE void arithMem(Arith op, MemFmt fmt, uint64_t raw) {
 #if FADOR_X87_HOST
     if (!isEmpty(0)) [[likely]] {
       uint16_t flags = knownFlags();
@@ -238,7 +248,21 @@ public:
   }
 
   // FCOM/FCOMP/FCOMPP/FUCOM*: compare ST0 with ST(i), then pop `pops` times.
-  void fcomReg(int i, bool unordered, int pops);
+  void fcomReg(int i, bool unordered, int pops) {
+#if FADOR_X87_HOST
+    if (!isEmpty(0) && !isEmpty(i)) [[likely]] {
+      uint16_t flags = knownFlags();
+      if (host::fastReady(m_cw, flags)) [[likely]] {
+        host::fastCompare(&m_regs[phys(0)], &m_regs[phys(i)], unordered, flags);
+        update(flags, SW_CC);
+        for (int k = 0; k < pops; ++k)
+          popRaw();
+        return;
+      }
+    }
+#endif
+    fcomRegSlow(i, unordered, pops);
+  }
   void fcomMem(MemFmt fmt, uint64_t raw, bool pop);
   // FCOMI/FCOMIP/FUCOMI/FUCOMIP: returns the updated EFLAGS.
   uint32_t fcomi(int i, bool unordered, bool pop, uint32_t eflags);
@@ -295,19 +319,22 @@ private:
   void fstRegSlow(int i, bool pop);
   void fldRegSlow(int i);
   void arithRegSlow(Arith op, int dst, int src, bool pop);
+  void fcomRegSlow(int i, bool unordered, int pops);
   void arithMemSlow(Arith op, MemFmt fmt, uint64_t raw);
   void fldConstSlow(Const c);
 
   void refreshSummary() {
-    if (m_sw & ~m_cw & SW_EXC)
+    if (m_sw & ~m_cw & SW_EXC) {
       m_sw = static_cast<uint16_t>(m_sw | SW_ES | SW_B);
-    else
+    } else {
       m_sw = static_cast<uint16_t>(m_sw & ~(SW_ES | SW_B));
+      m_ferrSignalled = false;
+    }
   }
 
   // Merges exception flags (sticky) and replaces the condition bits in
   // `ccMask` with those in `flags`.
-  void update(uint16_t flags, uint16_t ccMask) {
+  FADOR_X87_ALWAYS_INLINE void update(uint16_t flags, uint16_t ccMask) {
     const uint16_t added = static_cast<uint16_t>(flags & SW_EXC & ~m_sw);
     m_sw = static_cast<uint16_t>((m_sw & ~ccMask) | (flags & ccMask) |
                                  (flags & (SW_EXC | SW_SF)));
@@ -351,6 +378,7 @@ private:
   uint8_t m_top = 0;
   uint16_t m_cw = kDefaultControlWord;
   uint16_t m_sw = 0; // without TOP
+  bool m_ferrSignalled = false;
 };
 
 } // namespace fador::cpu::x87

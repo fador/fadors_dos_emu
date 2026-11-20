@@ -39,6 +39,7 @@ void FPU::reset() {
   m_top = 0;
   m_cw = kDefaultControlWord;
   m_sw = 0;
+  m_ferrSignalled = false;
   fip = 0;
   fcs = 0;
   fop = 0;
@@ -388,7 +389,7 @@ void FPU::arithMemSlow(Arith op, MemFmt fmt, uint64_t raw) {
 
 // Compares set the condition codes even when an unmasked exception
 // suppresses the pop (unordered for invalid operands / stack underflow).
-void FPU::fcomReg(int i, bool unordered, int pops) {
+void FPU::fcomRegSlow(int i, bool unordered, int pops) {
   if (isEmpty(0) || isEmpty(i)) {
     update(SW_IE | SW_SF | kUnordered, SW_CC);
     if (!ieMasked())
@@ -622,6 +623,7 @@ void FPU::stackOp(uint8_t modrm) {
 
 void FPU::fnclex() {
   m_sw = static_cast<uint16_t>(m_sw & ~(SW_EXC | SW_SF | SW_ES | SW_B));
+  m_ferrSignalled = false;
 }
 
 // ---------------------------------------------------------------------------
