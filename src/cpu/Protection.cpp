@@ -65,11 +65,54 @@ void InstructionDecoder::writeFlags(uint32_t value, uint32_t mask, bool op32) {
     mask &= 0xFFFFu;
   const uint32_t merged = (m_cpu.getEFLAGS() & ~mask) | (value & mask);
   m_cpu.setEFLAGS((merged & m_cpu.eflagsMask()) | 0x2u);
+  if (merged & mask & kFlagRF)
+    m_rfLoaded = true; // IRET: the next instruction ignores breakpoints
 }
 
 bool InstructionDecoder::checkIOPL() {
   if (!m_cpu.nativeProtection() ||
       currentCPL() <= ((m_cpu.getEFLAGS() & kFlagIOPL) >> 12))
+    return true;
+  raiseException(13, 0);
+  return false;
+}
+
+bool InstructionDecoder::requireCPL0() {
+  if (!m_cpu.nativeProtection() || currentCPL() == 0)
+    return true;
+  raiseException(13, 0);
+  return false;
+}
+
+bool InstructionDecoder::ioBitmapAllows(uint16_t port, uint32_t size) const {
+  // Only a 32-bit TSS has an I/O permission bitmap; its offset is the word
+  // at 66h and every port needs its bit clear and inside the TSS limit.
+  uint32_t low = 0, high = 0;
+  if (!readDescriptor(m_cpu.getTRSelector(), low, high) ||
+      !((high >> 8) & 0x08))
+    return false;
+  const DescriptorRegister tr = m_cpu.getTR();
+  if (tr.limit < 0x67)
+    return false;
+  const uint32_t iopb = m_memory.lread16(tr.base + 0x66);
+  const uint32_t first = iopb + port / 8u;
+  const uint32_t last = iopb + (port + size - 1u) / 8u;
+  if (last > tr.limit)
+    return false;
+  uint32_t bits = m_memory.lread8(tr.base + first);
+  if (last != first)
+    bits |= static_cast<uint32_t>(m_memory.lread8(tr.base + last)) << 8;
+  const uint32_t mask = ((1u << size) - 1u) << (port & 7u);
+  return (bits & mask) == 0;
+}
+
+bool InstructionDecoder::checkIOPermission(uint16_t port, uint32_t size) {
+  if (!m_cpu.nativeProtection())
+    return true;
+  const uint32_t flags = m_cpu.getEFLAGSNonArith();
+  if (!(flags & kFlagVM) && currentCPL() <= ((flags & kFlagIOPL) >> 12))
+    return true;
+  if (ioBitmapAllows(port, size))
     return true;
   raiseException(13, 0);
   return false;
@@ -94,6 +137,8 @@ void InstructionDecoder::executeCPUID() {
   case 1:
     a = model.signature;
     d = model.cpuidFeatureEdx;
+    if (!m_cpu.fpuPresent())
+      d &= ~cpuid_edx::kFpu;
     break;
   case 2: // P6 cache/TLB descriptors: one iteration; ITLB 4K/4M, DTLB 4K,
           // L1I 8K, DTLB 4M, L1D 8K, L2 256K
@@ -196,6 +241,7 @@ uint32_t InstructionDecoder::popSized(bool is32) {
 }
 
 void InstructionDecoder::raiseException(uint8_t vector, uint32_t errorCode) {
+  ++m_faultCount;
   m_cpu.setEIP(m_instrStartEIP);
   if (m_cpu.nativeProtection()) {
     nativeInterrupt(vector, false, hasErrorCode(vector), errorCode);
@@ -206,6 +252,7 @@ void InstructionDecoder::raiseException(uint8_t vector, uint32_t errorCode) {
 
 void InstructionDecoder::nativeInterrupt(uint8_t vector, bool software,
                                          bool pushError, uint32_t errorCode) {
+  ++m_interruptCount;
   const uint32_t oldFlags = m_cpu.getEFLAGS();
   const bool fromV86 = (oldFlags & kFlagVM) != 0;
   const uint8_t cpl = currentCPL();
@@ -340,6 +387,7 @@ void InstructionDecoder::nativeIret(bool op32) {
     const uint16_t fs = static_cast<uint16_t>(m_cpu.pop32());
     const uint16_t gs = static_cast<uint16_t>(m_cpu.pop32());
     m_cpu.setEFLAGS((newFlags & m_cpu.eflagsMask()) | 2);
+    m_rfLoaded = (newFlags & kFlagRF) != 0;
     loadSegment(CS, cs);
     loadSegment(SS, ss);
     loadSegment(ES, es);
@@ -501,6 +549,151 @@ void InstructionDecoder::nativeRetf(uint16_t release, bool op32) {
   }
   loadSegment(CS, cs);
   m_cpu.setEIP(op32 ? eip : (eip & 0xFFFF));
+}
+
+// ── Debug registers and single-stepping ─────────────────────────────────
+
+namespace {
+constexpr uint32_t kDr6BD = 0x2000; // general detect
+constexpr uint32_t kDr6BS = 0x4000; // single step
+constexpr uint32_t kDr7GD = 0x2000;
+constexpr uint32_t kCr4DE = 0x0008;
+} // namespace
+
+void InstructionDecoder::deliverDebugException(uint32_t dr6Bits) {
+  // B0-B3 report the breakpoints of this exception only; BD/BS/BT
+  // accumulate until software clears them.
+  uint32_t dr6 = m_cpu.getDR(6);
+  if (dr6Bits & 0xFu)
+    dr6 &= ~0xFu;
+  m_cpu.setDR(6, dr6 | dr6Bits);
+  if (m_cpu.nativeProtection())
+    nativeInterrupt(1, false, false, 0);
+  else
+    triggerInterrupt(1);
+}
+
+void InstructionDecoder::stepDebug() {
+  syncSegmentCacheIfNeeded();
+  const uint32_t flags = m_cpu.getEFLAGSNonArith();
+  // Instruction breakpoints are faults taken before the instruction runs;
+  // RF (set by the debugger's IRET) lets the instruction run once.
+  if (const uint8_t exec = m_cpu.instructionBreakpoints();
+      exec != 0 && !(flags & kFlagRF)) {
+    const uint32_t linear = m_segBase[CS] + m_cpu.getEIP();
+    uint32_t hits = 0;
+    for (unsigned i = 0; i < 4; ++i)
+      if (((exec >> i) & 1u) && m_cpu.getDR(static_cast<uint8_t>(i)) == linear)
+        hits |= 1u << i;
+    if (hits != 0) {
+      m_instrStartEIP = m_cpu.getEIP();
+      ++m_faultCount;
+      deliverDebugException(hits);
+      return;
+    }
+  }
+  const uint32_t faults = m_faultCount;
+  const uint32_t interrupts = m_interruptCount;
+  m_rfLoaded = false;
+  m_memory.takeDataBreakpointHits();
+  stepChecked();
+  // RF is cleared once an instruction completes, unless it loaded RF
+  // itself (IRET, task switch).
+  if (!m_rfLoaded && (m_cpu.getEFLAGSNonArith() & kFlagRF))
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~kFlagRF);
+  const uint8_t dataHits = static_cast<uint8_t>(
+      m_memory.takeDataBreakpointHits() & m_cpu.dataBreakpoints());
+  if (m_faultCount != faults)
+    return; // the instruction faulted: no traps
+  uint32_t dr6 = dataHits;
+  // Single-step trap after an instruction that started with TF set, unless
+  // it was an INT n / exception that entered a handler (which runs with
+  // TF clear).
+  if ((flags & kFlagTF) && m_interruptCount == interrupts)
+    dr6 |= kDr6BS;
+  if (dr6 != 0)
+    deliverDebugException(dr6);
+}
+
+bool InstructionDecoder::debugRegisterAccess(uint8_t &dr) {
+  if (dr == 4 || dr == 5) {
+    if (m_cpu.getCR(4) & kCr4DE) { // debug extensions: DR4/DR5 reserved
+      raiseException(6);
+      return false;
+    }
+    dr = static_cast<uint8_t>(dr + 2);
+  }
+  if (!requireCPL0())
+    return false;
+  if (m_cpu.getDR(7) & kDr7GD) {
+    // General detect: a fault before the MOV, GD cleared for the handler.
+    m_cpu.setDR(7, m_cpu.getDR(7) & ~kDr7GD);
+    m_cpu.setEIP(m_instrStartEIP);
+    ++m_faultCount;
+    deliverDebugException(kDr6BD);
+    return false;
+  }
+  return true;
+}
+
+uint32_t InstructionDecoder::readDebugRegister(uint8_t dr) const {
+  const uint32_t v = m_cpu.getDR(dr);
+  if (dr == 6)
+    return (v & 0x0000E00Fu) | 0xFFFF0FF0u; // reserved bits read as 1
+  if (dr == 7)
+    return (v & 0xFFFF2BFFu) | 0x00000400u;
+  return v;
+}
+
+void InstructionDecoder::writeDebugRegister(uint8_t dr, uint32_t value) {
+  if (dr == 6)
+    value &= 0x0000E00Fu;
+  else if (dr == 7)
+    value &= 0xFFFF2BFFu;
+  m_cpu.setDR(dr, value);
+}
+
+// ── LLDT / LTR ───────────────────────────────────────────────────────────
+
+void InstructionDecoder::nativeLoadLDT(uint16_t selector) {
+  if ((selector & 0xFFFC) == 0) {
+    m_cpu.setLDTRSelector(selector);
+    m_cpu.setLDTR({0, 0});
+    return;
+  }
+  uint32_t low = 0, high = 0;
+  if ((selector & 4) || !readDescriptor(selector, low, high) ||
+      (high & 0x1F00) != 0x0200) { // system descriptor, type 2 (LDT)
+    raiseException(13, selector & 0xFFFC);
+    return;
+  }
+  if (!(high & 0x8000)) {
+    raiseException(11, selector & 0xFFFC);
+    return;
+  }
+  const Descriptor d = decodeDescriptor(low, high);
+  m_cpu.setLDTRSelector(selector);
+  m_cpu.setLDTR({static_cast<uint16_t>(d.limit), d.base});
+}
+
+void InstructionDecoder::nativeLoadTR(uint16_t selector) {
+  uint32_t low = 0, high = 0;
+  if ((selector & 4) || !readDescriptor(selector, low, high) ||
+      (((high >> 8) & 0x1F) != 0x01 && ((high >> 8) & 0x1F) != 0x09)) {
+    // Null, LDT-based, not a TSS or already busy.
+    raiseException(13, selector & 0xFFFC);
+    return;
+  }
+  if (!(high & 0x8000)) {
+    raiseException(11, selector & 0xFFFC);
+    return;
+  }
+  const Descriptor d = decodeDescriptor(low, high);
+  // LTR marks the task busy.
+  m_memory.lwrite32(m_cpu.getGDTR().base + (selector & 0xFFF8u) + 4,
+                    high | 0x0200);
+  m_cpu.setTRSelector(selector);
+  m_cpu.setTR({static_cast<uint16_t>(d.limit), d.base});
 }
 
 } // namespace fador::cpu

@@ -178,6 +178,8 @@ __declspec(noinline)
 __attribute__((noinline))
 #endif
 bool InstructionDecoder::tryFastRepString(uint8_t opcode) {
+  if (m_cpu.dataBreakpoints() != 0)
+    return false; // element by element, so the MemoryBus sees each access
   switch (opcode) {
   case 0xA4:
     return tryFastRepMovs(1);
@@ -477,6 +479,14 @@ bool InstructionDecoder::checkCondition(uint8_t cond) {
 // (registers, flags, EIP) and #PF is delivered, so the guest's handler can
 // map the page and restart it.
 void InstructionDecoder::step() {
+  if (m_cpu.debugStepNeeded()) [[unlikely]] {
+    stepDebug();
+    return;
+  }
+  stepChecked();
+}
+
+void InstructionDecoder::stepChecked() {
   if (!m_memory.pagingEnabled()) [[likely]] {
     stepInstruction();
     return;
@@ -518,7 +528,7 @@ uint64_t InstructionDecoder::run(uint64_t maxInstructions) {
     // them can load a segment, start an interrupt shadow, enable paging
     // or end the program, so those checks are done once per burst.
     if (burst && executed < maxInstructions && !m_memory.pagingEnabled() &&
-        !m_cpu.interruptShadowActive() &&
+        !m_cpu.interruptShadowActive() && !m_cpu.debugStepNeeded() &&
         m_cachedSegStateVersion == m_cpu.getSegmentStateVersion())
       executed += runFastBurst(maxInstructions - executed);
   }
@@ -556,7 +566,8 @@ uint64_t InstructionDecoder::runFastBurst(uint64_t maxInstructions) {
       pageHost = p - (lin & 0xFFFu);
     }
     if (!d.matches(p) || d.wraps(eip) ||
-        ((d.flags & DecodedInsn::kX87) && m_cpu.fpu().errorPending()))
+        ((d.flags & DecodedInsn::kX87) &&
+         (m_cpu.fpu().errorPending() || m_cpu.x87Gated())))
       [[unlikely]]
       break;
     // Same bookkeeping as stepInstruction().
@@ -697,6 +708,7 @@ void InstructionDecoder::stepInstruction() {
 
         int batchCount = 0;
         uint32_t iterations = 0;
+        const uint32_t faults = m_faultCount;
         while (true) {
           uint32_t cx =
               m_hasPrefix67 ? m_cpu.getReg32(ECX) : m_cpu.getReg16(CX);
@@ -704,6 +716,8 @@ void InstructionDecoder::stepInstruction() {
             break;
 
           executeOpcode(opcode);
+          if (m_faultCount != faults) [[unlikely]]
+            break; // e.g. #GP from the I/O permission bitmap: CX stays
           ++iterations;
 
           cx--;
@@ -1314,6 +1328,11 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     break;
 
   case 0x9B: // FWAIT
+    // #NM when the task switched with a coprocessor monitored (TS and MP).
+    if ((m_cpu.getCR(0) & 0xAu) == 0xAu) {
+      raiseException(7);
+      break;
+    }
     fpuWait();
     break;
 
@@ -1630,12 +1649,49 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
       m_cpu.push16(static_cast<uint16_t>(static_cast<int16_t>(imm8)));
     break;
   }
-  case 0x6C:
-  case 0x6D:
-  case 0x6E:
-  case 0x6F:
-    LOG_CPU("INS/OUTS - stubbed");
+  case 0x6C:   // INSB
+  case 0x6D: { // INSW / INSD
+    const uint32_t size = opcode == 0x6C ? 1 : (m_hasPrefix66 ? 4 : 2);
+    const uint16_t port = m_cpu.getReg16(DX);
+    if (!checkIOPermission(port, size))
+      break;
+    const uint32_t di = m_hasPrefix67 ? m_cpu.getReg32(EDI) : m_cpu.getReg16(DI);
+    const uint32_t addr = m_segBase[ES] + di;
+    if (size == 1)
+      m_memory.lwrite8(addr, m_iobus.read8(port));
+    else if (size == 2)
+      m_memory.lwrite16(addr, m_iobus.read16(port));
+    else
+      m_memory.lwrite32(addr, m_iobus.read32(port));
+    const uint32_t next = m_cpu.directionFlag() ? di - size : di + size;
+    if (m_hasPrefix67)
+      m_cpu.setReg32(EDI, next);
+    else
+      m_cpu.setReg16(DI, static_cast<uint16_t>(next));
     break;
+  }
+  case 0x6E:   // OUTSB
+  case 0x6F: { // OUTSW / OUTSD
+    const uint32_t size = opcode == 0x6E ? 1 : (m_hasPrefix66 ? 4 : 2);
+    const uint16_t port = m_cpu.getReg16(DX);
+    if (!checkIOPermission(port, size))
+      break;
+    const uint8_t seg = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
+    const uint32_t si = m_hasPrefix67 ? m_cpu.getReg32(ESI) : m_cpu.getReg16(SI);
+    const uint32_t addr = m_segBase[seg] + si;
+    if (size == 1)
+      m_iobus.write8(port, m_memory.lread8(addr));
+    else if (size == 2)
+      m_iobus.write16(port, m_memory.lread16(addr));
+    else
+      m_iobus.write32(port, m_memory.lread32(addr));
+    const uint32_t next = m_cpu.directionFlag() ? si - size : si + size;
+    if (m_hasPrefix67)
+      m_cpu.setReg32(ESI, next);
+    else
+      m_cpu.setReg16(SI, static_cast<uint16_t>(next));
+    break;
+  }
 
   // Short Jumps
   case 0x70:
@@ -2863,43 +2919,37 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
       m_cpu.setReg16(opcode & 0x07, fetch16());
     break;
 
-  // I/O
+  // I/O: IN/OUT AL/AX/EAX with an imm8 (E4-E7) or DX (EC-EF) port.
+  // Under guest-owned protection, CPL > IOPL and V86 mode consult the
+  // TSS I/O permission bitmap (checkIOPermission).
   case 0xE4:
-    m_cpu.setReg8(AL, m_iobus.read8(fetch8()));
-    break;   // IN AL, imm8
-  case 0xE5: // IN AX/EAX, imm8
-    if (m_hasPrefix66)
-      m_cpu.setReg32(EAX, m_iobus.read32(fetch8()));
-    else
-      m_cpu.setReg16(AX, m_iobus.read16(fetch8()));
-    break;
+  case 0xE5:
   case 0xE6:
-    m_iobus.write8(fetch8(), m_cpu.getReg8(AL));
-    break;   // OUT imm8, AL
-  case 0xE7: // OUT imm8, AX/EAX
-    if (m_hasPrefix66)
-      m_iobus.write32(fetch8(), m_cpu.getReg32(EAX));
-    else
-      m_iobus.write16(fetch8(), m_cpu.getReg16(AX));
-    break;
+  case 0xE7:
   case 0xEC:
-    m_cpu.setReg8(AL, m_iobus.read8(m_cpu.getReg16(DX)));
-    break;   // IN AL, DX
-  case 0xED: // IN AX/EAX, DX
-    if (m_hasPrefix66)
-      m_cpu.setReg32(EAX, m_iobus.read32(m_cpu.getReg16(DX)));
-    else
-      m_cpu.setReg16(AX, m_iobus.read16(m_cpu.getReg16(DX)));
-    break;
+  case 0xED:
   case 0xEE:
-    m_iobus.write8(m_cpu.getReg16(DX), m_cpu.getReg8(AL));
-    break;   // OUT DX, AL
-  case 0xEF: // OUT DX, AX/EAX
-    if (m_hasPrefix66)
-      m_iobus.write32(m_cpu.getReg16(DX), m_cpu.getReg32(EAX));
-    else
-      m_iobus.write16(m_cpu.getReg16(DX), m_cpu.getReg16(AX));
+  case 0xEF: {
+    const uint16_t port = (opcode & 0x08) ? m_cpu.getReg16(DX) : fetch8();
+    const uint32_t size = (opcode & 1) ? (m_hasPrefix66 ? 4 : 2) : 1;
+    if (!checkIOPermission(port, size))
+      break;
+    if (!(opcode & 2)) { // IN
+      if (size == 1)
+        m_cpu.setReg8(AL, m_iobus.read8(port));
+      else if (size == 2)
+        m_cpu.setReg16(AX, m_iobus.read16(port));
+      else
+        m_cpu.setReg32(EAX, m_iobus.read32(port));
+    } else if (size == 1) {
+      m_iobus.write8(port, m_cpu.getReg8(AL));
+    } else if (size == 2) {
+      m_iobus.write16(port, m_cpu.getReg16(AX));
+    } else {
+      m_iobus.write32(port, m_cpu.getReg32(EAX));
+    }
     break;
+  }
 
   case 0xD6: { // SALC – Set AL from Carry (undocumented Intel; used by Borland
                // RTL)
@@ -2907,12 +2957,15 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     break;
   }
 
-  case 0xF1: { // INT1 / ICEBP – treat as debug breakpoint (no-op)
-    static int f1_count = 0;
-    f1_count++;
+  case 0xF1: // INT1 / ICEBP: a debug trap through vector 1
+    if (m_cpu.nativeProtection())
+      nativeInterrupt(1, false, false, 0);
+    else
+      triggerInterrupt(1);
     break;
-  }
   case 0xF4: {
+    if (!requireCPL0()) // HLT at CPL > 0 or in V86 mode: #GP(0)
+      break;
     uint16_t haltCs = m_cpu.getSegReg(CS);
     uint32_t haltEip = m_cpu.getEIP() - 1;
     LOG_DEBUG("HLT at ", std::hex, haltCs, ":", haltEip);
@@ -2971,6 +3024,20 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
   switch (opcode) {
   case 0x00: { // Group 6
     ModRM modrm = decodeModRM(fetch8());
+    if ((m_cpu.getEFLAGSNonArith() & eflags::kVM) && m_cpu.nativeProtection()) {
+      raiseException(6); // not recognised in virtual-8086 mode
+      break;
+    }
+    if (m_cpu.nativeProtection() && (modrm.reg == 2 || modrm.reg == 3)) {
+      if (!requireCPL0())
+        break;
+      const uint16_t selector = readModRM16(modrm);
+      if (modrm.reg == 2)
+        nativeLoadLDT(selector);
+      else
+        nativeLoadTR(selector);
+      break;
+    }
     switch (modrm.reg) {
     case 0: // SLDT
       writeModRM16(modrm, m_cpu.getLDTRSelector());
@@ -3068,6 +3135,8 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
       break;
     }
     case 2: { // LGDT
+      if (!requireCPL0())
+        break;
       uint32_t addr = m_hasPrefix67 ? getEffectiveAddress32(modrm)
                                     : getEffectiveAddress16(modrm);
       uint16_t limit = m_memory.lread16(addr);
@@ -3079,6 +3148,8 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
       break;
     }
     case 3: { // LIDT
+      if (!requireCPL0())
+        break;
       uint32_t addr = m_hasPrefix67 ? getEffectiveAddress32(modrm)
                                     : getEffectiveAddress16(modrm);
       uint16_t limit = m_memory.lread16(addr);
@@ -3093,6 +3164,8 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
       writeModRM16(modrm, m_cpu.getCR(0) & 0xFFFF);
       break;
     case 6: { // LMSW
+      if (!requireCPL0())
+        break;
       // LMSW loads PE, MP, EM and TS only, and cannot clear PE.
       const uint32_t cur = m_cpu.getCR(0);
       const uint16_t new_msw = readModRM16(modrm);
@@ -3111,6 +3184,8 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
         raiseException(6);
         break;
       }
+      if (!requireCPL0())
+        break;
       uint32_t addr = m_hasPrefix67 ? getEffectiveAddress32(modrm)
                                     : getEffectiveAddress16(modrm);
       m_memory.invalidatePage(addr);
@@ -3216,16 +3291,17 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
   }
   case 0x08: // INVD   – invalidate caches (no-op)
   case 0x09: // WBINVD – write back and invalidate caches (no-op)
-    requireFeature(feature::k486);
+    if (requireFeature(feature::k486))
+      requireCPL0();
     break;
   case 0x0B: // UD2  – intentional #UD
     m_cpu.setEIP(m_instrStartEIP); // #UD reports the faulting instruction
     triggerInterrupt(6);
     break;
-  case 0x06: { // CLTS
-    LOG_CPU("CLTS - stubbed (no task switching)");
+  case 0x06: // CLTS: clears CR0.TS (set by every task switch)
+    if (requireCPL0())
+      m_cpu.setCR(0, m_cpu.getCR(0) & ~0x8u);
     break;
-  }
   case 0x20: { // MOV rd, CRn
     ModRM modrm = decodeModRM(fetch8());
     const uint8_t cr = modrm.reg;
@@ -3242,7 +3318,10 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
   }
   case 0x21: { // MOV rd, DRn
     ModRM modrm = decodeModRM(fetch8());
-    m_cpu.setReg32(modrm.rm, m_cpu.getDR(modrm.reg));
+    uint8_t dr = modrm.reg;
+    if (!debugRegisterAccess(dr))
+      break;
+    m_cpu.setReg32(modrm.rm, readDebugRegister(dr));
     break;
   }
   case 0x22: { // MOV CRn, rd
@@ -3281,7 +3360,10 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
   }
   case 0x23: { // MOV DRn, rd
     ModRM modrm = decodeModRM(fetch8());
-    m_cpu.setDR(modrm.reg, m_cpu.getReg32(modrm.rm));
+    uint8_t dr = modrm.reg;
+    if (!debugRegisterAccess(dr))
+      break;
+    writeDebugRegister(dr, m_cpu.getReg32(modrm.rm));
     break;
   }
   case 0x30: { // WRMSR
@@ -4195,6 +4277,7 @@ void InstructionDecoder::executeOpcode0F(uint8_t opcode) {
 }
 
 void InstructionDecoder::triggerInterrupt(uint8_t vector) {
+  ++m_interruptCount;
   if (m_cpu.nativeProtection()) {
     nativeInterrupt(vector, false, false, 0);
     return;

@@ -84,14 +84,16 @@ void CPU::reset() {
 
   m_cr.fill(0);
   // ET: a 387-compatible FPU is present (hardwired on the 486 and later).
-  m_cr[0] = 0x00000010u;
+  m_cr[0] = (m_fpuPresent || (m_model->cr0Fixed & 0x10u)) ? 0x00000010u : 0u;
   m_nativeProtection = false;
+  updateX87Gate();
   // The time-stamp counter restarts at 0.
   m_tscOffset = 0 - (m_tscSource ? m_tscSource() : m_guestCycles);
   m_tscRead = false;
   if (m_memory)
     m_memory->setPaging(false, 0, false);
   m_dr.fill(0);
+  updateBreakpoints();
   resetFPU();
 
   // Initialise segment bases for Real Mode
@@ -103,6 +105,32 @@ void CPU::reset() {
   m_interruptShadow = 0;
 
   LOG_INFO("CPU Reset: CS:EIP = 0x", std::hex, m_segRegs[CS], ":0x", m_eip);
+}
+
+void CPU::updateBreakpoints() {
+  const uint32_t dr7 = m_dr[7];
+  std::array<memory::MemoryBus::DataBreakpoint, 4> watch{};
+  uint8_t exec = 0, data = 0;
+  for (unsigned i = 0; i < 4; ++i) {
+    if (!((dr7 >> (2 * i)) & 3u))
+      continue;
+    const uint32_t rw = (dr7 >> (16 + 4 * i)) & 3u;
+    const uint32_t len = (dr7 >> (18 + 4 * i)) & 3u;
+    if (rw == 0) {
+      exec |= static_cast<uint8_t>(1u << i);
+    } else if (rw == 1 || rw == 3) { // write / read-write (02 = I/O: not modelled)
+      const uint32_t bytes = len == 3 ? 4u : (len == 1 ? 2u : (len == 2 ? 8u : 1u));
+      watch[i].start = m_dr[i] & ~(bytes - 1u);
+      watch[i].bytes = bytes;
+      watch[i].reads = rw == 3;
+      data |= static_cast<uint8_t>(1u << i);
+    }
+  }
+  m_execBreakpoints = exec;
+  m_dataBreakpoints = data;
+  m_debugArmed = (exec | data) != 0;
+  if (m_memory)
+    m_memory->setDataBreakpoints(watch, data);
 }
 
 void CPU::loadSegment(SegRegIndex segIndex, uint16_t value) {

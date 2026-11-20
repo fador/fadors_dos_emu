@@ -212,10 +212,20 @@ void MemoryBus::clearVGA() {
 // Linear slow paths: without paging they are the physical slow paths;
 // with paging the address is translated (accesses that straddle a page
 // boundary are split).
+uint32_t MemoryBus::lfetchSlow(uint32_t a, uint32_t n) const {
+  m_fetching = true;
+  const uint32_t v = n == 1 ? lread8Slow(a) : (n == 2 ? lread16Slow(a) : lread32Slow(a));
+  m_fetching = false;
+  return v;
+}
 uint8_t MemoryBus::lread8Slow(uint32_t a) const {
+  if (m_watchMask) [[unlikely]]
+    noteDataAccess(a, 1, false);
   return read8(m_paging ? translate(a, false) : a);
 }
 uint16_t MemoryBus::lread16Slow(uint32_t a) const {
+  if (m_watchMask) [[unlikely]]
+    noteDataAccess(a, 2, false);
   if (!m_paging)
     return read16(a);
   if ((a & 0xFFF) <= 0xFFE)
@@ -223,6 +233,8 @@ uint16_t MemoryBus::lread16Slow(uint32_t a) const {
   return static_cast<uint16_t>(lread8Slow(a) | (lread8Slow(a + 1) << 8));
 }
 uint32_t MemoryBus::lread32Slow(uint32_t a) const {
+  if (m_watchMask) [[unlikely]]
+    noteDataAccess(a, 4, false);
   if (!m_paging)
     return read32(a);
   if ((a & 0xFFF) <= 0xFFC)
@@ -231,9 +243,13 @@ uint32_t MemoryBus::lread32Slow(uint32_t a) const {
          (static_cast<uint32_t>(lread16Slow(a + 2)) << 16);
 }
 void MemoryBus::lwrite8Slow(uint32_t a, uint8_t v) {
+  if (m_watchMask) [[unlikely]]
+    noteDataAccess(a, 1, true);
   write8(m_paging ? translate(a, true) : a, v);
 }
 void MemoryBus::lwrite16Slow(uint32_t a, uint16_t v) {
+  if (m_watchMask) [[unlikely]]
+    noteDataAccess(a, 2, true);
   if (!m_paging)
     return write16(a, v);
   if ((a & 0xFFF) <= 0xFFE)
@@ -242,6 +258,8 @@ void MemoryBus::lwrite16Slow(uint32_t a, uint16_t v) {
   lwrite8Slow(a + 1, static_cast<uint8_t>(v >> 8));
 }
 void MemoryBus::lwrite32Slow(uint32_t a, uint32_t v) {
+  if (m_watchMask) [[unlikely]]
+    noteDataAccess(a, 4, true);
   if (!m_paging)
     return write32(a, v);
   if ((a & 0xFFF) <= 0xFFC)

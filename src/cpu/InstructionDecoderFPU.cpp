@@ -516,6 +516,19 @@ FADOR_FPU_HOT void InstructionDecoder::executeFPUOpcode(uint8_t opcode) {
   const ModRM modrm{static_cast<uint8_t>(modrmByte >> 6),
                     static_cast<uint8_t>((modrmByte >> 3) & 7),
                     static_cast<uint8_t>(modrmByte & 7)};
+  if (m_cpu.x87Gated()) [[unlikely]] {
+    if (m_cpu.getCR(0) & 0xCu) {
+      // CR0.EM (software emulation) or CR0.TS (x87 state belongs to
+      // another task): #NM, a fault at the instruction (prefixes included).
+      raiseException(7);
+      return;
+    }
+    // No coprocessor: the instruction is consumed and does nothing.
+    if (modrm.mod != 3)
+      (void)(m_hasPrefix67 ? getEffectiveAddress32(modrm)
+                           : getEffectiveAddress16(modrm));
+    return;
+  }
   x87::FPU &fpu = m_cpu.fpu();
   const uint8_t cls = kFpuClass[((opcode & 7u) << 8) | modrmByte];
 

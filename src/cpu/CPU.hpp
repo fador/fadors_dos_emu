@@ -525,15 +525,49 @@ public:
   void setCR(uint8_t index, uint32_t val) {
     index &= 7;
     m_cr[index] = val;
-    if (index == 0 && !(val & 1))
-      m_nativeProtection = false;
+    if (index == 0) {
+      if (!(val & 1))
+        m_nativeProtection = false;
+      updateX87Gate();
+    }
     if (m_memory && (index == 0 || index == 3 || index == 4))
       m_memory->setPaging((m_cr[0] & 0x80000001u) == 0x80000001u, m_cr[3],
                           (m_cr[4] & 0x10u) != 0);
   }
 
   uint32_t getDR(uint8_t index) const { return m_dr[index & 7]; }
-  void setDR(uint8_t index, uint32_t val) { m_dr[index & 7] = val; }
+  // Writing DR0-DR3 or DR7 re-arms the breakpoints: enabled instruction
+  // breakpoints are checked by the decoder before each instruction, data
+  // breakpoints are watched by the MemoryBus (MemoryBus::setDataBreakpoints).
+  void setDR(uint8_t index, uint32_t val) {
+    index &= 7;
+    m_dr[index] = val;
+    if (index < 4 || index == 7)
+      updateBreakpoints();
+  }
+  // Enabled (L or G bit) breakpoints by kind: bit n = DRn.
+  uint8_t instructionBreakpoints() const { return m_execBreakpoints; }
+  uint8_t dataBreakpoints() const { return m_dataBreakpoints; }
+  // Single-stepping (TF) or an armed breakpoint: the decoder takes its
+  // debug path (InstructionDecoder::stepDebug), no fast-path bursts.
+  bool debugStepNeeded() const {
+    return ((m_eflags & FLAG_TRAP) != 0) | m_debugArmed;
+  }
+
+  // x87 availability.  With CR0.EM or CR0.TS set every x87 instruction
+  // raises #NM (WAIT/FWAIT only with TS and MP); without a coprocessor
+  // (setFpuPresent(false): a 386 or 486SX with no 387) x87 instructions
+  // do nothing.  Either way they leave the predecoded fast path, which
+  // checks x87Gated() only for x87 entries.
+  bool x87Gated() const { return m_x87Gate; }
+  bool fpuPresent() const { return m_fpuPresent; }
+  void setFpuPresent(bool present) {
+    m_fpuPresent = present;
+    // CR0.ET reports the coprocessor on the 386 (hardwired on the 486+).
+    if (!(m_model->cr0Fixed & 0x10u))
+      m_cr[0] = present ? (m_cr[0] | 0x10u) : (m_cr[0] & ~0x10u);
+    updateX87Gate();
+  }
 
   DescriptorRegister getGDTR() const { return m_gdtr; }
   void setGDTR(DescriptorRegister val) { m_gdtr = val; }
@@ -647,7 +681,16 @@ private:
 
   std::array<uint32_t, 8> m_cr{};
   bool m_nativeProtection{false};
+  bool m_x87Gate{false};
+  bool m_fpuPresent{true};
+  void updateX87Gate() {
+    m_x87Gate = (m_cr[0] & 0xCu) != 0 || !m_fpuPresent; // EM | TS
+  }
   std::array<uint32_t, 8> m_dr{};
+  uint8_t m_execBreakpoints{0};
+  uint8_t m_dataBreakpoints{0};
+  bool m_debugArmed{false};
+  void updateBreakpoints();
 
   DescriptorRegister m_gdtr{0xFFFF, 0};
   DescriptorRegister m_idtr{0xFFFF, 0};

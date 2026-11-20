@@ -160,6 +160,9 @@ private:
 
   // Prefixes state for current instruction
   uint32_t m_instrStartEIP;
+  uint32_t m_faultCount = 0; // raiseException() calls (REP loops stop)
+  uint32_t m_interruptCount = 0; // interrupts/exceptions delivered
+  bool m_rfLoaded = false;        // the instruction loaded EFLAGS.RF = 1
   bool m_hasPrefix66; // Operand size override
   bool m_hasPrefix67; // Address size override
   bool m_hasRepnz;
@@ -194,19 +197,19 @@ private:
   // Fetches next byte(s) from memory through CS:EIP (inline: hot path)
   uint8_t fetch8() {
     const uint32_t eip = m_cpu.getEIP();
-    const uint8_t val = m_memory.lread8(m_segBase[CS] + eip);
+    const uint8_t val = m_memory.lfetch8(m_segBase[CS] + eip);
     m_cpu.setEIP(eip + 1);
     return val;
   }
   uint16_t fetch16() {
     const uint32_t eip = m_cpu.getEIP();
-    const uint16_t val = m_memory.lread16(m_segBase[CS] + eip);
+    const uint16_t val = m_memory.lfetch16(m_segBase[CS] + eip);
     m_cpu.setEIP(eip + 2);
     return val;
   }
   uint32_t fetch32() {
     const uint32_t eip = m_cpu.getEIP();
-    const uint32_t val = m_memory.lread32(m_segBase[CS] + eip);
+    const uint32_t val = m_memory.lfetch32(m_segBase[CS] + eip);
     m_cpu.setEIP(eip + 4);
     return val;
   }
@@ -285,6 +288,23 @@ private:
                          bool op32);
   void nativeRetf(uint16_t release, bool op32);
   void stepInstruction();
+  // step() without the debug checks: one instruction, undone and restarted
+  // after #PF when paging is on.
+  void stepChecked();
+  // Debug registers and single-stepping (Protection.cpp): instruction
+  // breakpoints (faults, suppressed by RF), data breakpoints and TF
+  // single-step (traps after the instruction).  Only used while
+  // CPU::debugStepNeeded().
+  void stepDebug();
+  void deliverDebugException(uint32_t dr6Bits);
+  // MOV DRn privilege/alias/general-detect checks; maps DR4/DR5 to
+  // DR6/DR7.  Returns false when an exception was raised.
+  bool debugRegisterAccess(uint8_t &dr);
+  uint32_t readDebugRegister(uint8_t dr) const;
+  void writeDebugRegister(uint8_t dr, uint32_t value);
+  // LLDT / LTR under guest-owned protection (type, presence, busy bit).
+  void nativeLoadLDT(uint16_t selector);
+  void nativeLoadTR(uint16_t selector);
 
   // CPU model rules (Protection.cpp).
   // Raises #UD and returns false when the model lacks the feature bits.
@@ -298,6 +318,15 @@ private:
   // IOPL-sensitive instructions (CLI/STI/PUSHF/POPF in V86) under guest-owned
   // protection: raises #GP(0) and returns false when CPL > IOPL.
   bool checkIOPL();
+  // Privileged instructions (LGDT, LIDT, LLDT, LTR, LMSW, CLTS, MOV
+  // CRn/DRn, INVD, WBINVD, INVLPG, HLT, RDMSR/WRMSR) under guest-owned
+  // protection: #GP(0) and false at CPL > 0 (V86 mode is CPL 3).
+  bool requireCPL0();
+  // IN/OUT/INS/OUTS: with CPL > IOPL or in V86 mode the TSS I/O permission
+  // bitmap must clear every bit of ports port..port+size-1; otherwise
+  // #GP(0) and false.
+  bool checkIOPermission(uint16_t port, uint32_t size);
+  bool ioBitmapAllows(uint16_t port, uint32_t size) const;
   void executeCPUID();
   bool readMSR(uint32_t index, uint64_t &value) const;
   bool writeMSR(uint32_t index, uint64_t value);
@@ -346,7 +375,8 @@ inline bool InstructionDecoder::tryFastPath(uint32_t startEIP) {
   }
   const DecodedInsn &d = *e;
   if (d.wraps(startEIP) ||
-      ((d.flags & DecodedInsn::kX87) && m_cpu.fpu().errorPending()))
+      ((d.flags & DecodedInsn::kX87) &&
+       (m_cpu.fpu().errorPending() || m_cpu.x87Gated())))
     [[unlikely]]
     return false;
   m_cpu.setEIP(startEIP + d.len);

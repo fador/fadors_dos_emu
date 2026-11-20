@@ -204,10 +204,58 @@ public:
   bool lwriteVgaElements(uint32_t a, const uint8_t *src, uint32_t pattern,
                          uint32_t elementSize, uint32_t count);
 
+  // Data breakpoints (DR0-DR3 with R/W = 01 or 11): CPU data accesses
+  // (lread*/lwrite*, not instruction fetches through lfetch*) that overlap
+  // [start, start + bytes) record a hit; the CPU collects them after each
+  // instruction.  While any is armed every linear access takes the slow
+  // path (zero cost otherwise).
+  struct DataBreakpoint {
+    uint32_t start = 0;
+    uint32_t bytes = 0;
+    bool reads = false; // R/W = 11: reads and writes; 01: writes only
+  };
+  void setDataBreakpoints(const std::array<DataBreakpoint, 4> &bps,
+                          uint8_t mask) {
+    m_watch = bps;
+    m_watchMask = mask;
+    m_watchHits = 0;
+    m_linearLimit = (m_paging || m_watchMask) ? 0 : MEMORY_SIZE;
+  }
+  uint8_t takeDataBreakpointHits() {
+    const uint8_t h = m_watchHits;
+    m_watchHits = 0;
+    return h;
+  }
+  // Instruction fetches: lread* without data-breakpoint matching.
+  uint8_t lfetch8(uint32_t a) const {
+    const uint32_t e = a & m_a20Mask;
+    if (isPlainLinear(e, 1)) [[likely]]
+      return m_ram[e];
+    return static_cast<uint8_t>(lfetchSlow(a, 1));
+  }
+  uint16_t lfetch16(uint32_t a) const {
+    const uint32_t e = a & m_a20Mask;
+    if (isPlainLinear(e, 2)) [[likely]] {
+      uint16_t v;
+      std::memcpy(&v, &m_ram[e], sizeof(v));
+      return v;
+    }
+    return static_cast<uint16_t>(lfetchSlow(a, 2));
+  }
+  uint32_t lfetch32(uint32_t a) const {
+    const uint32_t e = a & m_a20Mask;
+    if (isPlainLinear(e, 4)) [[likely]] {
+      uint32_t v;
+      std::memcpy(&v, &m_ram[e], sizeof(v));
+      return v;
+    }
+    return lfetchSlow(a, 4);
+  }
+
   // Called by the CPU whenever CR0, CR3 or CR4 change.
   void setPaging(bool enabled, uint32_t cr3, bool pse) {
     m_paging = enabled;
-    m_linearLimit = enabled ? 0 : MEMORY_SIZE;
+    m_linearLimit = (enabled || m_watchMask) ? 0 : MEMORY_SIZE;
     m_cr3 = cr3 & 0xFFFFF000u;
     m_pse = pse;
     flushTlb();
@@ -385,6 +433,22 @@ private:
   void lwrite8Slow(uint32_t a, uint8_t v);
   void lwrite16Slow(uint32_t a, uint16_t v);
   void lwrite32Slow(uint32_t a, uint32_t v);
+
+  std::array<DataBreakpoint, 4> m_watch{};
+  uint8_t m_watchMask{0};
+  mutable uint8_t m_watchHits{0};
+  mutable bool m_fetching{false};
+  void noteDataAccess(uint32_t a, uint32_t n, bool write) const {
+    if (m_fetching)
+      return;
+    for (unsigned i = 0; i < 4; ++i) {
+      const DataBreakpoint &w = m_watch[i];
+      if ((m_watchMask >> i) & 1u && (write || w.reads) &&
+          a < w.start + w.bytes && w.start < a + n)
+        m_watchHits = static_cast<uint8_t>(m_watchHits | (1u << i));
+    }
+  }
+  uint32_t lfetchSlow(uint32_t a, uint32_t n) const;
 
   bool m_a20Enabled{false};
   uint32_t m_a20Mask{A20_MASK};
