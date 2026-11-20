@@ -1,5 +1,7 @@
 #include "test_framework.hpp"
 #include "hw/DMA8237.hpp"
+#include <utility>
+#include <vector>
 
 using namespace fador::hw;
 
@@ -139,4 +141,35 @@ TEST_CASE("Hardware: DMA8237", "[HW][DMA]") {
         REQUIRE(dma.getChannelCount(1) == 1);
         REQUIRE(dma.getChannelAddress(1) == 0x2000);
     }
+}
+
+TEST_CASE("Hardware: DMA8237 mask registers and mask listeners", "[HW][DMA]") {
+    DMA8237 dma;
+    std::vector<std::pair<int, bool>> changes;
+    const int id = dma.addMaskListener(
+        [&](int ch, bool masked) { changes.emplace_back(ch, masked); });
+    REQUIRE(dma.isMasked(1));
+    dma.write8(0x0A, 0x01); // unmask channel 1
+    REQUIRE(!dma.isMasked(1));
+    REQUIRE(changes.size() == 1);
+    REQUIRE(changes[0] == std::make_pair(1, false));
+    dma.write8(0x0A, 0x01); // no change: no call
+    REQUIRE(changes.size() == 1);
+    dma.write8(0x0F, 0x0D); // write all mask bits: 0, 2, 3 masked
+    REQUIRE(dma.isMasked(0));
+    REQUIRE(!dma.isMasked(1));
+    REQUIRE(dma.isMasked(2));
+    dma.write8(0x0E, 0x00); // clear mask register: all unmasked
+    for (int ch = 0; ch < 4; ++ch)
+        REQUIRE(!dma.isMasked(ch));
+    dma.write8(0xDE, 0x0E); // master: 5-7 masked, 4 unmasked
+    REQUIRE(!dma.isMasked(4));
+    REQUIRE(dma.isMasked(5));
+    dma.write8(0xDC, 0x00);
+    REQUIRE(!dma.isMasked(7));
+    const size_t calls = changes.size();
+    dma.removeMaskListener(id);
+    dma.write8(0x0D, 0x00); // master clear masks 0-3
+    REQUIRE(dma.isMasked(3));
+    REQUIRE(changes.size() == calls);
 }

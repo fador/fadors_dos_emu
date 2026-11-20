@@ -3,6 +3,8 @@
 #include "IODevice.hpp"
 #include <array>
 #include <cstdint>
+#include <functional>
+#include <vector>
 
 namespace fador::hw {
 
@@ -20,7 +22,20 @@ public:
   uint32_t getChannelAddress(int channel);
 
   // Returns the current remaining count for the specified channel.
-  uint16_t getChannelCount(int channel);
+  uint16_t getChannelCount(int channel) const;
+
+  // True while the channel is masked (no transfers).
+  bool isMasked(int channel) const {
+    return channel < 0 || channel > 7 || m_channels[channel].mask;
+  }
+
+  // Called when a port write masks or unmasks a channel (single mask,
+  // all-mask, clear-mask and master clear registers), so a device whose
+  // DREQ is waiting can start transferring.  Not called for the automatic
+  // mask at terminal count.  Returns an id for removeMaskListener().
+  using MaskListener = std::function<void(int channel, bool masked)>;
+  int addMaskListener(MaskListener listener);
+  void removeMaskListener(int id);
 
   // Advances the channel state by 'bytes'. Returns true if the channel reached
   // Terminal Count (TC).
@@ -45,6 +60,10 @@ private:
   bool m_flipflopMaster = false;     // low/high byte toggle (master)
   uint8_t m_status = 0;
   uint8_t m_statusMaster = 0;
+  std::vector<std::pair<int, MaskListener>> m_maskListeners;
+  int m_nextListenerId = 1;
+
+  void setMask(int channel, bool masked);
 };
 
 } // namespace fador::hw

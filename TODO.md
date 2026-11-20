@@ -159,7 +159,15 @@
   - [x] Direct DAC (command 10h), silence blocks, speaker on/off
   - [x] Clocked by emulated time, not by the host audio device
 - [x] **PC speaker** (PIT channel 2 square waves, port 61h bit-banging, PWM)
-- [x] **Output Mixer** — AdLib + SB PCM + PC speaker into one stream
+- [x] **Gravis Ultrasound (GF1)** — `--gus[=240,irq=11,dma=3,mem=1024]`, ULTRASND/ULTRADIR
+  - [x] DRAM peek/poke, reset, IRQ/DMA latches, UltraProbe/DRAM sizing
+  - [x] 14–32 voices at 617400/voices Hz on emulated time, interpolation, 8/16-bit data, loops, bidirectional, rollover
+  - [x] Logarithmic volume, volume ramps, pan, wavetable/ramp IRQ queue (8Fh)
+  - [x] Timers 1/2 (2X8/2X9, 45h–47h), DMA uploads with invert MSB / 16-bit / TC IRQ, HLT wake-ups
+  - [x] Windowed-sinc resampling to 44.1 kHz; `tests/gus/check_gus.py` end-to-end check
+  - [ ] Recording (48h/49h), MIDI port, GUS MAX codec / rev 3.7 mixer, SBOS
+  - [ ] Verify with real players (Cubic Player, MikMod, FT2/IT, Second Reality) once test binaries are available
+- [x] **Output Mixer** — AdLib + SB PCM + GUS + PC speaker into one stream
 - [x] `--audio-wav=FILE` records the output (headless tests check the level)
 
 ## Phase 8: Built-in Assembler & Disassembler
