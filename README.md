@@ -129,6 +129,7 @@ run exactly like that too, with interrupts, sound and the headless options.
 | `--stop-after=N` | Stop execution after N instruction cycles and dump CPU state |
 | `--stop-after-debugger` | When `--stop-after` triggers, enter the interactive debugger at that exact instruction instead of exiting |
 | `--dump-on-exit` | Dump CPU state when the program terminates |
+| `--no-fast-path` | Run every instruction through the legacy decoder (no predecoded instruction cache); for debugging the CPU |
 | `--instruction-trace=N` | Print one trace line per executed instruction for the next `N` instructions |
 | `--instruction-trace-from=ADDR[#N]` | Delay `--instruction-trace` until CS:EIP reaches the given hex linear address (the `N`-th time with `#N`) |
 | `--instruction-trace-step` | Pause between each instruction trace line (ENTER to step, `sN` to skip N, `q` to quit, `d` for debugger) |

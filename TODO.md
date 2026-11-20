@@ -189,10 +189,17 @@
 - [x] **Differential CPU fuzzer** (`cpu_fuzz`, integer instructions vs. the host CPU)
 - [x] **Differential x87 fuzzer** (`fpu_fuzz`, x87 sequences vs. the host FPU; `--backend` soft vs. host)
 - [x] Cycle-weighted `--throttle-machine` presets (MHz x cycles-per-instruction estimate)
-- [ ] Further interpreter speed-ups (decoded-instruction cache or a JIT)
+- [x] **Interpreter speed-ups** (lazy arithmetic flags, predecoded fast path with byte-verified decoded-instruction cache, burst execution, bulk VGA-window REP MOVS/STOS: ~2.15x geomean on `tests/perf`)
+- [ ] Further interpreter speed-ups
+  - [ ] Bursts with paging on (save/restore per instruction for #PF restart instead of falling back to `step()`); a data-side software TLB for `lread*/lwrite*` with paging
+  - [ ] Cheaper burst dispatch: per-instruction byte verification and lookup are now most of the per-instruction cost (~40 host instructions); block linking (next-entry pointer) or code-page write tracking would remove them
+  - [ ] More opcodes on the fast path: BT family, SHLD/SHRD, BSF/BSR, XADD/CMPXCHG, DIV/IDIV, string instructions without REP, MOV SS / POP SS, far CALL/RET
+  - [ ] Faster single-byte VGA-window stores (inline chain-4 path in `MemoryBus`)
+  - [ ] REP STOS into RAM never charged per-element guest cycles (only the opcode cost, unlike the element-wise and VGA paths); fixing it changes guest cycle counts, so it was left as is
+  - [ ] A JIT
 - [x] **Host SIMD dispatch** (CPUID/XGETBV detection, `--host-simd`, SSE2/SSE4/AVX2/NEON kernels for frame conversion, audio and REP STOS fills)
   - [ ] Text-mode glyph expansion and CGA modes through the kernels
-  - [ ] Bulk VGA-window writes (REP MOVS/STOS into A000h in chain-4 / write mode 0) without per-byte plane dispatch (dominates `vga32`)
+  - [x] Bulk VGA-window writes (REP MOVS/STOS into A000h) without per-access dispatch (`MemoryBus::lwriteVgaElements`)
   - [ ] NEON variants for the planar conversion; verify the NEON kernels on real ARM64 hardware (only compile-checked so far)
 
 ## Phase 10: Memory & Extended Memory

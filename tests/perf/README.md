@@ -39,26 +39,40 @@ perf report --no-children
 
 ## Reference numbers
 
-Release build, GCC 13, one core of a cloud x86-64 VM, median of 3 runs
-(MIPS = guest instructions per microsecond):
+Release build, GCC 13, one core of a shared cloud x86-64 VM.  "Before" is
+8120f53, "after" the interpreter work below; CPU time, best of 3 runs of
+each binary back to back (MIPS = guest instructions per microsecond).
+Instruction counts and guest cycle counts are unchanged.
 
-| Profile  | Instructions | Before (s) | After (s) | MIPS before | MIPS after |
-|----------|-------------:|-----------:|----------:|------------:|-----------:|
-| int32    |  130,022,166 |       9.98 |      2.00 |        13.0 |       65.0 |
-| mem32    |  344,250,870 |      26.80 |      5.25 |        12.8 |       65.6 |
-| fpu32    |   73,821,957 |       5.82 |      1.36 |        12.7 |       54.5 |
-| call32   |  183,721,894 |      14.08 |      2.37 |        13.0 |       77.5 |
-| str32    |  161,014,082 |      12.05 |      2.02 |        13.3 |       79.8 |
-| vga32    |  171,388,397 |      13.25 |      2.53 |        12.9 |       67.8 |
-| real16   |   95,291,579 |       7.32 |      1.50 |        13.0 |       63.4 |
-| geomean  |              |            |           |        13.0 |       67.2 |
+| Profile  | Instructions | Before (s) | After (s) | MIPS before | MIPS after | Speed-up |
+|----------|-------------:|-----------:|----------:|------------:|-----------:|---------:|
+| int32    |  130,022,722 |      2.092 |     0.953 |        62.2 |      136.4 |    2.20x |
+| mem32    |  344,251,426 |      5.435 |     2.050 |        63.3 |      167.9 |    2.65x |
+| fpu32    |   73,822,748 |      1.330 |     0.849 |        55.5 |       87.0 |    1.57x |
+| call32   |  183,722,450 |      2.900 |     1.216 |        63.4 |      151.1 |    2.39x |
+| str32    |  161,014,638 |      2.450 |     1.124 |        65.7 |      143.3 |    2.18x |
+| vga32    |  171,388,953 |      2.602 |     1.203 |        65.9 |      142.4 |    2.16x |
+| real16   |   95,291,617 |      1.571 |     0.748 |        60.7 |      127.4 |    2.10x |
+| geomean  |              |            |           |        62.3 |      134.2 |    2.15x |
 
-"Before" is the emulator prior to the interpreter work (inline register and
-memory accessors, a flat-RAM fast path in `MemoryBus`, inline instruction
-fetch, cheaper logging guards and avoiding store-forwarding stalls in
-`InstructionDecoder::step`).
+What made the difference: lazy arithmetic flags (`LazyFlags.hpp`), the
+predecoded fast path with its decoded-instruction cache (`FastPath.cpp`),
+bursts of fast-path instructions in `InstructionDecoder::run()`, and bulk
+REP MOVS/STOS into the VGA window.  `--no-fast-path` runs the legacy
+decoder alone (lazy flags still apply).  The interpreter work before that (13 -> 65
+MIPS) was inline register and memory accessors, a flat-RAM fast path in
+`MemoryBus`, inline instruction fetch, cheaper logging guards and avoiding
+store-forwarding stalls in `InstructionDecoder::step`.
+
+To check that a change keeps the guest's behaviour, compare a
+`--deterministic` run with and without `--no-fast-path` (and with the
+previous build): the instruction count, the "Guest CPU: ... cycles" line,
+the emulated time and the program output must be identical.
+
+Under callgrind, use `--deterministic`: in auto pacing a slowed-down host
+makes the virtual clock (and the OPL3 synthesis it drives) dominate the
+profile.
 
 The x87 runs on the host FPU in normal x86/x86-64 GCC/Clang builds. A
 `-DFADOR_SOFT_X87=ON` build (portable software 80-bit arithmetic, as used
-by MSVC and non-x86 hosts) runs `fpu32` at roughly 75% of that speed
-(about 40 vs. 55 MIPS on the VM above).
+by MSVC and non-x86 hosts) runs `fpu32` noticeably slower.
