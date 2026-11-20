@@ -318,10 +318,12 @@
   - [ ] Unit tests (`test_batch.cpp`)
 
 ## Known Use-Case Issues
-- [ ] Cannon Fodder 2: silent.  After opening TITLE.AMF its loader grows its
-      heap with AH=4Ah, which fails because a 2-paragraph block it allocated
-      sits right after the program block; the music is then not loaded.
-      Needs comparison with a real DOS run to find the earlier divergence.
+- [x] Cannon Fodder 2: silent.  Its 2-paragraph AH=48h block landed right
+      after the program and stopped the sbrk heap from growing when TITLE.AMF
+      was loaded.  A DOSBox reference run (tools/memlog) showed the block goes
+      into the small free MCB that real DOS leaves below the first program
+      (from COMMAND.COM's environment growing); DOS::initialize now creates
+      that 4-paragraph hole and the AH=4Ah "sbrk headroom" heuristic is gone.
 - [ ] Modplay Pro plays about 7% sharp through the Sound Blaster direct DAC
       (the DAC rate is exact, so this is probably its own pitch table).
 - Use-case configuration notes (not emulator bugs): DOOM 1.1 reads its

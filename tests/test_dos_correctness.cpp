@@ -203,8 +203,8 @@ TEST_CASE("DOS Correctness: Allocation Strategy First Fit vs Best Fit vs Last Fi
     dos.initialize();
 
     // Create three free blocks of varying sizes
-    // Initial free block in dos.initialize is at 0x811
-    uint16_t b1 = dos.allocateMemory(0x100); // 256 paras at ~0x812
+    // Initial free block in dos.initialize is at 0x816 (after the 4-paragraph hole at 0x811)
+    uint16_t b1 = dos.allocateMemory(0x100); // 256 paras at ~0x817
     uint16_t b2 = dos.allocateMemory(0x300); // 768 paras
     uint16_t b3 = dos.allocateMemory(0x200); // 512 paras
 

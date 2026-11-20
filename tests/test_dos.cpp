@@ -1283,7 +1283,7 @@ TEST_CASE("DOS: Nested Exec (AH=4Bh) and Get Return Code (AH=4Dh)", "[DOS][Exec]
         ofs.write(reinterpret_cast<const char*>(parentImg.data()), parentImg.size());
     }
 
-    // Load parent.com at the default PSP segment (0x0812)
+    // Load parent.com at the default PSP segment (0x0817)
     uint16_t parentSeg = dos.getPSPSegment();
     REQUIRE(loader.loadCOM("parent.com", parentSeg, dos));
 
@@ -1363,7 +1363,7 @@ TEST_CASE("DOS: Process State Save and Restore (CR0 and Descriptors)", "[DOS][Ex
         ofs.write(reinterpret_cast<const char*>(parentImg.data()), parentImg.size());
     }
 
-    // Load parent.com at the default PSP segment (0x0812)
+    // Load parent.com at the default PSP segment (0x0817)
     uint16_t parentSeg = dos.getPSPSegment();
     REQUIRE(loader.loadCOM("parent.com", parentSeg, dos));
 
@@ -1645,7 +1645,7 @@ TEST_CASE("DOS: Process State Segment Cache Sync on Termination", "[DOS][Exec]")
         ofs.write(reinterpret_cast<const char*>(parentImg.data()), parentImg.size());
     }
 
-    // Load parent.com at the default PSP segment (0x0812)
+    // Load parent.com at the default PSP segment (0x0817)
     uint16_t parentSeg = dos.getPSPSegment();
     REQUIRE(loader.loadCOM("parent.com", parentSeg, dos));
 
@@ -1693,7 +1693,7 @@ TEST_CASE("DOS: Set/Get Current PSP (AH=50h/51h/62h)", "[DOS][PSP]") {
 
     // Initial PSP
     uint16_t initialPSP = dos.getPSPSegment();
-    REQUIRE(initialPSP == 0x0812);
+    REQUIRE(initialPSP == 0x0817);
 
     // 1. Get current PSP in Real Mode
     cpu.setReg8(cpu::AH, 0x51);

@@ -258,6 +258,8 @@ private:
   uint16_t storeHandle(std::shared_ptr<FileHandle> fh);
 
   static constexpr uint16_t FIRST_MCB_SEGMENT = 0x0800;
+  // Size of the free block left below the first program (see initialize()).
+  static constexpr uint16_t LOW_FREE_HOLE_PARAS = 4;
   static constexpr uint16_t LAST_PARA = 0x9FFF;
 
   void handleDOSService();                 // INT 21h

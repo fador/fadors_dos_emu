@@ -287,7 +287,7 @@ TEST_CASE("DOS: memory runs out after the program sized its block", "[DOS][Memor
     (void)c;
 }
 
-TEST_CASE("DOS: incremental PSP heap growth resists small AH=48h pinning", "[DOS][Memory]") {
+TEST_CASE("DOS: a small free block below the first program, as on real DOS", "[DOS][Memory]") {
     CPU cpu;
     MemoryBus memory;
     DOS dos(cpu, memory);
@@ -303,12 +303,30 @@ TEST_CASE("DOS: incremental PSP heap growth resists small AH=48h pinning", "[DOS
         return !(cpu.getEFLAGS() & FLAG_CARRY);
     };
 
-    // Simulate Borland startup shrink followed by incremental 1KB (0x40-para) sbrk growth.
+    // The free hole sits between the system block and the program.
+    const uint16_t holeMcb = 0x0811; // after the system block at 0800h
+    REQUIRE(memory.read8(static_cast<uint32_t>(holeMcb) << 4) == 'M');
+    REQUIRE(memory.read16((static_cast<uint32_t>(holeMcb) << 4) + 1) == 0);
+    REQUIRE(memory.read16((static_cast<uint32_t>(holeMcb) << 4) + 3) ==
+            4);
+    REQUIRE(psp == holeMcb + 4 + 2);
+
+    // Borland-style startup shrink and 1 KB sbrk growth of the PSP block
+    // (the sequence Cannon Fodder 2 makes; identical results under DOSBox).
     REQUIRE(call(0x4A, 0x4000, psp));
     REQUIRE(call(0x4A, 0x4800, psp));
 
-    // A small standalone INT 21h AH=48h allocation shouldn't immediately pin
-    // the next 1KB heap expansion on the PSP block.
+    // First fit puts a small AH=48h block into the hole below the program,
+    // so the next heap step can still grow the PSP block.
     REQUIRE(call(0x48, 0x0002));
+    REQUIRE(cpu.getReg16(AX) == holeMcb + 1);
     REQUIRE(call(0x4A, 0x4840, psp));
+
+    // A block that does not fit the hole lands right after the program and,
+    // as on DOS, pins it: growing past it fails and reports the maximum.
+    REQUIRE(call(0x48, 0x0010));
+    REQUIRE(cpu.getReg16(AX) == psp + 0x4840 + 1);
+    REQUIRE(!call(0x4A, 0x4880, psp));
+    REQUIRE(cpu.getReg16(AX) == 0x0008);
+    REQUIRE(cpu.getReg16(BX) == 0x4840);
 }

@@ -174,11 +174,25 @@ void DOS::initialize() {
   strcpy(system.name, "SDATA");
   writeMCB(FIRST_MCB_SEGMENT, system);
 
-  // Block 2: User program block, initially owned by the program PSP
-  uint16_t freeSeg = FIRST_MCB_SEGMENT + 0x10 + 1;
+  // Block 2: a small free block below the first program.  On a real
+  // MS-DOS machine one is left behind when COMMAND.COM's environment block
+  // grows (DOSBox reproduces it the same way).  Programs depend on it:
+  // small AH=48h allocations land there instead of right after their own
+  // block, where they would stop the PSP block from growing with AH=4Ah
+  // (Cannon Fodder 2's sbrk heap, for example).
+  MCB hole;
+  hole.type = 'M';
+  hole.owner = 0;
+  hole.size = LOW_FREE_HOLE_PARAS;
+  for (int i = 0; i < 8; ++i) hole.name[i] = 0;
+  const uint16_t holeSeg = FIRST_MCB_SEGMENT + 0x10 + 1;
+  writeMCB(holeSeg, hole);
+
+  // Block 3: User program block, initially owned by the program PSP
+  uint16_t freeSeg = holeSeg + LOW_FREE_HOLE_PARAS + 1;
   MCB free;
   free.type = 'Z';
-  free.owner = freeSeg + 1; // Owned by the program PSP at 0x0812
+  free.owner = freeSeg + 1; // Owned by the program PSP (0x0817)
   free.size = LAST_PARA - freeSeg;
   for (int i = 0; i < 8; ++i) free.name[i] = 0;
   writeMCB(freeSeg, free);
@@ -2310,41 +2324,7 @@ void DOS::handleMemoryManagement() {
       }
     };
 
-    constexpr uint16_t SBRK_MIN_BLOCK_PARAS = 0x4000;
-    constexpr uint16_t SBRK_HEADROOM_PARAS = 0x1000;
-    constexpr uint16_t SBRK_GRAIN_MASK = 0x003F;
-    const bool isPspHeapGrowth =
-        (segment == m_pspSegment) && (mcb.size >= SBRK_MIN_BLOCK_PARAS) &&
-        ((requested & SBRK_GRAIN_MASK) == 0);
-
     if (mcb.size >= requested) { // Shrink
-      // Keep headroom on large PSP heap blocks so subsequent small AH=48h
-      // allocations cannot immediately pin 1KB sbrk increments.
-      const uint32_t targetSize =
-          static_cast<uint32_t>(requested) + SBRK_HEADROOM_PARAS;
-      if (isPspHeapGrowth && mcb.size <= targetSize) {
-        if (mcb.type == 'M') {
-          const uint32_t nextSeg32 =
-              static_cast<uint32_t>(mcbSeg) + mcb.size + 1u;
-          if (nextSeg32 <= LAST_PARA &&
-              readMCB(static_cast<uint16_t>(nextSeg32)).owner == 0) {
-            MCB topped = mcb;
-            coalesceFollowingFreeBlocks(topped);
-            if (topped.size > targetSize + 1u) {
-              MCB newNext;
-              newNext.type = topped.type;
-              newNext.owner = 0;
-              newNext.size = static_cast<uint16_t>(topped.size - targetSize - 1u);
-              topped.type = 'M';
-              topped.size = static_cast<uint16_t>(targetSize);
-              writeMCB(mcbSeg, topped);
-              writeMCB(static_cast<uint16_t>(mcbSeg + targetSize + 1u), newNext);
-            }
-          }
-        }
-        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-        return;
-      }
       if (mcb.size > requested + 1) {
         // Compute the size of the new free block
         uint16_t freeSize = mcb.size - requested - 1;
@@ -2383,11 +2363,7 @@ void DOS::handleMemoryManagement() {
       coalesceFollowingFreeBlocks(expanded);
 
       if (expanded.size >= requested) {
-        uint16_t allocSize = requested;
-        if (isPspHeapGrowth &&
-            expanded.size > static_cast<uint32_t>(requested) + SBRK_HEADROOM_PARAS + 1u) {
-          allocSize = static_cast<uint16_t>(requested + SBRK_HEADROOM_PARAS);
-        }
+        const uint16_t allocSize = requested;
         if (expanded.size > allocSize + 1) {
           MCB newNext;
           newNext.type = expanded.type;
