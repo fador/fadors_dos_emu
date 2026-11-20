@@ -174,6 +174,8 @@
   - [x] `decoder-loop` — measure raw instruction decoder throughput
   - [x] `rep-movsb` — measure byte-string copy fast path
   - [x] `rep-movsd` — measure dword-string copy fast path
+  - [x] `rep-stosd` — measure the REP STOS fill fast path
+  - [x] `render-13h`, `render-modex`, `render-planar`, `render-vbe`, `audio-mix`, `mem-fill` — host-SIMD kernels at every level
   - [x] `--bench-steps=N` and `--bench-warmup=N` for tuning
 - [x] **Instruction Tracing**
   - [x] `--instruction-trace=N` (conditional, with optional start address)
@@ -188,6 +190,10 @@
 - [x] **Differential x87 fuzzer** (`fpu_fuzz`, x87 sequences vs. the host FPU; `--backend` soft vs. host)
 - [x] Cycle-weighted `--throttle-machine` presets (MHz x cycles-per-instruction estimate)
 - [ ] Further interpreter speed-ups (decoded-instruction cache or a JIT)
+- [x] **Host SIMD dispatch** (CPUID/XGETBV detection, `--host-simd`, SSE2/SSE4/AVX2/NEON kernels for frame conversion, audio and REP STOS fills)
+  - [ ] Text-mode glyph expansion and CGA modes through the kernels
+  - [ ] Bulk VGA-window writes (REP MOVS/STOS into A000h in chain-4 / write mode 0) without per-byte plane dispatch (dominates `vga32`)
+  - [ ] NEON variants for the planar conversion; verify the NEON kernels on real ARM64 hardware (only compile-checked so far)
 
 ## Phase 10: Memory & Extended Memory
 - [x] **HIMEM/XMS (INT 2Fh + far-call dispatcher)**

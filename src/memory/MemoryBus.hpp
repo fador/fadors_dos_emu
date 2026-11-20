@@ -157,6 +157,12 @@ public:
     return contiguousAccess(translate(a, true), size);
   }
 
+  // REP STOS fast path: fills `bytes` bytes at linear address `a` with the
+  // repeating little-endian 4-byte `pattern` (host-SIMD kernel) when the
+  // range is plain RAM: no VGA plane window, no write tracing and, with
+  // paging on, inside one page.  Returns false without writing otherwise.
+  bool lfillPattern(uint32_t a, uint32_t bytes, uint32_t pattern);
+
   // Called by the CPU whenever CR0, CR3 or CR4 change.
   void setPaging(bool enabled, uint32_t cr3, bool pse) {
     m_paging = enabled;

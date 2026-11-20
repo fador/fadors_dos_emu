@@ -1,6 +1,8 @@
 #include "WavWriter.hpp"
+#include "../../utils/simd/Simd.hpp"
 #include <algorithm>
-#include <cmath>
+#include <array>
+#include <bit>
 
 namespace fador::hw::audio {
 
@@ -51,11 +53,20 @@ void WavWriter::writeHeader() {
 void WavWriter::write(const float *interleaved, size_t sampleCount) {
   if (!m_file)
     return;
-  for (size_t i = 0; i < sampleCount; ++i) {
-    const float v = std::clamp(interleaved[i], -1.0f, 1.0f);
-    m_peak = std::max(m_peak, std::fabs(v));
-    put16(m_file, static_cast<uint16_t>(static_cast<int16_t>(
-                      std::lrint(v * 32767.0f))));
+  // Clamp, convert and track the peak a block at a time (host-SIMD kernel;
+  // NaN samples become -1), then write the block with one fwrite.
+  std::array<int16_t, 4096> pcm;
+  const auto &k = utils::simd::kernels();
+  for (size_t done = 0; done < sampleCount;) {
+    const size_t n = std::min(pcm.size(), sampleCount - done);
+    m_peak = std::max(m_peak, k.f32ToS16(pcm.data(), interleaved + done, n));
+    if constexpr (std::endian::native == std::endian::big)
+      for (size_t i = 0; i < n; ++i)
+        pcm[i] = static_cast<int16_t>(
+            (static_cast<uint16_t>(pcm[i]) >> 8) |
+            (static_cast<uint16_t>(pcm[i]) << 8));
+    std::fwrite(pcm.data(), sizeof(int16_t), n, m_file);
+    done += n;
   }
   m_dataBytes += sampleCount * 2;
 }
