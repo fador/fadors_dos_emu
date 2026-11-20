@@ -560,38 +560,16 @@ void BIOS::handleVideoService() {
     resetVbeState();
     uint8_t al = m_cpu.getReg8(cpu::AL) & 0x7F; // bit 7 = don't clear if set
     bool clearScreen = !(m_cpu.getReg8(cpu::AL) & 0x80);
-    const auto *mi = findVideoMode(al);
-    m_memory.write8(0x449, al); // BDA: current mode
-    m_memory.write8(0x462, 0);  // BDA: active page = 0
-    m_memory.write16(0x44E, 0); // BDA: page offset = 0
-    // Reset cursor for all 8 pages
-    for (int p = 0; p < 8; ++p) {
-      m_memory.write8(0x450 + p * 2, 0);     // col
-      m_memory.write8(0x450 + p * 2 + 1, 0); // row
-    }
-    if (mi) {
-      m_memory.write16(0x44A, mi->textCols);
-      m_memory.write8(0x484, mi->textRows - 1);
-      m_memory.write16(0x44C, static_cast<uint16_t>(mi->pageSize));
-      if (clearScreen) {
-        if (mi->isGraphics) {
-          m_memory.clearVGA();
-        } else {
-          uint32_t cells = static_cast<uint32_t>(mi->textCols) * mi->textRows;
-          for (uint32_t i = 0; i < cells * 2; i += 2) {
-            m_memory.write8(mi->vramBase + i, ' ');
-            m_memory.write8(mi->vramBase + i + 1, 0x07);
-          }
-        }
-      }
-      // Program VGA registers for this mode (real BIOS does this).
-      // Without this, VGA state from a previous mode (e.g. GC write
-      // mode, map mask, read map select) persists and breaks the new mode.
-      if (m_vga) {
-        programVGARegisters(al);
-      }
+    if (findVideoMode(al)) {
+      // Loads the VGA parameter table, default palette and font.
+      setVgaMode(al, clearScreen);
     } else {
       // Unknown mode — default to 80x25 text
+      m_memory.write8(0x449, al);
+      m_memory.write8(0x462, 0);
+      m_memory.write16(0x44E, 0);
+      for (int p = 0; p < 8; ++p)
+        m_memory.write16(0x450 + p * 2, 0);
       m_memory.write16(0x44A, 80);
       m_memory.write8(0x484, 24);
       m_memory.write16(0x44C, 80 * 25 * 2);
@@ -607,7 +585,7 @@ void BIOS::handleVideoService() {
     break;
   }
   case 0x01: { // Set Cursor Type
-    m_memory.write16(0x460, m_cpu.getReg16(cpu::CX));
+    setCursorShape(m_cpu.getReg8(cpu::CH), m_cpu.getReg8(cpu::CL));
     LOG_DEBUG("BIOS INT 10h: Set Cursor Type CX=", m_cpu.getReg16(cpu::CX));
     break;
   }
@@ -619,6 +597,8 @@ void BIOS::handleVideoService() {
       page = 0;
     m_memory.write8(0x450 + page * 2, dl);
     m_memory.write8(0x450 + page * 2 + 1, dh);
+    if (page == m_memory.read8(0x462))
+      syncCursorFromBDA(m_memory);
     LOG_DEBUG("BIOS INT 10h: Set Cursor Position page=", (int)page, " to ",
               (int)dh, ":", (int)dl);
     break;
@@ -641,9 +621,8 @@ void BIOS::handleVideoService() {
     uint8_t page = m_cpu.getReg8(cpu::AL);
     if (page > 7)
       page = 0;
-    m_memory.write8(0x462, page);
-    m_memory.write16(0x44E,
-                     static_cast<uint16_t>(page * m_memory.read16(0x44C)));
+    setActivePage(page);
+    syncCursorFromBDA(m_memory);
     LOG_DEBUG("BIOS INT 10h: Set Active Page ", (int)page);
     break;
   }
@@ -773,8 +752,8 @@ void BIOS::handleVideoService() {
   case 0x0B: { // Set Color Palette / Background/Border
     uint8_t bh = m_cpu.getReg8(cpu::BH);
     uint8_t bl = m_cpu.getReg8(cpu::BL);
-    LOG_DEBUG("BIOS INT 10h AH=0Bh: Set Palette BH=", (int)bh, " BL=", (int)bl,
-              " (stubbed)");
+    setCgaPalette(bh, bl);
+    LOG_DEBUG("BIOS INT 10h AH=0Bh: Set Palette BH=", (int)bh, " BL=", (int)bl);
     break;
   }
   case 0x0C: { // Write Graphics Pixel
@@ -812,18 +791,23 @@ void BIOS::handleVideoService() {
           break;
         }
         case VMemLayout::Planar: {
-          // Write pixel across 4 planes stored sequentially
-          uint32_t byteOff = (y * mi->width + x) / 8;
-          uint8_t bit = 7 - (x & 7);
-          uint32_t planeSize =
-              (static_cast<uint32_t>(mi->width) * mi->height) / 8;
+          // EGA/VGA planes: one bit per plane, AL bit 7 = XOR
+          if (!m_vga)
+            break;
+          const uint32_t byteOff =
+              static_cast<uint32_t>(m_cpu.getReg8(cpu::BH)) *
+                  m_memory.read16(0x44C) +
+              (static_cast<uint32_t>(y) * mi->width + x) / 8;
+          const uint8_t bit = static_cast<uint8_t>(0x80 >> (x & 7));
           for (int p = 0; p < 4; ++p) {
-            uint8_t b = m_memory.read8(mi->vramBase + p * planeSize + byteOff);
-            if (color & (1 << p))
-              b |= (1 << bit);
+            uint8_t b = m_vga->readPlane(p, byteOff);
+            const bool set = (color & (1 << p)) != 0;
+            if (color & 0x80)
+              b = set ? static_cast<uint8_t>(b ^ bit) : b;
             else
-              b &= ~(1 << bit);
-            m_memory.write8(mi->vramBase + p * planeSize + byteOff, b);
+              b = set ? static_cast<uint8_t>(b | bit)
+                      : static_cast<uint8_t>(b & ~bit);
+            m_vga->writePlane(p, byteOff, b);
           }
           break;
         }
@@ -865,16 +849,17 @@ void BIOS::handleVideoService() {
           break;
         }
         case VMemLayout::Planar: {
-          uint32_t byteOff = (y * mi->width + x) / 8;
-          uint8_t bit = 7 - (x & 7);
-          uint32_t planeSize =
-              (static_cast<uint32_t>(mi->width) * mi->height) / 8;
+          if (!m_vga)
+            break;
+          const uint32_t byteOff =
+              static_cast<uint32_t>(m_cpu.getReg8(cpu::BH)) *
+                  m_memory.read16(0x44C) +
+              (static_cast<uint32_t>(y) * mi->width + x) / 8;
+          const uint8_t bit = static_cast<uint8_t>(0x80 >> (x & 7));
           uint8_t pixel = 0;
-          for (int p = 0; p < 4; ++p) {
-            if (m_memory.read8(mi->vramBase + p * planeSize + byteOff) &
-                (1 << bit))
-              pixel |= (1 << p);
-          }
+          for (int p = 0; p < 4; ++p)
+            if (m_vga->readPlane(p, byteOff) & bit)
+              pixel |= static_cast<uint8_t>(1 << p);
           m_cpu.setReg8(cpu::AL, pixel);
           break;
         }
@@ -944,152 +929,18 @@ void BIOS::handleVideoService() {
     }
     m_memory.write8(0x450 + page * 2, cursorCol);
     m_memory.write8(0x450 + page * 2 + 1, cursorRow);
+    syncCursorFromBDA(m_memory);
     break;
   }
-  case 0x10: { // DAC/Palette Functions
-    uint8_t al = m_cpu.getReg8(cpu::AL);
-    uint8_t *PAL = m_memory.dacPalette();
-    switch (al) {
-    case 0x00: // Set Individual Palette Register
-      LOG_DEBUG("BIOS INT 10h AH=10h AL=00h: Set Palette Reg BL=",
-                (int)m_cpu.getReg8(cpu::BL), " (stubbed)");
-      break;
-    case 0x01: // Set Overscan (Border) Color
-      LOG_DEBUG("BIOS INT 10h AH=10h AL=01h: Set Border Color (stubbed)");
-      break;
-    case 0x02: // Set All Palette Registers
-      LOG_DEBUG("BIOS INT 10h AH=10h AL=02h: Set All Palette (stubbed)");
-      break;
-    case 0x03: // Toggle Intensity/Blinking
-      LOG_DEBUG("BIOS INT 10h AH=10h AL=03h: Toggle Blink BL=",
-                (int)m_cpu.getReg8(cpu::BL), " (stubbed)");
-      break;
-    case 0x07: // Read Individual Palette Register
-      m_cpu.setReg8(cpu::BH, m_cpu.getReg8(cpu::BL)); // Echo back
-      break;
-    case 0x08:                      // Read Overscan Register
-      m_cpu.setReg8(cpu::BH, 0x00); // Black border
-      break;
-    case 0x10: { // Set Individual DAC Register
-      uint16_t reg = m_cpu.getReg16(cpu::BX);
-      if (reg < 256) {
-        PAL[reg * 3 + 0] = static_cast<uint8_t>(m_cpu.getReg8(cpu::DH) & 0x3F);
-        PAL[reg * 3 + 1] = static_cast<uint8_t>(m_cpu.getReg8(cpu::CH) & 0x3F);
-        PAL[reg * 3 + 2] = static_cast<uint8_t>(m_cpu.getReg8(cpu::CL) & 0x3F);
-      }
-      LOG_DEBUG("BIOS INT 10h AH=10h AL=10h: Set DAC Reg ", reg);
-      break;
-    }
-    case 0x12: { // Set Block of DAC Registers
-      uint16_t first = m_cpu.getReg16(cpu::BX);
-      uint16_t count = m_cpu.getReg16(cpu::CX);
-      uint16_t es = m_cpu.getSegReg(cpu::ES);
-      uint16_t dx = m_cpu.getReg16(cpu::DX);
-      uint32_t addr = (es << 4) + dx;
-      for (uint16_t i = 0; i < count && (first + i) < 256; ++i) {
-        PAL[(first + i) * 3 + 0] = static_cast<uint8_t>(m_memory.read8(addr + i * 3 + 0) & 0x3F);
-        PAL[(first + i) * 3 + 1] = static_cast<uint8_t>(m_memory.read8(addr + i * 3 + 1) & 0x3F);
-        PAL[(first + i) * 3 + 2] = static_cast<uint8_t>(m_memory.read8(addr + i * 3 + 2) & 0x3F);
-      }
-      LOG_DEBUG("BIOS INT 10h AH=10h AL=12h: Set DAC Block first=", first,
-                " count=", count);
-      break;
-    }
-    case 0x15: { // Read Individual DAC Register
-      uint16_t reg = m_cpu.getReg16(cpu::BX);
-      if (reg < 256) {
-        m_cpu.setReg8(cpu::DH, PAL[reg * 3 + 0]);
-        m_cpu.setReg8(cpu::CH, PAL[reg * 3 + 1]);
-        m_cpu.setReg8(cpu::CL, PAL[reg * 3 + 2]);
-      }
-      break;
-    }
-    case 0x17: { // Read Block of DAC Registers
-      uint16_t first = m_cpu.getReg16(cpu::BX);
-      uint16_t count = m_cpu.getReg16(cpu::CX);
-      uint16_t es = m_cpu.getSegReg(cpu::ES);
-      uint16_t dx = m_cpu.getReg16(cpu::DX);
-      uint32_t addr = (es << 4) + dx;
-      for (uint16_t i = 0; i < count && (first + i) < 256; ++i) {
-        m_memory.write8(addr + i * 3 + 0,
-                        PAL[(first + i) * 3 + 0]);
-        m_memory.write8(addr + i * 3 + 1,
-                        PAL[(first + i) * 3 + 1]);
-        m_memory.write8(addr + i * 3 + 2,
-                        PAL[(first + i) * 3 + 2]);
-      }
-      LOG_DEBUG("BIOS INT 10h AH=10h AL=17h: Read DAC Block first=", first,
-                " count=", count);
-      break;
-    }
-    case 0x1A:                   // Get Color Page State
-      m_cpu.setReg8(cpu::BL, 0); // Paging mode 0
-      m_cpu.setReg8(cpu::BH, 0); // Current page 0
-      break;
-    default:
-      LOG_DEBUG("BIOS INT 10h AH=10h: Palette subfn AL=", std::hex, (int)al,
-                " (stubbed)");
-      break;
-    }
+  case 0x10: // Palette registers and DAC
+    handlePaletteService();
     break;
-  }
-  case 0x11: { // Character Generator / Font Services
-    uint8_t al = m_cpu.getReg8(cpu::AL);
-    switch (al) {
-    case 0x30: { // Get Font Information
-      uint8_t bh = m_cpu.getReg8(cpu::BH);
-      // Return standard 8x16 font info
-      m_cpu.setReg16(cpu::CX, 16); // Bytes per character (height)
-      m_cpu.setReg8(cpu::DL, 24);  // Rows - 1
-      // ES:BP -> font table (point to a dummy area)
-      m_cpu.setSegReg(cpu::ES, 0xC000);
-      m_cpu.setReg16(cpu::BP, 0x0000);
-      LOG_DEBUG("BIOS INT 10h AH=11h AL=30h: Get Font Info pointer=", (int)bh);
-      break;
-    }
-    default:
-      LOG_DEBUG("BIOS INT 10h AH=11h: Font subfn AL=", std::hex, (int)al,
-                " (stubbed)");
-      break;
-    }
+  case 0x11: // Character generator / font services
+    handleFontService();
     break;
-  }
-  case 0x12: { // Alternate Function Select (Video Subsystem Configuration)
-    uint8_t bl = m_cpu.getReg8(cpu::BL);
-    switch (bl) {
-    case 0x10: {                    // Get EGA Info
-      m_cpu.setReg8(cpu::BH, 0x00); // Color mode
-      m_cpu.setReg8(cpu::BL, 0x03); // 256K EGA memory
-      m_cpu.setReg8(cpu::CH, 0x00); // Feature bits
-      m_cpu.setReg8(cpu::CL, 0x09); // Switch settings
-      LOG_DEBUG("BIOS INT 10h AH=12h BL=10h: Get EGA Info");
-      break;
-    }
-    case 0x30: { // Set Vertical Resolution
-      uint8_t al = m_cpu.getReg8(cpu::AL);
-      m_cpu.setReg8(cpu::AL, 0x12); // Function supported
-      LOG_DEBUG("BIOS INT 10h AH=12h BL=30h: Set VertRes AL=", (int)al,
-                " (stubbed)");
-      break;
-    }
-    case 0x34: { // Cursor Emulation
-      m_cpu.setReg8(cpu::AL, 0x12);
-      LOG_DEBUG("BIOS INT 10h AH=12h BL=34h: Cursor Emulation (stubbed)");
-      break;
-    }
-    case 0x36: { // Video Refresh Control
-      m_cpu.setReg8(cpu::AL, 0x12);
-      LOG_DEBUG("BIOS INT 10h AH=12h BL=36h: Video Refresh (stubbed)");
-      break;
-    }
-    default:
-      LOG_DEBUG("BIOS INT 10h AH=12h: Alt Select BL=", std::hex, (int)bl,
-                " (stubbed)");
-      m_cpu.setReg8(cpu::AL, 0x12);
-      break;
-    }
+  case 0x12: // Alternate function select
+    handleAltSelectService();
     break;
-  }
   case 0x13: {                           // Write String
     uint8_t al = m_cpu.getReg8(cpu::AL); // Write mode
     uint8_t page = m_cpu.getReg8(cpu::BH);
@@ -1154,6 +1005,7 @@ void BIOS::handleVideoService() {
       m_memory.write8(0x450 + page * 2, col);
       m_memory.write8(0x450 + page * 2 + 1, row);
     }
+    syncCursorFromBDA(m_memory);
     LOG_VIDEO("BIOS INT 10h AH=13h: Write String mode=", (int)al,
               " count=", count);
     break;
@@ -1186,7 +1038,7 @@ void BIOS::handleVideoService() {
     m_memory.write16(addr + 0x01, cols);
     m_memory.write16(addr + 0x22, m_memory.read16(0x44C)); // Page size
     m_memory.write8(addr + 0x27, rows);                    // Rows - 1
-    m_memory.write16(addr + 0x28, 16);                     // Char height
+    m_memory.write16(addr + 0x28, currentCharHeight());    // Char height
     m_memory.write8(addr + 0x2A, m_memory.read8(0x462));   // Active page
     m_cpu.setReg8(cpu::AL, 0x1B);                          // Function supported
     LOG_DEBUG("BIOS INT 10h AH=1Bh: State Info (filled)");
@@ -1372,64 +1224,6 @@ void BIOS::handleKeyboardService() {
   }
 }
 
-void BIOS::programVGARegisters(uint8_t mode) {
-  if (!m_vga) return;
-
-  const auto* mi = findVideoMode(mode);
-  if (!mi) return;
-
-  // Reset Sequencer to safe defaults, then apply mode-specific values
-  // Seq reg 2: Map Mask — all planes enabled for writes
-  m_vga->write8(0x3C4, 2);
-  m_vga->write8(0x3C5, 0x0F);
-
-  // Seq reg 4: Memory Mode — chain-4 for mode 13h, unchained for planar modes
-  m_vga->write8(0x3C4, 4);
-  if (mi->layout == VMemLayout::Linear256) {
-    m_vga->write8(0x3C5, 0x08); // Chain-4 enabled
-  } else if (mi->layout == VMemLayout::Planar) {
-    m_vga->write8(0x3C5, 0x00); // Chain-4 disabled
-  }
-
-  // Reset Graphics Controller to safe defaults
-  // GC reg 0: Set/Reset — all zeros
-  m_vga->write8(0x3CE, 0x00);
-  m_vga->write8(0x3CF, 0x00);
-  // GC reg 1: Enable Set/Reset — disabled
-  m_vga->write8(0x3CE, 0x01);
-  m_vga->write8(0x3CF, 0x00);
-  // GC reg 3: Data Rotate — replace (no rotate, no logical op)
-  m_vga->write8(0x3CE, 0x03);
-  m_vga->write8(0x3CF, 0x00);
-  // GC reg 4: Read Map Select — plane 0
-  m_vga->write8(0x3CE, 0x04);
-  m_vga->write8(0x3CF, 0x00);
-  // GC reg 5: Mode — write mode 0, read mode 0
-  m_vga->write8(0x3CE, 0x05);
-  m_vga->write8(0x3CF, 0x00);
-  // GC reg 8: Bit Mask — all bits enabled
-  m_vga->write8(0x3CE, 0x08);
-  m_vga->write8(0x3CF, 0xFF);
-
-  // CRTC: reset start address (page flip) and set row offset
-  // CRTC reg 0x0C-0x0D: Start Address — reset to 0
-  m_vga->write8(0x3D4, 0x0C);
-  m_vga->write8(0x3D5, 0x00);
-  m_vga->write8(0x3D4, 0x0D);
-  m_vga->write8(0x3D5, 0x00);
-
-  // CRTC reg 0x13: Offset — character-clocks between rows.
-  // For mode 13h (320 pixels, 8bpp, 8 dots/char): offset = 320/8 = 40 (0x28).
-  // For 320-wide planar modes: same value (each char = 2 bytes/plane).
-  if (mi->isGraphics && mi->width > 0) {
-    uint8_t crtcOff = static_cast<uint8_t>(mi->width / 8);
-    m_vga->write8(0x3D4, 0x13);
-    m_vga->write8(0x3D5, (crtcOff > 0) ? crtcOff : 40);
-  }
-
-  LOG_DEBUG("BIOS: Programmed VGA registers for mode 0x", std::hex, (int)mode);
-}
-
 void BIOS::initialize() {
   // 1. Setup BDA (BIOS Data Area) at 0x40:0x00
   m_memory.write8(0x449, 0x03);         // Current video mode: 80x25 color text
@@ -1468,41 +1262,11 @@ void BIOS::initialize() {
     m_memory.write8(0xB8000 + i + 1, 0x07);
   }
 
-  // Initialize the VGA DAC palette (256 entries x 3 bytes = 768 bytes)
-  // Standard CGA colors first (6-bit VGA values, 0-63)
-  static const uint8_t cgaPal[16][3] = {
-      {0, 0, 0},    {0, 0, 42},   {0, 42, 0},   {0, 42, 42},
-      {42, 0, 0},   {42, 0, 42},  {42, 21, 0},  {42, 42, 42},
-      {21, 21, 21}, {21, 21, 63}, {21, 63, 21}, {21, 63, 63},
-      {63, 21, 21}, {63, 21, 63}, {63, 63, 21}, {63, 63, 63}};
-  uint8_t *PAL = m_memory.dacPalette();
-  for (int i = 0; i < 16; ++i) {
-    PAL[i * 3 + 0] = static_cast<uint8_t>(cgaPal[i][0]);
-    PAL[i * 3 + 1] = static_cast<uint8_t>(cgaPal[i][1]);
-    PAL[i * 3 + 2] = static_cast<uint8_t>(cgaPal[i][2]);
-  }
-  // 16-31: Grayscale ramp
-  for (int i = 0; i < 16; ++i) {
-    uint8_t v = static_cast<uint8_t>(i * 63 / 15);
-    PAL[(16 + i) * 3 + 0] = static_cast<uint8_t>(v);
-    PAL[(16 + i) * 3 + 1] = static_cast<uint8_t>(v);
-    PAL[(16 + i) * 3 + 2] = static_cast<uint8_t>(v);
-  }
-  // 32-247: 6x6x6 color cube
-  for (int i = 0; i < 216; ++i) {
-    uint8_t r = static_cast<uint8_t>((i / 36) * 12 + 3);
-    uint8_t g = static_cast<uint8_t>(((i % 36) / 6) * 12 + 3);
-    uint8_t b = static_cast<uint8_t>((i % 6) * 12 + 3);
-    PAL[(32 + i) * 3 + 0] = static_cast<uint8_t>(r);
-    PAL[(32 + i) * 3 + 1] = static_cast<uint8_t>(g);
-    PAL[(32 + i) * 3 + 2] = static_cast<uint8_t>(b);
-  }
-  // 248-255: Black
-  for (int i = 248; i < 256; ++i) {
-    PAL[i * 3 + 0] = static_cast<uint8_t>(0);
-    PAL[i * 3 + 1] = static_cast<uint8_t>(0);
-    PAL[i * 3 + 2] = static_cast<uint8_t>(0);
-  }
+  // EGA/VGA BDA: 256K, cursor emulation on; feature switches; 400-line
+  // text, default palette loading, VGA active
+  m_memory.write8(0x487, 0x60);
+  m_memory.write8(0x488, 0x09);
+  m_memory.write8(0x489, 0x11);
 
   initializeVbeRom();
 
@@ -1566,6 +1330,14 @@ void BIOS::initialize() {
   m_memory.write16(0x33 * 4, 0x0033);     // INT 33h offset
   m_memory.write16(0x33 * 4 + 2, 0xF000); // INT 33h segment
   m_originalIVT[0x33] = {0x0033, 0xF000};
+
+  // Video BIOS: ROM fonts (INT 1Fh/43h point at them), then the power-on
+  // mode set (80x25 colour text) with the IBM VGA register values.
+  initializeVgaRom();
+  m_originalIVT[0x1F] = {m_memory.read16(0x1F * 4), m_memory.read16(0x1F * 4 + 2)};
+  m_originalIVT[0x43] = {m_memory.read16(0x43 * 4), m_memory.read16(0x43 * 4 + 2)};
+  loadDefaultDac(0x13); // whole DAC defined; mode 3 then loads entries 0-63
+  setVgaMode(0x03, true);
 
   // XMS driver entry point stub at F000:XMS_ENTRY_OFFSET.
   // Programs obtain this address via INT 2Fh AX=4310h, then CALL FAR to it.

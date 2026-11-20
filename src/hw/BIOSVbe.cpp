@@ -250,6 +250,9 @@ void BIOS::handleVbeService() {
     }
     if (m_vga)
       m_vga->setSvgaWindow(true, MemoryBus::VBE_LFB_BASE);
+    // 8-bit modes start with the standard VGA 256-colour palette
+    if (mi->bpp == 8 && !(m_memory.read8(0x489) & 0x08))
+      loadDefaultDac(0x13);
     // Keep the BDA consistent for software that inspects it: report a
     // graphics mode and a text geometry derived from the 8x16 font.
     m_memory.write8(0x449, 0x13);

@@ -148,6 +148,7 @@ set(TEST_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_audio_backend.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_midi.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/hw/test_vga_controller.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/hw/test_vga_registers.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_batch.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cdrom.cpp"
 )
