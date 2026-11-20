@@ -43,6 +43,29 @@ void CPU::setModel(CpuModelId id) {
   setCR(4, m_cr[4] & m_model->cr4Mask);
 }
 
+uint64_t CPU::readTSC() {
+  uint64_t tsc = (m_tscSource ? m_tscSource() : m_guestCycles) + m_tscOffset;
+  // Two reads within one tick of the source still differ (software divides
+  // by TSC deltas); the TSC never runs backwards.
+  if (m_tscRead && tsc <= m_lastTsc)
+    tsc = m_lastTsc + 1;
+  m_lastTsc = tsc;
+  m_tscRead = true;
+  return tsc;
+}
+
+void CPU::writeTSC(uint64_t value) {
+  m_tscOffset = value - (m_tscSource ? m_tscSource() : m_guestCycles);
+  m_tscRead = false;
+}
+
+void CPU::setTimeStampSource(std::function<uint64_t()> source) {
+  const uint64_t current =
+      (m_tscSource ? m_tscSource() : m_guestCycles) + m_tscOffset;
+  m_tscSource = std::move(source);
+  writeTSC(current);
+}
+
 void CPU::reset() {
   m_regs.fill(0);
   // EDX holds the component/revision signature after reset.
@@ -63,7 +86,9 @@ void CPU::reset() {
   // ET: a 387-compatible FPU is present (hardwired on the 486 and later).
   m_cr[0] = 0x00000010u;
   m_nativeProtection = false;
-  m_tscOffset = 0 - m_guestCycles; // the time-stamp counter restarts at 0
+  // The time-stamp counter restarts at 0.
+  m_tscOffset = 0 - (m_tscSource ? m_tscSource() : m_guestCycles);
+  m_tscRead = false;
   if (m_memory)
     m_memory->setPaging(false, 0, false);
   m_dr.fill(0);

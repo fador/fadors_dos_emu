@@ -5,6 +5,7 @@
 #include "PIC8259.hpp"
 #include "PIT8254.hpp"
 #include "CMOSRTC.hpp"
+#include "MachineTime.hpp"
 #include "VGAController.hpp"
 #include "VideoMode.hpp"
 #include <algorithm>
@@ -81,12 +82,15 @@ bool BIOS::handleInterrupt(uint8_t vector) {
     return true;
   }
   case 0x10:
+    m_cpu.addGuestCycles(hle_cost::kVideo);
     handleVideoService();
     return true;
   case 0x13:
+    m_cpu.addGuestCycles(hle_cost::kDisk);
     handleDiskService();
     return true;
   case 0x16:
+    m_cpu.addGuestCycles(hle_cost::kKeyboard);
     handleKeyboardService();
     return true;
   case 0x1A:
@@ -140,8 +144,11 @@ bool BIOS::handleInterrupt(uint8_t vector) {
       m_cpu.setReg8(cpu::AL, 0x00); // Neither Windows 3.x nor Windows 9x
       LOG_DEBUG("INT 2Fh AX=1600h: Windows check (stubbed)");
     } else if (ax == 0x1680) {
-      // Release time slice
+      // Release time slice: the program is idle (set AL before the idle
+      // callback, which may inject an IRQ).
       m_cpu.setReg8(cpu::AL, 0x00);
+      if (m_idleCallback)
+        m_idleCallback();
       LOG_DEBUG("INT 2Fh AX=1680h: Release time slice");
     } else if (ax == 0x1686) {
       // Get CPU mode
@@ -153,12 +160,8 @@ bool BIOS::handleInterrupt(uint8_t vector) {
     }
     return true;
   }
-  case 0x08: { // IRQ0 – Timer Tick (HLE path, matches machine code at F000:0200)
-    uint32_t lo = m_memory.read16(0x46C);
-    lo++;
-    m_memory.write16(0x46C, static_cast<uint16_t>(lo & 0xFFFF));
-    if ((lo & 0xFFFF) == 0)
-      m_memory.write16(0x46E, m_memory.read16(0x46E) + 1);
+  case 0x08: { // IRQ0 – Timer Tick (HLE path, matches the INT 8 machine code)
+    advanceTickCount();
     // INT 1Ch (user timer hook) is dispatched via triggerInterrupt(0x1C)
     // in the injectHardwareInterrupt HLE path (InstructionDecoder.cpp).
     // Send EOI to master PIC so the ISR bit is cleared and future
@@ -1167,10 +1170,10 @@ void BIOS::handleKeyboardService() {
       if (!m_kbd.hasKey()) {
         // Set IP for retry before m_idleCallback() in case it injects an IRQ.
         m_cpu.setEIP(m_cpu.getInstructionStartEIP());
-        if (m_idleCallback) {
-          m_idleCallback();
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (m_idleCallback)
+          m_idleCallback(); // waits for the next event (host or virtual)
+        else
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
         return;
       }
     }
@@ -1297,29 +1300,37 @@ void BIOS::initialize() {
   }
 
   // INT 8 (IRQ0 / timer tick) handler — real machine code so INT 1Ch
-  // chains work naturally when programs hook the user-timer vector.
-  //   PUSH DS; PUSH AX; MOV AX,0040; MOV DS,AX;
-  //   INC WORD [006C]; JNZ +4; INC WORD [006E];
-  //   INT 1C; MOV AL,20; OUT 20,AL; POP AX; POP DS; IRET
+  // chains work naturally when programs hook the user-timer vector.  Like
+  // the AT BIOS it wraps the count at midnight (0x1800B0 ticks) and sets
+  // the midnight flag.  (It lives outside the per-vector HLE stubs.)
   {
-    constexpr uint16_t INT8_HANDLER = 0x0200;
+    constexpr uint16_t INT8_HANDLER = 0x1E00;
     const uint32_t base =
         (static_cast<uint32_t>(HLE_STUB_SEG) << 4) + INT8_HANDLER;
     const uint8_t code[] = {
-        0x1E,                   // PUSH DS
-        0x50,                   // PUSH AX
-        0xB8, 0x40, 0x00,       // MOV AX, 0040h
-        0x8E, 0xD8,             // MOV DS, AX
-        0xFF, 0x06, 0x6C, 0x00, // INC WORD [006Ch]
-        0x75, 0x04,             // JNZ +4
-        0xFF, 0x06, 0x6E, 0x00, // INC WORD [006Eh]
-        0xCD, 0x1C,             // INT 1Ch
-        0xB0, 0x20,             // MOV AL, 20h (EOI before restoring AX)
-        0xE6, 0x20,             // OUT 20h, AL
-        0x58,                   // POP AX
-        0x1F,                   // POP DS
-        0xCF                    // IRET
+        0x1E,                         // PUSH DS
+        0x50,                         // PUSH AX
+        0xB8, 0x40, 0x00,             // MOV AX, 0040h
+        0x8E, 0xD8,                   // MOV DS, AX
+        0xFF, 0x06, 0x6C, 0x00,       // INC WORD [006Ch]
+        0x75, 0x04,                   // JNZ +4
+        0xFF, 0x06, 0x6E, 0x00,       // INC WORD [006Eh]
+        0x83, 0x3E, 0x6E, 0x00, 0x18, // CMP WORD [006Eh], 18h
+        0x75, 0x15,                   // JNZ chain
+        0x81, 0x3E, 0x6C, 0x00, 0xB0, 0x00, // CMP WORD [006Ch], 00B0h
+        0x75, 0x0D,                   // JNZ chain
+        0x31, 0xC0,                   // XOR AX, AX
+        0xA3, 0x6C, 0x00,             // MOV [006Ch], AX
+        0xA3, 0x6E, 0x00,             // MOV [006Eh], AX
+        0xC6, 0x06, 0x70, 0x00, 0x01, // MOV BYTE [0070h], 1
+        0xCD, 0x1C,                   // chain: INT 1Ch
+        0xB0, 0x20,                   // MOV AL, 20h (EOI before restoring AX)
+        0xE6, 0x20,                   // OUT 20h, AL
+        0x58,                         // POP AX
+        0x1F,                         // POP DS
+        0xCF                          // IRET
     };
+    static_assert(sizeof(code) == 54);
     for (size_t i = 0; i < sizeof(code); ++i)
       m_memory.write8(base + i, code[i]);
     m_memory.write16(0x08 * 4, INT8_HANDLER);
@@ -1619,15 +1630,50 @@ bool BIOS::isOriginalIVT(uint8_t vector, uint16_t cs, uint32_t eip) const {
   return false;
 }
 
+void BIOS::advanceTickCount() {
+  uint32_t ticks = m_memory.read32(0x46C) + 1;
+  if (ticks == kBiosTicksPerDay) {
+    ticks = 0;
+    m_memory.write8(0x470, 1);
+  }
+  m_memory.write32(0x46C, ticks);
+}
+
+void BIOS::loadTickCountFromRTC() {
+  if (!m_cmos)
+    return;
+  const CivilDateTime now = m_cmos->dateTime();
+  m_memory.write32(0x46C, biosTicksAt(now.hour, now.minute, now.second));
+  m_memory.write8(0x470, 0);
+}
+
+namespace {
+uint8_t toBcd(int v) {
+  return static_cast<uint8_t>(((v / 10) << 4) | (v % 10));
+}
+// -1 for a byte that is not valid BCD.
+int fromBcd(uint8_t v) {
+  if ((v & 0x0F) > 9 || (v >> 4) > 9)
+    return -1;
+  return (v >> 4) * 10 + (v & 0x0F);
+}
+} // namespace
+
 void BIOS::handleTimeService() {
   uint8_t ah = m_cpu.getReg8(cpu::AH);
+  auto setCarry = [this](bool on) {
+    m_cpu.setEFLAGS(on ? (m_cpu.getEFLAGS() | cpu::FLAG_CARRY)
+                       : (m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY));
+  };
   switch (ah) {
   case 0x00: { // Read system timer (ticks since midnight)
     LOG_TRACE("BIOS INT 1Ah: Get System Time");
     uint32_t ticks = m_memory.read32(0x46C);
     m_cpu.setReg16(cpu::CX, static_cast<uint16_t>(ticks >> 16));
     m_cpu.setReg16(cpu::DX, static_cast<uint16_t>(ticks & 0xFFFF));
-    m_cpu.setReg8(cpu::AL, 0); // 0 = no midnight overflow
+    // AL = midnight flag; reading it clears it.
+    m_cpu.setReg8(cpu::AL, m_memory.read8(0x470));
+    m_memory.write8(0x470, 0);
     break;
   }
   case 0x01: { // Set system timer (CX:DX → BDA 0x46C)
@@ -1639,68 +1685,82 @@ void BIOS::handleTimeService() {
     m_memory.write8(0x470, 0);
     break;
   }
+  // AH=02h-05h: the RTC (emulated time).  CF=1 without an RTC.
   case 0x02: { // Read Real-Time Clock Time
-    auto now = std::chrono::system_clock::now();
-    std::time_t t = std::chrono::system_clock::to_time_t(now);
-    std::tm *lt = std::localtime(&t);
-    if (lt) {
-      auto toBcd = [](int v) -> uint8_t {
-        return static_cast<uint8_t>(((v / 10) << 4) | (v % 10));
-      };
-      m_cpu.setReg8(cpu::CH, toBcd(lt->tm_hour));
-      m_cpu.setReg8(cpu::CL, toBcd(lt->tm_min));
-      m_cpu.setReg8(cpu::DH, toBcd(lt->tm_sec));
-      m_cpu.setReg8(cpu::DL, lt->tm_isdst > 0 ? 1 : 0);
-      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-    } else {
-      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
-    }
     LOG_TRACE("BIOS INT 1Ah: Read RTC Time");
+    if (!m_cmos) {
+      setCarry(true);
+      break;
+    }
+    const CivilDateTime now = m_cmos->dateTime();
+    m_cpu.setReg8(cpu::CH, toBcd(now.hour));
+    m_cpu.setReg8(cpu::CL, toBcd(now.minute));
+    m_cpu.setReg8(cpu::DH, toBcd(now.second));
+    m_cpu.setReg8(cpu::DL, m_cmos->daylightSaving() ? 1 : 0);
+    setCarry(false);
     break;
   }
-  case 0x03: { // Set Real-Time Clock Time
-    // Store RTC time from CH(hr),CL(min),DH(sec),DL(dst).
-    // We can't modify the host system clock, so just acknowledge success.
+  case 0x03: { // Set Real-Time Clock Time: CH, CL, DH (BCD), DL = DST
     LOG_TRACE("BIOS INT 1Ah: Set RTC Time");
-    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    const int hour = fromBcd(m_cpu.getReg8(cpu::CH));
+    const int minute = fromBcd(m_cpu.getReg8(cpu::CL));
+    const int second = fromBcd(m_cpu.getReg8(cpu::DH));
+    if (!m_cmos || !isValidTime(hour, minute, second)) {
+      setCarry(true);
+      break;
+    }
+    CivilDateTime dt = m_cmos->dateTime();
+    dt.hour = hour;
+    dt.minute = minute;
+    dt.second = second;
+    m_cmos->setDateTime(dt);
+    m_cmos->setDaylightSaving((m_cpu.getReg8(cpu::DL) & 1) != 0);
+    setCarry(false);
     break;
   }
   case 0x04: { // Read Real-Time Clock Date
-    auto now = std::chrono::system_clock::now();
-    std::time_t t = std::chrono::system_clock::to_time_t(now);
-    std::tm *lt = std::localtime(&t);
-    if (lt) {
-      auto toBcd = [](int v) -> uint8_t {
-        return static_cast<uint8_t>(((v / 10) << 4) | (v % 10));
-      };
-      m_cpu.setReg8(cpu::CH, toBcd((lt->tm_year + 1900) / 100)); // century (BCD)
-      m_cpu.setReg8(cpu::CL, toBcd((lt->tm_year + 1900) % 100)); // year (BCD)
-      m_cpu.setReg8(cpu::DH, toBcd(lt->tm_mon + 1));             // month (BCD)
-      m_cpu.setReg8(cpu::DL, toBcd(lt->tm_mday));                // day (BCD)
-      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-    } else {
-      m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
-    }
     LOG_TRACE("BIOS INT 1Ah: Read RTC Date");
+    if (!m_cmos) {
+      setCarry(true);
+      break;
+    }
+    const CivilDateTime now = m_cmos->dateTime();
+    m_cpu.setReg8(cpu::CH, toBcd(now.year / 100)); // century
+    m_cpu.setReg8(cpu::CL, toBcd(now.year % 100));
+    m_cpu.setReg8(cpu::DH, toBcd(now.month));
+    m_cpu.setReg8(cpu::DL, toBcd(now.day));
+    setCarry(false);
     break;
   }
-  case 0x05: { // Set Real-Time Clock Date
-    // Store RTC date from CH(cent),CL(year),DH(month),DL(day).
-    // Can't modify host clock, acknowledge success.
+  case 0x05: { // Set Real-Time Clock Date: CH century, CL year, DH, DL (BCD)
     LOG_TRACE("BIOS INT 1Ah: Set RTC Date");
-    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    const int century = fromBcd(m_cpu.getReg8(cpu::CH));
+    const int year = fromBcd(m_cpu.getReg8(cpu::CL));
+    const int month = fromBcd(m_cpu.getReg8(cpu::DH));
+    const int day = fromBcd(m_cpu.getReg8(cpu::DL));
+    if (!m_cmos || century < 0 || year < 0 ||
+        !isValidDate(century * 100 + year, month, day)) {
+      setCarry(true);
+      break;
+    }
+    CivilDateTime dt = m_cmos->dateTime();
+    dt.year = century * 100 + year;
+    dt.month = month;
+    dt.day = day;
+    m_cmos->setDateTime(dt);
+    setCarry(false);
     break;
   }
   case 0x06: { // Set RTC Alarm
     // CH=hours(BCD), CL=minutes(BCD), DH=seconds(BCD)
     // Stub: alarm not implemented, return CF=1 (function not supported)
     LOG_DEBUG("BIOS INT 1Ah: Set Alarm (stubbed)");
-    m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
+    setCarry(true);
     break;
   }
   case 0x07: { // Reset RTC Alarm
     LOG_DEBUG("BIOS INT 1Ah: Reset Alarm (stubbed)");
-    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    setCarry(false);
     break;
   }
   default:
@@ -1920,9 +1980,13 @@ void BIOS::handleSystemService() {
     break;
   }
   case 0x86: { // Wait (microseconds in CX:DX)
-    // Programs use this for delays. We just return immediately.
+    const uint64_t us =
+        (static_cast<uint64_t>(m_cpu.getReg16(cpu::CX)) << 16) |
+        m_cpu.getReg16(cpu::DX);
+    if (m_delayCallback)
+      m_delayCallback(us * 1000);
     m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-    LOG_DEBUG("BIOS INT 15h AH=86h: Wait (stubbed - no delay)");
+    LOG_DEBUG("BIOS INT 15h AH=86h: Wait ", std::dec, us, " us");
     break;
   }
   case 0x41: { // Wait on external event (PS/2)

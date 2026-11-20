@@ -65,8 +65,13 @@
 - [x] Virtual clock (`VirtualClock`): one emulated time base for all devices
   - [x] Auto pacing (full speed, timers track the wall clock), fixed rate, `--deterministic`
   - [x] Audio generated per emulated time; host queue only steers auto pacing
-  - [ ] Feed real per-instruction cycle counts from the CPU model (`advanceCycles` / counter with CPI 1)
-  - [ ] HLT idles until the next interrupt instead of spinning
+  - [x] Driven by the CPU model's guest clock (`CPU::cycles()` / clock Hz); `--throttle-machine` selects the model (`hw::MachineTime`, `planSpeed`)
+  - [x] HLT idles until the next interrupt (next PIT/RTC/SB event; host sleeps in auto pacing)
+  - [x] Blocking BIOS/DOS input, INT 28h and INT 2Fh AX=1680h idle the host / advance to the next event
+  - [x] RDTSC = emulated time x core clock (monotonic) in every pacing mode
+  - [x] Nominal cycle cost for HLE INT 10h/13h/16h/21h
+  - [ ] Wake source for the UART (serial IRQs) once it exists
+  - [ ] Pre-386 presets (8088, 286) still run the 386 instruction set and cycle table (scaled)
 - [x] Keyboard Controller (8042)
 - [x] VGA Controller (Text/Graphics modes)
 - [x] DMA Controller (8237)
@@ -81,7 +86,9 @@
 - [x] INT 13h (Disk Services) - Basic floppy/hard drive image support
 - [x] INT 16h (Keyboard Services)
 - [x] INT 1Ah (Time of Day / RTC Services)
-  - [ ] AH=02h/04h and DOS INT 21h AH=2Ch read the emulated RTC / tick count instead of the host clock
+  - [x] AH=00h-05h on emulated time: tick count with midnight wrap/flag (ROM INT 8 too), RTC read/set
+  - [x] DOS INT 21h AH=2Ah-2Dh from the tick count and a DOS date (midnight flag), setting updates the RTC
+  - [x] Fixed start date/time with `--deterministic` / `--start-time`
 - [x] INT 33h (Mouse Services)
 - [x] INT 11h, 12h, 14h, 15h, 17h, 1Bh, 1Ch, 1Dh, 1Eh, 1Fh (system stubs)
 - [x] INT 2Fh (Multiplex/TSR/Network)
@@ -188,7 +195,8 @@
 - [x] **Performance profiles** (`tests/perf`: fixed-workload DOS programs, MIPS table)
 - [x] **Differential CPU fuzzer** (`cpu_fuzz`, integer instructions vs. the host CPU)
 - [x] **Differential x87 fuzzer** (`fpu_fuzz`, x87 sequences vs. the host FPU; `--backend` soft vs. host)
-- [x] Cycle-weighted `--throttle-machine` presets (MHz x cycles-per-instruction estimate)
+- [x] Cycle-weighted `--throttle-machine` presets (MHz on the CPU model's cycle table)
+- [x] **Emulated-time checks** (`tests/timing/check_time.py`: RDTSC vs PIT, HLT, DOS clock, reproducibility)
 - [x] **Interpreter speed-ups** (lazy arithmetic flags, predecoded fast path with byte-verified decoded-instruction cache, burst execution, bulk VGA-window REP MOVS/STOS: ~2.15x geomean on `tests/perf`)
 - [ ] Further interpreter speed-ups
   - [ ] Bursts with paging on (save/restore per instruction for #PF restart instead of falling back to `step()`); a data-side software TLB for `lread*/lwrite*` with paging

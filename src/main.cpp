@@ -15,6 +15,8 @@
 #include "hw/DosShell.hpp"
 #include "hw/VGAController.hpp"
 #include "hw/VirtualClock.hpp"
+#include "hw/MachineTime.hpp"
+#include "hw/CivilTime.hpp"
 #include "hw/audio/AdLib.hpp"
 #include "hw/audio/AudioBackend.hpp"
 #include "hw/audio/MidiDevice.hpp"
@@ -410,12 +412,17 @@ void printHelp(const char *programName) {
     "  --sdl                     Force the SDL graphical frontend (requires SDL2 build).\n"
     "  --no-sdl                  Force headless/text-mode execution even in SDL builds.\n"
     "  --throttle-ips=N          Run at a fixed N instructions per second of emulated time.\n"
-    "  --throttle-machine=name   Run at a fixed machine speed (MHz x cycles/instruction):\n"
+    "  --throttle-machine=name   Run at a fixed machine speed: the preset selects the CPU\n"
+    "                            model (unless --cpu is given) and its clock:\n"
     "                            %s.\n"
     "                            Default: as fast as the host allows, timers in real time.\n"
-    "  --deterministic           Emulated time depends only on the executed instructions\n"
-    "                            (486dx2-66 speed unless --throttle-* is given) and never on\n"
+    "  --deterministic           Emulated time = guest clock cycles / CPU clock (the\n"
+    "                            --cpu model's clock unless --throttle-* is given), never\n"
     "                            the host clock: runs are reproducible and not paced.\n"
+    "  --start-time=YYYY-MM-DDTHH:MM:SS\n"
+    "                            Date and time the emulated RTC/DOS clock starts at\n"
+    "                            (default: host local time; 1994-06-01T12:00:00 with\n"
+    "                            --deterministic).\n"
     "  --stop-after=N            Stop execution after N instruction cycles and dump state.\n"
     "  --stop-after-debugger     When --stop-after triggers, enter the interactive debugger.\n"
     "  --dump-on-exit            Dump CPU state when the program terminates.\n"
@@ -506,9 +513,10 @@ int main(int argc, char *argv[]) {
     fador::hw::VGAController vga(memory);
     fador::hw::DMA8237 dma;
     fador::hw::CMOSRTC cmos;
-    // --cpu is needed before the CPU is constructed (its reset state is
-    // model-specific); the main option loop below skips it.
-    fador::cpu::CpuModelId cpuModelId = fador::cpu::kDefaultCpuModel;
+    // --cpu and --throttle-machine (which selects a CPU model) are needed
+    // before the CPU is constructed (its reset state is model-specific);
+    // the main option loop below parses the rest.
+    fador::hw::SpeedOptions speedOptions;
     for (int i = 1; i < argc; ++i) {
       const std::string arg = argv[i];
       if (arg.rfind("--", 0) != 0 || arg == "--")
@@ -520,18 +528,26 @@ int main(int argc, char *argv[]) {
                     fador::cpu::cpuModelNames());
           return 1;
         }
-        cpuModelId = *id;
+        speedOptions.cpu = *id;
+      } else if (arg.rfind("--throttle-machine=", 0) == 0) {
+        speedOptions.preset = fador::hw::findMachinePreset(arg.substr(19));
+        if (!speedOptions.preset) {
+          LOG_ERROR("Unknown throttle machine preset: ", arg.substr(19),
+                    ". Use one of ", fador::hw::machinePresetList());
+          return 1;
+        }
       }
     }
-    fador::cpu::CPU cpu(cpuModelId);
+    fador::cpu::CPU cpu(fador::hw::planSpeed(speedOptions).model);
     LOG_INFO("CPU model: ", cpu.model().description);
 
-    // The single emulated time base.  Virtual time advances with the
-    // instructions the CPU retires (CPU::m_cycles counts one per
-    // instruction until the CPU model reports real cycles); every timed
-    // device reads it.  Pacing is chosen after the command line is parsed.
+    // The single emulated time base.  Virtual time advances with the guest
+    // clock cycles the CPU model charges per instruction (CPU::cycles());
+    // every timed device reads it.  MachineTime applies the speed and
+    // pacing once the command line is parsed, and implements HLT and the
+    // BIOS/DOS idle waits.
     fador::hw::VirtualClock clock;
-    clock.attachInstructionCounter(&cpu.getCyclesRef());
+    fador::hw::MachineTime machineTime(clock, cpu);
     pit.setTimeSource(clock.timeSource());
     cmos.setTimeSource(clock.timeSource());
     vga.setTimeSource(clock.timeSource()); // 3DAh retrace, cursor and text blink
@@ -668,8 +684,10 @@ int main(int argc, char *argv[]) {
             pic.acknowledgeInterrupt();
           }
           decoder.injectHardwareInterrupt(static_cast<uint8_t>(pending));
+          return true;
         }
       }
+      return false;
     };
 
     // ── Install crash handlers ─────────────────────────────────────────
@@ -795,9 +813,8 @@ int main(int argc, char *argv[]) {
     uint64_t instructionTraceSkipSteps = 0;
     std::optional<uint32_t> instructionTraceFrom;
     uint64_t instructionTraceSkipHits = 0;
-    std::optional<fador::hw::MachineSpeed> throttleMachine; // fixed speed
-    std::string throttleLabel;
     bool deterministic = false;     // --deterministic: virtual time only
+    std::optional<fador::hw::CivilDateTime> startTime; // --start-time
     std::string execAsm;          // --exec="asm instructions"
     std::string benchmarkArg;
     std::string hostSimdArg;      // --host-simd=auto|avx2|sse4|sse2|scalar
@@ -848,18 +865,16 @@ int main(int argc, char *argv[]) {
           LOG_ERROR("--throttle-ips needs a positive rate");
           return 1;
         }
-        throttleMachine =
-            fador::hw::MachineSpeed{"", static_cast<double>(ips) / 1e6, 1.0};
-        throttleLabel = arg.substr(15) + " instructions/s";
+        speedOptions.throttleIps = ips;
       } else if (arg.find("--throttle-machine=") == 0) {
-        std::string presetName = arg.substr(19);
-        throttleMachine = fador::hw::findMachinePreset(presetName);
-        if (!throttleMachine) {
-          LOG_ERROR("Unknown throttle machine preset: ", presetName,
-                    ". Use one of ", fador::hw::machinePresetList());
+        // Parsed before the CPU was constructed.
+      } else if (arg.find("--start-time=") == 0) {
+        startTime = fador::hw::parseCivilDateTime(arg.substr(13));
+        if (!startTime) {
+          LOG_ERROR("--start-time needs YYYY-MM-DDTHH:MM:SS (1980-2099), got ",
+                    arg.substr(13));
           return 1;
         }
-        throttleLabel = std::string(throttleMachine->name);
       } else if (arg == "--deterministic") {
         deterministic = true;
       } else if (arg.find("--stop-after=") == 0) {
@@ -1019,14 +1034,23 @@ int main(int argc, char *argv[]) {
     if (!headless)
       audio.init(44100, 2, 1024);
 
-    if (deterministic) {
-      clock.setMachine(
-          throttleMachine.value_or(fador::hw::defaultDeterministicMachine()));
-      clock.setPacing(fador::hw::VirtualClock::Pacing::Deterministic);
-    } else if (throttleMachine) {
-      clock.setMachine(*throttleMachine);
-      clock.setPacing(fador::hw::VirtualClock::Pacing::Fixed);
+    speedOptions.deterministic = deterministic;
+    const fador::hw::SpeedPlan speedPlan = fador::hw::planSpeed(speedOptions);
+    for (const std::string &warning : speedPlan.warnings)
+      LOG_WARN(warning);
+    machineTime.configure(speedPlan);
+
+    // The guest's wall clock: the RTC holds the date and time (the host's
+    // at construction), the BIOS tick count and the DOS date start from it
+    // and then follow emulated time only.
+    if (startTime || deterministic)
+      cmos.setDateTime(startTime.value_or(fador::hw::kDeterministicStartTime));
+    bios.loadTickCountFromRTC();
+    {
+      const fador::hw::CivilDateTime rtcNow = cmos.dateTime();
+      dos.setDate(rtcNow.year, rtcNow.month, rtcNow.day);
     }
+    dos.setRTC(&cmos);
 
     // Apply CLI mounts
     for (auto& m : cliMounts) {
@@ -1173,15 +1197,15 @@ int main(int argc, char *argv[]) {
       }
       decoder.syncSegments();
       if (clock.pacing() != fador::hw::VirtualClock::Pacing::Auto) {
-        LOG_INFO("Emulated time: ",
-                 fador::hw::VirtualClock::pacingName(clock.pacing()), ", ",
-                 throttleLabel.empty() ? std::string("486dx2-66")
-                                       : throttleLabel,
-                 " (", clock.cpuHz() / 1e6, " MHz, ",
-                 clock.cyclesPerInstruction(), " cycles/instruction = ",
-                 std::dec,
-                 static_cast<uint64_t>(clock.instructionsPerSecond()),
-                 " instructions/s)");
+        if (speedPlan.countInstructions)
+          LOG_INFO("Emulated time: ",
+                   fador::hw::VirtualClock::pacingName(clock.pacing()), ", ",
+                   speedPlan.label);
+        else
+          LOG_INFO("Emulated time: ",
+                   fador::hw::VirtualClock::pacingName(clock.pacing()), ", ",
+                   speedPlan.label, " (", cpu.model().description,
+                   " cycle table at ", clock.cpuHz() / 1e6, " MHz)");
       }
     } else if (path.empty() && (!benchmarkArg.empty() || !execAsm.empty())) {
       auto runExecLoop = [&](uint64_t steps) {
@@ -1500,7 +1524,7 @@ int main(int argc, char *argv[]) {
     unsigned idleCalls = 0;
     auto guestIdle = [&]() {
       cpu.addCycles(8);
-      clock.idle();
+      machineTime.guestIdle(); // waits for the next event if only waiting
       serviceHardware();
       dispatchPendingHardwareInterrupt();
       if ((++idleCalls & 7) == 0)
@@ -1557,6 +1581,20 @@ int main(int argc, char *argv[]) {
     servicePeriodicWhileIdle = [&]() {
       servicePeriodic(std::chrono::steady_clock::now());
     };
+    // HLT and the idle waits stop at the next device event.
+    machineTime.addWakeSource([&pit] { return pit.nextIrq0Ns(); });
+    machineTime.addWakeSource([&cmos] { return cmos.nextIrqNs(); });
+    machineTime.addWakeSource([&sb, &lastHardwareNs] {
+      const double s = sb.secondsUntilIrq();
+      return s < 0.0 ? fador::hw::MachineTime::kNever
+                     : lastHardwareNs + static_cast<uint64_t>(s * 1e9);
+    });
+    bios.setDelayCallback([&](uint64_t ns) { machineTime.delay(ns); });
+    machineTime.setHooks({serviceHardware, dispatchPendingHardwareInterrupt,
+                          [&]() {
+                            servicePeriodic(std::chrono::steady_clock::now());
+                            return running;
+                          }});
     // Runs the loaded program until it terminates (true) or the emulator
     // has to stop (false).
     auto runGuest = [&]() -> bool {
@@ -1624,6 +1662,10 @@ int main(int argc, char *argv[]) {
       shell.setIdleCallback([&]() {
         clock.idle(); // time passes at the prompt (scripted keys, RTC)
         clock.sync();
+        // The BIOS tick count (the DOS clock) keeps running at the prompt.
+        pit.advanceTo(clock.nowNs());
+        while (pit.checkPendingIRQ0())
+          bios.advanceTickCount();
         servicePeriodic(std::chrono::steady_clock::now());
       });
       shell.setStopCheck([&]() { return !running; });
@@ -1649,8 +1691,10 @@ int main(int argc, char *argv[]) {
       LOG_INFO("Emulated time ",
                static_cast<double>(clock.nowNs() - virtualStart) * 1e-9,
                " s (", fador::hw::VirtualClock::pacingName(clock.pacing()),
-               " pacing, ", std::dec, memory.read32(0x46C),
-               " BIOS timer ticks)");
+               " pacing, ", std::dec, cpu.cycles(), " guest cycles, ",
+               static_cast<double>(machineTime.haltedNs()) * 1e-9,
+               " s halted in ", machineTime.halts(), " HLTs, BIOS tick count ",
+               memory.read32(0x46C), ")");
       LOG_INFO("Guest CPU: ", cpu.model().cliName, ", ", cpu.cycles(),
                " cycles");
     }

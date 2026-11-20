@@ -7,7 +7,7 @@ Fador's DOS Emulator is a multiplatform MS-DOS emulator written in modern C++20.
 
 ## Features
 - **CPU Emulation:** 16-bit Real Mode and 32-bit Protected Mode execution, descriptor-table and control-register instructions, string operations, and REP fast paths. The x87 FPU is bit-accurate: registers are 80-bit (64-bit significand), precision and rounding control, all exception flags (with stack faults, masked and unmasked responses, rebiased over/underflow results), condition codes, NaN propagation, BCD, the 16/32-bit real/protected `FSTENV`/`FSAVE` layouts and unmasked-exception delivery (`#MF` with `CR0.NE=1`, otherwise `FERR#` → IRQ13 → `INT 75h` → `INT 02h`) follow real hardware. On GCC/Clang x86/x86-64 builds the arithmetic runs on the host's x87; elsewhere (MSVC, ARM64) a portable software 80-bit implementation is used (transcendentals there are within 16 ulps of a real x87).
-- **Selectable CPU Models:** `--cpu=386|486|486dx2|486dx4|pentium|pentiumpro` (default `486dx2`) sets the reset signature, `CPUID` (none on the 386 and early 486; `GenuineIntel` leaves advertising only emulated features), which `EFLAGS`/`CR0`/`CR4` bits exist, the model-gated instructions (`BSWAP`/`CMPXCHG`/`XADD`/`INVD`/`WBINVD`/`INVLPG` from the 486, `RDTSC`/`RDMSR`/`WRMSR`/`CMPXCHG8B` from the Pentium, `CMOVcc`/`FCMOVcc`/`FCOMI` on the Pentium Pro raise `#UD` elsewhere) and per-instruction clock costs. `POPF`/`IRET` follow the 386 privilege rules (reserved bits, `IOPL` only at CPL 0, `IF` only when CPL <= IOPL, V86 IOPL-sensitive instructions fault), so CPU-detection routines see the selected model. A guest cycle counter (`CPU::cycles()`) backs `RDTSC` and MSR 10h.
+- **Selectable CPU Models:** `--cpu=386|486|486dx2|486dx4|pentium|pentiumpro` (default `486dx2`) sets the reset signature, `CPUID` (none on the 386 and early 486; `GenuineIntel` leaves advertising only emulated features), which `EFLAGS`/`CR0`/`CR4` bits exist, the model-gated instructions (`BSWAP`/`CMPXCHG`/`XADD`/`INVD`/`WBINVD`/`INVLPG` from the 486, `RDTSC`/`RDMSR`/`WRMSR`/`CMPXCHG8B` from the Pentium, `CMOVcc`/`FCMOVcc`/`FCOMI` on the Pentium Pro raise `#UD` elsewhere) and per-instruction clock costs. `POPF`/`IRET` follow the 386 privilege rules (reserved bits, `IOPL` only at CPL 0, `IF` only when CPL <= IOPL, V86 IOPL-sensitive instructions fault), so CPU-detection routines see the selected model. A guest cycle counter (`CPU::cycles()`) drives emulated time; `RDTSC` and MSR 10h count emulated time at the model's clock.
 - **Protected Mode & DOS Extenders:** DPMI 0.9 host for protected-mode DOS extenders, including GDT/IDT handling, mode-switch entry points, segment reload callbacks, and app/host interrupt plumbing. DOS/4GW (bound or loaded through `DOS4GW.EXE`), PMODE/W, DOS/32A, CauseWay and DJGPP programs run; `tests/compat` checks each of them. 386 paging (CR0.PG, CR3, INVLPG, 4 MB pages) is available to raw-mode software.
 - **Memory Model:** 128 MB of physical memory: conventional memory managed through a DOS-compatible MCB chain, an XMS/DPMI pool from 1 MB to 112 MB, 8 MB of SVGA video memory at `0x07000000` (the VBE linear frame buffer), and host tables (DPMI LDT/IDT/GDT) above it so programs can never allocate over them.
 - **Expanded and Extended Memory:** EMS services via `INT 67h` with an `EMMXXXX0` device, page-frame mappings, and private API stubs, plus optional HIMEM/XMS 3.0 support (32-bit sizes beyond 64 MB) wired through `INT 2Fh` and far-call dispatch stubs.
@@ -22,7 +22,7 @@ Fador's DOS Emulator is a multiplatform MS-DOS emulator written in modern C++20.
 - **Interactive Debugger and CLI Tooling:** Single-step execution, one-line instruction tracing with raw bytes and register snapshots, register and memory inspection, disassembly, inline assembly, `--exec` for one-shot assembly execution, and `--stop-after`, `--stop-after-debugger`, `--instruction-trace`, and `--dump-on-exit` state dumps.
 - **Host SIMD:** Frame conversion (mode 13h, Mode X, 16-colour planar, VBE 8/15/16/24/32bpp), audio mixing/conversion and REP STOS fills use kernels chosen at startup from the host CPU's features (CPUID/XGETBV: SSE2, SSE4, AVX2; NEON on ARM64), with a portable scalar fallback. The build itself stays at the baseline ISA. See [Host SIMD](#host-simd).
 - **Benchmark Modes and Profiles:** Built-in `decoder-loop`, `rep-movsb`, `rep-movsd` and `rep-stosd` benchmarks for interpreter hot paths, host-SIMD kernel benchmarks (`render-*`, `audio-mix`, `mem-fill`), plus fixed-workload DOS programs (`tests/perf`) that report guest MIPS for integer, memory, x87, call, string, VGA and 16-bit real-mode code.
-- **Emulated Time:** One virtual clock drives the PIT, RTC, Sound Blaster, OPL timers, PC speaker and the port 61h refresh bit. By default the guest runs at full host speed while timers stay real-time-correct; `--throttle-*` sets a fixed machine speed and `--deterministic` makes timing a pure function of the executed instructions (see [Emulated time](#emulated-time)).
+- **Emulated Time:** One virtual clock drives the PIT, RTC, Sound Blaster, OPL timers, PC speaker and the port 61h refresh bit. By default the guest runs at full host speed while timers stay real-time-correct; `--throttle-*` sets a fixed machine speed and `--deterministic` makes timing a pure function of the executed instructions' cycle costs; `HLT` and blocking BIOS/DOS calls sleep until the next interrupt; the BIOS/DOS date and time follow emulated time (see [Emulated time](#emulated-time)).
 - **Headless Mode:** `--headless` runs without a window or terminal, with a time limit, PNG screenshots and scripted key presses, for automated testing of DOS programs.
 - **Frontends:** Text-mode terminal rendering by default, with optional SDL rendering when the project is built with SDL2.
 - **Test Coverage:** Custom unit tests cover CPU execution, instruction decoding, assembler/disassembler behavior, BIOS/DOS/DPMI services, memory managers, paging, interrupts, and hardware devices. Differential fuzzers compare integer instructions (`cpu_fuzz`) and x87 instruction sequences (`fpu_fuzz`: 80-bit stack, status/tag words, memory results) against the host CPU.
@@ -124,8 +124,9 @@ run exactly like that too, with interrupts, sound and the headless options.
 | `--sdl` | Force the SDL frontend when SDL2 support is available |
 | `--no-sdl` | Force headless/text-mode execution even in SDL builds |
 | `--throttle-ips=N` | Run at a fixed `N` instructions per second of emulated time; the host sleeps when the guest gets ahead |
-| `--throttle-machine=name` | Run at a fixed machine speed, clock (MHz) times an average cycles-per-instruction estimate: `8088`, `286-12`, `386sx-16`, `386dx-25`, `386dx-33`, `486sx-25`, `486dx-33`, `486dx2-66`, `486dx4-100`, `pentium-60`, `pentium-90`, `pentium-100`, `pentium-133` (aliases `xt`, `286`, `386`, `486`, `pentium`, ...) |
-| `--deterministic` | Emulated time is a function of the executed instructions only (at `486dx2-66` speed, or the `--throttle-*` speed) and never reads the host clock: headless runs, screenshots and `--audio-wav` recordings are reproducible. Execution is not paced |
+| `--throttle-machine=name` | Run at a fixed machine speed: the preset selects the CPU model (cycle table, CPUID; unless `--cpu` is given, then it only sets the MHz and warns on a mismatch) and its clock: `8088`, `286-12`, `386sx-16`, `386dx-25`, `386dx-33`, `486sx-25`, `486dx-33`, `486dx2-66`, `486dx4-100`, `pentium-60`, `pentium-90`, `pentium-100`, `pentium-133`, `pentiumpro-150`, `pentiumpro-200` (aliases `xt`, `286`, `386`, `486`, `486dx4`, `pentium`, `ppro`, ...). See the table below |
+| `--deterministic` | Emulated time = guest clock cycles / CPU clock (the `--cpu` model's nominal clock, or the `--throttle-*` speed) and never reads the host clock: headless runs, screenshots and `--audio-wav` recordings are reproducible. Execution is not paced; the date and time start at 1994-06-01 12:00:00 |
+| `--start-time=YYYY-MM-DDTHH:MM:SS` | Date and time the emulated RTC and DOS clock start at (default: host local time, or the fixed `--deterministic` start) |
 | `--stop-after=N` | Stop execution after N instruction cycles and dump CPU state |
 | `--stop-after-debugger` | When `--stop-after` triggers, enter the interactive debugger at that exact instruction instead of exiting |
 | `--dump-on-exit` | Dump CPU state when the program terminates |
@@ -150,19 +151,70 @@ All timed devices read one virtual clock (`src/hw/VirtualClock.hpp`): the
 8254 PIT (IRQ 0, speaker, port 61h refresh toggle every ~15 us and OUT2),
 the RTC (seconds, UIP, periodic/alarm/update-ended IRQ 8), Sound Blaster
 DMA, OPL timers, the PC speaker and audio generation (44100 frames per
-emulated second). Virtual time advances with the instructions the CPU
-retires, so a timer read in the middle of a loop sees time move. How it
-relates to the host clock depends on the pacing mode:
+emulated second). Virtual time advances with the guest clock cycles the
+CPU model charges per instruction (`CPU::cycles()`, see `--cpu`), so a
+timer read in the middle of a loop sees time move. `src/hw/MachineTime.*`
+connects the CPU model to the clock. How emulated time relates to the host
+clock depends on the pacing mode:
 
 | Mode | Selected by | Behaviour |
 |------|-------------|-----------|
-| auto | default | The guest runs as fast as the host allows; the instruction rate is measured continuously so emulated time tracks the wall clock. After a host stall (debugger, window drag) emulated time jumps by at most 20 ms. With an audio device, the audio queue level nudges the clock so it neither underruns nor grows. |
-| fixed | `--throttle-ips`, `--throttle-machine` | Emulated time = instructions x cycles per instruction / clock rate; the host sleeps while emulated time is ahead of the wall clock. |
-| deterministic | `--deterministic` | Emulated time = instructions x cycles per instruction / clock rate; the host clock is never read and execution is not paced. A guest that is only waiting (blocking `INT 16h`/DOS input, the shell prompt) lets 1 ms pass per poll. `--max-seconds`, `--keys` and `--screenshot-at` count emulated seconds. |
+| auto | default | The guest runs as fast as the host allows; its rate is measured continuously so emulated time tracks the wall clock. After a host stall (debugger, window drag) emulated time jumps by at most 20 ms. With an audio device, the audio queue level nudges the clock so it neither underruns nor grows. |
+| fixed | `--throttle-ips`, `--throttle-machine` | Emulated time = guest cycles / clock rate (`--throttle-ips`: instructions / N); the host sleeps while emulated time is ahead of the wall clock. |
+| deterministic | `--deterministic` | Emulated time = guest cycles / clock rate; the host clock is never read and execution is not paced. `--max-seconds`, `--keys` and `--screenshot-at` count emulated seconds. |
 
-At exit the emulator logs the emulated time and the BIOS tick count
-(18.2 per emulated second) next to the host time and MIPS. The RTC's date
-and time start from the host clock.
+Machine presets (`--throttle-machine`) and the CPU model they select. The
+emulator models 386 and later CPUs: older and slower parts use the 386
+cycle table with the clock divided by a correction (their cycles per
+instruction relative to a 386: 8088 ~14.5, 286 ~10, 386SX ~5 against 4.5),
+and they still execute the 386 instruction set.
+
+| Preset | CPU model | Guest clock |
+|--------|-----------|-------------|
+| `8088` | `386` | 4.77 MHz / 3.2 |
+| `286-12` | `386` | 12 MHz / 2.2 |
+| `386sx-16` | `386` | 16 MHz / 1.1 |
+| `386dx-25`, `386dx-33` | `386` | 25, 33 MHz |
+| `486sx-25`, `486dx-33` | `486` | 25, 33 MHz |
+| `486dx2-66` | `486dx2` | 66 MHz |
+| `486dx4-100` | `486dx4` | 100 MHz |
+| `pentium-60` ... `pentium-133` | `pentium` | 60, 90, 100, 133 MHz |
+| `pentiumpro-150`, `pentiumpro-200` | `pentiumpro` | 150, 200 MHz |
+
+Without a preset the model runs at its nominal clock (`386`/`486`: 33 MHz,
+`486dx2`: 66, `486dx4` and `pentium`: 100, `pentiumpro`: 200).
+
+- **Time-stamp counter:** `RDTSC` (and MSR 10h) returns emulated
+  nanoseconds x the core clock (the preset's MHz or the model's nominal
+  clock), in every pacing mode, made strictly increasing, plus the `WRMSR`
+  offset. In fixed and deterministic pacing it equals the guest cycle count
+  while the guest does not wait; in auto pacing the guest runs at host
+  speed but a program calibrating `RDTSC` against the PIT still measures
+  the nominal MHz. The TSC keeps counting while the CPU is halted.
+- **Waiting:** `HLT` with interrupts enabled sleeps until an interrupt is
+  delivered: emulated time jumps to the next device event (PIT IRQ 0, RTC,
+  Sound Blaster block end; at most 1 ms per step) in fixed and
+  deterministic pacing, and the host thread sleeps (<= 1 ms at a time) in
+  auto pacing. `HLT` with interrupts disabled logs a warning and continues.
+  Blocking BIOS/DOS input (`INT 16h` AH=00h, `INT 21h` AH=01h/07h/08h/0Ah),
+  `INT 21h` AH=06h/0Bh polls, `INT 28h` and `INT 2Fh` AX=1680h wait the
+  same way when the guest calls them in a tight loop (less than 2048
+  cycles of work in between). Halted time does not add to `CPU::cycles()`.
+- **HLE services** are charged nominal cycles (`INT 10h` 300, `INT 13h`
+  1000, `INT 16h` 100, `INT 21h` 500) for the BIOS/DOS code they replace.
+- **Date and time:** the RTC starts at the host's local time (fixed
+  1994-06-01 12:00:00 with `--deterministic`, or `--start-time`) and then
+  runs on emulated time. The BIOS loads the tick count at 0040:006Ch from
+  it; INT 8 wraps the count at midnight and sets the midnight flag.
+  `INT 1Ah` AH=00h/01h use the tick count, AH=02h-05h the RTC. DOS (AH=2Ah
+  -2Dh) works like MS-DOS's CLOCK$ driver: the time of day is the tick
+  count, the date advances on the midnight flag, and setting the date or
+  time also sets the RTC. Host file timestamps are kept as they are.
+
+At exit the emulator logs the emulated time, guest cycles, time spent
+halted and the BIOS tick count next to the host time and MIPS.
+`tests/timing/check_time.py build/fadors_emu` runs end-to-end checks
+(RDTSC against the PIT, HLT, DOS clock, reproducibility).
 
 ### Examples
 ```bash
@@ -180,8 +232,12 @@ and time start from the host clock.
 # Run with an execution throttle of about 4 MIPS
 ./fadors_emu --throttle-ips=4000000 program.exe
 
-# Run at 386DX/33 speed (33 MHz, ~4.5 cycles per instruction)
+# Run as a 386DX/33 (386 model and cycle table at 33 MHz)
 ./fadors_emu --throttle-machine=386dx-33 program.exe
+
+# Reproducible run on a Pentium 133 with a given date and time
+./fadors_emu --headless --deterministic --throttle-machine=pentium-133 \
+    --start-time=1996-03-01T09:00:00 --screenshot=shot.png program.exe
 
 # Reproducible headless run: same screenshot and recording every time
 ./fadors_emu --headless --deterministic --max-seconds=20 --keys=5:ENTER \

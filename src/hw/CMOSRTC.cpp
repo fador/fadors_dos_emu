@@ -3,7 +3,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <ctime>
 
 namespace fador::hw {
 
@@ -136,25 +135,39 @@ void CMOSRTC::writeStatusB(uint8_t value) {
 //  time synchronisation
 // ────────────────────────────────────────────────────────────
 
-void CMOSRTC::syncTime() {
-  auto now = std::chrono::system_clock::now();
-  std::time_t t = std::chrono::system_clock::to_time_t(now);
-  std::tm lt{};
-#ifdef _WIN32
-  localtime_s(&lt, &t);
-#else
-  localtime_r(&t, &lt);
-#endif
+void CMOSRTC::syncTime() { setDateTime(hostLocalTime()); }
 
+void CMOSRTC::setDateTime(const CivilDateTime &dt) {
+  sync(); // pending updates happen before the new value is stored
   const uint8_t b = m_cmosRAM[0x0B];
-  m_cmosRAM[0x00] = encode(lt.tm_sec, b);
-  m_cmosRAM[0x02] = encode(lt.tm_min, b);
-  m_cmosRAM[0x04] = hourRaw(lt.tm_hour, b);
-  m_cmosRAM[0x06] = encode(lt.tm_wday + 1, b); // day of week (1=Sun)
-  m_cmosRAM[0x07] = encode(lt.tm_mday, b);
-  m_cmosRAM[0x08] = encode(lt.tm_mon + 1, b);
-  m_cmosRAM[0x09] = encode((lt.tm_year + 1900) % 100, b);
-  m_cmosRAM[0x32] = encode((lt.tm_year + 1900) / 100, b); // century
+  const int64_t days = daysFromCivil(dt.year, dt.month, dt.day);
+  m_cmosRAM[0x00] = encode(dt.second, b);
+  m_cmosRAM[0x02] = encode(dt.minute, b);
+  m_cmosRAM[0x04] = hourRaw(dt.hour, b);
+  m_cmosRAM[0x06] = encode(weekdayFromDays(days) + 1, b); // 1 = Sunday
+  m_cmosRAM[0x07] = encode(dt.day, b);
+  m_cmosRAM[0x08] = encode(dt.month, b);
+  m_cmosRAM[0x09] = encode(dt.year % 100, b);
+  m_cmosRAM[0x32] = encode(dt.year / 100, b); // century
+  recomputeNextIrq();
+}
+
+CivilDateTime CMOSRTC::dateTime() {
+  sync();
+  const uint8_t b = m_cmosRAM[0x0B];
+  CivilDateTime dt;
+  dt.year = decode(m_cmosRAM[0x32], b) * 100 + decode(m_cmosRAM[0x09], b);
+  dt.month = decode(m_cmosRAM[0x08], b);
+  dt.day = decode(m_cmosRAM[0x07], b);
+  dt.hour = hour24(m_cmosRAM[0x04], b);
+  dt.minute = decode(m_cmosRAM[0x02], b);
+  dt.second = decode(m_cmosRAM[0x00], b);
+  return dt;
+}
+
+void CMOSRTC::setDaylightSaving(bool enabled) {
+  m_cmosRAM[0x0B] = static_cast<uint8_t>((m_cmosRAM[0x0B] & ~0x01) |
+                                         (enabled ? 0x01 : 0x00));
 }
 
 void CMOSRTC::advanceTime(std::chrono::nanoseconds elapsed) {

@@ -2917,7 +2917,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
   case 0xF4: {
     uint16_t haltCs = m_cpu.getSegReg(CS);
     uint32_t haltEip = m_cpu.getEIP() - 1;
-    LOG_INFO("HLT encountered at ", std::hex, haltCs, ":", haltEip);
+    LOG_DEBUG("HLT at ", std::hex, haltCs, ":", haltEip);
     // DPMI thunk error bailout: if HLT fires inside the thunk code and
     // there's an outermost dpmiStackSwitch frame (the app's DPMI call),
     // the thunk has entered its fatal error path. Restore the app's
@@ -2951,8 +2951,10 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
         // Clear all HLE frames — the DPMI call is aborted
         while (m_cpu.hleStackSize() > 0)
           m_cpu.popHLEFrame();
+        break;
       }
     }
+    m_cpu.halt(); // wait for the next interrupt (host callback)
     break;
   }
 

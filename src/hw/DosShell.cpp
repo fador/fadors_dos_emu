@@ -471,8 +471,7 @@ void DosShell::handleTab(std::string& line)
 std::string DosShell::buildPrompt()
 {
     std::string result;
-    auto now = std::time(nullptr);
-    auto* lt = std::localtime(&now);
+    const CivilDateTime now = m_dos.readClock().dateTime;
 
     for (size_t i = 0; i < m_promptTemplate.size(); ++i) {
         if (m_promptTemplate[i] == '$' && i + 1 < m_promptTemplate.size()) {
@@ -485,14 +484,14 @@ std::string DosShell::buildPrompt()
             case 'D': {
                 char buf[32];
                 std::snprintf(buf, sizeof(buf), "%02d-%02d-%04d",
-                              lt->tm_mon + 1, lt->tm_mday, lt->tm_year + 1900);
+                              now.month, now.day, now.year);
                 result += buf;
                 break;
             }
             case 'T': {
                 char buf[32];
                 std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d",
-                              lt->tm_hour, lt->tm_min, lt->tm_sec);
+                              now.hour, now.minute, now.second);
                 result += buf;
                 break;
             }
@@ -1035,23 +1034,23 @@ int DosShell::cmdVol(const ParsedCommand&)
 
 int DosShell::cmdDate(const ParsedCommand&)
 {
-    auto now = std::time(nullptr);
-    auto* lt = std::localtime(&now);
+    const auto now = m_dos.readClock();
     const char* days[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
     char buf[64];
     std::snprintf(buf, sizeof(buf), "Current date is %s %02d-%02d-%04d",
-                  days[lt->tm_wday], lt->tm_mon + 1, lt->tm_mday, lt->tm_year + 1900);
+                  days[now.weekday], now.dateTime.month, now.dateTime.day,
+                  now.dateTime.year);
     printLine(buf);
     return 0;
 }
 
 int DosShell::cmdTime(const ParsedCommand&)
 {
-    auto now = std::time(nullptr);
-    auto* lt = std::localtime(&now);
+    const auto now = m_dos.readClock();
     char buf[64];
     std::snprintf(buf, sizeof(buf), "Current time is %02d:%02d:%02d.%02d",
-                  lt->tm_hour, lt->tm_min, lt->tm_sec, 0);
+                  now.dateTime.hour, now.dateTime.minute, now.dateTime.second,
+                  now.hundredths);
     printLine(buf);
     return 0;
 }

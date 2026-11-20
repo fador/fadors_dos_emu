@@ -1,14 +1,24 @@
 // Virtual time base, 8254 PIT modes and MC146818 RTC timing.
 #include "test_framework.hpp"
+#include "cpu/CPU.hpp"
+#include "cpu/InstructionDecoder.hpp"
+#include "hw/BIOS.hpp"
 #include "hw/CMOSRTC.hpp"
+#include "hw/CivilTime.hpp"
+#include "hw/DOS.hpp"
+#include "hw/IOBus.hpp"
 #include "hw/KeyboardController.hpp"
+#include "hw/MachineTime.hpp"
+#include "hw/PIC8259.hpp"
 #include "hw/PIT8254.hpp"
 #include "hw/VirtualClock.hpp"
+#include "memory/MemoryBus.hpp"
 
 #include <cstdint>
 #include <vector>
 
 using namespace fador::hw;
+namespace cpu = fador::cpu;
 
 namespace {
 
@@ -765,4 +775,510 @@ TEST_CASE("CMOSRTC: leap years", "[Timing][CMOS]") {
   r.ns += 86400ULL * 1000000000ULL;
   REQUIRE(rtcRead(r.rtc, 0x07) == 0x01);
   REQUIRE(rtcRead(r.rtc, 0x08) == 0x03);
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  CPU model <-> emulated time (MachineTime)
+// ══════════════════════════════════════════════════════════════════
+
+TEST_CASE("MachineTime: presets select the CPU model and its clock",
+          "[Timing][Model]") {
+  using cpu::CpuModelId;
+  SECTION("every preset maps to a CPU model") {
+    for (const char *name :
+         {"8088", "286-12", "386sx-16", "386dx-25", "386dx-33", "486sx-25",
+          "486dx-33", "486dx2-66", "486dx4-100", "pentium-60", "pentium-90",
+          "pentium-100", "pentium-133", "pentiumpro-150", "pentiumpro-200"}) {
+      const auto p = findMachinePreset(name);
+      REQUIRE(p.has_value());
+      REQUIRE(presetCpuModel(*p).has_value());
+      REQUIRE(p->cycleScale >= 1.0);
+    }
+    REQUIRE(*presetCpuModel(*findMachinePreset("486dx2-66")) ==
+            CpuModelId::I486DX2);
+    REQUIRE(*presetCpuModel(*findMachinePreset("486dx-33")) ==
+            CpuModelId::I486DX);
+    REQUIRE(*presetCpuModel(*findMachinePreset("386dx-25")) ==
+            CpuModelId::I386DX);
+    REQUIRE(*presetCpuModel(*findMachinePreset("486dx4")) ==
+            CpuModelId::I486DX4);
+    REQUIRE(*presetCpuModel(*findMachinePreset("pentium-133")) ==
+            CpuModelId::Pentium);
+    REQUIRE(*presetCpuModel(*findMachinePreset("ppro")) ==
+            CpuModelId::PentiumPro);
+  }
+
+  SECTION("a preset alone selects model, clock and fixed pacing") {
+    SpeedOptions o;
+    o.preset = findMachinePreset("486dx2-66");
+    const SpeedPlan plan = planSpeed(o);
+    REQUIRE(plan.model == CpuModelId::I486DX2);
+    REQUIRE(plan.pacing == VirtualClock::Pacing::Fixed);
+    REQUIRE(plan.workHz == 66e6);
+    REQUIRE(plan.tscHz == 66000000);
+    REQUIRE(!plan.countInstructions);
+    REQUIRE(plan.warnings.empty());
+  }
+
+  SECTION("pre-386 presets run the 386 table at a corrected clock") {
+    SpeedOptions o;
+    o.preset = findMachinePreset("xt");
+    const SpeedPlan plan = planSpeed(o);
+    REQUIRE(plan.model == CpuModelId::I386DX);
+    REQUIRE(plan.workHz == 4.77e6 / 3.2);
+    o.preset = findMachinePreset("286");
+    REQUIRE(planSpeed(o).workHz == 12e6 / 2.2);
+  }
+
+  SECTION("an explicit --cpu wins; the preset only sets the MHz") {
+    SpeedOptions o;
+    o.cpu = CpuModelId::I386DX;
+    o.preset = findMachinePreset("pentium-90");
+    const SpeedPlan plan = planSpeed(o);
+    REQUIRE(plan.model == CpuModelId::I386DX);
+    REQUIRE(plan.workHz == 90e6);
+    REQUIRE(plan.warnings.size() == 1);
+    o.cpu = CpuModelId::Pentium; // matching model: no warning
+    REQUIRE(planSpeed(o).warnings.empty());
+  }
+
+  SECTION("no speed option: the model's nominal clock, auto pacing") {
+    SpeedOptions o;
+    SpeedPlan plan = planSpeed(o);
+    REQUIRE(plan.model == cpu::kDefaultCpuModel);
+    REQUIRE(plan.pacing == VirtualClock::Pacing::Auto);
+    REQUIRE(plan.workHz == cpu::cpuModel(plan.model).clockHz);
+    o.cpu = CpuModelId::PentiumPro;
+    o.deterministic = true;
+    plan = planSpeed(o);
+    REQUIRE(plan.pacing == VirtualClock::Pacing::Deterministic);
+    REQUIRE(plan.workHz == 200e6);
+    REQUIRE(plan.tscHz == 200000000);
+  }
+
+  SECTION("--throttle-ips paces by instructions") {
+    SpeedOptions o;
+    o.throttleIps = 1000000;
+    const SpeedPlan plan = planSpeed(o);
+    REQUIRE(plan.countInstructions);
+    REQUIRE(plan.workHz == 1e6);
+    REQUIRE(plan.pacing == VirtualClock::Pacing::Fixed);
+    REQUIRE(plan.tscHz == cpu::cpuModel(plan.model).clockHz);
+  }
+}
+
+TEST_CASE("VirtualClock: waiting for an event", "[Timing]") {
+  uint64_t host = 0;
+  std::vector<uint64_t> sleeps;
+  uint64_t counter = 0;
+  VirtualClock clock;
+  clock.setHostClock([&] { return host; },
+                     [&](uint64_t ns) {
+                       sleeps.push_back(ns);
+                       host += ns;
+                     });
+  clock.attachInstructionCounter(&counter);
+  clock.setCyclesPerInstruction(1.0);
+  clock.setCpuHz(100e6);
+
+  SECTION("deterministic: time jumps to the deadline, never back") {
+    clock.setPacing(VirtualClock::Pacing::Deterministic);
+    clock.start();
+    counter += 100; // 1 us
+    clock.waitUntil(5'000'000);
+    REQUIRE(clock.nowNs() == 5'000'000);
+    clock.waitUntil(1'000);
+    REQUIRE(clock.nowNs() == 5'000'000);
+    counter += 100;
+    REQUIRE(clock.nowNs() == 5'001'000);
+    REQUIRE(sleeps.empty());
+  }
+
+  SECTION("fixed: time jumps and the host sleeps until the wall catches up") {
+    clock.setPacing(VirtualClock::Pacing::Fixed);
+    clock.start();
+    clock.waitUntil(2'000'000);
+    REQUIRE(clock.nowNs() == 2'000'000);
+    REQUIRE(sleeps.size() == 1);
+    REQUIRE(sleeps[0] == 2'000'000);
+  }
+
+  SECTION("auto: the host sleeps at most kMaxIdleSleepNs, time follows it") {
+    clock.setPacing(VirtualClock::Pacing::Auto);
+    clock.start();
+    clock.waitUntil(5'000'000);
+    REQUIRE(sleeps.size() == 1);
+    REQUIRE(sleeps[0] == VirtualClock::kMaxIdleSleepNs);
+    REQUIRE(clock.nowNs() == VirtualClock::kMaxIdleSleepNs);
+    sleeps.clear();
+    clock.waitUntil(clock.nowNs()); // already due: no sleep
+    REQUIRE(sleeps.empty());
+  }
+
+  SECTION("noteIdle: only calls with little work in between are waiting") {
+    clock.setIdleWorkThreshold(2048);
+    clock.setPacing(VirtualClock::Pacing::Deterministic);
+    counter += 5000;
+    REQUIRE(!clock.noteIdle());
+    counter += 300;
+    REQUIRE(clock.noteIdle());
+    counter += 3000;
+    REQUIRE(!clock.noteIdle());
+  }
+}
+
+namespace {
+
+// CPU + clock + PIT + PIC with MachineTime hooks like main.cpp's.
+struct HaltRig {
+  cpu::CPU cpu{cpu::CpuModelId::Pentium};
+  VirtualClock clock;
+  MachineTime time{clock, cpu};
+  PIT8254 pit;
+  PIC8259 pic{true};
+  int delivered = 0;
+  bool running = true;
+
+  explicit HaltRig(VirtualClock::Pacing pacing = VirtualClock::Pacing::Deterministic) {
+    SpeedOptions o;
+    o.cpu = cpu::CpuModelId::Pentium;
+    o.deterministic = pacing == VirtualClock::Pacing::Deterministic;
+    time.configure(planSpeed(o));
+    clock.setHostClock([] { return uint64_t{0}; }, [](uint64_t) {});
+    clock.start();
+    pit.setTimeSource(clock.timeSource());
+    pic.write8(0x21, 0x00); // unmask everything
+    time.addWakeSource([this] { return pit.nextIrq0Ns(); });
+    time.setHooks({[this] {
+                     clock.sync();
+                     pit.advanceTo(clock.nowNs());
+                     while (pit.checkPendingIRQ0())
+                       pic.raiseIRQ(0);
+                   },
+                   [this] {
+                     if (!cpu.hardwareInterruptsEnabled() ||
+                         pic.getPendingInterrupt() < 0)
+                       return false;
+                     pic.acknowledgeInterrupt();
+                     pic.write8(0x20, 0x20); // the ISR's EOI
+                     ++delivered;
+                     return true;
+                   },
+                   [this] { return running; }});
+    cpu.setEFLAGS(cpu.getEFLAGS() | cpu::FLAG_INTERRUPT);
+  }
+};
+
+} // namespace
+
+TEST_CASE("MachineTime: HLT sleeps until the next IRQ 0", "[Timing][HLT]") {
+  SECTION("deterministic: each HLT ends exactly at the PIT edge") {
+    HaltRig rig;
+    rig.cpu.addGuestCycles(1234);
+    for (int i = 1; i <= 100; ++i) {
+      const uint64_t due = rig.pit.nextIrq0Ns();
+      REQUIRE(due > rig.clock.nowNs());
+      rig.cpu.halt();
+      REQUIRE(rig.delivered == i);
+      REQUIRE(rig.clock.nowNs() == due);
+    }
+    // Channel 0 at its default 65536 count: 100 periods.
+    REQUIRE(PIT8254::ticksAt(rig.clock.nowNs()) / 65536 == 100);
+    REQUIRE(rig.time.halts() == 100);
+    REQUIRE(rig.cpu.cycles() == 1234); // waiting is not executed work
+  }
+
+  SECTION("the TSC counts the halted time at the core clock") {
+    HaltRig rig;
+    const uint64_t tsc0 = rig.cpu.readTSC();
+    for (int i = 0; i < 18; ++i)
+      rig.cpu.halt();
+    const uint64_t tsc1 = rig.cpu.readTSC();
+    const double seconds = static_cast<double>(rig.clock.nowNs()) * 1e-9;
+    REQUIRE(std::abs(static_cast<double>(tsc1 - tsc0) / seconds - 100e6) <
+            1e3);
+    REQUIRE(rig.cpu.readTSC() > tsc1); // strictly increasing
+  }
+
+  SECTION("IF=0: HLT does not wait") {
+    HaltRig rig;
+    rig.cpu.setEFLAGS(rig.cpu.getEFLAGS() & ~cpu::FLAG_INTERRUPT);
+    rig.cpu.halt();
+    REQUIRE(rig.clock.nowNs() == 0);
+    REQUIRE(rig.delivered == 0);
+    REQUIRE(rig.time.haltsWithInterruptsDisabled() == 1);
+  }
+
+  SECTION("an STI shadow ends with the HLT") {
+    HaltRig rig;
+    rig.cpu.beginInterruptShadow();
+    rig.cpu.halt();
+    REQUIRE(rig.delivered == 1);
+  }
+
+  SECTION("the run stopping ends the wait") {
+    HaltRig rig;
+    rig.pic.write8(0x21, 0xFF); // everything masked: nothing can wake it
+    int calls = 0;
+    rig.time.setHooks({[] {}, [] { return false; },
+                       [&] { return ++calls < 5; }});
+    rig.cpu.halt();
+    REQUIRE(calls == 5);
+    REQUIRE(rig.clock.nowNs() == 4 * MachineTime::kWaitSliceNs);
+  }
+
+  SECTION("INT 15h AH=86h style delay: time passes, IRQs wait") {
+    HaltRig rig;
+    rig.time.delay(200'000'000); // 200 ms: several PIT periods
+    REQUIRE(rig.clock.nowNs() == 200'000'000);
+    REQUIRE(rig.delivered == 0);
+    REQUIRE(rig.pic.getPendingInterrupt() >= 0);
+  }
+
+  SECTION("idle: only a waiting guest moves time to the next event") {
+    HaltRig rig;
+    rig.cpu.addGuestCycles(100000);
+    rig.time.guestIdle(); // work since the last idle call: no wait
+    REQUIRE(rig.clock.nowNs() == 1000000); // 100000 cycles at 100 MHz
+    rig.cpu.addGuestCycles(200);
+    rig.time.guestIdle();
+    REQUIRE(rig.clock.nowNs() == 1002000 + MachineTime::kWaitSliceNs);
+  }
+}
+
+TEST_CASE("MachineTime: the TSC is emulated time at the core clock",
+          "[Timing][TSC]") {
+  cpu::CPU c(cpu::CpuModelId::Pentium);
+  VirtualClock clock;
+  MachineTime time(clock, c);
+  SpeedOptions o;
+  o.preset = findMachinePreset("pentium-133");
+  o.deterministic = true;
+  time.configure(planSpeed(o));
+  clock.start();
+  const uint64_t t0 = c.readTSC();
+  c.addGuestCycles(133000);
+  REQUIRE(clock.nowNs() == 1000000);
+  REQUIRE(c.readTSC() - t0 == 133000);
+  clock.advanceNs(1000000); // time without work (an idle wait)
+  REQUIRE(c.readTSC() - t0 == 266000);
+  c.writeTSC(5);
+  REQUIRE(c.readTSC() == 5);
+  REQUIRE(c.readTSC() == 6); // same instant: still increasing
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  Guest wall clock: RTC, BIOS tick count, DOS date/time
+// ══════════════════════════════════════════════════════════════════
+
+TEST_CASE("CivilTime: calendar arithmetic and --start-time parsing",
+          "[Timing][Clock]") {
+  REQUIRE(daysFromCivil(1970, 1, 1) == 0);
+  REQUIRE(weekdayFromDays(daysFromCivil(1994, 6, 1)) == 3);   // Wednesday
+  REQUIRE(weekdayFromDays(daysFromCivil(1980, 1, 1)) == 2);   // Tuesday
+  REQUIRE(weekdayFromDays(daysFromCivil(2000, 2, 29)) == 2);  // Tuesday
+  for (int64_t d = daysFromCivil(1979, 12, 1); d < daysFromCivil(2101, 1, 1);
+       d += 17) {
+    int y = 0, m = 0, dd = 0;
+    civilFromDays(d, y, m, dd);
+    REQUIRE(daysFromCivil(y, m, dd) == d);
+  }
+  REQUIRE(biosTicksAt(24, 0, 0) == kBiosTicksPerDay);
+  REQUIRE(biosTicksAt(12, 0, 0) == kBiosTicksPerDay / 2);
+  const auto t = parseCivilDateTime("2001-02-28T08:30:05");
+  REQUIRE(t.has_value());
+  REQUIRE((*t == CivilDateTime{2001, 2, 28, 8, 30, 5}));
+  REQUIRE((*parseCivilDateTime("1999-12-31") ==
+           CivilDateTime{1999, 12, 31, 0, 0, 0}));
+  REQUIRE(!parseCivilDateTime("2001-02-29T00:00:00").has_value());
+  REQUIRE(!parseCivilDateTime("1979-12-31T00:00:00").has_value());
+  REQUIRE(!parseCivilDateTime("2001-02-28T24:00:00").has_value());
+  REQUIRE(!parseCivilDateTime("2001-2-28").has_value());
+}
+
+TEST_CASE("CMOSRTC: setDateTime/dateTime in every register format",
+          "[Timing][CMOS]") {
+  for (uint8_t regB : {0x02, 0x00, 0x06, 0x04}) { // 24h/12h, BCD/binary
+    RtcRig rig;
+    rtcWrite(rig.rtc, 0x0B, regB);
+    rig.rtc.setDateTime({1999, 12, 31, 23, 59, 58});
+    REQUIRE((rig.rtc.dateTime() == CivilDateTime{1999, 12, 31, 23, 59, 58}));
+    rig.ns += 2'100'000'000; // the clock keeps running
+    REQUIRE((rig.rtc.dateTime() == CivilDateTime{2000, 1, 1, 0, 0, 0}));
+    // Day of week register: 2000-01-01 was a Saturday (7).
+    const uint8_t dow = rtcRead(rig.rtc, 0x06);
+    REQUIRE(dow == 7);
+  }
+}
+
+namespace {
+
+struct ClockRig {
+  cpu::CPU cpu;
+  fador::memory::MemoryBus mem;
+  KeyboardController kbd;
+  PIT8254 pit;
+  PIC8259 pic{true};
+  CMOSRTC rtc;
+  uint64_t ns = 0;
+  BIOS bios{cpu, mem, kbd, pit, pic};
+  DOS dos{cpu, mem};
+  ClockRig() {
+    bios.initialize();
+    dos.initialize();
+    rtc.setTimeSource([this] { return ns; });
+    bios.setCMOS(&rtc);
+    dos.setRTC(&rtc);
+    rtc.setDateTime(kDeterministicStartTime);
+    bios.loadTickCountFromRTC();
+    dos.setDate(1994, 6, 1);
+  }
+  bool carry() const { return (cpu.getEFLAGS() & cpu::FLAG_CARRY) != 0; }
+  void int1A(uint8_t ah) {
+    cpu.setReg8(cpu::AH, ah);
+    bios.handleInterrupt(0x1A);
+  }
+  void int21(uint8_t ah) {
+    cpu.setReg8(cpu::AH, ah);
+    dos.handleInterrupt(0x21);
+  }
+};
+
+} // namespace
+
+TEST_CASE("BIOS: tick count, midnight flag and INT 1Ah", "[Timing][BIOS]") {
+  ClockRig rig;
+  SECTION("POST loads the tick count from the RTC") {
+    REQUIRE(rig.mem.read32(0x46C) == kBiosTicksPerDay / 2);
+    rig.int1A(0x00);
+    REQUIRE((static_cast<uint32_t>(rig.cpu.getReg16(cpu::CX)) << 16 |
+             rig.cpu.getReg16(cpu::DX)) == rig.mem.read32(0x46C));
+    REQUIRE(rig.cpu.getReg8(cpu::AL) == 0);
+  }
+
+  SECTION("the tick count wraps at midnight and AH=00h reports it once") {
+    rig.mem.write32(0x46C, kBiosTicksPerDay - 2);
+    rig.bios.advanceTickCount();
+    REQUIRE(rig.mem.read32(0x46C) == kBiosTicksPerDay - 1);
+    rig.bios.advanceTickCount();
+    REQUIRE(rig.mem.read32(0x46C) == 0);
+    REQUIRE(rig.mem.read8(0x470) == 1);
+    rig.int1A(0x00);
+    REQUIRE(rig.cpu.getReg8(cpu::AL) == 1);
+    rig.int1A(0x00);
+    REQUIRE(rig.cpu.getReg8(cpu::AL) == 0);
+  }
+
+  SECTION("the ROM INT 8 handler wraps the count too") {
+    IOBus iobus;
+    cpu::InstructionDecoder decoder(rig.cpu, rig.mem, iobus, rig.bios,
+                                    rig.dos);
+    rig.mem.write32(0x46C, kBiosTicksPerDay - 1);
+    decoder.loadSegment(cpu::SS, 0x1000);
+    rig.cpu.setReg16(cpu::SP, 0x0100);
+    decoder.loadSegment(cpu::CS, 0x2000);
+    rig.cpu.setEIP(0x0010);
+    rig.mem.write8(0x20010, 0x90);
+    rig.cpu.push16(0x0002);
+    rig.cpu.push16(0x2000);
+    rig.cpu.push16(0x0010);
+    decoder.loadSegment(cpu::CS, rig.mem.read16(0x08 * 4 + 2));
+    rig.cpu.setEIP(rig.mem.read16(0x08 * 4));
+    for (int i = 0; i < 64 && rig.cpu.getSegReg(cpu::CS) != 0x2000; ++i)
+      decoder.step();
+    REQUIRE(rig.cpu.getSegReg(cpu::CS) == 0x2000);
+    REQUIRE(rig.mem.read32(0x46C) == 0);
+    REQUIRE(rig.mem.read8(0x470) == 1);
+  }
+
+  SECTION("AH=02h/04h read the RTC; AH=03h/05h set it") {
+    rig.ns = 3'500'000'000; // 3.5 s later
+    rig.int1A(0x02);
+    REQUIRE(!rig.carry());
+    REQUIRE(rig.cpu.getReg8(cpu::CH) == 0x12);
+    REQUIRE(rig.cpu.getReg8(cpu::CL) == 0x00);
+    REQUIRE(rig.cpu.getReg8(cpu::DH) == 0x03);
+    rig.int1A(0x04);
+    REQUIRE(rig.cpu.getReg16(cpu::CX) == 0x1994);
+    REQUIRE(rig.cpu.getReg16(cpu::DX) == 0x0601);
+    rig.cpu.setReg16(cpu::CX, 0x2359);
+    rig.cpu.setReg16(cpu::DX, 0x5901); // 23:59:59, DST on
+    rig.int1A(0x03);
+    REQUIRE(!rig.carry());
+    rig.cpu.setReg16(cpu::CX, 0x2023);
+    rig.cpu.setReg16(cpu::DX, 0x1231);
+    rig.int1A(0x05);
+    REQUIRE(!rig.carry());
+    rig.ns += 1'000'000'000;
+    REQUIRE((rig.rtc.dateTime() == CivilDateTime{2024, 1, 1, 0, 0, 0}));
+    rig.int1A(0x02);
+    REQUIRE(rig.cpu.getReg8(cpu::DL) == 1);
+    rig.cpu.setReg16(cpu::CX, 0x2460); // invalid
+    rig.int1A(0x03);
+    REQUIRE(rig.carry());
+  }
+}
+
+TEST_CASE("DOS: date and time come from the BIOS tick count",
+          "[Timing][DOS]") {
+  ClockRig rig;
+  SECTION("AH=2Ch/2Ah read the emulated clock") {
+    rig.mem.write32(0x46C, biosTicksAt(12, 34, 56));
+    rig.int21(0x2C);
+    REQUIRE(rig.cpu.getReg8(cpu::CH) == 12);
+    REQUIRE(rig.cpu.getReg8(cpu::CL) == 34);
+    REQUIRE(rig.cpu.getReg8(cpu::DH) == 56);
+    REQUIRE(rig.cpu.getReg8(cpu::DL) < 6);
+    rig.int21(0x2A);
+    REQUIRE(rig.cpu.getReg16(cpu::CX) == 1994);
+    REQUIRE(rig.cpu.getReg8(cpu::DH) == 6);
+    REQUIRE(rig.cpu.getReg8(cpu::DL) == 1);
+    REQUIRE(rig.cpu.getReg8(cpu::AL) == 3);
+  }
+
+  SECTION("AH=2Dh sets the time; reading it back gives the same second") {
+    for (uint8_t hundredths : {0, 37, 94}) {
+      rig.cpu.setReg16(cpu::CX, 0x0817); // 08:23
+      rig.cpu.setReg16(cpu::DX, static_cast<uint16_t>(0x2D00 | hundredths));
+      rig.int21(0x2D);
+      REQUIRE(rig.cpu.getReg8(cpu::AL) == 0);
+      rig.int1A(0x00); // INT 1Ah AH=00h sees the same count
+      const uint32_t ticks = static_cast<uint32_t>(rig.cpu.getReg16(cpu::CX))
+                                 << 16 |
+                             rig.cpu.getReg16(cpu::DX);
+      REQUIRE(ticks == rig.mem.read32(0x46C));
+      rig.int21(0x2C);
+      REQUIRE(rig.cpu.getReg16(cpu::CX) == 0x0817);
+      const int cs = rig.cpu.getReg8(cpu::DH) * 100 + rig.cpu.getReg8(cpu::DL);
+      REQUIRE(cs >= 45 * 100 + hundredths);
+      REQUIRE(cs <= 45 * 100 + hundredths + 5); // one tick is 5.5/100 s
+    }
+    // The RTC was set too (DOS 3.3+).
+    REQUIRE(rig.rtc.dateTime().hour == 8);
+    REQUIRE(rig.rtc.dateTime().minute == 23);
+    rig.cpu.setReg16(cpu::CX, 0x1800); // 24:00 is invalid
+    rig.cpu.setReg16(cpu::DX, 0);
+    rig.int21(0x2D);
+    REQUIRE(rig.cpu.getReg8(cpu::AL) == 0xFF);
+  }
+
+  SECTION("AH=2Bh sets the date; midnight advances it") {
+    rig.cpu.setReg16(cpu::CX, 1999);
+    rig.cpu.setReg16(cpu::DX, 0x0C1F); // 12-31
+    rig.int21(0x2B);
+    REQUIRE(rig.cpu.getReg8(cpu::AL) == 0);
+    REQUIRE(rig.rtc.dateTime().year == 1999);
+    rig.mem.write32(0x46C, kBiosTicksPerDay - 1);
+    rig.bios.advanceTickCount();
+    rig.int21(0x2A);
+    REQUIRE(rig.cpu.getReg16(cpu::CX) == 2000);
+    REQUIRE(rig.cpu.getReg16(cpu::DX) == 0x0101);
+    REQUIRE(rig.cpu.getReg8(cpu::AL) == 6); // Saturday
+    rig.int21(0x2A);                         // only one day per midnight
+    REQUIRE(rig.cpu.getReg16(cpu::DX) == 0x0101);
+    rig.cpu.setReg16(cpu::CX, 1999);
+    rig.cpu.setReg16(cpu::DX, 0x021D); // 1999-02-29 does not exist
+    rig.int21(0x2B);
+    REQUIRE(rig.cpu.getReg8(cpu::AL) == 0xFF);
+  }
 }
