@@ -144,6 +144,7 @@ set(TEST_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_int_asm.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cpu.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cpu_model.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_interpreter_fast_paths.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_debugger.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_dpmi.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_vga_and_irq.cpp"

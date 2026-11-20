@@ -37,7 +37,7 @@ void CPU::setModel(CpuModelId id) {
   m_mulExtraCycles = cost(CycleClass::Mul) - cost(CycleClass::Alu);
   m_divExtraCycles = cost(CycleClass::Div) - cost(CycleClass::Alu);
   ++m_segmentStateVersion; // decoders re-read the cycle table
-  m_eflags = (m_eflags & m_model->eflagsMask) | 0x2u;
+  setEFLAGS((getEFLAGS() & m_model->eflagsMask) | 0x2u);
   setCR(0, (m_cr[0] & (m_model->cr0Mask | m_model->cr0Fixed)) |
                m_model->cr0Fixed);
   setCR(4, m_cr[4] & m_model->cr4Mask);
@@ -57,7 +57,7 @@ void CPU::reset() {
   m_instructionStartEIP = 0xFFF0;
   m_instructionStartCS = 0xF000;
   m_prevInstructionCS = 0xF000;
-  m_eflags = 0x00000002;
+  setEFLAGS(0x00000002);
 
   m_cr.fill(0);
   // ET: a 387-compatible FPU is present (hardwired on the 486 and later).

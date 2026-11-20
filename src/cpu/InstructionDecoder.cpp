@@ -42,7 +42,7 @@ bool InstructionDecoder::tryFastRepMovs(uint32_t elementSize) {
     return true;
   }
 
-  if ((m_cpu.getEFLAGS() & FLAG_DIRECTION) != 0) {
+  if (m_cpu.directionFlag()) {
     return false;
   }
 
@@ -51,7 +51,7 @@ bool InstructionDecoder::tryFastRepMovs(uint32_t elementSize) {
   uint8_t srcSeg = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
   uint32_t srcOff = m_hasPrefix67 ? m_cpu.getReg32(ESI) : m_cpu.getReg16(SI);
   uint32_t dstOff = m_hasPrefix67 ? m_cpu.getReg32(EDI) : m_cpu.getReg16(DI);
-  bool decrement = (m_cpu.getEFLAGS() & FLAG_DIRECTION) != 0;
+  bool decrement = m_cpu.directionFlag();
   uint32_t srcStart = srcOff;
   uint32_t dstStart = dstOff;
   uint64_t startSpan =
@@ -121,7 +121,7 @@ bool InstructionDecoder::tryFastRepStos(uint32_t elementSize) {
       m_hasPrefix67 ? m_cpu.getReg32(ECX) : m_cpu.getReg16(CX);
   if (count == 0)
     return true;
-  if ((m_cpu.getEFLAGS() & FLAG_DIRECTION) != 0)
+  if (m_cpu.directionFlag())
     return false;
 
   constexpr uint32_t MAX_REP_BATCH = 4096;
@@ -353,63 +353,57 @@ void InstructionDecoder::writeModRM8(const ModRM &modrm, uint8_t value) {
 
 uint32_t InstructionDecoder::aluOp(uint8_t op, uint32_t dest, uint32_t src,
                                    int size) {
-  // 64-bit intermediates so the carry out of a 32-bit operation is not lost
-  const uint64_t mask = (size == 8) ? 0xFFull : (size == 16) ? 0xFFFFull
-                                                             : 0xFFFFFFFFull;
-  const uint64_t msb = 1ull << (size - 1);
-  const uint64_t d = dest & mask;
-  const uint64_t s = src & mask;
-  const uint32_t oldFlags = m_cpu.getEFLAGS();
-  const uint64_t cIn = oldFlags & FLAG_CARRY;
-  uint32_t flags = oldFlags & ~0x08D5u; // clear OF SF ZF AF PF CF
-  uint64_t r = 0;
-
-  switch (op) {
+  // The six arithmetic flags are recorded lazily (see LazyFlags.hpp).
+  const uint32_t msb = 1u << (size - 1);
+  const uint32_t mask = (msb << 1) - 1u;
+  const uint32_t d = dest & mask;
+  const uint32_t s = src & mask;
+  uint32_t r;
+  LazyFlags::Kind kind;
+  switch (op & 7) {
   case 0: // ADD
+    r = d + s;
+    kind = LazyFlags::Add;
+    break;
   case 2: // ADC
-    r = d + s + (op == 2 ? cIn : 0);
-    if (r & (mask + 1))
-      flags |= FLAG_CARRY;
-    if ((d ^ r) & (s ^ r) & msb)
-      flags |= FLAG_OVERFLOW;
-    if ((d ^ s ^ r) & 0x10)
-      flags |= FLAG_AUX;
+    if (m_cpu.carryFlag()) {
+      r = d + s + 1;
+      kind = LazyFlags::AddC;
+    } else {
+      r = d + s;
+      kind = LazyFlags::Add;
+    }
     break;
   case 3: // SBB
+    if (m_cpu.carryFlag()) {
+      r = d - s - 1;
+      kind = LazyFlags::SubB;
+    } else {
+      r = d - s;
+      kind = LazyFlags::Sub;
+    }
+    break;
   case 5: // SUB
   case 7: // CMP
-  {
-    const uint64_t borrow = (op == 3) ? cIn : 0;
-    r = d - s - borrow;
-    if (d < s + borrow)
-      flags |= FLAG_CARRY;
-    if ((d ^ s) & (d ^ r) & msb)
-      flags |= FLAG_OVERFLOW;
-    if ((d ^ s ^ r) & 0x10)
-      flags |= FLAG_AUX;
+    r = d - s;
+    kind = LazyFlags::Sub;
     break;
-  }
   case 1: // OR
     r = d | s;
+    kind = LazyFlags::Logic;
     break;
   case 4: // AND
     r = d & s;
+    kind = LazyFlags::Logic;
     break;
-  case 6: // XOR
+  default: // 6: XOR
     r = d ^ s;
+    kind = LazyFlags::Logic;
     break;
   }
-
   r &= mask;
-  if (r == 0)
-    flags |= FLAG_ZERO;
-  if (r & msb)
-    flags |= FLAG_SIGN;
-  if (!(std::popcount(static_cast<uint8_t>(r)) & 1))
-    flags |= FLAG_PARITY;
-
-  m_cpu.setEFLAGS(flags);
-  return static_cast<uint32_t>(r);
+  m_cpu.setLazyFlags(kind, msb, d, s, r);
+  return r;
 }
 
 // MUL/IMUL: CF and OF report whether the upper half of the product is
@@ -421,62 +415,27 @@ void InstructionDecoder::setMulOverflow(bool overflow) {
   m_cpu.setEFLAGS(flags);
 }
 
+// INC/DEC preserve CF (setLazyFlags folds the current CF into EFLAGS).
 uint32_t InstructionDecoder::incOp(uint32_t val, int size) {
-  uint32_t oldCF = m_cpu.getEFLAGS() & 0x0001;
-  uint32_t result = aluOp(0, val, 1, size);
-  m_cpu.setEFLAGS((m_cpu.getEFLAGS() & ~0x0001U) | oldCF);
-  return result;
+  const uint32_t msb = 1u << (size - 1);
+  const uint32_t mask = (msb << 1) - 1u;
+  const uint32_t d = val & mask;
+  const uint32_t r = (d + 1) & mask;
+  m_cpu.setLazyFlags(LazyFlags::Inc, msb, d, 1, r);
+  return r;
 }
 
 uint32_t InstructionDecoder::decOp(uint32_t val, int size) {
-  uint32_t oldCF = m_cpu.getEFLAGS() & 0x0001;
-  uint32_t result = aluOp(5, val, 1, size);
-  m_cpu.setEFLAGS((m_cpu.getEFLAGS() & ~0x0001U) | oldCF);
-  return result;
+  const uint32_t msb = 1u << (size - 1);
+  const uint32_t mask = (msb << 1) - 1u;
+  const uint32_t d = val & mask;
+  const uint32_t r = (d - 1) & mask;
+  m_cpu.setLazyFlags(LazyFlags::Dec, msb, d, 1, r);
+  return r;
 }
 
 bool InstructionDecoder::checkCondition(uint8_t cond) {
-  uint32_t flags = m_cpu.getEFLAGS();
-  bool cf = flags & 0x0001, pf = flags & 0x0004;
-  bool zf = flags & 0x0040, sf = flags & 0x0080;
-  bool of = flags & 0x0800;
-
-  switch (cond & 0x0F) {
-  case 0x0:
-    return of; // JO
-  case 0x1:
-    return !of; // JNO
-  case 0x2:
-    return cf; // JB / JC
-  case 0x3:
-    return !cf; // JNB / JNC
-  case 0x4:
-    return zf; // JZ / JE
-  case 0x5:
-    return !zf; // JNZ / JNE
-  case 0x6:
-    return cf || zf; // JBE / JNA
-  case 0x7:
-    return !cf && !zf; // JA / JNBE
-  case 0x8:
-    return sf; // JS
-  case 0x9:
-    return !sf; // JNS
-  case 0xA:
-    return pf; // JP / JPE
-  case 0xB:
-    return !pf; // JNP / JPO
-  case 0xC:
-    return sf != of; // JL / JNGE
-  case 0xD:
-    return sf == of; // JGE / JNL
-  case 0xE:
-    return zf || (sf != of); // JLE / JNG
-  case 0xF:
-    return !zf && (sf == of); // JG / JNLE
-  default:
-    return false;
-  }
+  return m_cpu.testCondition(cond);
 }
 
 // With paging on, a CPU access to a not-present page has no effect and
@@ -491,14 +450,14 @@ void InstructionDecoder::step() {
   std::array<uint32_t, 8> regs;
   for (int i = 0; i < 8; ++i)
     regs[i] = m_cpu.getReg32(static_cast<uint8_t>(i));
-  const uint32_t flags = m_cpu.getEFLAGS();
+  const CPU::FlagsState flags = m_cpu.saveFlagsState();
   const uint32_t eip = m_cpu.getEIP();
   stepInstruction();
   uint32_t linear = 0, error = 0;
   if (m_memory.takePageFault(linear, error)) {
     for (int i = 0; i < 8; ++i)
       m_cpu.setReg32(static_cast<uint8_t>(i), regs[i]);
-    m_cpu.setEFLAGS(flags);
+    m_cpu.restoreFlagsState(flags);
     m_instrStartEIP = eip;
     m_cpu.setCR(2, linear);
     if (currentCPL() == 3)
@@ -645,7 +604,7 @@ void InstructionDecoder::stepInstruction() {
           bool isCompare = (opcode == 0xA6 || opcode == 0xA7 ||
                             opcode == 0xAE || opcode == 0xAF);
           if (isCompare) {
-            bool zf = (m_cpu.getEFLAGS() & 0x0040);
+            bool zf = m_cpu.zeroFlag();
             if (m_hasRepz && !zf)
               break;
             if (m_hasRepnz && zf)
@@ -2086,9 +2045,9 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
       if (opcode == 0xE2)
         jump = (count != 0); // LOOP
       else if (opcode == 0xE1)
-        jump = (count != 0 && (m_cpu.getEFLAGS() & 0x0040)); // LOOPE
+        jump = (count != 0 && m_cpu.zeroFlag()); // LOOPE
       else if (opcode == 0xE0)
-        jump = (count != 0 && !(m_cpu.getEFLAGS() & 0x0040)); // LOOPNE
+        jump = (count != 0 && !m_cpu.zeroFlag()); // LOOPNE
     }
     if (jump)
       m_cpu.setEIP(m_cpu.getEIP() + disp);
@@ -2157,7 +2116,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     uint32_t dstPhys = m_segBase[ES] + dstOff;
     m_memory.lwrite8(dstPhys, m_memory.lread8(srcPhys));
 
-    int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -1 : 1;
+    int32_t diff = m_cpu.directionFlag() ? -1 : 1;
     if (m_hasPrefix67) {
       m_cpu.setReg32(EDI, dstOff + diff);
       m_cpu.setReg32(ESI, srcOff + diff);
@@ -2178,7 +2137,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
       uint32_t srcPhys = m_segBase[srcSeg] + srcOff;
       uint32_t srcVal = m_memory.lread32(srcPhys);
       m_memory.lwrite32(dstPhys, srcVal);
-      int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -4 : 4;
+      int32_t diff = m_cpu.directionFlag() ? -4 : 4;
       if (m_hasPrefix67) {
         m_cpu.setReg32(EDI, dstOff + diff);
         m_cpu.setReg32(ESI, srcOff + diff);
@@ -2191,7 +2150,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
       uint32_t srcPhys = m_segBase[srcSeg] + srcOff;
       uint16_t srcVal = m_memory.lread16(srcPhys);
       m_memory.lwrite16(dstPhys, srcVal);
-      int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -2 : 2;
+      int32_t diff = m_cpu.directionFlag() ? -2 : 2;
       if (m_hasPrefix67) {
         m_cpu.setReg32(EDI, dstOff + diff);
         m_cpu.setReg32(ESI, srcOff + diff);
@@ -2212,7 +2171,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
         m_memory.lread8(m_segBase[ES] + (m_hasPrefix67 ? m_cpu.getReg32(EDI)
                                                       : m_cpu.getReg16(DI)));
     aluOp(7, val1, val2, 8); // CMP
-    int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -1 : 1;
+    int32_t diff = m_cpu.directionFlag() ? -1 : 1;
     if (m_hasPrefix67) {
       m_cpu.setReg32(ESI, m_cpu.getReg32(ESI) + diff);
       m_cpu.setReg32(EDI, m_cpu.getReg32(EDI) + diff);
@@ -2232,7 +2191,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
           m_memory.lread32(m_segBase[ES] + (m_hasPrefix67 ? m_cpu.getReg32(EDI)
                                                          : m_cpu.getReg16(DI)));
       aluOp(7, val1, val2, 32);
-      int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -4 : 4;
+      int32_t diff = m_cpu.directionFlag() ? -4 : 4;
       if (m_hasPrefix67) {
         m_cpu.setReg32(ESI, m_cpu.getReg32(ESI) + diff);
         m_cpu.setReg32(EDI, m_cpu.getReg32(EDI) + diff);
@@ -2248,7 +2207,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
           m_memory.lread16(m_segBase[ES] + (m_hasPrefix67 ? m_cpu.getReg32(EDI)
                                                          : m_cpu.getReg16(DI)));
       aluOp(7, val1, val2, 16);
-      int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -2 : 2;
+      int32_t diff = m_cpu.directionFlag() ? -2 : 2;
       if (m_hasPrefix67) {
         m_cpu.setReg32(ESI, m_cpu.getReg32(ESI) + diff);
         m_cpu.setReg32(EDI, m_cpu.getReg32(EDI) + diff);
@@ -2263,7 +2222,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     LOG_CPU("STOSB");
     uint32_t dstOff = m_hasPrefix67 ? m_cpu.getReg32(EDI) : m_cpu.getReg16(DI);
     m_memory.lwrite8(m_segBase[ES] + dstOff, m_cpu.getReg8(AL));
-    int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -1 : 1;
+    int32_t diff = m_cpu.directionFlag() ? -1 : 1;
     if (m_hasPrefix67)
       m_cpu.setReg32(EDI, dstOff + diff);
     else
@@ -2275,14 +2234,14 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     uint32_t dstOff = m_hasPrefix67 ? m_cpu.getReg32(EDI) : m_cpu.getReg16(DI);
     if (m_hasPrefix66) {
       m_memory.lwrite32(m_segBase[ES] + dstOff, m_cpu.getReg32(EAX));
-      int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -4 : 4;
+      int32_t diff = m_cpu.directionFlag() ? -4 : 4;
       if (m_hasPrefix67)
         m_cpu.setReg32(EDI, dstOff + diff);
       else
         m_cpu.setReg16(DI, static_cast<uint16_t>(dstOff + diff));
     } else {
       m_memory.lwrite16(m_segBase[ES] + dstOff, m_cpu.getReg16(AX));
-      int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -2 : 2;
+      int32_t diff = m_cpu.directionFlag() ? -2 : 2;
       if (m_hasPrefix67)
         m_cpu.setReg32(EDI, dstOff + diff);
       else
@@ -2295,7 +2254,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     uint8_t srcSeg = (m_segmentOverride != 0xFF) ? m_segmentOverride : DS;
     uint32_t srcOff = m_hasPrefix67 ? m_cpu.getReg32(ESI) : m_cpu.getReg16(SI);
     m_cpu.setReg8(AL, m_memory.lread8(m_segBase[srcSeg] + srcOff));
-    int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -1 : 1;
+    int32_t diff = m_cpu.directionFlag() ? -1 : 1;
     if (m_hasPrefix67)
       m_cpu.setReg32(ESI, srcOff + diff);
     else
@@ -2308,14 +2267,14 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
     uint32_t srcOff = m_hasPrefix67 ? m_cpu.getReg32(ESI) : m_cpu.getReg16(SI);
     if (m_hasPrefix66) {
       m_cpu.setReg32(EAX, m_memory.lread32(m_segBase[srcSeg] + srcOff));
-      int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -4 : 4;
+      int32_t diff = m_cpu.directionFlag() ? -4 : 4;
       if (m_hasPrefix67)
         m_cpu.setReg32(ESI, srcOff + diff);
       else
         m_cpu.setReg16(SI, static_cast<uint16_t>(srcOff + diff));
     } else {
       m_cpu.setReg16(AX, m_memory.lread16(m_segBase[srcSeg] + srcOff));
-      int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -2 : 2;
+      int32_t diff = m_cpu.directionFlag() ? -2 : 2;
       if (m_hasPrefix67)
         m_cpu.setReg32(ESI, srcOff + diff);
       else
@@ -2329,7 +2288,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
         m_memory.lread8(m_segBase[ES] + (m_hasPrefix67 ? m_cpu.getReg32(EDI)
                                                       : m_cpu.getReg16(DI)));
     aluOp(7, val1, val2, 8); // CMP
-    int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -1 : 1;
+    int32_t diff = m_cpu.directionFlag() ? -1 : 1;
     if (m_hasPrefix67)
       m_cpu.setReg32(EDI, m_cpu.getReg32(EDI) + diff);
     else
@@ -2343,7 +2302,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
           m_memory.lread32(m_segBase[ES] + (m_hasPrefix67 ? m_cpu.getReg32(EDI)
                                                          : m_cpu.getReg16(DI)));
       aluOp(7, val1, val2, 32);
-      int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -4 : 4;
+      int32_t diff = m_cpu.directionFlag() ? -4 : 4;
       if (m_hasPrefix67)
         m_cpu.setReg32(EDI, m_cpu.getReg32(EDI) + diff);
       else
@@ -2354,7 +2313,7 @@ void InstructionDecoder::executeOpcode(uint8_t opcode) {
           m_memory.lread16(m_segBase[ES] + (m_hasPrefix67 ? m_cpu.getReg32(EDI)
                                                          : m_cpu.getReg16(DI)));
       aluOp(7, val1, val2, 16);
-      int32_t diff = (m_cpu.getEFLAGS() & 0x0400) ? -2 : 2;
+      int32_t diff = m_cpu.directionFlag() ? -2 : 2;
       if (m_hasPrefix67)
         m_cpu.setReg32(EDI, m_cpu.getReg32(EDI) + diff);
       else
@@ -4998,4 +4957,4 @@ void InstructionDecoder::loadSegment(SegRegIndex seg, uint16_t selector) {
   syncSegments();
 }
 
-} // namespace fador::cpu
+} // namespace fador::cpu

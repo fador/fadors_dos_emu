@@ -2,6 +2,7 @@
 #include "../memory/MemoryBus.hpp"
 #include "x87/FPU.hpp"
 #include "CpuModel.hpp"
+#include "LazyFlags.hpp"
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -434,8 +435,63 @@ public:
   uint16_t getPrevInstructionCS() const { return m_prevInstructionCS; }
   void setPrevInstructionCS(uint16_t val) { m_prevInstructionCS = val; }
 
-  uint32_t getEFLAGS() const { return m_eflags; }
-  void setEFLAGS(uint32_t val) { m_eflags = val; }
+  // EFLAGS.  The arithmetic flags (OF SF ZF AF PF CF) of the last ALU
+  // instruction are computed lazily: the decoder records the operation and
+  // its operands (setLazyFlags) and they are folded into EFLAGS only when
+  // something reads them.  getEFLAGS() always returns the architectural
+  // value; setEFLAGS() replaces it (and drops the pending record).
+  uint32_t getEFLAGS() const {
+    if (m_lazy.kind != LazyFlags::None) [[unlikely]]
+      materializeFlags();
+    return m_eflags;
+  }
+  void setEFLAGS(uint32_t val) {
+    m_lazy.kind = LazyFlags::None;
+    m_eflags = val;
+  }
+  // Bits that are never lazy (IF, DF, TF, IOPL, NT, RF, VM, AC, ...) can be
+  // read without folding the arithmetic flags in.
+  uint32_t getEFLAGSNonArith() const { return m_eflags & ~LazyFlags::kArithMask; }
+  bool directionFlag() const { return (m_eflags & FLAG_DIRECTION) != 0; }
+
+  // Records the result of an ALU operation whose six arithmetic flags are
+  // a function of (kind, size, dst, src, res); see LazyFlags.  For Inc/Dec
+  // the carry flag is first folded into m_eflags (INC/DEC preserve CF).
+  void setLazyFlags(LazyFlags::Kind kind, uint32_t msb, uint32_t dst,
+                    uint32_t src, uint32_t res) {
+    if (kind == LazyFlags::Inc || kind == LazyFlags::Dec) {
+      const uint32_t cf = carryFlag() ? FLAG_CARRY : 0u;
+      m_eflags = (m_eflags & ~FLAG_CARRY) | cf;
+    }
+    m_lazy.kind = kind;
+    m_lazy.msb = msb;
+    m_lazy.dst = dst;
+    m_lazy.src = src;
+    m_lazy.res = res;
+  }
+  bool carryFlag() const {
+    if (m_lazy.kind == LazyFlags::None || m_lazy.kind >= LazyFlags::Inc)
+      return (m_eflags & FLAG_CARRY) != 0;
+    return m_lazy.carry();
+  }
+  bool zeroFlag() const {
+    if (m_lazy.kind == LazyFlags::None)
+      return (m_eflags & FLAG_ZERO) != 0;
+    return m_lazy.res == 0;
+  }
+  // Jcc/SETcc/CMOVcc condition (low four bits of the opcode).
+  bool testCondition(uint8_t cond) const;
+  // Snapshot of EFLAGS including a pending lazy record (instruction restart
+  // after #PF restores it without materializing anything).
+  struct FlagsState {
+    uint32_t eflags;
+    LazyFlags lazy;
+  };
+  FlagsState saveFlagsState() const { return {m_eflags, m_lazy}; }
+  void restoreFlagsState(const FlagsState &s) {
+    m_eflags = s.eflags;
+    m_lazy = s.lazy;
+  }
 
   uint32_t getCR(uint8_t index) const { return m_cr[index & 7]; }
   // True while the guest itself owns protected mode (it set CR0.PE with
@@ -551,7 +607,12 @@ private:
   uint32_t m_instructionStartEIP{0};
   uint16_t m_instructionStartCS{0xF000};
   uint16_t m_prevInstructionCS{0xF000};
-  uint32_t m_eflags{0x00000002}; // bit 1 is always reserved as 1
+  mutable uint32_t m_eflags{0x00000002}; // bit 1 is always reserved as 1
+  mutable LazyFlags m_lazy{};
+  void materializeFlags() const {
+    m_eflags = (m_eflags & ~m_lazy.definedMask()) | m_lazy.flags(m_eflags);
+    m_lazy.kind = LazyFlags::None;
+  }
 
   std::array<uint32_t, 8> m_cr{};
   bool m_nativeProtection{false};
@@ -576,6 +637,37 @@ private:
   uint64_t m_tscOffset{0};
   CycleTable m_cycleTable{};
 };
+
+inline bool CPU::testCondition(uint8_t cond) const {
+  bool r;
+  if (m_lazy.kind == LazyFlags::None) {
+    const uint32_t f = m_eflags;
+    const bool of = (f & FLAG_OVERFLOW) != 0, sf = (f & FLAG_SIGN) != 0;
+    const bool zf = (f & FLAG_ZERO) != 0, cf = (f & FLAG_CARRY) != 0;
+    switch ((cond >> 1) & 7) {
+    case 0: r = of; break;
+    case 1: r = cf; break;
+    case 2: r = zf; break;
+    case 3: r = cf || zf; break;
+    case 4: r = sf; break;
+    case 5: r = (f & FLAG_PARITY) != 0; break;
+    case 6: r = sf != of; break;
+    default: r = zf || (sf != of); break;
+    }
+  } else {
+    switch ((cond >> 1) & 7) {
+    case 0: r = m_lazy.overflow(); break;
+    case 1: r = carryFlag(); break;
+    case 2: r = m_lazy.zero(); break;
+    case 3: r = m_lazy.zero() || carryFlag(); break;
+    case 4: r = m_lazy.sign(); break;
+    case 5: r = m_lazy.parity(); break;
+    case 6: r = m_lazy.sign() != m_lazy.overflow(); break;
+    default: r = m_lazy.zero() || (m_lazy.sign() != m_lazy.overflow()); break;
+    }
+  }
+  return r != ((cond & 1) != 0);
+}
 
 // Stack helpers (inline: used by PUSH/POP/CALL/RET on every call)
 inline void CPU::push16(uint16_t value) {

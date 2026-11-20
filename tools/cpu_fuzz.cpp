@@ -5,6 +5,11 @@
 //
 //   cpu_fuzz [iterations] [seed] [filter]
 //
+// Every other test is a sequence of two to five instructions (registers and
+// flags compared after the last one) so that flags handed from one
+// instruction to the next (the interpreter computes them lazily) are
+// covered too: ADD then ADC, SUB then INC then SETcc, and so on.
+//
 // Only register/immediate forms are generated so the same bytes are valid
 // in 64-bit mode (no REX prefixes, no stack or memory operands, no
 // instructions that are invalid in long mode).  Exit status is non-zero if
@@ -542,7 +547,7 @@ struct Emulator {
   }
   // Returns false if the instruction did not complete normally (e.g. it
   // raised #UD in the interpreter).
-  bool run(const Insn &in, State &st) {
+  bool run(const Insn &in, State &st, int steps = 1) {
     cpu.setGDTR({0x17, GDT});
     cpu.setCR(0, cpu.getCR(0) | 1);
     cpu.setEFLAGS(0x202);
@@ -559,7 +564,8 @@ struct Emulator {
     cpu.setReg32(cpu::ESP, 0x80000);
     cpu.setEFLAGS(0x00000202u | (static_cast<uint32_t>(st.flags) & (ALL | DF)));
     cpu.setEIP(CODE);
-    decoder.step();
+    for (int i = 0; i < steps; ++i)
+      decoder.step();
     for (int i = 0; i < 8; ++i)
       if (i != 4)
         st.r[i] = cpu.getReg32(static_cast<uint8_t>(i));
@@ -614,7 +620,41 @@ int main(int argc, char **argv) {
       init.r[i] = rnd32();
     init.r[4] = 0;
     init.flags = 0x202 | (rng() & ALL);
-    Insn in = generate(init);
+    int steps = 1;
+    Insn in;
+    if (it & 1) {
+      // Sequence: a prefix of instructions whose results are fully defined
+      // (only AF may be undefined; it is then excluded from the compare)
+      // that do not constrain the initial state, then a final instruction.
+      const int prefixLen = 1 + static_cast<int>(rng() % 4);
+      uint32_t undef = 0;
+      std::vector<Insn> seq;
+      while (static_cast<int>(seq.size()) <= prefixLen) {
+        const bool last = static_cast<int>(seq.size()) == prefixLen;
+        State probe = init;
+        Insn x = generate(probe);
+        if (std::memcmp(&probe, &init, sizeof(State)) != 0 ||
+            x.name.find("div") != std::string::npos ||
+            (x.name.size() >= 2 &&
+             x.name.compare(x.name.size() - 2, 2, "cl") == 0))
+          continue; // depends on the initial state (DIV: #DE, CL counts)
+        if (!last && (!x.compareRegs || (x.flagMask | AF) != ALL))
+          continue;
+        if (undef && x.name.rfind("lahf", 0) == 0)
+          continue; // would copy an undefined flag into AH
+        if (!last)
+          undef |= ALL & ~x.flagMask;
+        seq.push_back(std::move(x));
+      }
+      in.name = "seq ... " + seq.back().name;
+      in.flagMask = seq.back().flagMask & ~undef;
+      in.compareRegs = seq.back().compareRegs;
+      for (const Insn &x : seq)
+        in.bytes.insert(in.bytes.end(), x.bytes.begin(), x.bytes.end());
+      steps = static_cast<int>(seq.size());
+    } else {
+      in = generate(init);
+    }
     if (!filter.empty() && in.name.find(filter) == std::string::npos)
       continue;
     ++executed;
@@ -626,7 +666,7 @@ int main(int argc, char **argv) {
     std::memcpy(page, in.bytes.data(), in.bytes.size());
     page[in.bytes.size()] = 0xC3; // ret
     fuzz_trampoline(&host, page);
-    bool completed = emu.run(in, guest);
+    bool completed = emu.run(in, guest, steps);
 
     bool ok = completed;
     for (int i = 0; i < 8; ++i)
@@ -670,7 +710,7 @@ int main(int argc, char **argv) {
     }
   }
 
-  std::printf("cpu_fuzz: %" PRIu64 " instructions executed, %" PRIu64
+  std::printf("cpu_fuzz: %" PRIu64 " tests executed, %" PRIu64
               " mismatches (seed %" PRIu64 ")\n",
               executed, failures, seed);
   for (const auto &[name, s] : stats) {
