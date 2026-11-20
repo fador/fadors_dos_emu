@@ -55,6 +55,19 @@ struct Buffer {
   }
 };
 
+// Input copy in a heap block that ends right after its last byte (placed
+// `off` bytes into the block), so a kernel reading past its input runs
+// into the allocator's redzone under ASan.
+template <typename T> struct Tight {
+  std::vector<T> buf;
+  size_t off;
+  Tight(const T *from, size_t count, size_t o) : buf(o + count), off(o) {
+    if (count)
+      std::memcpy(buf.data() + o, from, count * sizeof(T));
+  }
+  const T *data() const { return buf.data() + off; }
+};
+
 uint32_t u32At(const uint8_t *p, size_t i) {
   uint32_t v;
   std::memcpy(&v, p + 4 * i, 4);
@@ -145,16 +158,18 @@ TEST_CASE("HostSimd: video kernels match the scalar reference", "[simd]") {
 
         { // 8bpp palette
           Buffer out(4 * n, 4 * off);
-          k->paletteToArgb(reinterpret_cast<uint32_t *>(out.data()), s, n,
-                           pal.data());
+          const Tight<uint8_t> in(s, n, off);
+          k->paletteToArgb(reinterpret_cast<uint32_t *>(out.data()), in.data(),
+                           n, pal.data());
           for (size_t i = 0; i < n; ++i)
             REQUIRE_MSG(u32At(out.data(), i) == pal[s[i]], ctx);
           REQUIRE_MSG(out.guardIntact(4 * n), ctx);
         }
         { // 8bpp palette, doubled
           Buffer out(8 * n, 4 * off);
-          k->paletteToArgbX2(reinterpret_cast<uint32_t *>(out.data()), s, n,
-                             pal.data());
+          const Tight<uint8_t> in(s, n, off);
+          k->paletteToArgbX2(reinterpret_cast<uint32_t *>(out.data()),
+                             in.data(), n, pal.data());
           for (size_t i = 0; i < 2 * n; ++i)
             REQUIRE_MSG(u32At(out.data(), i) == pal[s[i / 2]], ctx);
           REQUIRE_MSG(out.guardIntact(8 * n), ctx);
@@ -163,14 +178,22 @@ TEST_CASE("HostSimd: video kernels match the scalar reference", "[simd]") {
         const uint8_t *planes[4] = {s, s + 509, s + 1021 + off, s + 1777};
         { // Mode X interleave
           Buffer out(n, off);
-          k->interleave4(out.data(), planes, n);
+          const size_t bytes = (n + 3) / 4;
+          const Tight<uint8_t> t0(planes[0], bytes, off), t1(planes[1], bytes, 1),
+              t2(planes[2], bytes, 2), t3(planes[3], bytes, 0);
+          const uint8_t *tight[4] = {t0.data(), t1.data(), t2.data(), t3.data()};
+          k->interleave4(out.data(), tight, n);
           for (size_t i = 0; i < n; ++i)
             REQUIRE_MSG(out.data()[i] == planes[i & 3][i >> 2], ctx);
           REQUIRE_MSG(out.guardIntact(n), ctx);
         }
         { // 16-colour planar
           Buffer out(n, off);
-          k->planarToIndex(out.data(), planes, n);
+          const size_t bytes = (n + 7) / 8;
+          const Tight<uint8_t> t0(planes[0], bytes, off), t1(planes[1], bytes, 1),
+              t2(planes[2], bytes, 2), t3(planes[3], bytes, 0);
+          const uint8_t *tight[4] = {t0.data(), t1.data(), t2.data(), t3.data()};
+          k->planarToIndex(out.data(), tight, n);
           for (size_t i = 0; i < n; ++i) {
             uint8_t idx = 0;
             for (int p = 0; p < 4; ++p)
@@ -183,10 +206,12 @@ TEST_CASE("HostSimd: video kernels match the scalar reference", "[simd]") {
         { // 15/16/24/32 bpp
           Buffer o555(4 * n, 4 * off), o565(4 * n, 4 * off),
               o24(4 * n, 4 * off), o32(4 * n, 4 * off);
-          k->rgb555ToArgb(reinterpret_cast<uint32_t *>(o555.data()), s, n);
-          k->rgb565ToArgb(reinterpret_cast<uint32_t *>(o565.data()), s, n);
-          k->rgb24ToArgb(reinterpret_cast<uint32_t *>(o24.data()), s, n);
-          k->rgb32ToArgb(reinterpret_cast<uint32_t *>(o32.data()), s, n);
+          const Tight<uint8_t> in16(s, 2 * n, off), in24(s, 3 * n, off),
+              in32(s, 4 * n, off);
+          k->rgb555ToArgb(reinterpret_cast<uint32_t *>(o555.data()), in16.data(), n);
+          k->rgb565ToArgb(reinterpret_cast<uint32_t *>(o565.data()), in16.data(), n);
+          k->rgb24ToArgb(reinterpret_cast<uint32_t *>(o24.data()), in24.data(), n);
+          k->rgb32ToArgb(reinterpret_cast<uint32_t *>(o32.data()), in32.data(), n);
           for (size_t i = 0; i < n; ++i) {
             const auto p16 = static_cast<uint16_t>(s[2 * i] | (s[2 * i + 1] << 8));
             REQUIRE_MSG(u32At(o555.data(), i) == model555(p16), ctx);
@@ -279,23 +304,27 @@ TEST_CASE("HostSimd: audio kernels match the scalar reference bit for bit",
         { // mix-add
           std::vector<float> d1(b.begin() + off, b.begin() + off + n + 8);
           std::vector<float> d2 = d1;
-          ref->mixAddF32(d1.data(), a.data() + off, n, gain);
-          k->mixAddF32(d2.data(), a.data() + off, n, gain);
+          const Tight<float> in(a.data() + off, n, off);
+          ref->mixAddF32(d1.data(), in.data(), n, gain);
+          k->mixAddF32(d2.data(), in.data(), n, gain);
           REQUIRE_MSG(sameBits(d1.data(), d2.data(), n + 8), ctx);
         }
         { // int16 / uint8 → float
           std::vector<float> r(n + 8, 7.0f), t(n + 8, 7.0f);
-          ref->s16ToF32(r.data(), bytes.data() + off, n, gain);
-          k->s16ToF32(t.data(), bytes.data() + off, n, gain);
+          const Tight<uint8_t> in16(bytes.data() + off, 2 * n, off);
+          const Tight<uint8_t> in8(bytes.data() + off, n, off);
+          ref->s16ToF32(r.data(), in16.data(), n, gain);
+          k->s16ToF32(t.data(), in16.data(), n, gain);
           REQUIRE_MSG(sameBits(r.data(), t.data(), n + 8), ctx);
-          ref->u8ToF32(r.data(), bytes.data() + off, n, gain);
-          k->u8ToF32(t.data(), bytes.data() + off, n, gain);
+          ref->u8ToF32(r.data(), in8.data(), n, gain);
+          k->u8ToF32(t.data(), in8.data(), n, gain);
           REQUIRE_MSG(sameBits(r.data(), t.data(), n + 8), ctx);
         }
         { // float → int16 with clamp and peak
           std::vector<int16_t> r(n + 8, 0x5A5A), t(n + 8, 0x5A5A);
-          const float pr = ref->f32ToS16(r.data(), conv.data() + off, n);
-          const float pt = k->f32ToS16(t.data(), conv.data() + off, n);
+          const Tight<float> in(conv.data() + off, n, off);
+          const float pr = ref->f32ToS16(r.data(), in.data(), n);
+          const float pt = k->f32ToS16(t.data(), in.data(), n);
           REQUIRE_MSG(r == t, ctx);
           REQUIRE_MSG(std::memcmp(&pr, &pt, sizeof(float)) == 0, ctx);
         }
@@ -459,4 +488,103 @@ TEST_CASE("HostSimd: SoundBlaster output queue mixes, pads and drops frames",
   sb.generateSamples(buf.data(), 4); // queue drained: nothing added
   for (float v : buf)
     REQUIRE(v == 0.5f);
+}
+
+// ── Integration: REP STOS fast path (MemoryBus::lfillPattern) ────────
+
+#include "cpu/CPU.hpp"
+#include "cpu/InstructionDecoder.hpp"
+#include "hw/BIOS.hpp"
+#include "hw/DOS.hpp"
+#include "hw/IOBus.hpp"
+#include "hw/KeyboardController.hpp"
+#include "hw/PIC8259.hpp"
+#include "hw/PIT8254.hpp"
+
+namespace {
+
+struct StosRun {
+  std::vector<uint8_t> memory; // 0x20000..0x5FFFF after the run
+  uint32_t ecx = 0, edi = 0, eip = 0;
+  int steps = 0;
+};
+
+// Runs one string instruction at 0000:0100 until it completes.  With
+// `slowPath` the bus traces writes, which disables the fill fast path.
+StosRun runStos(const std::vector<uint8_t> &code, bool slowPath, uint16_t es,
+                uint32_t edi, uint32_t ecx, uint32_t eax, bool df) {
+  using namespace fador;
+  cpu::CPU cpu;
+  memory::MemoryBus mem;
+  hw::IOBus iobus;
+  hw::KeyboardController kbd;
+  hw::PIT8254 pit;
+  hw::DOS dos(cpu, mem);
+  hw::PIC8259 pic(true);
+  hw::BIOS bios(cpu, mem, kbd, pit, pic);
+  bios.initialize();
+  dos.initialize();
+  cpu::InstructionDecoder decoder(cpu, mem, iobus, bios, dos);
+  for (uint32_t a = 0x20000; a < 0x60000; ++a)
+    mem.write8(a, static_cast<uint8_t>(a * 7 + (a >> 9)));
+  for (size_t i = 0; i < code.size(); ++i)
+    mem.write8(0x100 + static_cast<uint32_t>(i), code[i]);
+  cpu.setSegReg(cpu::CS, 0);
+  cpu.setSegReg(cpu::DS, 0);
+  cpu.setSegReg(cpu::SS, 0);
+  cpu.setSegReg(cpu::ES, es);
+  cpu.setReg32(cpu::EDI, edi);
+  cpu.setReg32(cpu::ECX, ecx);
+  cpu.setReg32(cpu::EAX, eax);
+  cpu.setEFLAGS(df ? (cpu.getEFLAGS() | cpu::FLAG_DIRECTION)
+                   : (cpu.getEFLAGS() & ~cpu::FLAG_DIRECTION));
+  cpu.setEIP(0x100);
+  mem.setWriteTracing(slowPath);
+  StosRun r;
+  while (cpu.getEIP() == 0x100 && r.steps < 100000) {
+    decoder.step();
+    ++r.steps;
+  }
+  mem.setWriteTracing(false);
+  for (uint32_t a = 0x20000; a < 0x60000; ++a)
+    r.memory.push_back(mem.read8(a));
+  r.ecx = cpu.getReg32(cpu::ECX);
+  r.edi = cpu.getReg32(cpu::EDI);
+  r.eip = cpu.getEIP();
+  return r;
+}
+
+} // namespace
+
+TEST_CASE("HostSimd: REP STOS fast path matches the element-wise loop",
+          "[simd][cpu]") {
+  struct Case {
+    const char *name;
+    std::vector<uint8_t> code;
+    uint16_t es;
+    uint32_t edi, ecx, eax;
+    bool df;
+  };
+  const uint32_t hiEcx = 0xABCD0000u; // upper half must survive 16-bit forms
+  const Case cases[] = {
+      {"rep stosb", {0xF3, 0xAA}, 0x2000, 0x0003, hiEcx | 5000, 0x11223344, false},
+      {"rep stosw odd di", {0xF3, 0xAB}, 0x2000, 0x0001, hiEcx | 0x1001, 0x5566, false},
+      {"rep stosd", {0xF3, 0x66, 0xAB}, 0x2100, 0x0002, hiEcx | 9000, 0xDEADBEEF, false},
+      {"rep stosd addr32", {0xF3, 0x67, 0x66, 0xAB}, 0x0000, 0x30001, 9999, 0xCAFEF00D, false},
+      {"rep stosb addr32 byte", {0xF3, 0x67, 0xAA}, 0x0000, 0x20000, 0x12345, 0x7F, false},
+      {"repne stosw", {0xF2, 0xAB}, 0x3000, 0x0100, hiEcx | 77, 0xA5A5, false},
+      {"di wraps", {0xF3, 0xAB}, 0x2000, 0xFFF0, hiEcx | 0x20, 0x1234, false},
+      {"df set", {0xF3, 0xAA}, 0x2000, 0x8000, hiEcx | 300, 0x42, true},
+      {"zero count", {0xF3, 0x66, 0xAB}, 0x2000, 0x0010, hiEcx, 0x99, false},
+  };
+  for (const Case &c : cases) {
+    const StosRun slow = runStos(c.code, true, c.es, c.edi, c.ecx, c.eax, c.df);
+    const StosRun fast = runStos(c.code, false, c.es, c.edi, c.ecx, c.eax, c.df);
+    REQUIRE_MSG(slow.eip != 0x100, c.name);
+    REQUIRE_MSG(fast.memory == slow.memory, c.name);
+    REQUIRE_MSG(fast.ecx == slow.ecx, c.name);
+    REQUIRE_MSG(fast.edi == slow.edi, c.name);
+    REQUIRE_MSG(fast.eip == slow.eip, c.name);
+    REQUIRE_MSG(fast.steps == slow.steps, c.name); // same batching
+  }
 }
