@@ -1,6 +1,7 @@
 #include "test_framework.hpp"
 #include <algorithm>
 #include <fstream>
+#include <iterator>
 #include <cstdio>
 #include <vector>
 #include "cpu/CPU.hpp"
@@ -2541,4 +2542,126 @@ TEST_CASE("DOS: a new handle takes the lowest free number", "[DOS][File]") {
     REQUIRE(open() == a);
     close(a);
     std::remove("handles.txt");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Standard handles 0-4: redirection, duplication, console input
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("DOS: stdout redirected to a file with AH=46h and restored with a dup", "[DOS][File]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    bios.initialize();
+    dos.initialize();
+    std::string console;
+    dos.setConsoleTap([&](uint8_t c) { console += static_cast<char>(c); });
+
+    auto call = [&](uint8_t ah, uint16_t bx, uint16_t cx) {
+        cpu.setReg8(cpu::AH, ah);
+        cpu.setReg16(cpu::BX, bx);
+        cpu.setReg16(cpu::CX, cx);
+        dos.handleInterrupt(0x21);
+    };
+    auto write = [&](uint16_t h, const std::string &text) {
+        for (size_t i = 0; i < text.size(); ++i)
+            mem.write8(0x80000 + static_cast<uint32_t>(i), static_cast<uint8_t>(text[i]));
+        cpu.setSegReg(cpu::DS, 0x8000);
+        cpu.setSegBase(cpu::DS, 0x80000);
+        cpu.setReg16(cpu::DX, 0);
+        call(0x40, h, static_cast<uint16_t>(text.size()));
+        REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    };
+
+    // create OUT.TXT
+    const std::string name = "OUT.TXT";
+    for (size_t i = 0; i < name.size(); ++i)
+        mem.write8(0x70000 + static_cast<uint32_t>(i), static_cast<uint8_t>(name[i]));
+    mem.write8(0x70000 + static_cast<uint32_t>(name.size()), 0);
+    cpu.setSegReg(cpu::DS, 0x7000);
+    cpu.setSegBase(cpu::DS, 0x70000);
+    cpu.setReg16(cpu::DX, 0);
+    call(0x3C, 0, 0);
+    REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    const uint16_t hFile = cpu.getReg16(cpu::AX);
+
+    call(0x45, 1, 0); // saved = dup(1): a new handle on the console
+    REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    const uint16_t hSaved = cpu.getReg16(cpu::AX);
+    REQUIRE(hSaved >= 5);
+
+    call(0x46, hFile, 1); // dup2(file, 1)
+    REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    write(1, "to-file");
+
+    cpu.setReg8(cpu::AL, 0x00); // IOCTL: handle 1 is a disk file now
+    call(0x44, 1, 0);
+    REQUIRE((cpu.getReg16(cpu::DX) & 0x80) == 0);
+
+    call(0x46, hSaved, 1); // dup2(saved, 1)
+    REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
+    write(1, "to-console");
+    write(hSaved, "!");
+    cpu.setReg8(cpu::AL, 0x00);
+    call(0x44, 1, 0);
+    REQUIRE((cpu.getReg16(cpu::DX) & 0x83) == 0x83);
+
+    call(0x3E, hSaved, 0);
+    call(0x3E, hFile, 0);
+    REQUIRE(console == "to-console!");
+    std::ifstream in("OUT.TXT", std::ios::binary);
+    std::string data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    REQUIRE(data == "to-file");
+    in.close();
+    std::remove("OUT.TXT");
+}
+
+TEST_CASE("DOS: handle 0 reads cooked console lines and --stdin data", "[DOS][File]") {
+    cpu::CPU cpu;
+    memory::MemoryBus mem;
+    hw::KeyboardController kbd;
+    hw::PIT8254 pit;
+    hw::PIC8259 pic(true);
+    hw::BIOS bios(cpu, mem, kbd, pit, pic);
+    hw::DOS dos(cpu, mem);
+    bios.initialize();
+    dos.initialize();
+    dos.setKeyboard(kbd);
+    std::string echo;
+    dos.setConsoleTap([&](uint8_t c) { echo += static_cast<char>(c); });
+
+    auto read = [&](uint16_t count) -> std::string {
+        cpu.setSegReg(cpu::DS, 0x8000);
+        cpu.setSegBase(cpu::DS, 0x80000);
+        cpu.setReg16(cpu::DX, 0);
+        cpu.setReg8(cpu::AH, 0x3F);
+        cpu.setReg16(cpu::BX, 0);
+        cpu.setReg16(cpu::CX, count);
+        cpu.setReg16(cpu::AX, 0x3FFF);
+        dos.handleInterrupt(0x21);
+        if (cpu.getReg8(cpu::AH) == 0x3F && cpu.getReg8(cpu::AL) == 0xFF)
+            return "<retry>"; // no complete line: the INT is executed again
+        std::string s;
+        for (uint16_t i = 0; i < cpu.getReg16(cpu::AX); ++i)
+            s += static_cast<char>(mem.read8(0x80000 + i));
+        return s;
+    };
+
+    REQUIRE(read(10) == "<retry>");
+    for (char c : std::string("ab\x08xy"))
+        kbd.pushKey(static_cast<uint8_t>(c), 0);
+    REQUIRE(read(10) == "<retry>"); // typed, but no Enter yet
+    kbd.pushKey(0x0D, 0x1C);
+    REQUIRE(read(2) == "ax");       // a line is returned over several reads
+    REQUIRE(read(10) == "y\r\n");
+    REQUIRE(echo == "ab\x08 \x08xy\r\n");
+
+    dos.setStdinData("one\r\ntwo");
+    REQUIRE(read(5) == "one\r\n");
+    REQUIRE(read(10) == "two");
+    REQUIRE(read(10).empty());      // end of file
 }

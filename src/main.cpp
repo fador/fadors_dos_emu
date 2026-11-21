@@ -62,6 +62,8 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <fstream>
+#include <iterator>
 #include <sstream>
 #include <thread>
 
@@ -412,6 +414,11 @@ void printHelp(const char *programName) {
     "                            runs.  Exit status 124 when --max-seconds expires.\n"
     "  --max-seconds=S           Stop after S seconds (wall clock; virtual time with\n"
     "                            --deterministic).\n"
+    "  --stdin=FILE              Standard input (handle 0) reads FILE, as with\n"
+    "                            \"PROGRAM < FILE\"; end of file after its last byte.\n"
+    "  --console-log=FILE        Copy everything DOS writes to the console (INT 21h,\n"
+    "                            INT 29h, handles 1 and 2) to FILE; '-' is stdout,\n"
+    "                            which then replaces the --headless screen dump.\n"
     "  --screenshot=FILE.png     Save the screen (text or graphics) as PNG at exit, or at\n"
     "  --screenshot-at=S         S seconds after start (virtual with --deterministic).\n"
     "  --audio-wav=FILE.wav      Record the sound output (AdLib, Sound Blaster, GUS, MIDI).\n"
@@ -860,6 +867,8 @@ int main(int argc, char *argv[]) {
     bool headless = false;          // --headless: no rendering, no host input
     double maxSeconds = 0.0;        // --max-seconds=N wall-clock limit
     std::string screenshotPath;     // --screenshot=FILE.png at exit
+    std::string consoleLogPath;     // --console-log=FILE ('-' = stdout)
+    std::string stdinPath;          // --stdin=FILE: standard input data
     std::string audioWavPath;       // --audio-wav=FILE.wav: record output
     double screenshotAt = -1.0;     // --screenshot-at=T: capture at T s instead
     ScriptedKeys scriptedKeys;      // --keys=T:KEY,...
@@ -881,7 +890,13 @@ int main(int argc, char *argv[]) {
           continue;
         if (!args.empty())
           args += ' ';
-        args += arg;
+        // One host argument stays one DOS argument: quote it when it
+        // contains blanks (C runtimes split the command tail at blanks
+        // outside double quotes, as COMMAND.COM passes it).
+        if (arg.empty() || arg.find_first_of(" \t") != std::string::npos)
+          args += '"' + arg + '"';
+        else
+          args += arg;
         continue;
       }
 
@@ -972,6 +987,10 @@ int main(int argc, char *argv[]) {
         maxSeconds = std::stod(arg.substr(14));
       } else if (arg.find("--audio-wav=") == 0) {
         audioWavPath = arg.substr(12);
+      } else if (arg.find("--console-log=") == 0) {
+        consoleLogPath = arg.substr(14);
+      } else if (arg.find("--stdin=") == 0) {
+        stdinPath = arg.substr(8);
       } else if (arg.find("--screenshot=") == 0) {
         screenshotPath = arg.substr(13);
       } else if (arg.find("--screenshot-at=") == 0) {
@@ -1562,6 +1581,33 @@ int main(int argc, char *argv[]) {
     std::function<void(bool)> renderFrame = [](bool) {};
     std::function<bool()> quitRequested = []() { return false; };
 
+    // --console-log: a transcript of the DOS console output
+    std::unique_ptr<std::FILE, int (*)(std::FILE *)> consoleLog(nullptr,
+                                                                 &std::fclose);
+    const bool consoleLogToStdout = consoleLogPath == "-";
+    if (!consoleLogPath.empty()) {
+      std::FILE *f = consoleLogToStdout ? stdout
+                                        : std::fopen(consoleLogPath.c_str(), "wb");
+      if (!f) {
+        LOG_ERROR("Cannot open --console-log file ", consoleLogPath);
+        return 1;
+      }
+      if (!consoleLogToStdout)
+        consoleLog.reset(f);
+      dos.setConsoleTap([f](uint8_t c) { std::fputc(c, f); });
+    }
+
+    if (!stdinPath.empty()) {
+      std::ifstream in(stdinPath, std::ios::binary);
+      if (!in) {
+        LOG_ERROR("Cannot open --stdin file ", stdinPath);
+        return 1;
+      }
+      std::string data((std::istreambuf_iterator<char>(in)),
+                       std::istreambuf_iterator<char>());
+      dos.setStdinData(std::move(data));
+    }
+
     if (headless) {
       // nothing to wire up
     }
@@ -1942,7 +1988,7 @@ int main(int argc, char *argv[]) {
       }
       std::string text = frame.textScreen();
       if (headless) {
-        if (!text.empty())
+        if (!text.empty() && !consoleLogToStdout)
           std::fwrite(text.data(), 1, text.size(), stdout);
       } else if (!text.empty()) {
         std::string line;

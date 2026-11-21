@@ -162,8 +162,92 @@ void DOS::setDriveManager(DriveManager *dm) {
   }
 }
 
+void DOS::resetStdHandles() {
+  for (uint8_t i = 0; i < 5; ++i) {
+    auto fh = std::make_shared<FileHandle>();
+    fh->kind = FileHandle::Kind::Console;
+    fh->device = i;
+    m_stdHandles[i] = std::move(fh);
+  }
+}
+
+std::shared_ptr<DOS::FileHandle> *DOS::handleSlot(uint16_t handle) {
+  if (handle < 5)
+    return m_stdHandles[handle] ? &m_stdHandles[handle] : nullptr;
+  if (static_cast<size_t>(handle - 5) < m_fileHandles.size() &&
+      m_fileHandles[handle - 5])
+    return &m_fileHandles[handle - 5];
+  return nullptr;
+}
+
+// Closes what a handle refers to when it is the last reference.
+void DOS::releaseHandle(std::shared_ptr<FileHandle> &slot) {
+  if (slot && slot.use_count() == 1 && slot->kind == FileHandle::Kind::File)
+    slot->stream.close();
+  slot.reset();
+}
+
+bool DOS::readConsole(uint32_t bufAddr, uint16_t count) {
+  if (m_stdinFromData) { // "< file": raw bytes, then end of file
+    size_t n = std::min<size_t>(count, m_stdinData.size() - m_stdinPos);
+    for (size_t i = 0; i < n; ++i)
+      m_memory.write8(bufAddr + static_cast<uint32_t>(i),
+                      static_cast<uint8_t>(m_stdinData[m_stdinPos + i]));
+    m_stdinPos += n;
+    m_cpu.setReg16(cpu::AX, static_cast<uint16_t>(n));
+    m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    return true;
+  }
+  // Cooked CON input: a whole line is edited (echo, backspace) and then
+  // returned with CR LF, over as many reads as the caller needs.
+  while (m_conPending.empty()) {
+    if (m_kbd && !m_kbd->hasKey() && m_pollInput)
+      m_pollInput();
+    if (!m_kbd || !m_kbd->hasKey())
+      return false;
+    auto [ascii, scancode] = m_kbd->popKey();
+    if (ascii == 0)
+      continue; // extended keys are not part of a line
+    if (ascii == 0x0D) {
+      writeCharToVRAM(0x0D);
+      writeCharToVRAM(0x0A);
+      m_conPending = m_conLine + "\r\n";
+      m_conLine.clear();
+    } else if (ascii == 0x08) {
+      if (!m_conLine.empty()) {
+        m_conLine.pop_back();
+        writeCharToVRAM(0x08);
+        writeCharToVRAM(' ');
+        writeCharToVRAM(0x08);
+      }
+    } else if (ascii == 0x1B) { // Esc: cancel the line
+      m_conLine.clear();
+      writeCharToVRAM('\\');
+      writeCharToVRAM(0x0D);
+      writeCharToVRAM(0x0A);
+    } else if (m_conLine.size() < 127) {
+      m_conLine += static_cast<char>(ascii);
+      if (ascii == 0x1A) { // ^Z shows as ^Z
+        writeCharToVRAM('^');
+        writeCharToVRAM('Z');
+      } else {
+        writeCharToVRAM(ascii);
+      }
+    }
+  }
+  size_t n = std::min<size_t>(count, m_conPending.size());
+  for (size_t i = 0; i < n; ++i)
+    m_memory.write8(bufAddr + static_cast<uint32_t>(i),
+                    static_cast<uint8_t>(m_conPending[i]));
+  m_conPending.erase(0, n);
+  m_cpu.setReg16(cpu::AX, static_cast<uint16_t>(n));
+  m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+  return true;
+}
+
 void DOS::initialize() {
   LOG_INFO("DOS: Kernel initialized (v2.2).");
+  resetStdHandles();
 
   // Setup initial MCB chain
   // Block 1: System sentinel at FIRST_MCB_SEGMENT (0x800)
@@ -1135,22 +1219,20 @@ void DOS::handleDOSService() {
       // Return device info word: bit 7=1 means character device
       // (stdin/stdout/stderr)
       uint16_t info = 0;
-      if (bx == 0)
-        info = 0x80 | 0x01; // STDIN  - char device, EOF on input
-      else if (bx == 1)
-        info = 0x80 | 0x02; // STDOUT - char device
-      else if (bx == 2)
-        info = 0x80 | 0x02; // STDERR - char device
-      else if (bx == 3)
-        info = 0x80 | 0x00; // STDAUX - char device
-      else if (bx == 4)
-        info = 0x80 | 0x04; // STDPRN - char device
-      else if (bx >= 5 && bx - 5 < m_fileHandles.size() &&
-               m_fileHandles[bx - 5]) {
-        if (m_fileHandles[bx - 5]->isEMSDevice())
+      auto *slot = handleSlot(bx);
+      if (slot && (*slot)->isConsole()) {
+        const uint8_t device = (*slot)->device;
+        if (device <= 2)
+          info = 0x80 | 0x03; // CON: char device, console input and output
+        else if (device == 3)
+          info = 0x80 | 0x00; // AUX - char device
+        else
+          info = 0x80 | 0x04; // PRN - char device
+      } else if (slot) {
+        if ((*slot)->isEMSDevice())
           info = 0x0080; // Character device
-        else if (m_fileHandles[bx - 5]->isIsoFile())
-          info = static_cast<uint16_t>(0x0040 | (m_fileHandles[bx - 5]->isoDriveIdx & 0x3F));
+        else if ((*slot)->isIsoFile())
+          info = static_cast<uint16_t>(0x0040 | ((*slot)->isoDriveIdx & 0x3F));
         else
           // Disk file: bit7=0 (file), bit11=1 (media not removable),
           // bits 5-0 = drive number (0=A:,2=C:).
@@ -1553,6 +1635,7 @@ void DOS::handleDOSService() {
 
         // Push parent state
         m_processStack.push_back(parent);
+        m_stdHandleStack.push_back(m_stdHandles); // the child inherits them
 
         // Setup child environment
         m_pspSegment = childSeg;
@@ -1786,6 +1869,12 @@ void DOS::terminateProcess(uint8_t exitCode, uint8_t exitType, uint16_t resident
         if (readMCB(parent.childMemorySeg - 1).owner != 0)
           freeMemory(parent.childMemorySeg);
       }
+    }
+
+    // The parent's standard handles (the child may have redirected its own)
+    if (!m_stdHandleStack.empty()) {
+      m_stdHandles = m_stdHandleStack.back();
+      m_stdHandleStack.pop_back();
     }
 
     // Clean up file handles opened by the child
@@ -2222,6 +2311,8 @@ std::string DOS::resolvePath(const std::string &path) {
 void DOS::writeCharToVRAM(uint8_t c) {
   // As the CON driver does through INT 29h / INT 10h AH=0Eh (BL = 07h):
   // the active page in text modes, glyphs in graphics modes.
+  if (m_consoleTap)
+    m_consoleTap(c);
   VideoText text(m_memory);
   text.teletype(text.activePage(), c, 0x07, false);
 }
@@ -3642,14 +3733,20 @@ void DOS::handleFileService() {
     uint16_t handle = m_cpu.getReg16(cpu::BX);
     if (handle >= 5 && handle - 5 < m_fileHandles.size() &&
         m_fileHandles[handle - 5]) {
-      if (m_fileHandles[handle - 5].use_count() == 1 &&
-          m_fileHandles[handle - 5]->kind == FileHandle::Kind::File)
-        m_fileHandles[handle - 5]->stream.close();
-      m_fileHandles[handle - 5].reset(); // Free slot
+      releaseHandle(m_fileHandles[handle - 5]); // Free slot
       syncJFT(handle, 0xFF);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
       LOG_DOS("DOS: Closed file handle=", handle);
     } else if (handle < 5) { // Standard handles
+      // A redirected standard handle lets go of its file and becomes the
+      // console again (the emulator keeps 0-4 usable for the next program).
+      if (m_stdHandles[handle] && !m_stdHandles[handle]->isConsole()) {
+        releaseHandle(m_stdHandles[handle]);
+        auto con = std::make_shared<FileHandle>();
+        con->kind = FileHandle::Kind::Console;
+        con->device = static_cast<uint8_t>(handle);
+        m_stdHandles[handle] = std::move(con);
+      }
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
       LOG_DOS("DOS: Closed standard handle=", handle);
     } else {
@@ -3659,17 +3756,14 @@ void DOS::handleFileService() {
     }
   } else if (ah == 0x45) { // Duplicate File Handle
     uint16_t handle = m_cpu.getReg16(cpu::BX);
-    if (handle >= 5 && handle - 5 < m_fileHandles.size() &&
-        m_fileHandles[handle - 5]) {
-      uint16_t newH = storeHandle(m_fileHandles[handle - 5]);
+    if (auto *slot = handleSlot(handle)) {
+      // A standard handle duplicates to a new handle on the same device,
+      // which later restores a redirected one (dup / dup2).
+      uint16_t newH = storeHandle(*slot);
       m_cpu.setReg16(cpu::AX, newH);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
       syncJFT(newH, static_cast<uint8_t>(handle));
       LOG_DOS("DOS: Duplicated handle=", handle, " -> ", newH);
-    } else if (handle < 5) {
-      m_cpu.setReg16(cpu::AX, handle);
-      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-      LOG_DOS("DOS: Duplicated standard handle=", handle);
     } else {
       m_cpu.setReg16(cpu::AX, 0x06); // Invalid handle
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
@@ -3683,26 +3777,26 @@ void DOS::handleFileService() {
     uint16_t srcHandle = m_cpu.getReg16(cpu::BX);
     uint16_t dstHandle = m_cpu.getReg16(cpu::CX);
 
-    if (srcHandle >= 5 && srcHandle - 5 < m_fileHandles.size() &&
-        m_fileHandles[srcHandle - 5]) {
-      // Close target handle if it was open
-      if (dstHandle >= 5 && dstHandle - 5 < m_fileHandles.size() &&
-          m_fileHandles[dstHandle - 5]) {
-        if (m_fileHandles[dstHandle - 5].use_count() == 1 &&
-            m_fileHandles[dstHandle - 5]->kind == FileHandle::Kind::File)
-          m_fileHandles[dstHandle - 5]->stream.close();
-        m_fileHandles[dstHandle - 5].reset();
-      } else if (dstHandle < 5) {
-        // Closing a standard handle is a no-op for redirection
-      } else if (dstHandle - 5 >= m_fileHandles.size()) {
-        // Expand handle table to accommodate the target handle
-        m_fileHandles.resize(dstHandle - 5 + 1);
+    auto *srcSlot = handleSlot(srcHandle);
+    if (srcSlot && srcHandle != dstHandle) {
+      std::shared_ptr<FileHandle> src = *srcSlot;
+      std::shared_ptr<FileHandle> *dst;
+      if (dstHandle < 5) {
+        dst = &m_stdHandles[dstHandle];
+      } else {
+        if (static_cast<size_t>(dstHandle - 5) >= m_fileHandles.size())
+          m_fileHandles.resize(dstHandle - 5 + 1); // grow the table
+        dst = &m_fileHandles[dstHandle - 5];
       }
-      // Redirect: target handle now points to the same FileHandle as source
-      m_fileHandles[dstHandle - 5] = m_fileHandles[srcHandle - 5];
+      // Close the target handle if it was open, then make it refer to
+      // the source's file or device.
+      releaseHandle(*dst);
+      *dst = std::move(src);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
       syncJFT(dstHandle, static_cast<uint8_t>(srcHandle));
       LOG_DOS("DOS: Redirected handle ", srcHandle, " -> ", dstHandle);
+    } else if (srcSlot) {
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY); // same handle
     } else {
       m_cpu.setReg16(cpu::AX, 0x06); // Invalid source handle
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
@@ -3716,9 +3810,24 @@ void DOS::handleFileService() {
     uint16_t dx = m_cpu.getReg16(cpu::DX);
     uint32_t bufAddr = m_cpu.getSegBase(cpu::DS) + dx;
 
-    if (handle >= 5 && handle - 5 < m_fileHandles.size() &&
-        m_fileHandles[handle - 5]) {
-      auto &fh = m_fileHandles[handle - 5];
+    auto *slot = handleSlot(handle);
+    if (slot && (*slot)->isConsole()) {
+      const uint8_t device = (*slot)->device;
+      if (device <= 2) { // CON (DOS lets a program read handle 1 too)
+        if (!readConsole(bufAddr, bytesToRead)) {
+          // No complete line yet: run the machine (timers, scripted keys)
+          // and execute the INT 21h again.
+          m_cpu.setEIP(m_cpu.getInstructionStartEIP());
+          if (m_idleCallback)
+            m_idleCallback();
+          return;
+        }
+      } else { // AUX / PRN: nothing to read
+        m_cpu.setReg16(cpu::AX, 0);
+        m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+      }
+    } else if (slot) {
+      auto &fh = *slot;
       if (fh->isEMSDevice()) {
         m_cpu.setReg16(cpu::AX, 0x0000);
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
@@ -3751,9 +3860,6 @@ void DOS::handleFileService() {
       m_cpu.setReg16(cpu::AX, static_cast<uint16_t>(bytesRead));
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
       LOG_DOS("DOS: Read ", bytesRead, " bytes from handle=", handle);
-    } else if (handle == 0) {     // STDIN
-      m_cpu.setReg16(cpu::AX, 0); // Not fully implemented
-      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
     } else {
       m_cpu.setReg16(cpu::AX, 0x06); // Invalid handle
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);
@@ -3765,15 +3871,18 @@ void DOS::handleFileService() {
     uint16_t dx = m_cpu.getReg16(cpu::DX);
     uint32_t bufAddr = m_cpu.getSegBase(cpu::DS) + dx;
 
-    if (handle == 1 || handle == 2) { // STDOUT / STDERR
-      for (uint16_t i = 0; i < bytesToWrite; ++i) {
-        writeCharToVRAM(m_memory.read8(bufAddr + i));
+    auto *slot = handleSlot(handle);
+    if (slot && (*slot)->isConsole()) {
+      // CON (handles 0-2); AUX and PRN take the bytes
+      if ((*slot)->device <= 2) {
+        for (uint16_t i = 0; i < bytesToWrite; ++i) {
+          writeCharToVRAM(m_memory.read8(bufAddr + i));
+        }
       }
       m_cpu.setReg16(cpu::AX, bytesToWrite);
       m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
-    } else if (handle >= 5 && handle - 5 < m_fileHandles.size() &&
-               m_fileHandles[handle - 5]) {
-      auto &fh = m_fileHandles[handle - 5];
+    } else if (slot) {
+      auto &fh = *slot;
       if (fh->isEMSDevice()) {
         m_cpu.setReg16(cpu::AX, bytesToWrite);
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
@@ -3879,9 +3988,13 @@ void DOS::handleFileService() {
     uint16_t dx = m_cpu.getReg16(cpu::DX); // Low word of offset
     int32_t offset = (cx << 16) | dx;
 
-    if (handle >= 5 && handle - 5 < m_fileHandles.size() &&
-        m_fileHandles[handle - 5]) {
-      auto &fh = m_fileHandles[handle - 5];
+    auto *slot = handleSlot(handle);
+    if (slot && (*slot)->isConsole()) {
+      m_cpu.setReg16(cpu::AX, 0); // devices have no position
+      m_cpu.setReg16(cpu::DX, 0);
+      m_cpu.setEFLAGS(m_cpu.getEFLAGS() & ~cpu::FLAG_CARRY);
+    } else if (slot) {
+      auto &fh = *slot;
       if (fh->isEMSDevice()) {
         m_cpu.setReg16(cpu::AX, 0x01); // Invalid function for device
         m_cpu.setEFLAGS(m_cpu.getEFLAGS() | cpu::FLAG_CARRY);

@@ -132,16 +132,17 @@ TEST_CASE("BIOS Emulation Services", "[BIOS]") {
         REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
     }
 
-    SECTION("DOS INT 21h: AH=45 (Unknown function stub)") {
+    SECTION("DOS INT 21h: AH=45 duplicates standard input to a new handle") {
         cpu.setSegReg(cpu::SegRegIndex::CS, 0x0000);
         cpu.setReg8(cpu::AH, 0x45);
+        cpu.setReg16(cpu::BX, 0x0000);
 
         mem.write8(0x100, 0xCD);
         mem.write8(0x101, 0x21);
         cpu.setEIP(0x100);
 
         decoder.step();
-        REQUIRE(cpu.getReg16(cpu::AX) == 0x0000);
+        REQUIRE(cpu.getReg16(cpu::AX) == 0x0005); // first handle after 0-4
         REQUIRE(!(cpu.getEFLAGS() & cpu::FLAG_CARRY));
     }
 

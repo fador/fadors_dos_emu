@@ -35,6 +35,18 @@ public:
   void setIdleCallback(std::function<void()> cb) {
     m_idleCallback = std::move(cb);
   }
+  // Receives every character written to the console (CON output through
+  // INT 21h, INT 29h and handles 1/2), e.g. for --console-log.
+  void setConsoleTap(std::function<void(uint8_t)> cb) {
+    m_consoleTap = std::move(cb);
+  }
+  // Standard input from host data instead of the keyboard (--stdin=FILE),
+  // like "PROGRAM < FILE": handle 0 reads return its bytes, then EOF.
+  void setStdinData(std::string data) {
+    m_stdinData = std::move(data);
+    m_stdinPos = 0;
+    m_stdinFromData = true;
+  }
 
   // DPMI host wiring
   void setDPMI(DPMI *dpmi) { m_dpmi = dpmi; }
@@ -218,6 +230,7 @@ private:
   KeyboardController *m_kbd = nullptr;
   std::function<void()> m_pollInput;
   std::function<void()> m_idleCallback;
+  std::function<void(uint8_t)> m_consoleTap;
   // Extended key handling for INT 21h AH=07h/08h
   // When DOS reads a key with ASCII=0 (extended key like arrow keys),
   // it returns AL=0 on the first call and the scancode on the next call.
@@ -239,7 +252,9 @@ private:
       File,
       EMSDevice,
       IsoFile,
+      Console, // a standard device: `device` 0 CON in, 1-2 CON out, 3 AUX, 4 PRN
     };
+    uint8_t device = 0;
 
     std::string path;
     Kind kind = Kind::File;
@@ -253,9 +268,30 @@ private:
 
     bool isEMSDevice() const { return kind == Kind::EMSDevice; }
     bool isIsoFile() const { return kind == Kind::IsoFile; }
+    bool isConsole() const { return kind == Kind::Console; }
   };
   std::vector<std::shared_ptr<FileHandle>> m_fileHandles;
   uint16_t storeHandle(std::shared_ptr<FileHandle> fh);
+
+  // Handles 0-4 (CON in, CON out, CON err, AUX, PRN): console devices
+  // unless redirected with AH=46h.  m_stdHandleStack keeps the parent's
+  // set while a child (AH=4Bh) runs.
+  std::array<std::shared_ptr<FileHandle>, 5> m_stdHandles;
+  std::vector<std::array<std::shared_ptr<FileHandle>, 5>> m_stdHandleStack;
+  void resetStdHandles();
+  // The slot of a handle (standard or from the table), or null.
+  std::shared_ptr<FileHandle> *handleSlot(uint16_t handle);
+  void releaseHandle(std::shared_ptr<FileHandle> &slot);
+
+  // CON input through handle reads: the cooked line being typed and the
+  // completed line not yet returned.  --stdin=FILE replaces the keyboard.
+  std::string m_conLine;
+  std::string m_conPending;
+  bool m_stdinFromData = false;
+  std::string m_stdinData;
+  size_t m_stdinPos = 0;
+  // true: AX/CF are set; false: the caller rewinds and retries later
+  bool readConsole(uint32_t bufAddr, uint16_t count);
 
   static constexpr uint16_t FIRST_MCB_SEGMENT = 0x0800;
   // Size of the free block left below the first program (see initialize()).
